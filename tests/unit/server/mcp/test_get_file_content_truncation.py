@@ -87,12 +87,8 @@ class TestGetFileContentTruncation:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100  # 400 chars max with default 4 chars/token
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100  # 400 chars max with default 4 chars/token
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -143,12 +139,8 @@ class TestGetFileContentTruncation:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                50000
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 50000
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -286,8 +278,7 @@ class TestGetFileContentGlobalRepoTruncation:
         }
 
         # Mock global registry
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
+        mock_repos_list = [
             {
                 "alias_name": "test-global",
                 "repo_name": "test",
@@ -309,8 +300,8 @@ class TestGetFileContentGlobalRepoTruncation:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ),
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
@@ -321,12 +312,8 @@ class TestGetFileContentGlobalRepoTruncation:
             ) as mock_config_service,
         ):
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -368,8 +355,7 @@ class TestGetFileContentGlobalRepoTruncation:
             },
         }
 
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
+        mock_repos_list = [
             {
                 "alias_name": "test-global",
                 "repo_name": "test",
@@ -385,8 +371,8 @@ class TestGetFileContentGlobalRepoTruncation:
 
         with (
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ),
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
@@ -397,12 +383,8 @@ class TestGetFileContentGlobalRepoTruncation:
             ) as mock_config_service,
         ):
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                50000
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 50000
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {

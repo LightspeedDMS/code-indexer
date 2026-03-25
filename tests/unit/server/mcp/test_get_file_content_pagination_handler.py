@@ -347,7 +347,7 @@ class TestGetFileContentGlobalRepositories:
         # get_server_global_registry is the function used in handlers
         with (
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_func,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager"
@@ -359,11 +359,9 @@ class TestGetFileContentGlobalRepositories:
             mock_get_golden_dir.return_value = "/fake/golden/repos"
 
             # Mock registry
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = [
+            mock_registry_func.return_value = [
                 {"alias_name": "test-repo-global", "target_path": "/fake/repo"}
             ]
-            mock_registry_func.return_value = mock_registry
 
             # Mock alias manager
             mock_alias_manager = MagicMock()

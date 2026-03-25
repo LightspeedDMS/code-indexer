@@ -56,34 +56,56 @@ def mock_categories():
 class TestListRepositoriesCategoryEnrichment:
     """Test list_repositories handler category enrichment (Step 3)."""
 
-    def test_list_repositories_includes_category_field(self, mock_user, mock_category_map):
+    def test_list_repositories_includes_category_field(
+        self, mock_user, mock_category_map
+    ):
         """Test that list_repositories includes repo_category field for each repo."""
         mock_activated_repos = [
-            {"user_alias": "backend-api", "golden_repo_alias": "backend-api", "is_global": False},
-            {"user_alias": "misc-tool", "golden_repo_alias": "misc-tool", "is_global": False},
+            {
+                "user_alias": "backend-api",
+                "golden_repo_alias": "backend-api",
+                "is_global": False,
+            },
+            {
+                "user_alias": "misc-tool",
+                "golden_repo_alias": "misc-tool",
+                "is_global": False,
+            },
         ]
 
         mock_global_repos = [
-            {"alias_name": "frontend-app-global", "repo_name": "frontend-app", "repo_url": "https://example.com"},
+            {
+                "alias_name": "frontend-app-global",
+                "repo_name": "frontend-app",
+                "repo_url": "https://example.com",
+            },
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=mock_global_repos)
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = mock_global_repos
 
             # Mock the category service
             mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value=mock_category_map)
+            mock_category_service.get_repo_category_map = Mock(
+                return_value=mock_category_map
+            )
             mock_golden_manager._repo_category_service = mock_category_service
 
             # Execute
@@ -95,42 +117,70 @@ class TestListRepositoriesCategoryEnrichment:
             assert len(data["repositories"]) == 3
 
             # Check activated repo with category
-            backend_repo = next(r for r in data["repositories"] if r["user_alias"] == "backend-api")
+            backend_repo = next(
+                r for r in data["repositories"] if r["user_alias"] == "backend-api"
+            )
             assert backend_repo["repo_category"] == "Backend"
 
             # Check activated repo without category (Unassigned)
-            misc_repo = next(r for r in data["repositories"] if r["user_alias"] == "misc-tool")
+            misc_repo = next(
+                r for r in data["repositories"] if r["user_alias"] == "misc-tool"
+            )
             assert misc_repo["repo_category"] is None
 
             # Check global repo with category (inherits from golden_repo_alias)
-            global_repo = next(r for r in data["repositories"] if r["user_alias"] == "frontend-app-global")
+            global_repo = next(
+                r
+                for r in data["repositories"]
+                if r["user_alias"] == "frontend-app-global"
+            )
             assert global_repo["repo_category"] == "Frontend"
 
     def test_list_repositories_filter_by_category(self, mock_user, mock_category_map):
         """Test list_repositories filtering by category parameter."""
         mock_activated_repos = [
-            {"user_alias": "backend-api", "golden_repo_alias": "backend-api", "is_global": False},
-            {"user_alias": "frontend-app", "golden_repo_alias": "frontend-app", "is_global": False},
-            {"user_alias": "misc-tool", "golden_repo_alias": "misc-tool", "is_global": False},
+            {
+                "user_alias": "backend-api",
+                "golden_repo_alias": "backend-api",
+                "is_global": False,
+            },
+            {
+                "user_alias": "frontend-app",
+                "golden_repo_alias": "frontend-app",
+                "is_global": False,
+            },
+            {
+                "user_alias": "misc-tool",
+                "golden_repo_alias": "misc-tool",
+                "is_global": False,
+            },
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock the category service
             mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value=mock_category_map)
+            mock_category_service.get_repo_category_map = Mock(
+                return_value=mock_category_map
+            )
             mock_golden_manager._repo_category_service = mock_category_service
 
             # Execute with category filter
@@ -143,30 +193,48 @@ class TestListRepositoriesCategoryEnrichment:
             assert data["repositories"][0]["user_alias"] == "backend-api"
             assert data["repositories"][0]["repo_category"] == "Backend"
 
-    def test_list_repositories_filter_unassigned_category(self, mock_user, mock_category_map):
+    def test_list_repositories_filter_unassigned_category(
+        self, mock_user, mock_category_map
+    ):
         """Test list_repositories filtering by Unassigned category."""
         mock_activated_repos = [
-            {"user_alias": "backend-api", "golden_repo_alias": "backend-api", "is_global": False},
-            {"user_alias": "misc-tool", "golden_repo_alias": "misc-tool", "is_global": False},
+            {
+                "user_alias": "backend-api",
+                "golden_repo_alias": "backend-api",
+                "is_global": False,
+            },
+            {
+                "user_alias": "misc-tool",
+                "golden_repo_alias": "misc-tool",
+                "is_global": False,
+            },
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock the category service
             mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value=mock_category_map)
+            mock_category_service.get_repo_category_map = Mock(
+                return_value=mock_category_map
+            )
             mock_golden_manager._repo_category_service = mock_category_service
 
             # Execute with Unassigned filter
@@ -179,32 +247,58 @@ class TestListRepositoriesCategoryEnrichment:
             assert data["repositories"][0]["user_alias"] == "misc-tool"
             assert data["repositories"][0]["repo_category"] is None
 
-    def test_list_repositories_sorts_by_category_priority(self, mock_user, mock_category_map):
+    def test_list_repositories_sorts_by_category_priority(
+        self, mock_user, mock_category_map
+    ):
         """Test list_repositories sorts repos by category priority, then Unassigned, then alphabetically."""
         mock_activated_repos = [
-            {"user_alias": "misc-tool", "golden_repo_alias": "misc-tool", "is_global": False},
-            {"user_alias": "ml-model", "golden_repo_alias": "ml-model", "is_global": False},
-            {"user_alias": "backend-api", "golden_repo_alias": "backend-api", "is_global": False},
-            {"user_alias": "frontend-app", "golden_repo_alias": "frontend-app", "is_global": False},
+            {
+                "user_alias": "misc-tool",
+                "golden_repo_alias": "misc-tool",
+                "is_global": False,
+            },
+            {
+                "user_alias": "ml-model",
+                "golden_repo_alias": "ml-model",
+                "is_global": False,
+            },
+            {
+                "user_alias": "backend-api",
+                "golden_repo_alias": "backend-api",
+                "is_global": False,
+            },
+            {
+                "user_alias": "frontend-app",
+                "golden_repo_alias": "frontend-app",
+                "is_global": False,
+            },
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock the category service
             mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value=mock_category_map)
+            mock_category_service.get_repo_category_map = Mock(
+                return_value=mock_category_map
+            )
             mock_golden_manager._repo_category_service = mock_category_service
 
             # Execute
@@ -221,22 +315,32 @@ class TestListRepositoriesCategoryEnrichment:
     def test_list_repositories_no_category_service(self, mock_user):
         """Test list_repositories gracefully handles missing category service."""
         mock_activated_repos = [
-            {"user_alias": "backend-api", "golden_repo_alias": "backend-api", "is_global": False},
+            {
+                "user_alias": "backend-api",
+                "golden_repo_alias": "backend-api",
+                "is_global": False,
+            },
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # No category service available
             mock_golden_manager._repo_category_service = None
@@ -258,7 +362,9 @@ class TestListRepoCategoriesHandler:
         """Test list_repo_categories returns all categories."""
         from code_indexer.server.mcp.handlers import list_repo_categories
 
-        with patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager:
+        with patch(
+            "code_indexer.server.app.golden_repo_manager"
+        ) as mock_golden_manager:
             # Mock the category service
             mock_category_service = Mock()
             mock_category_service.list_categories = Mock(return_value=mock_categories)
@@ -280,7 +386,9 @@ class TestListRepoCategoriesHandler:
         """Test list_repo_categories with no categories."""
         from code_indexer.server.mcp.handlers import list_repo_categories
 
-        with patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager:
+        with patch(
+            "code_indexer.server.app.golden_repo_manager"
+        ) as mock_golden_manager:
             # Mock the category service
             mock_category_service = Mock()
             mock_category_service.list_categories = Mock(return_value=[])
@@ -299,7 +407,9 @@ class TestListRepoCategoriesHandler:
         """Test list_repo_categories handles missing service gracefully."""
         from code_indexer.server.mcp.handlers import list_repo_categories
 
-        with patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager:
+        with patch(
+            "code_indexer.server.app.golden_repo_manager"
+        ) as mock_golden_manager:
             # No category service available
             mock_golden_manager._repo_category_service = None
 

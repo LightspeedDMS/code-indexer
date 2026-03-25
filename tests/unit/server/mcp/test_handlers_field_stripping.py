@@ -44,18 +44,24 @@ class TestListRepositoriesFieldStripping:
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock category service (no categories)
             mock_category_service = Mock()
@@ -107,18 +113,22 @@ class TestListRepositoriesFieldStripping:
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
             mock_repo_manager.list_activated_repositories = Mock(return_value=[])
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=mock_global_repos)
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = mock_global_repos
 
             # Mock category service (no categories)
             mock_category_service = Mock()
@@ -154,25 +164,35 @@ class TestListRepositoriesFieldStripping:
                 "path": "/home/testuser/.cidx-server/composite/my-composite",
                 "is_composite": True,
                 "golden_repo_aliases": ["backend-api", "frontend-app", "ml-model"],
-                "discovered_repos": ["backend-api", "frontend-app", "ml-model"],  # Duplicate
+                "discovered_repos": [
+                    "backend-api",
+                    "frontend-app",
+                    "ml-model",
+                ],  # Duplicate
                 "activated_at": "2024-01-15T10:30:00",
                 "last_accessed": "2024-01-15T10:30:00",
             }
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock category service (no categories)
             mock_category_service = Mock()
@@ -193,7 +213,11 @@ class TestListRepositoriesFieldStripping:
             assert "is_composite" in repo
             assert repo["is_composite"] is True
             assert "golden_repo_aliases" in repo
-            assert repo["golden_repo_aliases"] == ["backend-api", "frontend-app", "ml-model"]
+            assert repo["golden_repo_aliases"] == [
+                "backend-api",
+                "frontend-app",
+                "ml-model",
+            ]
 
             # Verify discovered_repos is NOT present (it's a duplicate)
             assert "discovered_repos" not in repo
@@ -207,22 +231,32 @@ class TestListRepositoriesFieldStripping:
     def test_backward_compatibility_response_structure(self, mock_user):
         """AC3: Test that response structure remains compatible."""
         mock_activated_repos = [
-            {"user_alias": "repo1", "golden_repo_alias": "golden1", "current_branch": "main"}
+            {
+                "user_alias": "repo1",
+                "golden_repo_alias": "golden1",
+                "current_branch": "main",
+            }
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock category service
             mock_category_service = Mock()
@@ -242,8 +276,16 @@ class TestListRepositoriesFieldStripping:
     def test_category_filter_still_works(self, mock_user):
         """AC3: Test that category filtering parameter still works after field stripping."""
         mock_activated_repos = [
-            {"user_alias": "backend-api", "golden_repo_alias": "backend-api", "current_branch": "main"},
-            {"user_alias": "frontend-app", "golden_repo_alias": "frontend-app", "current_branch": "main"},
+            {
+                "user_alias": "backend-api",
+                "golden_repo_alias": "backend-api",
+                "current_branch": "main",
+            },
+            {
+                "user_alias": "frontend-app",
+                "golden_repo_alias": "frontend-app",
+                "current_branch": "main",
+            },
         ]
 
         mock_category_map = {
@@ -252,22 +294,30 @@ class TestListRepositoriesFieldStripping:
         }
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             # Mock category service
             mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value=mock_category_map)
+            mock_category_service.get_repo_category_map = Mock(
+                return_value=mock_category_map
+            )
             mock_golden_manager._repo_category_service = mock_category_service
 
             # Execute with category filter
@@ -301,18 +351,24 @@ class TestListRepositoriesFieldStripping:
         ]
 
         with (
-            patch("code_indexer.server.app.activated_repo_manager") as mock_repo_manager,
-            patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_get_dir,
-            patch("code_indexer.server.mcp.handlers.get_server_global_registry") as mock_get_registry,
+            patch(
+                "code_indexer.server.app.activated_repo_manager"
+            ) as mock_repo_manager,
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir"
+            ) as mock_get_dir,
+            patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_get_registry,
             patch("code_indexer.server.app.golden_repo_manager") as mock_golden_manager,
         ):
             # Setup mocks
-            mock_repo_manager.list_activated_repositories = Mock(return_value=mock_activated_repos)
+            mock_repo_manager.list_activated_repositories = Mock(
+                return_value=mock_activated_repos
+            )
             mock_get_dir.return_value = "/mock/golden-repos"
 
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=mock_global_repos)
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = mock_global_repos
 
             # Mock category service
             mock_category_service = Mock()
@@ -324,15 +380,21 @@ class TestListRepositoriesFieldStripping:
             data = json.loads(result["content"][0]["text"])
 
             # AC3: Verify field types and semantics are preserved
-            activated_repo = next(r for r in data["repositories"] if r["user_alias"] == "my-repo")
+            activated_repo = next(
+                r for r in data["repositories"] if r["user_alias"] == "my-repo"
+            )
             assert isinstance(activated_repo["user_alias"], str)
             assert isinstance(activated_repo["golden_repo_alias"], str)
             assert isinstance(activated_repo["current_branch"], str)
             assert activated_repo["current_branch"] == "feature/new-feature"
 
-            global_repo = next(r for r in data["repositories"] if r["user_alias"] == "shared-global")
+            global_repo = next(
+                r for r in data["repositories"] if r["user_alias"] == "shared-global"
+            )
             assert isinstance(global_repo["is_global"], bool)
             assert global_repo["is_global"] is True
             assert isinstance(global_repo["repo_url"], str)
             assert isinstance(global_repo["last_refresh"], str)
-            assert global_repo["current_branch"] is None  # Global repos have None for current_branch
+            assert (
+                global_repo["current_branch"] is None
+            )  # Global repos have None for current_branch

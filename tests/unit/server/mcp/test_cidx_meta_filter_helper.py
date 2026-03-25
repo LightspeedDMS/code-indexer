@@ -84,13 +84,9 @@ class TestCidxMetaGlobalAliasFiltering:
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
-            ) as mock_registry_factory:
-                mock_registry = Mock()
-                mock_registry.list_global_repos.return_value = [
-                    {"alias_name": "cidx-meta-global"}
-                ]
-                mock_registry_factory.return_value = mock_registry
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_list_repos:
+                mock_list_repos.return_value = [{"alias_name": "cidx-meta-global"}]
 
                 with patch(
                     "code_indexer.server.mcp.handlers._get_golden_repos_dir",

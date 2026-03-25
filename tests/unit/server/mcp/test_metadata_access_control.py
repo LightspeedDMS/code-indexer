@@ -107,9 +107,7 @@ class TestListGlobalReposFiltersByGroup:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
             ),
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.global_repos.shared_operations.GlobalRepoOperations"
             ) as mock_ops_class,
@@ -134,9 +132,7 @@ class TestListGlobalReposFiltersByGroup:
         assert "allowed-repo" in repo_names
         assert "blocked-repo" not in repo_names
 
-    def test_list_global_repos_no_service_returns_all(
-        self, mock_regular_user
-    ):
+    def test_list_global_repos_no_service_returns_all(self, mock_regular_user):
         """
         AC1-compat: When no AccessFilteringService is configured
         (access_filtering_service=None), all repos are returned without
@@ -165,9 +161,7 @@ class TestListGlobalReposFiltersByGroup:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
             ),
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.global_repos.shared_operations.GlobalRepoOperations"
             ) as mock_ops_class,
@@ -228,9 +222,7 @@ class TestListGlobalReposAdminSeesAll:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
             ),
-            patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
                 "code_indexer.global_repos.shared_operations.GlobalRepoOperations"
             ) as mock_ops_class,
@@ -307,11 +299,9 @@ class TestGetAllRepositoriesStatusFiltersGlobalRepos:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
             ),
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
-            patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
         ):
             mock_app_module.app.state = mock_app_state
@@ -320,9 +310,7 @@ class TestGetAllRepositoriesStatusFiltersGlobalRepos:
                 return_value=[]
             )
 
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=global_repos_data)
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = global_repos_data
 
             result = get_all_repositories_status({}, mock_regular_user)
 
@@ -373,11 +361,9 @@ class TestGetAllRepositoriesStatusFiltersGlobalRepos:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
             ),
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
-            patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
         ):
             mock_app_module.app.state = mock_app_state
@@ -385,9 +371,7 @@ class TestGetAllRepositoriesStatusFiltersGlobalRepos:
                 return_value=[]
             )
 
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=global_repos_data)
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = global_repos_data
 
             result = get_all_repositories_status({}, mock_regular_user)
 
@@ -445,11 +429,9 @@ class TestGetAllRepositoriesStatusAdminSeesAll:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir",
                 return_value="/mock/golden-repos",
             ),
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
-                "code_indexer.server.mcp.handlers.app_module"
-            ) as mock_app_module,
-            patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
         ):
             mock_app_module.app.state = mock_app_state
@@ -457,9 +439,7 @@ class TestGetAllRepositoriesStatusAdminSeesAll:
                 return_value=[]
             )
 
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=global_repos_data)
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = global_repos_data
 
             result = get_all_repositories_status({}, mock_admin_user)
 

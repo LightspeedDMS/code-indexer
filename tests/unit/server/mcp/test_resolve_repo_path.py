@@ -91,15 +91,14 @@ class TestResolveRepoPathAliasJson:
         golden_repos_dir = str(tmp_path / "golden-repos")
 
         # Mock the registry so it returns a repo entry pointing here
-        mock_registry = MagicMock()
-        mock_registry.get_global_repo.return_value = {
+        mock_repo_entry = {
             "alias_name": "my-git-repo-global",
             "index_path": str(git_repo),
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            return_value=mock_registry,
+            "code_indexer.server.mcp.handlers._get_global_repo",
+            return_value=mock_repo_entry,
         ):
             result = _resolve_repo_path("my-git-repo-global", golden_repos_dir)
 
@@ -129,15 +128,14 @@ class TestResolveRepoPathAliasJson:
         # No git repo in any fallback location either — expect None
         golden_repos_dir = str(tmp_path / "golden-repos")
 
-        mock_registry = MagicMock()
-        mock_registry.get_global_repo.return_value = {
+        mock_repo_entry = {
             "alias_name": "ghost-repo-global",
             "index_path": str(missing_dir),  # Also points nowhere
         }
 
         with patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            return_value=mock_registry,
+            "code_indexer.server.mcp.handlers._get_global_repo",
+            return_value=mock_repo_entry,
         ):
             result = _resolve_repo_path("ghost-repo-global", golden_repos_dir)
 
@@ -169,16 +167,15 @@ class TestResolveRepoPathAliasJson:
         alias_file = aliases_dir / "my-repo-global.json"
         alias_file.write_text(json.dumps(alias_data))
 
-        mock_registry = MagicMock()
-        mock_registry.get_global_repo.return_value = {
+        mock_repo_entry = {
             "alias_name": "my-repo-global",
             "index_path": str(stale_dir),
         }
 
         golden_repos_dir = str(tmp_path / "golden-repos")
         with patch(
-            "code_indexer.server.mcp.handlers.get_server_global_registry",
-            return_value=mock_registry,
+            "code_indexer.server.mcp.handlers._get_global_repo",
+            return_value=mock_repo_entry,
         ):
             result = _resolve_repo_path("my-repo-global", golden_repos_dir)
 
@@ -258,11 +255,7 @@ class TestHandleDirectoryTreeAliasResolution:
 
         args = {"repository_alias": "test-repo-global"}
 
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
-            {"alias_name": "test-repo-global", "index_path": str(repo_content_dir)}
-        ]
-        mock_registry.get_global_repo.return_value = {
+        mock_repo_entry = {
             "alias_name": "test-repo-global",
             "index_path": str(repo_content_dir),
             "repo_url": "git@github.com:org/test-repo.git",
@@ -277,8 +270,8 @@ class TestHandleDirectoryTreeAliasResolution:
                 return_value=str(tmp_path / "golden-repos"),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._get_global_repo",
+                return_value=mock_repo_entry,
             ),
             patch(
                 "code_indexer.server.mcp.handlers.AliasManager",

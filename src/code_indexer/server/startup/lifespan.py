@@ -1321,6 +1321,11 @@ def make_lifespan(
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Make backend_registry available to MCP handlers for BOTH modes.
+        # In SQLite mode it contains SQLite backends; in postgres mode, PG backends.
+        # MCP handlers use app.state.backend_registry unconditionally.
+        app.state.backend_registry = backend_registry
+
         # Epic #408: Start cluster services when in postgres mode
         _cluster_services = []
         if storage_mode == "postgres" and backend_registry is not None:
@@ -1389,7 +1394,6 @@ def make_lifespan(
                     _cluster_services.append(("reconciliation", _reconciliation))
 
                     app.state.leader_election = _leader_election
-                    app.state.backend_registry = backend_registry
                     logger.info(
                         f"Cluster services started: node_id={_node_id}, "
                         f"is_leader={_leader_election.is_leader}",

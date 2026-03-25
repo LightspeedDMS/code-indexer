@@ -129,7 +129,7 @@ class TestMcpHandlerSkipTruncation:
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_func,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager"
@@ -137,11 +137,9 @@ class TestMcpHandlerSkipTruncation:
             patch("code_indexer.server.mcp.handlers._get_golden_repos_dir") as mock_dir,
         ):
             mock_dir.return_value = "/fake/golden/repos"
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = [
+            mock_registry_func.return_value = [
                 {"alias_name": "test-repo-global", "target_path": "/fake/repo"}
             ]
-            mock_registry_func.return_value = mock_registry
             mock_alias = MagicMock()
             mock_alias.read_alias.return_value = "/fake/repo"
             mock_alias_class.return_value = mock_alias

@@ -41,26 +41,20 @@ def _extract_response_data(mcp_response: dict) -> dict:
 
 def _make_mock_registry(repo_url: str = "local://cidx-meta"):
     """Return a mock GlobalRegistry whose get_global_repo returns a local:// entry."""
-    mock_registry = MagicMock()
-    mock_registry.get_global_repo.return_value = {"repo_url": repo_url}
-    mock_get_registry = MagicMock(return_value=mock_registry)
-    return mock_get_registry
+    mock = MagicMock(return_value={"repo_url": repo_url})
+    return mock
 
 
 def _make_mock_registry_not_found():
     """Return a mock GlobalRegistry whose get_global_repo returns None (not found)."""
-    mock_registry = MagicMock()
-    mock_registry.get_global_repo.return_value = None
-    mock_get_registry = MagicMock(return_value=mock_registry)
-    return mock_get_registry
+    mock = MagicMock(return_value=None)
+    return mock
 
 
 def _make_mock_registry_git_repo(repo_url: str = "https://github.com/org/my-repo.git"):
     """Return a mock GlobalRegistry whose get_global_repo returns a git:// entry."""
-    mock_registry = MagicMock()
-    mock_registry.get_global_repo.return_value = {"repo_url": repo_url}
-    mock_get_registry = MagicMock(return_value=mock_registry)
-    return mock_get_registry
+    mock = MagicMock(return_value={"repo_url": repo_url})
+    return mock
 
 
 class TestResolveGitRepoPath:
@@ -80,7 +74,7 @@ class TestResolveGitRepoPath:
                 return_value=str(tmp_path),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -106,7 +100,7 @@ class TestResolveGitRepoPath:
                 return_value=str(tmp_path),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry_not_found(),
             ),
             patch(
@@ -136,7 +130,7 @@ class TestResolveGitRepoPath:
                 return_value=str(tmp_path),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry_git_repo(),
             ),
             patch(
@@ -195,7 +189,7 @@ class TestGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -224,7 +218,7 @@ class TestGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -253,7 +247,7 @@ class TestGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -293,7 +287,7 @@ class TestFirstGenGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -323,7 +317,7 @@ class TestFirstGenGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -357,7 +351,7 @@ class TestFirstGenGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -387,7 +381,7 @@ class TestFirstGenGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -417,7 +411,7 @@ class TestFirstGenGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(
@@ -447,7 +441,7 @@ class TestFirstGenGitHandlersWithGlobalRepo:
                 return_value=os.path.dirname(mock_local_global_repo),
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._get_global_repo",
                 _make_mock_registry("local://cidx-meta"),
             ),
             patch(

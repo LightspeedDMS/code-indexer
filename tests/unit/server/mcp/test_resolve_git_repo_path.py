@@ -103,13 +103,10 @@ class TestResolveGitRepoPathGroupAccess:
                 return_value=str(repo_dir),
             ):
                 with patch(
-                    "code_indexer.server.mcp.handlers.get_server_global_registry"
+                    "code_indexer.server.mcp.handlers._get_global_repo"
                 ) as mock_registry_fn:
-                    mock_registry = MagicMock()
-                    mock_registry.get_global_repo.return_value = {
-                        "repo_url": "git@github.com:org/my-repo.git"
-                    }
-                    mock_registry_fn.return_value = mock_registry
+                    mock_repo_entry = {"repo_url": "git@github.com:org/my-repo.git"}
+                    mock_registry_fn.return_value = mock_repo_entry
 
                     with patch(
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -148,13 +145,10 @@ class TestResolveGitRepoPathGroupAccess:
                 return_value=str(repo_dir),
             ):
                 with patch(
-                    "code_indexer.server.mcp.handlers.get_server_global_registry"
+                    "code_indexer.server.mcp.handlers._get_global_repo"
                 ) as mock_registry_fn:
-                    mock_registry = MagicMock()
-                    mock_registry.get_global_repo.return_value = {
-                        "repo_url": "git@github.com:org/my-repo.git"
-                    }
-                    mock_registry_fn.return_value = mock_registry
+                    mock_repo_entry = {"repo_url": "git@github.com:org/my-repo.git"}
+                    mock_registry_fn.return_value = mock_repo_entry
 
                     with patch(
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -185,13 +179,10 @@ class TestResolveGitRepoPathGroupAccess:
                 return_value=str(repo_dir),
             ):
                 with patch(
-                    "code_indexer.server.mcp.handlers.get_server_global_registry"
+                    "code_indexer.server.mcp.handlers._get_global_repo"
                 ) as mock_registry_fn:
-                    mock_registry = MagicMock()
-                    mock_registry.get_global_repo.return_value = {
-                        "repo_url": "git@github.com:org/my-repo.git"
-                    }
-                    mock_registry_fn.return_value = mock_registry
+                    mock_repo_entry = {"repo_url": "git@github.com:org/my-repo.git"}
+                    mock_registry_fn.return_value = mock_repo_entry
 
                     # No access filtering service (returns None)
                     with patch(
@@ -230,13 +221,12 @@ class TestResolveGitRepoPathGroupAccess:
                 return_value=str(repo_dir),
             ):
                 with patch(
-                    "code_indexer.server.mcp.handlers.get_server_global_registry"
+                    "code_indexer.server.mcp.handlers._get_global_repo"
                 ) as mock_registry_fn:
-                    mock_registry = MagicMock()
-                    mock_registry.get_global_repo.return_value = {
+                    mock_repo_entry = {
                         "repo_url": "git@github.com:org/code-indexer.git"
                     }
-                    mock_registry_fn.return_value = mock_registry
+                    mock_registry_fn.return_value = mock_repo_entry
 
                     with patch(
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",

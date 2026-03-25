@@ -86,8 +86,8 @@ class TestHandlerRegistry:
         ]
 
         # Verify we have a reasonable number of handlers (at least the core set)
-        assert len(HANDLER_REGISTRY) >= len(
-            core_handlers
+        assert (
+            len(HANDLER_REGISTRY) >= len(core_handlers)
         ), f"Expected at least {len(core_handlers)} handlers, found {len(HANDLER_REGISTRY)}"
 
         # Verify all core handlers are registered
@@ -417,16 +417,14 @@ class TestListRepositories:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir"
             ) as mock_get_dir,
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_get_registry,
         ):
             mock_manager.list_activated_repositories = Mock(return_value=mock_repos)
             mock_get_dir.return_value = "/mock/golden-repos"
 
             # Mock get_server_global_registry to return a mock registry instance
-            mock_registry_instance = Mock()
-            mock_registry_instance.list_global_repos = Mock(return_value=[])
-            mock_get_registry.return_value = mock_registry_instance
+            mock_get_registry.return_value = []
 
             result = list_repositories({}, mock_user)
 

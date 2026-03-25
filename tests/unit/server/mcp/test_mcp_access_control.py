@@ -130,7 +130,7 @@ class TestSearchCodeFiltersResultsByGroup:
                 return_value="/mock/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
@@ -138,9 +138,7 @@ class TestSearchCodeFiltersResultsByGroup:
             ) as mock_alias_cls,
             patch("pathlib.Path.exists", return_value=True),
         ):
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=[mock_repo_entry])
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = [mock_repo_entry]
 
             mock_alias_cls.return_value = mock_alias_manager
 
@@ -208,7 +206,7 @@ class TestSearchCodeAdminSeesAll:
                 return_value="/mock/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
@@ -216,9 +214,7 @@ class TestSearchCodeAdminSeesAll:
             ) as mock_alias_cls,
             patch("pathlib.Path.exists", return_value=True),
         ):
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=[mock_repo_entry])
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = [mock_repo_entry]
             mock_alias_cls.return_value = mock_alias_manager
             mock_app_module.app.state = mock_app_state
             mock_app_module.semantic_query_manager._perform_search = Mock(
@@ -287,7 +283,7 @@ class TestListRepositoriesFiltersByGroup:
                 return_value="/mock/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
         ):
             mock_app_module.app.state = mock_app_state
@@ -296,9 +292,7 @@ class TestListRepositoriesFiltersByGroup:
             )
             mock_app_module.golden_repo_manager = None
 
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=global_repos_data)
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = global_repos_data
 
             result = list_repositories({}, mock_regular_user)
 
@@ -755,7 +749,7 @@ class TestCidxMetaAlwaysAccessible:
                 return_value="/mock/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
             patch(
@@ -763,9 +757,7 @@ class TestCidxMetaAlwaysAccessible:
             ) as mock_alias_cls,
             patch("pathlib.Path.exists", return_value=True),
         ):
-            mock_registry = Mock()
-            mock_registry.list_global_repos = Mock(return_value=[mock_repo_entry])
-            mock_registry_factory.return_value = mock_registry
+            mock_registry_factory.return_value = [mock_repo_entry]
             mock_alias_cls.return_value = mock_alias_manager
             mock_app_module.app.state = mock_app_state
             mock_app_module.semantic_query_manager._perform_search = Mock(

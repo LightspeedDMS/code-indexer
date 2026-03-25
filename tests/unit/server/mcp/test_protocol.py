@@ -280,14 +280,12 @@ class TestToolsCallHandler:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir"
             ) as mock_get_dir,
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_get_registry,
         ):
             mock_mgr.list_activated_repositories = Mock(return_value=[])
             mock_get_dir.return_value = Path("/fake/golden/repos")
-            mock_registry = Mock()
-            mock_registry.list_global_repos.return_value = []
-            mock_get_registry.return_value = mock_registry
+            mock_get_registry.return_value = []
             result = await handle_tools_call(params, user)
 
         # MCP responses have content array with text blocks
@@ -322,14 +320,12 @@ class TestToolsCallHandler:
                 "code_indexer.server.mcp.handlers._get_golden_repos_dir"
             ) as mock_get_dir,
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_get_registry,
         ):
             mock_mgr.list_activated_repositories = Mock(return_value=[])
             mock_get_dir.return_value = Path("/fake/golden/repos")
-            mock_registry = Mock()
-            mock_registry.list_global_repos.return_value = []
-            mock_get_registry.return_value = mock_registry
+            mock_get_registry.return_value = []
             result = await handle_tools_call(params, user)
 
         # MCP responses have content array with text blocks

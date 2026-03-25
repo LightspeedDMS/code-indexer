@@ -56,7 +56,7 @@ def mock_omni_search_dependencies(search_side_effect=None):
 
         with patch(
             "code_indexer.server.mcp.handlers._expand_wildcard_patterns",
-            side_effect=lambda x: x,
+            side_effect=lambda x, user=None: x,
         ):
             mock_instance = Mock()
 

@@ -5,11 +5,14 @@ Tests that list_repositories returns both activated repos AND global repos
 from the golden-repos directory, with global repos properly marked.
 
 Per Epic #520 requirement: Global repos should be visible without activation.
+
+Bug #494: In cluster mode (storage_mode=postgres), global repos must be read
+from PostgreSQL via backend_registry.global_repos, not from local SQLite/filesystem.
 """
 
 import pytest
 import os
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from code_indexer.server.mcp.handlers import list_repositories
 from code_indexer.server.auth.user_manager import User, UserRole
 
@@ -74,6 +77,32 @@ def mock_activated_repos():
     ]
 
 
+def _setup_mock_app(mock_app, activated_repos=None, disable_access_filter=True):
+    """Helper to configure standard mock_app attributes needed by list_repositories.
+
+    Args:
+        mock_app: The patched app_module mock
+        activated_repos: List of activated repo dicts (default: empty list)
+        disable_access_filter: If True, sets access_filtering_service to None
+                               so repos are not filtered out by the access layer.
+    """
+    if activated_repos is None:
+        activated_repos = []
+    mock_app.activated_repo_manager.list_activated_repositories.return_value = (
+        activated_repos
+    )
+    mock_category_service = Mock()
+    mock_category_service.get_repo_category_map = Mock(return_value={})
+    mock_app.golden_repo_manager._repo_category_service = mock_category_service
+    if disable_access_filter:
+        # When app_module is a MagicMock, app.state.access_filtering_service
+        # is auto-created as a truthy MagicMock, which filters ALL repos out.
+        # Explicitly set it to None to disable access filtering in tests.
+        mock_app.app.state.access_filtering_service = None
+        # Also set backend_registry to None by default (standalone mode)
+        mock_app.app.state.backend_registry = None
+
+
 class TestListRepositoriesWithGlobalRepos:
     """Test MCP list_repositories handler includes global repos."""
 
@@ -82,52 +111,31 @@ class TestListRepositoriesWithGlobalRepos:
     ):
         """Test that global repos from registry appear in list_repositories response."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            # Mock activated repo manager
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                mock_activated_repos
-            )
-
-            # Story #196: Mock category service to prevent MagicMock serialization errors
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
+            _setup_mock_app(mock_app, activated_repos=mock_activated_repos)
 
             # Mock GlobalRegistry to return global repos
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = list(
-                mock_global_registry_data.values()
-            )
+            mock_repos_list = list(mock_global_registry_data.values())
 
-            # Patch get_server_global_registry to return our mock
-            # GlobalRegistry is accessed via get_server_global_registry(), not directly imported
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ):
-                # Execute
                 result = list_repositories({}, mock_user)
 
-                # Verify: Response contains content
                 assert "content" in result
                 assert len(result["content"]) == 1
                 assert result["content"][0]["type"] == "text"
 
-                # Parse the JSON response
                 import json
 
                 response_data = json.loads(result["content"][0]["text"])
 
-                # Verify: Response is successful
                 assert response_data["success"] is True
                 assert "repositories" in response_data
 
                 repos = response_data["repositories"]
-
-                # Verify: Total count includes activated + global repos
-                # 2 activated + 3 global = 5 total
                 assert len(repos) == 5
 
-                # Verify: Global repos are present with -global suffix
                 global_repo_aliases = [
                     repo["user_alias"]
                     for repo in repos
@@ -137,7 +145,6 @@ class TestListRepositoriesWithGlobalRepos:
                 assert "click-global" in global_repo_aliases
                 assert "pytest-global" in global_repo_aliases
 
-                # Verify: Activated repos are present
                 activated_aliases = [
                     repo["user_alias"]
                     for repo in repos
@@ -151,23 +158,13 @@ class TestListRepositoriesWithGlobalRepos:
     ):
         """Test that global repos have is_global: true field."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                mock_activated_repos
-            )
+            _setup_mock_app(mock_app, activated_repos=mock_activated_repos)
 
-            # Story #196: Mock category service
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
-
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = list(
-                mock_global_registry_data.values()
-            )
+            mock_repos_list = list(mock_global_registry_data.values())
 
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ):
                 result = list_repositories({}, mock_user)
 
@@ -176,14 +173,12 @@ class TestListRepositoriesWithGlobalRepos:
                 response_data = json.loads(result["content"][0]["text"])
                 repos = response_data["repositories"]
 
-                # Verify: All global repos have is_global: true
                 for repo in repos:
                     if repo.get("user_alias", "").endswith("-global"):
                         assert (
                             repo["is_global"] is True
                         ), f"Global repo {repo['user_alias']} missing is_global=True"
 
-                # Verify: Activated repos do NOT have is_global: true
                 for repo in repos:
                     if not repo.get("user_alias", "").endswith("-global"):
                         assert (
@@ -191,25 +186,15 @@ class TestListRepositoriesWithGlobalRepos:
                         ), "Activated repo should not have is_global=True"
 
     def test_global_repos_include_metadata(self, mock_user, mock_global_registry_data):
-        """Test that global repos include repo name, last update time, and index path."""
+        """Test that global repos include repo name, last update time."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                []
-            )
+            _setup_mock_app(mock_app, activated_repos=[])
 
-            # Story #196: Mock category service
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
-
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = list(
-                mock_global_registry_data.values()
-            )
+            mock_repos_list = list(mock_global_registry_data.values())
 
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ):
                 result = list_repositories({}, mock_user)
 
@@ -218,7 +203,6 @@ class TestListRepositoriesWithGlobalRepos:
                 response_data = json.loads(result["content"][0]["text"])
                 repos = response_data["repositories"]
 
-                # Verify: Each global repo has required metadata
                 for repo in repos:
                     if repo.get("is_global") is True:
                         assert (
@@ -228,10 +212,9 @@ class TestListRepositoriesWithGlobalRepos:
                         assert (
                             "last_refresh" in repo
                         ), "Global repo missing last_refresh"
-                        # Story #196: index_path removed from global repos
-                        assert "index_path" not in repo, "Global repo should not have index_path"
-
-                        # Verify user_alias has -global suffix
+                        assert (
+                            "index_path" not in repo
+                        ), "Global repo should not have index_path"
                         assert repo["user_alias"].endswith("-global")
 
     def test_empty_global_registry_handled_gracefully(
@@ -239,22 +222,13 @@ class TestListRepositoriesWithGlobalRepos:
     ):
         """Test that empty golden-repos directory is handled without errors."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                mock_activated_repos
-            )
+            _setup_mock_app(mock_app, activated_repos=mock_activated_repos)
 
-            # Story #196: Mock category service
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
-
-            # Mock empty global registry
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = []
+            mock_repos_list = []
 
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ):
                 result = list_repositories({}, mock_user)
 
@@ -262,12 +236,10 @@ class TestListRepositoriesWithGlobalRepos:
 
                 response_data = json.loads(result["content"][0]["text"])
 
-                # Verify: Response is successful
                 assert response_data["success"] is True
 
-                # Verify: Only activated repos are returned
                 repos = response_data["repositories"]
-                assert len(repos) == 2  # Only the 2 activated repos
+                assert len(repos) == 2
                 assert all(
                     repo.get("is_global") is not True for repo in repos
                 ), "Should not have any global repos"
@@ -277,24 +249,13 @@ class TestListRepositoriesWithGlobalRepos:
     ):
         """Test list_repositories when user has no activated repos but global repos exist."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            # No activated repos
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                []
-            )
+            _setup_mock_app(mock_app, activated_repos=[])
 
-            # Story #196: Mock category service
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
-
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = list(
-                mock_global_registry_data.values()
-            )
+            mock_repos_list = list(mock_global_registry_data.values())
 
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ):
                 result = list_repositories({}, mock_user)
 
@@ -303,7 +264,6 @@ class TestListRepositoriesWithGlobalRepos:
                 response_data = json.loads(result["content"][0]["text"])
                 repos = response_data["repositories"]
 
-                # Verify: Only global repos returned
                 assert len(repos) == 3
                 assert all(
                     repo["is_global"] is True for repo in repos
@@ -312,22 +272,19 @@ class TestListRepositoriesWithGlobalRepos:
     def test_global_registry_error_does_not_break_activated_list(self, mock_user):
         """Test that global registry errors don't prevent listing activated repos."""
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = [
-                {
-                    "user_alias": "my-project",
-                    "golden_repo_alias": "code-indexer",
-                    "branch_name": "main",
-                }
-            ]
+            _setup_mock_app(
+                mock_app,
+                activated_repos=[
+                    {
+                        "user_alias": "my-project",
+                        "golden_repo_alias": "code-indexer",
+                        "branch_name": "main",
+                    }
+                ],
+            )
 
-            # Story #196: Mock category service
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
-
-            # Mock get_server_global_registry to raise exception
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._list_global_repos",
                 side_effect=Exception("Registry load failed"),
             ):
                 result = list_repositories({}, mock_user)
@@ -336,19 +293,16 @@ class TestListRepositoriesWithGlobalRepos:
 
                 response_data = json.loads(result["content"][0]["text"])
 
-                # Verify: Response is successful (activated repos still listed)
                 assert response_data["success"] is True
                 repos = response_data["repositories"]
 
-                # Verify: Activated repo is still returned
                 assert len(repos) >= 1
                 assert any(
                     repo.get("user_alias") == "my-project" for repo in repos
                 ), "Activated repo should still be listed despite global registry error"
 
     def test_golden_repos_dir_from_environment(self, mock_user, tmp_path):
-        """Test that golden_repos_dir is loaded from environment variable."""
-        # Create temporary golden repos directory
+        """Test that golden_repos_dir is loaded from app.state."""
         temp_golden_dir = tmp_path / "test-golden-repos"
         temp_golden_dir.mkdir(parents=True)
 
@@ -356,55 +310,41 @@ class TestListRepositoriesWithGlobalRepos:
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
             patch.dict(os.environ, {"GOLDEN_REPOS_DIR": str(temp_golden_dir)}),
         ):
-            # Mock app.state.golden_repos_dir to return the test directory
             mock_app.app.state.golden_repos_dir = str(temp_golden_dir)
+            mock_app.app.state.access_filtering_service = None
+            mock_app.app.state.backend_registry = None  # Standalone mode
 
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                []
-            )
+            _setup_mock_app(mock_app, activated_repos=[], disable_access_filter=False)
+            mock_app.app.state.access_filtering_service = None
 
-            # Mock get_server_global_registry
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = []
+            mock_repos_list = []
 
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ) as mock_registry_factory:
                 list_repositories({}, mock_user)
 
-                # Verify: get_server_global_registry was called with app.state.golden_repos_dir
                 mock_registry_factory.assert_called_once_with(str(temp_golden_dir))
 
     def test_duplicate_alias_names_handled(self, mock_user, mock_global_registry_data):
         """Test that duplicate alias names between activated and global repos are handled."""
-        # Create activated repo with same name as global repo
         duplicate_activated = [
             {
-                "user_alias": "click-global",  # Same as global repo alias
+                "user_alias": "click-global",
                 "golden_repo_alias": "click",
                 "branch_name": "main",
             }
         ]
 
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
-            mock_app.activated_repo_manager.list_activated_repositories.return_value = (
-                duplicate_activated
-            )
+            _setup_mock_app(mock_app, activated_repos=duplicate_activated)
 
-            # Story #196: Mock category service
-            mock_category_service = Mock()
-            mock_category_service.get_repo_category_map = Mock(return_value={})
-            mock_app.golden_repo_manager._repo_category_service = mock_category_service
-
-            mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = [
-                mock_global_registry_data["click-global"]
-            ]
+            mock_repos_list = [mock_global_registry_data["click-global"]]
 
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
-                return_value=mock_registry,
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
             ):
                 result = list_repositories({}, mock_user)
 
@@ -413,11 +353,8 @@ class TestListRepositoriesWithGlobalRepos:
                 response_data = json.loads(result["content"][0]["text"])
                 repos = response_data["repositories"]
 
-                # Verify: Both entries exist (activated and global)
-                # This tests that we don't accidentally deduplicate
                 assert len(repos) == 2
 
-                # Verify: One is marked as global, one is not
                 global_count = sum(1 for repo in repos if repo.get("is_global") is True)
                 activated_count = sum(
                     1 for repo in repos if repo.get("is_global") is not True
@@ -425,3 +362,139 @@ class TestListRepositoriesWithGlobalRepos:
 
                 assert global_count == 1, "Should have 1 global repo"
                 assert activated_count == 1, "Should have 1 activated repo"
+
+
+class TestListRepositoriesClusterMode:
+    """Test MCP list_repositories handler in cluster mode (Bug #494).
+
+    In cluster mode (storage_mode=postgres), global repos MUST be read from
+    PostgreSQL via backend_registry.global_repos, not from local SQLite files.
+    """
+
+    def test_cluster_mode_uses_backend_registry_global_repos(
+        self, mock_user, mock_global_registry_data
+    ):
+        """Bug #494: In cluster mode, list_repositories reads from backend_registry.
+
+        When app.state.backend_registry is set (cluster/postgres mode), the handler
+        must use backend_registry.global_repos.list_repos() instead of creating a
+        new SQLite-backed GlobalRegistry from the filesystem.
+        """
+        import json
+
+        mock_backend_registry = Mock()
+        mock_global_repos_backend = Mock()
+        mock_global_repos_backend.list_repos.return_value = dict(
+            mock_global_registry_data
+        )
+        mock_backend_registry.global_repos = mock_global_repos_backend
+
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+            _setup_mock_app(mock_app, activated_repos=[])
+            mock_app.app.state.backend_registry = mock_backend_registry
+            mock_app.app.state.golden_repos_dir = "/fake/golden-repos"
+
+            with patch(
+                "code_indexer.server.mcp.handlers._list_global_repos"
+            ) as mock_registry_factory:
+                result = list_repositories({}, mock_user)
+
+                response_data = json.loads(result["content"][0]["text"])
+                assert response_data["success"] is True
+                repos = response_data["repositories"]
+
+                assert len(repos) == 3
+                assert all(r["is_global"] is True for r in repos)
+
+                global_aliases = {r["user_alias"] for r in repos}
+                assert "cidx-meta-global" in global_aliases
+                assert "click-global" in global_aliases
+                assert "pytest-global" in global_aliases
+
+                mock_global_repos_backend.list_repos.assert_called_once()
+                mock_registry_factory.assert_not_called()
+
+    def test_standalone_mode_uses_sqlite_registry(
+        self, mock_user, mock_global_registry_data
+    ):
+        """In standalone mode (no backend_registry), SQLite GlobalRegistry is used."""
+        import json
+
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+            _setup_mock_app(mock_app, activated_repos=[])
+            mock_app.app.state.backend_registry = None
+            mock_app.app.state.golden_repos_dir = "/fake/golden-repos"
+
+            mock_repos_list = list(mock_global_registry_data.values())
+
+            with patch(
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
+            ) as mock_registry_factory:
+                result = list_repositories({}, mock_user)
+
+                response_data = json.loads(result["content"][0]["text"])
+                assert response_data["success"] is True
+                repos = response_data["repositories"]
+
+                assert len(repos) == 3
+                mock_registry_factory.assert_called_once()
+
+    def test_cluster_mode_backend_registry_error_falls_back_gracefully(self, mock_user):
+        """If backend_registry.global_repos.list_repos() fails, handler returns activated repos only."""
+        import json
+
+        mock_backend_registry = Mock()
+        mock_global_repos_backend = Mock()
+        mock_global_repos_backend.list_repos.side_effect = Exception(
+            "PostgreSQL connection failed"
+        )
+        mock_backend_registry.global_repos = mock_global_repos_backend
+
+        activated = [
+            {
+                "user_alias": "my-project",
+                "golden_repo_alias": "code-indexer",
+                "current_branch": "main",
+                "is_global": False,
+                "repo_url": None,
+                "last_refresh": None,
+            }
+        ]
+
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+            _setup_mock_app(mock_app, activated_repos=activated)
+            mock_app.app.state.backend_registry = mock_backend_registry
+            mock_app.app.state.golden_repos_dir = "/fake/golden-repos"
+
+            result = list_repositories({}, mock_user)
+
+            response_data = json.loads(result["content"][0]["text"])
+            assert response_data["success"] is True
+            repos = response_data["repositories"]
+
+            assert len(repos) == 1
+            assert repos[0]["user_alias"] == "my-project"
+
+    def test_cluster_mode_with_no_global_repos_returns_empty_global_list(
+        self, mock_user
+    ):
+        """In cluster mode, if PostgreSQL has no global repos, result has no global repos."""
+        import json
+
+        mock_backend_registry = Mock()
+        mock_global_repos_backend = Mock()
+        mock_global_repos_backend.list_repos.return_value = {}
+        mock_backend_registry.global_repos = mock_global_repos_backend
+
+        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+            _setup_mock_app(mock_app, activated_repos=[])
+            mock_app.app.state.backend_registry = mock_backend_registry
+            mock_app.app.state.golden_repos_dir = "/fake/golden-repos"
+
+            result = list_repositories({}, mock_user)
+
+            response_data = json.loads(result["content"][0]["text"])
+            assert response_data["success"] is True
+            repos = response_data["repositories"]
+            assert repos == []

@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     from code_indexer.services.hnsw_health_service import HNSWHealthService
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies
-from code_indexer.server.utils.registry_factory import get_server_global_registry
 from code_indexer.server import app as app_module
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
@@ -197,6 +196,27 @@ def _get_golden_repos_dir() -> str:
         "golden_repos_dir not configured in app.state. "
         "Server must set app.state.golden_repos_dir during startup."
     )
+
+
+def _list_global_repos() -> list:
+    """List all global repos from the storage backend (SQLite or PostgreSQL).
+
+    Returns list of dicts with keys: alias_name, repo_name, repo_url,
+    index_path, created_at, last_refresh, enable_temporal, etc.
+    Works identically in standalone and cluster mode via BackendRegistry.
+    """
+    return list(
+        app_module.app.state.backend_registry.global_repos.list_repos().values()
+    )
+
+
+def _get_global_repo(alias_name: str):
+    """Get a single global repo by alias from the storage backend.
+
+    Returns dict with repo details, or None if not found.
+    Works identically in standalone and cluster mode via BackendRegistry.
+    """
+    return app_module.app.state.backend_registry.global_repos.get_repo(alias_name)
 
 
 def _get_query_tracker():
@@ -713,9 +733,7 @@ def _get_available_repos(user: "User") -> List[str]:
         List of repository alias names the user can see.
     """
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-        registry = get_server_global_registry(golden_repos_dir)
-        all_repos = [r["alias_name"] for r in registry.list_global_repos()]
+        all_repos = [r["alias_name"] for r in _list_global_repos()]
         access_service = _get_access_filtering_service()
         if access_service:
             filtered: List[str] = access_service.filter_repo_listing(
@@ -792,9 +810,7 @@ def _get_temporal_status(repo_aliases: List[str]) -> Dict[str, Any]:
         Dict with temporal_repos, non_temporal_repos, and optional warning
     """
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-        registry = get_server_global_registry(golden_repos_dir)
-        all_repos = {r["alias_name"]: r for r in registry.list_global_repos()}
+        all_repos = {r["alias_name"]: r for r in _list_global_repos()}
 
         temporal_repos = []
         non_temporal_repos = []
@@ -871,8 +887,7 @@ def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
 
     # Get available repos
     try:
-        registry = get_server_global_registry(golden_repos_dir)
-        available_repos = [r["alias_name"] for r in registry.list_global_repos()]
+        available_repos = [r["alias_name"] for r in _list_global_repos()]
     except Exception as e:
         logger.warning(
             format_error_log(
@@ -1221,8 +1236,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             golden_repos_dir = _get_golden_repos_dir()
 
             # Look up global repo in GlobalRegistry to get actual path
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             # Find the matching global repo
             repo_entry = next(
@@ -1617,22 +1631,10 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
             activated_repos.append(filtered_repo)
 
-        # Get global repos - use backend_registry in cluster mode (Bug #494),
-        # fall back to SQLite GlobalRegistry in standalone mode.
+        # Get global repos from storage backend (SQLite or PostgreSQL via BackendRegistry)
         global_repos = []
-        golden_repos_dir = "<unknown>"
         try:
-            backend_registry = getattr(app_module.app.state, "backend_registry", None)
-            if backend_registry is not None:
-                # Cluster mode (postgres): read from authoritative PostgreSQL backend.
-                # list_repos() returns Dict[str, Dict] keyed by alias_name.
-                global_repos_dict = backend_registry.global_repos.list_repos()
-                global_repos_data = list(global_repos_dict.values())
-            else:
-                # Standalone mode (sqlite): read from local SQLite GlobalRegistry.
-                golden_repos_dir = _get_golden_repos_dir()
-                registry = get_server_global_registry(golden_repos_dir)
-                global_repos_data = registry.list_global_repos()
+            global_repos_data = _list_global_repos()
 
             # Normalize global repos schema to match activated repos
             for repo in global_repos_data:
@@ -1665,7 +1667,7 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             logger.warning(
                 format_error_log(
                     "MCP-GENERAL-033",
-                    f"Failed to load global repos from {golden_repos_dir}: {e}",
+                    f"Failed to load global repos from storage backend: {e}",
                     exc_info=True,
                     extra={"correlation_id": get_correlation_id()},
                 )
@@ -1912,9 +1914,7 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Check if this is a global repository (ends with -global suffix)
         if user_alias and user_alias.endswith("-global"):
-            golden_repos_dir = _get_golden_repos_dir()
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             repo_entry = next(
                 (r for r in global_repos if r["alias_name"] == user_alias), None
@@ -2170,8 +2170,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Look up global repo in GlobalRegistry to get actual path
             golden_repos_dir = _get_golden_repos_dir()
 
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             # Find the matching global repo
             repo_entry = next(
@@ -2352,8 +2351,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Look up global repo in GlobalRegistry to get actual path
             golden_repos_dir = _get_golden_repos_dir()
 
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             # Find the matching global repo
             repo_entry = next(
@@ -2519,8 +2517,7 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Look up global repo in GlobalRegistry to get actual path
             golden_repos_dir = _get_golden_repos_dir()
 
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             # Find the matching global repo
             repo_entry = next(
@@ -2666,8 +2663,7 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Look up global repo in GlobalRegistry to get actual path
             golden_repos_dir = _get_golden_repos_dir()
 
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             # Find the matching global repo
             repo_entry = next(
@@ -3024,8 +3020,7 @@ def get_repository_statistics(params: Dict[str, Any], user: User) -> Dict[str, A
         # Check if this is a global repository (ends with -global suffix)
         if repository_alias and repository_alias.endswith("-global"):
             golden_repos_dir = _get_golden_repos_dir()
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos = registry.list_global_repos()
+            global_repos = _list_global_repos()
 
             repo_entry = next(
                 (r for r in global_repos if r["alias_name"] == repository_alias), None
@@ -3143,9 +3138,7 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
 
         # Get global repos status (same pattern as list_repositories handler)
         try:
-            golden_repos_dir = _get_golden_repos_dir()
-            registry = get_server_global_registry(golden_repos_dir)
-            global_repos_data = registry.list_global_repos()
+            global_repos_data = _list_global_repos()
 
             # Story #316: Filter global repos by user's group access
             access_filtering_service = _get_access_filtering_service()
@@ -4906,8 +4899,7 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
             return str(repo_path)
 
     # Look up in global registry
-    registry = get_server_global_registry(golden_repos_dir)
-    repo_entry = registry.get_global_repo(repo_identifier)
+    repo_entry = _get_global_repo(repo_identifier)
 
     if not repo_entry:
         return None
@@ -4981,8 +4973,7 @@ def _resolve_git_repo_path(
         golden_repos_dir = _get_golden_repos_dir()
 
         # Check repo URL first — local:// repos never support git operations
-        registry = get_server_global_registry(golden_repos_dir)
-        repo_entry = registry.get_global_repo(repository_alias)
+        repo_entry = _get_global_repo(repository_alias)
         if repo_entry and repo_entry.get("repo_url", "").startswith("local://"):
             return None, (
                 f"Repository '{repository_alias}' is a local repository "
@@ -7341,7 +7332,6 @@ def _resolve_cicd_project_access(
     Returns:
         None if allowed, error message string if denied
     """
-    from code_indexer.server.utils.registry_factory import get_server_global_registry
 
     def _extract_project_path(repo_url: str) -> Optional[str]:
         """Extract owner/project from a clone URL."""
@@ -7369,9 +7359,7 @@ def _resolve_cicd_project_access(
         return None
 
     try:
-        golden_repos_dir = _get_golden_repos_dir()
-        registry = get_server_global_registry(golden_repos_dir)
-        repos = registry.list_global_repos()
+        repos = _list_global_repos()
     except Exception as e:
         logger.warning(
             f"Failed to load golden repos registry for CI/CD access check: {e}",

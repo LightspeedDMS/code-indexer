@@ -426,21 +426,19 @@ class TestGetFileContentWikiUrlEnrichment:
                 return_value="/mock/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
             patch("code_indexer.server.app.app") as mock_app,
         ):
             mock_grm._sqlite_backend = mock_sqlite_backend_with_wiki
             mock_fs.get_file_content_by_path.return_value = mock_file_result
-            mock_registry = Mock()
-            mock_registry.list_global_repos.return_value = [
+            mock_registry_factory.return_value = [
                 {
                     "alias_name": "sf-kb-wiki-global",
                     "repo_name": "sf-kb-wiki",
                     "index_path": "/mock/path",
                 }
             ]
-            mock_registry_factory.return_value = mock_registry
 
             # Mock alias manager
             with patch(
@@ -491,21 +489,19 @@ class TestGetFileContentWikiUrlEnrichment:
                 return_value="/mock/golden-repos",
             ),
             patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry"
+                "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_factory,
             patch("code_indexer.server.app.app") as mock_app,
         ):
             mock_grm._sqlite_backend = mock_sqlite_backend_with_wiki
             mock_fs.get_file_content_by_path.return_value = mock_file_result
-            mock_registry = Mock()
-            mock_registry.list_global_repos.return_value = [
+            mock_registry_factory.return_value = [
                 {
                     "alias_name": "sf-kb-wiki-global",
                     "repo_name": "sf-kb-wiki",
                     "index_path": "/mock/path",
                 }
             ]
-            mock_registry_factory.return_value = mock_registry
 
             with patch(
                 "code_indexer.global_repos.alias_manager.AliasManager"

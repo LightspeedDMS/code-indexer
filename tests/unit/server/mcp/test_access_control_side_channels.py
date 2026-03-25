@@ -329,19 +329,15 @@ class TestAC1ErrorSuggestionsFiltered:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        # Mock the registry to return all repos
-        mock_registry = Mock()
-        mock_registry.list_global_repos.return_value = [
+        # Mock the storage backend to return all repos
+        mock_repos = [
             {"alias_name": "allowed-repo-global"},
             {"alias_name": "secret-repo-global"},
             {"alias_name": "another-secret-global"},
         ]
 
         with (
-            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
-            patch.object(
-                handlers, "get_server_global_registry", return_value=mock_registry
-            ),
+            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
             patch.object(
                 handlers, "_get_access_filtering_service", return_value=access_service
             ),
@@ -360,17 +356,13 @@ class TestAC1ErrorSuggestionsFiltered:
         user = _make_user("admin_user", role=UserRole.ADMIN)
         access_service = _make_access_service(is_admin=True)
 
-        mock_registry = Mock()
-        mock_registry.list_global_repos.return_value = [
+        mock_repos = [
             {"alias_name": "repo-a-global"},
             {"alias_name": "repo-b-global"},
         ]
 
         with (
-            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
-            patch.object(
-                handlers, "get_server_global_registry", return_value=mock_registry
-            ),
+            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
             patch.object(
                 handlers, "_get_access_filtering_service", return_value=access_service
             ),
@@ -416,8 +408,7 @@ class TestAC2WildcardExpansionFiltered:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        mock_registry = Mock()
-        mock_registry.list_global_repos.return_value = [
+        mock_repos = [
             {"alias_name": "allowed-repo-global"},
             {"alias_name": "secret-repo-global"},
             {"alias_name": "cidx-meta-global"},
@@ -425,9 +416,7 @@ class TestAC2WildcardExpansionFiltered:
 
         with (
             patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
-            patch.object(
-                handlers, "get_server_global_registry", return_value=mock_registry
-            ),
+            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
             patch.object(
                 handlers, "_get_access_filtering_service", return_value=access_service
             ),
@@ -448,16 +437,13 @@ class TestAC2WildcardExpansionFiltered:
             accessible_repos={"cidx-meta"},
         )
 
-        mock_registry = Mock()
-        mock_registry.list_global_repos.return_value = [
+        mock_repos = [
             {"alias_name": "allowed-repo-global"},
         ]
 
         with (
             patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
-            patch.object(
-                handlers, "get_server_global_registry", return_value=mock_registry
-            ),
+            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
             patch.object(
                 handlers, "_get_access_filtering_service", return_value=access_service
             ),

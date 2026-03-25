@@ -95,12 +95,16 @@ class TestToolOutputSchemas:
         assert "repo_url" in repo_items, "Missing 'repo_url' field"
         assert "last_refresh" in repo_items, "Missing 'last_refresh' field"
         # Story #196: Removed index_path (internal filesystem path)
-        assert "index_path" not in repo_items, "index_path should not be in schema (Story #196)"
+        assert (
+            "index_path" not in repo_items
+        ), "index_path should not be in schema (Story #196)"
         # Story #182: Added category support
         assert "repo_category" in repo_items, "Missing 'repo_category' field"
         # Composite repo fields
         assert "is_composite" in repo_items, "Missing 'is_composite' field"
-        assert "golden_repo_aliases" in repo_items, "Missing 'golden_repo_aliases' field"
+        assert (
+            "golden_repo_aliases" in repo_items
+        ), "Missing 'golden_repo_aliases' field"
 
         # Verify field descriptions are present
         assert "description" in repo_items["user_alias"]
@@ -441,11 +445,11 @@ class TestOutputSchemaCompleteness:
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
             mock_registry = MagicMock()
-            mock_registry.list_global_repos.return_value = global_repos
+            mock_registry.return_value = global_repos
 
             # GlobalRegistry is accessed via get_server_global_registry(), not directly imported
             with patch(
-                "code_indexer.server.mcp.handlers.get_server_global_registry",
+                "code_indexer.server.mcp.handlers._list_global_repos",
                 return_value=mock_registry,
             ):
                 # Execute handler
@@ -459,7 +463,9 @@ class TestOutputSchemaCompleteness:
                 assert "repositories" in response_data
 
                 # Story #196: Guard assertion to prevent vacuous test passing
-                assert len(response_data["repositories"]) > 0, "Test must validate actual repositories, not empty list"
+                assert (
+                    len(response_data["repositories"]) > 0
+                ), "Test must validate actual repositories, not empty list"
 
                 # Verify repository items have normalized fields
                 for repo in response_data["repositories"]:
@@ -562,11 +568,14 @@ class TestSearchCodeTemporalFields:
         ), "search_code output schema missing temporal_context field"
 
         temporal_prop = result_items_schema["properties"]["temporal_context"]
-        assert temporal_prop["type"] in [
-            ["object", "null"],
-            "object",
-            ["null", "object"],
-        ], f"temporal_context should be object|null type, got {temporal_prop.get('type')}"
+        assert (
+            temporal_prop["type"]
+            in [
+                ["object", "null"],
+                "object",
+                ["null", "object"],
+            ]
+        ), f"temporal_context should be object|null type, got {temporal_prop.get('type')}"
         assert (
             "description" in temporal_prop
         ), "temporal_context should have description"
@@ -653,11 +662,14 @@ class TestGlobalRepoStatusOutputSchema:
         assert (
             props["url"]["type"] == "string"
         ), f"url should be string, got {props['url'].get('type')}"
-        assert props["last_refresh"]["type"] in [
-            "string",
-            ["string", "null"],
-            ["null", "string"],
-        ], f"last_refresh should be string|null, got {props['last_refresh'].get('type')}"
+        assert (
+            props["last_refresh"]["type"]
+            in [
+                "string",
+                ["string", "null"],
+                ["null", "string"],
+            ]
+        ), f"last_refresh should be string|null, got {props['last_refresh'].get('type')}"
 
 
 class TestGetGlobalConfigOutputSchema:
@@ -758,11 +770,14 @@ class TestGetRepositoryStatusOutputSchema:
 
         # Verify temporal_status has nested structure
         temporal_status_prop = status_props["temporal_status"]
-        assert temporal_status_prop["type"] in [
-            ["object", "null"],
-            "object",
-            ["null", "object"],
-        ], f"temporal_status should be object|null, got {temporal_status_prop.get('type')}"
+        assert (
+            temporal_status_prop["type"]
+            in [
+                ["object", "null"],
+                "object",
+                ["null", "object"],
+            ]
+        ), f"temporal_status should be object|null, got {temporal_status_prop.get('type')}"
         if "properties" in temporal_status_prop:
             assert (
                 "enabled" in temporal_status_prop["properties"]
