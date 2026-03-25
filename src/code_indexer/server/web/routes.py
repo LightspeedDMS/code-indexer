@@ -453,6 +453,12 @@ def dashboard_stats_partial(
     if not session:
         return HTMLResponse(content="", status_code=401)
 
+    # Story #503 AC1: Use backend_registry.api_metrics for cluster-wide aggregation.
+    _backend_registry = getattr(request.app.state, "backend_registry", None)
+    _api_metrics_backend = (
+        _backend_registry.api_metrics if _backend_registry is not None else None
+    )
+
     dashboard_service = _get_dashboard_service()
     # Story #712 AC6: Pass user_role to prevent activated repos count flash
     # Rolling window API metrics: Pass api_window for configurable time window
@@ -462,6 +468,7 @@ def dashboard_stats_partial(
         recent_filter=recent_filter,
         user_role=session.role,
         api_window=api_filter,
+        api_metrics_backend=_api_metrics_backend,
     )
 
     return templates.TemplateResponse(
@@ -581,6 +588,20 @@ def dashboard_api_metrics_partial(
     if not session:
         return HTMLResponse(content="", status_code=401)
 
+    # Story #503 AC1: Use backend_registry.api_metrics for cluster-wide aggregation.
+    # In cluster (postgres) mode get_metrics(node_id=None) aggregates all nodes.
+    # In standalone mode the SQLite backend reads the local data — identical behaviour.
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    api_metrics_backend = (
+        backend_registry.api_metrics if backend_registry is not None else None
+    )
+
+    # Story #503 AC2/AC3: Detect cluster mode to conditionally show per-node breakdown.
+    is_cluster_mode = (
+        api_metrics_backend is not None
+        and "Postgres" in type(api_metrics_backend).__name__
+    )
+
     dashboard_service = _get_dashboard_service()
     stats_data = dashboard_service.get_stats_partial(
         session.username,
@@ -588,7 +609,27 @@ def dashboard_api_metrics_partial(
         recent_filter="24h",  # Not used for API metrics
         user_role=session.role,
         api_window=api_filter,
+        api_metrics_backend=api_metrics_backend,
     )
+
+    # Story #503 AC2: Per-node breakdown — only in cluster mode.
+    per_node_metrics = []
+    if is_cluster_mode:
+        try:
+            _nm_backend = getattr(request.app.state, "node_metrics_backend", None)
+            if _nm_backend is not None and api_metrics_backend is not None:
+                node_rows = _nm_backend.get_latest_per_node()
+                for row in node_rows:
+                    node_id = row.get("node_id")
+                    if node_id:
+                        node_counts = api_metrics_backend.get_metrics(
+                            window_seconds=api_filter, node_id=node_id
+                        )
+                        per_node_metrics.append(
+                            {"node_id": node_id, "metrics": node_counts}
+                        )
+        except Exception as _exc:
+            logger.debug("Could not read per-node api_metrics: %s", _exc)
 
     return templates.TemplateResponse(
         "partials/dashboard_api_metrics.html",
@@ -596,6 +637,8 @@ def dashboard_api_metrics_partial(
             "request": request,
             "api_metrics": stats_data.get("api_metrics", {}),
             "api_filter": api_filter,
+            "is_cluster_mode": is_cluster_mode,
+            "per_node_metrics": per_node_metrics,
         },
     )
 

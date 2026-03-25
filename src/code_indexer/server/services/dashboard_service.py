@@ -142,6 +142,7 @@ class DashboardService:
         recent_filter: str = "30d",
         user_role: str = "user",
         api_window: int = 60,
+        api_metrics_backend=None,
     ) -> Dict[str, Any]:
         """
         Get statistics data for partial refresh.
@@ -153,15 +154,24 @@ class DashboardService:
             user_role: User role ('admin' or 'user') - AC6 fix to prevent count flash
             api_window: Time window in seconds for API metrics (default 60).
                 Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
+            api_metrics_backend: Optional ApiMetricsBackend instance (Story #503).
+                When provided, used instead of the singleton api_metrics_service.
+                In cluster mode this is the PostgreSQL backend which aggregates
+                counts from all nodes; in standalone mode this is the SQLite backend.
 
         Returns:
             Dictionary containing job counts, repo counts, recent jobs, and API metrics
         """
-        # Story #4 AC2/AC3: Get API metrics for dashboard display
-        # Rolling window implementation - no reset needed, timestamps age out naturally
-        from .api_metrics_service import api_metrics_service
+        # Story #503 AC1: Use api_metrics_backend when available for cluster-wide aggregation.
+        # Falls back to the singleton api_metrics_service for backwards compatibility.
+        if api_metrics_backend is not None:
+            api_metrics = api_metrics_backend.get_metrics(window_seconds=api_window)
+        else:
+            # Story #4 AC2/AC3: Get API metrics for dashboard display
+            # Rolling window implementation - no reset needed, timestamps age out naturally
+            from .api_metrics_service import api_metrics_service
 
-        api_metrics = api_metrics_service.get_metrics(window_seconds=api_window)
+            api_metrics = api_metrics_service.get_metrics(window_seconds=api_window)
 
         return {
             "job_counts": self._get_job_counts(username, time_filter),

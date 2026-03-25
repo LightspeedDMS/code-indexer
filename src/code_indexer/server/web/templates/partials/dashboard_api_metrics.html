@@ -1,4 +1,5 @@
 <!-- Story #69: Granular partial for API metrics data ONLY -->
+<!-- Story #503: Cluster-wide aggregation; per-node breakdown in cluster mode -->
 <article class="stat-card">
     <header>
         <h3>Semantic Searches</h3>
@@ -38,3 +39,31 @@
         <small>All other endpoints</small>
     </footer>
 </article>
+
+{% if is_cluster_mode and per_node_metrics %}
+<section class="cluster-node-metrics">
+    <h4>Per-Node Breakdown</h4>
+    <table>
+        <thead>
+            <tr>
+                <th>Node</th>
+                <th>Semantic</th>
+                <th>Other Index</th>
+                <th>Regex</th>
+                <th>Other API</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for entry in per_node_metrics %}
+            <tr>
+                <td>{{ entry.node_id }}</td>
+                <td>{{ entry.metrics.semantic_searches }}</td>
+                <td>{{ entry.metrics.other_index_searches }}</td>
+                <td>{{ entry.metrics.regex_searches }}</td>
+                <td>{{ entry.metrics.other_api_calls }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+{% endif %}

@@ -842,3 +842,60 @@ class ApiMetricsBackend(Protocol):
     def close(self) -> None:
         """Close the backend and release any held resources."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# PayloadCacheBackend (Story #504: PayloadCacheBackend Protocol and Backends)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class PayloadCacheBackend(Protocol):
+    """Protocol for payload cache storage (Story #504).
+
+    Supports both SQLite (standalone) and PostgreSQL (cluster) backends.
+    Stores large content with TTL-based eviction, keyed by a cache handle.
+    """
+
+    def store(
+        self,
+        cache_handle: str,
+        content: str,
+        preview: str,
+        ttl_seconds: int,
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store a payload cache entry.
+
+        Args:
+            cache_handle: Unique identifier for this cache entry.
+            content: Full content to cache.
+            preview: Truncated preview of the content.
+            ttl_seconds: Time-to-live in seconds.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        ...
+
+    def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a cache entry by handle, or None if missing or expired.
+
+        Args:
+            cache_handle: Unique identifier for the cache entry.
+
+        Returns:
+            Dict with keys: content, preview, created_at, node_id — or None
+            if the entry does not exist or has exceeded its TTL.
+        """
+        ...
+
+    def cleanup_expired(self) -> int:
+        """Delete all entries that have exceeded their TTL.
+
+        Returns:
+            Number of rows deleted.
+        """
+        ...
+
+    def close(self) -> None:
+        """Close the backend and release any held resources."""
+        ...

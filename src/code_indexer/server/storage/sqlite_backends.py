@@ -3367,3 +3367,165 @@ class ApiMetricsSqliteBackend:
     def close(self) -> None:
         """No-op: connections are managed by DatabaseConnectionManager."""
         pass
+
+
+class PayloadCacheSqliteBackend:
+    """
+    SQLite backend for payload cache storage (Story #504).
+
+    Stores large content with TTL-based eviction, keyed by a unique cache handle.
+    Uses a dedicated payload_cache.db file to isolate cache writes from other server state.
+
+    Includes a node_id column for cluster support.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend and create the payload_cache table if it does not exist.
+
+        Args:
+            db_path: Path to SQLite database file
+                     (e.g. ~/.cidx-server/data/payload_cache.db).
+        """
+        import os
+
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+
+        # Enable WAL mode outside any transaction (PRAGMA cannot run inside BEGIN).
+        conn = self._conn_manager.get_connection()
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the payload_cache table if it does not already exist."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS payload_cache (
+                    cache_handle TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    preview TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    ttl_seconds INTEGER NOT NULL,
+                    node_id TEXT
+                )
+                """
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def store(
+        self,
+        cache_handle: str,
+        content: str,
+        preview: str,
+        ttl_seconds: int,
+        node_id: Optional[str] = None,
+    ) -> None:
+        """Store a payload cache entry, replacing any existing entry with the same handle.
+
+        Args:
+            cache_handle: Unique identifier for this cache entry.
+            content: Full content to cache.
+            preview: Truncated preview of the content.
+            ttl_seconds: Time-to-live in seconds.
+            node_id: Optional cluster node identifier (NULL in standalone).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO payload_cache
+                    (cache_handle, content, preview, created_at, ttl_seconds, node_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (cache_handle, content, preview, now, ttl_seconds, node_id),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def retrieve(self, cache_handle: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a cache entry by handle, or None if missing or expired.
+
+        Args:
+            cache_handle: Unique identifier for the cache entry.
+
+        Returns:
+            Dict with keys: content, preview, created_at, node_id — or None
+            if the entry does not exist or has exceeded its TTL.
+        """
+        conn = self._conn_manager.get_connection()
+        row = conn.execute(
+            """
+            SELECT cache_handle, content, preview, created_at, ttl_seconds, node_id
+            FROM payload_cache
+            WHERE cache_handle = ?
+            """,
+            (cache_handle,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        created_at_str: str = row[3]
+        ttl_secs: int = row[4]
+
+        # Check TTL expiry
+        try:
+            created_at = datetime.fromisoformat(created_at_str)
+            now = datetime.now(timezone.utc)
+            # Ensure created_at is timezone-aware for comparison
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            elapsed = (now - created_at).total_seconds()
+            if elapsed > ttl_secs:
+                return None
+        except (ValueError, TypeError):
+            return None
+
+        return {
+            "content": row[1],
+            "preview": row[2],
+            "created_at": created_at_str,
+            "node_id": row[5],
+        }
+
+    def cleanup_expired(self) -> int:
+        """Delete all entries that have exceeded their TTL.
+
+        Returns:
+            Number of rows deleted.
+        """
+        # Use Unix epoch seconds for reliable comparison (SQLite strftime
+        # cannot parse ISO timestamps with '+00:00' timezone offsets).
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+
+        def operation(conn: Any) -> int:
+            # Strip timezone suffix from created_at so strftime can parse it,
+            # then compare epoch seconds.
+            cursor = conn.execute(
+                """
+                DELETE FROM payload_cache
+                WHERE (? - strftime('%s', REPLACE(REPLACE(created_at, '+00:00', ''), 'Z', '')))
+                      >= ttl_seconds
+                """,
+                (now_epoch,),
+            )
+            return int(cursor.rowcount)
+
+        deleted: int = self._conn_manager.execute_atomic(operation)
+        if deleted:
+            logger.debug(
+                "PayloadCacheSqliteBackend: cleaned up %d expired cache entries",
+                deleted,
+            )
+        return deleted
+
+    def close(self) -> None:
+        """No-op: connections are managed by DatabaseConnectionManager."""
+        pass

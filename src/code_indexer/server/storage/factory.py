@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         GroupsBackend,
         LogsBackend,
         NodeMetricsBackend,
+        PayloadCacheBackend,
         RepoCategoryBackend,
         SessionsBackend,
         SSHKeysBackend,
@@ -79,6 +80,7 @@ class BackendRegistry:
     node_metrics: "NodeMetricsBackend"
     logs: "LogsBackend"
     api_metrics: "ApiMetricsBackend"
+    payload_cache: "PayloadCacheBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +145,7 @@ class StorageFactory:
             GoldenRepoMetadataSqliteBackend,
             LogsSqliteBackend,
             NodeMetricsSqliteBackend,
+            PayloadCacheSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
             SyncJobsSqliteBackend,
@@ -179,6 +182,9 @@ class StorageFactory:
             logs=LogsSqliteBackend(db_path=str(Path(data_dir).parent / "logs.db")),
             api_metrics=ApiMetricsSqliteBackend(
                 db_path=str(Path(data_dir) / "api_metrics.db")
+            ),
+            payload_cache=PayloadCacheSqliteBackend(
+                db_path=str(Path(data_dir) / "payload_cache.db")
             ),
         )
 
@@ -254,6 +260,9 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.api_metrics_backend import (
             ApiMetricsPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.payload_cache_backend import (
+            PayloadCachePostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
@@ -278,4 +287,5 @@ class StorageFactory:
             node_metrics=NodeMetricsPostgresBackend(pool),
             logs=LogsPostgresBackend(pool),
             api_metrics=ApiMetricsPostgresBackend(pool),
+            payload_cache=PayloadCachePostgresBackend(pool),
         )
