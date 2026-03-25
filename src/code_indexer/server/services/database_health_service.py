@@ -42,6 +42,9 @@ POSTGRES_MIGRATED_DATABASES = frozenset(
         "api_metrics.db",
         "payload_cache.db",
         "groups.db",
+        "oauth.db",
+        "scip_audit.db",
+        "refresh_tokens.db",
     }
 )
 

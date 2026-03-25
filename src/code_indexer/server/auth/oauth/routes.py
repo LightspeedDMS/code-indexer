@@ -55,7 +55,6 @@ from fastapi import APIRouter, HTTPException, status, Depends, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from typing import List, Optional
-from pathlib import Path
 import base64
 
 from .oauth_manager import OAuthManager, OAuthError, PKCEVerificationError
@@ -68,11 +67,10 @@ from ..oauth_rate_limiter import oauth_token_rate_limiter, oauth_register_rate_l
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
 
-# Initialize OAuth manager (singleton pattern)
-def get_oauth_manager() -> OAuthManager:
-    """Get OAuth manager instance."""
-    oauth_db = Path.home() / ".cidx-server" / "oauth.db"
-    return OAuthManager(db_path=str(oauth_db), issuer=None)
+# Get the backend-aware OAuth manager from app.state (set during startup in app_wiring.py)
+def get_oauth_manager(request: Request) -> OAuthManager:
+    """Get OAuth manager from app state."""
+    return request.app.state.oauth_manager  # type: ignore[no-any-return]
 
 
 def get_user_manager() -> UserManager:

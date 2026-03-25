@@ -40,8 +40,11 @@ if TYPE_CHECKING:
         GroupsBackend,
         LogsBackend,
         NodeMetricsBackend,
+        OAuthBackend,
         PayloadCacheBackend,
+        RefreshTokenBackend,
         RepoCategoryBackend,
+        SCIPAuditBackend,
         SessionsBackend,
         SSHKeysBackend,
         SyncJobsBackend,
@@ -81,6 +84,9 @@ class BackendRegistry:
     logs: "LogsBackend"
     api_metrics: "ApiMetricsBackend"
     payload_cache: "PayloadCacheBackend"
+    oauth: "OAuthBackend"
+    scip_audit: "SCIPAuditBackend"
+    refresh_tokens: "RefreshTokenBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +151,10 @@ class StorageFactory:
             GoldenRepoMetadataSqliteBackend,
             LogsSqliteBackend,
             NodeMetricsSqliteBackend,
+            OAuthSqliteBackend,
             PayloadCacheSqliteBackend,
+            RefreshTokenSqliteBackend,
+            SCIPAuditSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
             SyncJobsSqliteBackend,
@@ -185,6 +194,13 @@ class StorageFactory:
             ),
             payload_cache=PayloadCacheSqliteBackend(
                 db_path=str(Path(data_dir) / "payload_cache.db")
+            ),
+            oauth=OAuthSqliteBackend(db_path=str(Path(data_dir).parent / "oauth.db")),
+            scip_audit=SCIPAuditSqliteBackend(
+                db_path=str(Path(data_dir).parent / "scip_audit.db")
+            ),
+            refresh_tokens=RefreshTokenSqliteBackend(
+                db_path=str(Path(data_dir).parent / "refresh_tokens.db")
             ),
         )
 
@@ -263,6 +279,15 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.payload_cache_backend import (
             PayloadCachePostgresBackend,
         )
+        from code_indexer.server.storage.postgres.oauth_backend import (
+            OAuthPostgresBackend,
+        )
+        from code_indexer.server.storage.postgres.scip_audit_backend import (
+            SCIPAuditPostgresBackend,
+        )
+        from code_indexer.server.storage.postgres.refresh_token_backend import (
+            RefreshTokenPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
@@ -288,4 +313,7 @@ class StorageFactory:
             logs=LogsPostgresBackend(pool),
             api_metrics=ApiMetricsPostgresBackend(pool),
             payload_cache=PayloadCachePostgresBackend(pool),
+            oauth=OAuthPostgresBackend(pool),
+            scip_audit=SCIPAuditPostgresBackend(pool),
+            refresh_tokens=RefreshTokenPostgresBackend(pool),
         )

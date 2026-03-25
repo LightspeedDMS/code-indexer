@@ -52,6 +52,8 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     data_dir = services["data_dir"]
     db_path_str = services["db_path_str"]
     secret_key = services["secret_key"]
+    # SCIPAuditRepository with backend support (may be None on legacy startup)
+    scip_audit_repository = services.get("scip_audit_repository")
 
     # Create FastAPI app with metadata and lifespan
     app = FastAPI(
@@ -83,7 +85,9 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.add_middleware(GlobalErrorHandler)
 
     # Add correlation ID bridge middleware for OTEL tracing (Story #697)
-    from code_indexer.server.telemetry.correlation_bridge import CorrelationBridgeMiddleware
+    from code_indexer.server.telemetry.correlation_bridge import (
+        CorrelationBridgeMiddleware,
+    )
 
     app.add_middleware(CorrelationBridgeMiddleware)
 
@@ -133,6 +137,7 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
     app.state.data_dir = data_dir
     app.state.db_path_str = db_path_str
     app.state.job_tracker = job_tracker
+    app.state.scip_audit_repository = scip_audit_repository
 
     # AC2: Route handlers extracted to routers/inline_routes.py (Story #409)
     register_inline_routes(

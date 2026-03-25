@@ -888,6 +888,40 @@ class DatabaseConnectionManager:
     _instances: Dict[str, "DatabaseConnectionManager"] = {}
     _instance_lock: threading.Lock = threading.Lock()
 
+    # Bug #517: Global cleanup state so that any instance's get_connection() call
+    # triggers cleanup across ALL instances, not just the one being accessed.
+    _last_global_cleanup: float = 0.0
+    _global_cleanup_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def _cleanup_all_instances(cls) -> None:
+        """
+        Clean stale connections across ALL singleton instances.
+
+        Bug #517: When only per-instance cleanup existed, infrequently-accessed
+        instances never had their dead-thread connections removed.  Now, whenever
+        ANY instance's get_connection() fires the 60 s timer, every instance in
+        the registry is swept, bounding FD growth regardless of access pattern.
+
+        Throttled by _last_global_cleanup / _global_cleanup_lock at the class
+        level so the sweep runs at most once per CLEANUP_INTERVAL across the
+        entire process.
+        """
+        with cls._global_cleanup_lock:
+            now = time.time()
+            # Re-check inside the lock (double-checked locking pattern)
+            # CLEANUP_INTERVAL is an instance attribute; use a sentinel default
+            interval = next(
+                (inst.CLEANUP_INTERVAL for inst in cls._instances.values()), 60.0
+            )
+            if (now - cls._last_global_cleanup) <= interval:
+                return
+            cls._last_global_cleanup = now
+            instances_snapshot = list(cls._instances.values())
+
+        for inst in instances_snapshot:
+            inst._cleanup_stale_connections()
+
     @classmethod
     def get_instance(cls, db_path: str) -> "DatabaseConnectionManager":
         """
@@ -972,9 +1006,11 @@ class DatabaseConnectionManager:
             with self._lock:
                 self._connections[thread_id] = conn
 
-        # Piggyback stale connection cleanup (throttled)
-        if (time.time() - self._last_cleanup) > self.CLEANUP_INTERVAL:
-            self._cleanup_stale_connections()
+        # Piggyback stale connection cleanup (throttled).
+        # Bug #517: use class-level global cleanup so ALL instances are swept,
+        # not just this one.
+        if (time.time() - self.__class__._last_global_cleanup) > self.CLEANUP_INTERVAL:
+            self.__class__._cleanup_all_instances()
 
         connection: sqlite3.Connection = self._local.connection
         return connection

@@ -6,17 +6,21 @@ from code_indexer.server.logging_utils import format_error_log
 
 
 class OIDCManager:
-    def __init__(self, config, user_manager, jwt_manager):
+    def __init__(self, config, user_manager, jwt_manager, oauth_backend=None):
         self.config = config
         self.user_manager = user_manager
         self.jwt_manager = jwt_manager
         self.provider = None
+        self._oauth_backend = oauth_backend
         # Use existing oauth.db instead of separate database
         self.db_path = str(Path.home() / ".cidx-server" / "oauth.db")
 
     async def initialize(self):
         """Initialize database schema (no network calls)."""
         if self.config.enabled:
+            if self._oauth_backend:
+                # Backend handles schema initialization
+                return
             # Initialize database schema for OIDC identity links
             await self._init_db()
 
@@ -164,6 +168,12 @@ class OIDCManager:
             await db.commit()
 
     async def link_oidc_identity(self, username, subject, email):
+        if self._oauth_backend:
+            # OAuthBackend.link_oidc_identity is synchronous (see protocols.py)
+            self._oauth_backend.link_oidc_identity(  # sync call - no await needed
+                username=username, subject=subject, email=email
+            )
+            return
         import aiosqlite
         from datetime import datetime, timezone
 
@@ -183,6 +193,38 @@ class OIDCManager:
             )
             await db.commit()
 
+    def _handle_existing_oidc_link(self, username, subject, user_info):
+        """Check if an existing OIDC-linked user is still valid.
+
+        Returns the user if valid, or None if the link is stale (user deleted).
+        Handles group membership enforcement on valid users.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.info(
+            f"Found existing OIDC link: subject={subject} -> username={username}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        existing_user = self.user_manager.get_user(username)
+        if existing_user:
+            logger.info(
+                f"Returning existing user: {username}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            # Story #708: Ensure group membership on every SSO login
+            self._ensure_group_membership(existing_user.username, user_info.groups)
+            return existing_user
+        # Stale link - caller must delete it
+        logger.warning(
+            format_error_log(
+                "AUTH-GENERAL-008",
+                f"Stale OIDC link found for subject={subject}, deleting",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return None
+
     async def match_or_create_user(self, user_info):
         import aiosqlite
         import logging
@@ -194,40 +236,35 @@ class OIDCManager:
         )
 
         # Check if OIDC subject already exists in database (fast path)
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT username FROM oidc_identity_links WHERE subject = ?",
-                (user_info.subject,),
-            )
-            result = await cursor.fetchone()
-
-            if result:
-                # Subject exists, check if user still exists
-                username = result[0]
-                logger.info(
-                    f"Found existing OIDC link: subject={user_info.subject} -> username={username}",
-                    extra={"correlation_id": get_correlation_id()},
+        if self._oauth_backend:
+            # OAuthBackend methods are synchronous (see protocols.py)
+            identity = self._oauth_backend.get_oidc_identity(
+                user_info.subject
+            )  # sync call
+            if identity:
+                user = self._handle_existing_oidc_link(
+                    identity["username"], user_info.subject, user_info
                 )
-                existing_user = self.user_manager.get_user(username)
-                if existing_user:
-                    logger.info(
-                        f"Returning existing user: {username}",
-                        extra={"correlation_id": get_correlation_id()},
+                if user:
+                    return user
+                # Stale link - delete it so re-link is possible
+                self._oauth_backend.delete_oidc_identity(user_info.subject)  # sync call
+                # Fall through to auto-link or JIT provisioning
+        else:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT username FROM oidc_identity_links WHERE subject = ?",
+                    (user_info.subject,),
+                )
+                result = await cursor.fetchone()
+
+                if result:
+                    user = self._handle_existing_oidc_link(
+                        result[0], user_info.subject, user_info
                     )
-                    # Story #708: Ensure group membership on every SSO login
-                    self._ensure_group_membership(
-                        existing_user.username, user_info.groups
-                    )
-                    return existing_user
-                else:
-                    # Stale OIDC link (defensive check - should be cleaned up on user deletion)
-                    logger.warning(
-                        format_error_log(
-                            "AUTH-GENERAL-008",
-                            f"Stale OIDC link found for subject={user_info.subject}, deleting",
-                            extra={"correlation_id": get_correlation_id()},
-                        )
-                    )
+                    if user:
+                        return user
+                    # Stale link - delete it so re-link is possible
                     await db.execute(
                         "DELETE FROM oidc_identity_links WHERE subject = ?",
                         (user_info.subject,),

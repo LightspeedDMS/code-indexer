@@ -21,14 +21,23 @@ class SCIPAuditRepository:
     for tracking dependency installations across projects and languages.
     """
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: Optional[str] = None, storage_backend=None):
         """
         Initialize SCIP Audit Repository.
 
         Args:
             db_path: Path to SQLite database (defaults to ~/.cidx-server/scip_audit.db)
+            storage_backend: Optional storage backend for data operations.
+                When provided, skips SQLite setup and delegates all data
+                operations to the backend (used in cluster/PostgreSQL mode).
         """
         self._lock = threading.Lock()
+        self._backend = storage_backend
+
+        if storage_backend:
+            # Backend handles all storage - no SQLite connection needed
+            self._conn_manager = None
+            return
 
         # Set database path with fallback to user home directory
         if db_path:
@@ -49,6 +58,7 @@ class SCIPAuditRepository:
 
     def _init_database(self):
         """Initialize SQLite database schema for audit records."""
+
         def _do_init(conn: sqlite3.Connection) -> None:
             # Create scip_dependency_installations table
             conn.execute(
@@ -134,8 +144,22 @@ class SCIPAuditRepository:
         Raises:
             sqlite3.Error: If database operation fails
         """
+        if self._backend:
+            return self._backend.create_audit_record(  # type: ignore[no-any-return]
+                job_id=job_id,
+                repo_alias=repo_alias,
+                package=package,
+                command=command,
+                project_path=project_path,
+                project_language=project_language,
+                project_build_system=project_build_system,
+                reasoning=reasoning,
+                username=username,
+            )
+
         result: dict = {}
         with self._lock:
+
             def _do_insert(conn: sqlite3.Connection) -> None:
                 cursor = conn.execute(
                     """
@@ -158,11 +182,11 @@ class SCIPAuditRepository:
                 )
                 result["record_id"] = cursor.lastrowid
 
-            self._conn_manager.execute_atomic(_do_insert)
+            self._conn_manager.execute_atomic(_do_insert)  # type: ignore[union-attr]
         record_id = result["record_id"]
         if record_id is None:
             raise RuntimeError("Failed to get record ID after INSERT")
-        return record_id
+        return record_id  # type: ignore[no-any-return]
 
     def query_audit_records(
         self,
@@ -192,8 +216,20 @@ class SCIPAuditRepository:
             Tuple of (records list, total count)
             Each record is a dictionary with all audit fields
         """
+        if self._backend:
+            return self._backend.query_audit_records(  # type: ignore[no-any-return]
+                job_id=job_id,
+                repo_alias=repo_alias,
+                project_language=project_language,
+                project_build_system=project_build_system,
+                since=since,
+                until=until,
+                limit=limit,
+                offset=offset,
+            )
+
         with self._lock:
-            conn = self._conn_manager.get_connection()
+            conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
             # Use cursor-level row_factory to avoid mutating the shared connection
             # permanently for all subsequent operations on this thread.
             cursor = conn.cursor()

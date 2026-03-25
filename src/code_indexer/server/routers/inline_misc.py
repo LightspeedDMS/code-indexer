@@ -17,6 +17,7 @@ import logging
 from fastapi import (
     FastAPI,
     HTTPException,
+    Request,
     status,
     Depends,
 )
@@ -291,15 +292,10 @@ def register_misc_routes(
 
     # RFC 8414 compliance: OAuth discovery at root level for Claude.ai compatibility
     @app.get("/.well-known/oauth-authorization-server")
-    def root_oauth_discovery():
+    def root_oauth_discovery(request: Request):
         """OAuth 2.1 discovery endpoint at root path (RFC 8414 compliance)."""
-        from pathlib import Path
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthManager
-
-        # Use same configuration as /oauth/ routes for consistency
-        oauth_db = Path.home() / ".cidx-server" / "oauth.db"
-        manager = OAuthManager(db_path=str(oauth_db), issuer=None)
-        return manager.get_discovery_metadata()
+        oauth_manager = request.app.state.oauth_manager
+        return oauth_manager.get_discovery_metadata()
 
     # RFC 9728 compliance: OAuth Protected Resource Metadata
     @app.get("/.well-known/oauth-protected-resource")

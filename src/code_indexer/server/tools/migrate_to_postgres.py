@@ -62,6 +62,27 @@ GROUPS_DB_TABLES_ORDERED: List[str] = [
     "audit_logs",
 ]
 
+# Tables sourced from oauth.db, in dependency order.
+# oauth_clients must come first to satisfy FK constraints from oauth_codes and oauth_tokens.
+OAUTH_DB_TABLES_ORDERED: List[str] = [
+    "oauth_clients",
+    "oauth_codes",
+    "oauth_tokens",
+    "oidc_identity_links",
+]
+
+# Tables sourced from scip_audit.db (Story #516).
+SCIP_AUDIT_DB_TABLES_ORDERED: List[str] = [
+    "scip_dependency_installations",
+]
+
+# Tables sourced from refresh_tokens.db (Story #515), in dependency order.
+# token_families must come first to satisfy FK constraints from refresh_tokens.
+REFRESH_TOKEN_DB_TABLES_ORDERED: List[str] = [
+    "token_families",
+    "refresh_tokens",
+]
+
 
 # ---------------------------------------------------------------------------
 # Columns that hold JSON strings in SQLite but should become JSON/JSONB in PG.
@@ -70,6 +91,7 @@ GROUPS_DB_TABLES_ORDERED: List[str] = [
 JSON_COLUMNS: Dict[str, set] = {
     "global_repos": {"temporal_options"},
     "golden_repos_metadata": {"temporal_options"},
+    "oauth_clients": {"redirect_uris", "metadata"},
     "sync_jobs": {
         "phases",
         "phase_weights",
@@ -102,6 +124,7 @@ JSON_COLUMNS: Dict[str, set] = {
 # ---------------------------------------------------------------------------
 BOOLEAN_COLUMNS: Dict[str, set] = {
     "global_repos": {"enable_temporal", "enable_scip", "wiki_enabled"},
+    "oauth_codes": {"used"},
     "golden_repos_metadata": {
         "enable_temporal",
         "enable_scip",
@@ -112,6 +135,8 @@ BOOLEAN_COLUMNS: Dict[str, set] = {
     "groups": {"is_default"},
     "background_jobs": {"is_admin", "cancelled"},
     "users": {"is_admin", "is_sso"},
+    "token_families": {"is_revoked"},
+    "refresh_tokens": {"is_used"},
 }
 
 # ---------------------------------------------------------------------------
@@ -145,6 +170,9 @@ class SqliteToPostgresMigrator:
         sqlite_db_path: str,
         groups_db_path: str,
         pg_connection_string: str,
+        oauth_db_path: Optional[str] = None,
+        scip_audit_db_path: Optional[str] = None,
+        refresh_tokens_db_path: Optional[str] = None,
     ) -> None:
         """
         Initialise the migrator.
@@ -153,10 +181,16 @@ class SqliteToPostgresMigrator:
             sqlite_db_path: Path to cidx_server.db SQLite file.
             groups_db_path: Path to groups.db SQLite file.
             pg_connection_string: libpq connection string for PostgreSQL.
+            oauth_db_path: Optional path to oauth.db SQLite file.
+            scip_audit_db_path: Optional path to scip_audit.db SQLite file (Story #516).
+            refresh_tokens_db_path: Optional path to refresh_tokens.db SQLite file (Story #515).
         """
         self._sqlite_path = sqlite_db_path
         self._groups_path = groups_db_path
         self._pg_conn_str = pg_connection_string
+        self._oauth_path = oauth_db_path
+        self._scip_audit_path = scip_audit_db_path
+        self._refresh_tokens_path = refresh_tokens_db_path
 
     # ------------------------------------------------------------------
     # Public API
@@ -182,6 +216,19 @@ class SqliteToPostgresMigrator:
         all_tables: List[Tuple[str, str]] = [
             (t, self._sqlite_path) for t in MAIN_DB_TABLES_ORDERED
         ] + [(t, self._groups_path) for t in GROUPS_DB_TABLES_ORDERED]
+
+        if self._oauth_path:
+            all_tables += [(t, self._oauth_path) for t in OAUTH_DB_TABLES_ORDERED]
+
+        if self._scip_audit_path:
+            all_tables += [
+                (t, self._scip_audit_path) for t in SCIP_AUDIT_DB_TABLES_ORDERED
+            ]
+
+        if self._refresh_tokens_path:
+            all_tables += [
+                (t, self._refresh_tokens_path) for t in REFRESH_TOKEN_DB_TABLES_ORDERED
+            ]
 
         for table_name, db_path in all_tables:
             try:
@@ -220,10 +267,29 @@ class SqliteToPostgresMigrator:
             db_path = self._sqlite_path
         elif table_name in GROUPS_DB_TABLES_ORDERED:
             db_path = self._groups_path
+        elif table_name in OAUTH_DB_TABLES_ORDERED:
+            if not self._oauth_path:
+                raise ValueError(
+                    f"Table '{table_name}' is an OAuth table but oauth_db_path was not provided."
+                )
+            db_path = self._oauth_path
+        elif table_name in SCIP_AUDIT_DB_TABLES_ORDERED:
+            if not self._scip_audit_path:
+                raise ValueError(
+                    f"Table '{table_name}' is a SCIP audit table but scip_audit_db_path was not provided."
+                )
+            db_path = self._scip_audit_path
+        elif table_name in REFRESH_TOKEN_DB_TABLES_ORDERED:
+            if not self._refresh_tokens_path:
+                raise ValueError(
+                    f"Table '{table_name}' is a refresh token table but refresh_tokens_db_path was not provided."
+                )
+            db_path = self._refresh_tokens_path
         else:
             raise ValueError(
-                f"Unknown table '{table_name}'. Not in MAIN_DB_TABLES_ORDERED "
-                f"or GROUPS_DB_TABLES_ORDERED."
+                f"Unknown table '{table_name}'. Not in MAIN_DB_TABLES_ORDERED, "
+                f"GROUPS_DB_TABLES_ORDERED, OAUTH_DB_TABLES_ORDERED, SCIP_AUDIT_DB_TABLES_ORDERED, "
+                f"or REFRESH_TOKEN_DB_TABLES_ORDERED."
             )
         return self._migrate_table_from(table_name, db_path)
 
@@ -255,6 +321,20 @@ class SqliteToPostgresMigrator:
             all_tables: List[Tuple[str, str]] = [
                 (t, self._sqlite_path) for t in MAIN_DB_TABLES_ORDERED
             ] + [(t, self._groups_path) for t in GROUPS_DB_TABLES_ORDERED]
+
+            if self._oauth_path:
+                all_tables += [(t, self._oauth_path) for t in OAUTH_DB_TABLES_ORDERED]
+
+            if self._scip_audit_path:
+                all_tables += [
+                    (t, self._scip_audit_path) for t in SCIP_AUDIT_DB_TABLES_ORDERED
+                ]
+
+            if self._refresh_tokens_path:
+                all_tables += [
+                    (t, self._refresh_tokens_path)
+                    for t in REFRESH_TOKEN_DB_TABLES_ORDERED
+                ]
 
             for table_name, db_path in all_tables:
                 # SQLite count
@@ -612,6 +692,21 @@ def _build_arg_parser():  # type: ignore[return]
         help="PostgreSQL connection URL (e.g. postgresql://user:pass@host/db).",
     )
     parser.add_argument(
+        "--oauth-path",
+        default=None,
+        help="Path to oauth.db SQLite file (optional).",
+    )
+    parser.add_argument(
+        "--scip-audit-path",
+        default=None,
+        help="Path to scip_audit.db SQLite file (optional, Story #516).",
+    )
+    parser.add_argument(
+        "--refresh-tokens-path",
+        default=None,
+        help="Path to refresh_tokens.db SQLite file (optional, Story #515).",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         default=False,
@@ -641,6 +736,9 @@ def main() -> None:
         sqlite_db_path=args.sqlite_path,
         groups_db_path=args.groups_path,
         pg_connection_string=args.pg_url,
+        oauth_db_path=getattr(args, "oauth_path", None),
+        scip_audit_db_path=getattr(args, "scip_audit_path", None),
+        refresh_tokens_db_path=getattr(args, "refresh_tokens_path", None),
     )
 
     if args.validate_only:

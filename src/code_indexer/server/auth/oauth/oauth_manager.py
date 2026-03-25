@@ -37,8 +37,14 @@ class OAuthManager:
         issuer: Optional[str] = None,
         user_manager: Optional["UserManager"] = None,
         audit_logger: Optional["PasswordChangeAuditLogger"] = None,
+        storage_backend: Optional[Any] = None,
     ):
         self.issuer = issuer or os.getenv("CIDX_ISSUER_URL", "http://localhost:8000")
+        self._backend = storage_backend
+        if storage_backend:
+            # Backend handles all storage - no SQLite connection needed
+            self._conn_manager = None
+            return
         if db_path:
             self.db_path = Path(db_path)
         else:
@@ -140,6 +146,15 @@ class OAuthManager:
         token_endpoint_auth_method: Optional[str] = None,
         scope: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if self._backend:
+            return self._backend.register_client(  # type: ignore[no-any-return]
+                client_name=client_name,
+                redirect_uris=redirect_uris,
+                grant_types=grant_types,
+                response_types=response_types,
+                token_endpoint_auth_method=token_endpoint_auth_method,
+                scope=scope,
+            )
         if not client_name or client_name.strip() == "":
             raise OAuthError("client_name cannot be empty")
         client_id = secrets.token_urlsafe(32)
@@ -163,7 +178,7 @@ class OAuthManager:
                 ),
             )
 
-        self._conn_manager.execute_atomic(_do_insert)
+        self._conn_manager.execute_atomic(_do_insert)  # type: ignore[union-attr]
         return {
             "client_id": client_id,
             "client_name": client_name,
@@ -175,12 +190,12 @@ class OAuthManager:
         }
 
     def get_client(self, client_id: str) -> Optional[Dict[str, Any]]:
-        conn = self._conn_manager.get_connection()
+        if self._backend:
+            return self._backend.get_client(client_id)  # type: ignore[no-any-return]
+        conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
-        cursor.execute(
-            "SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,)
-        )
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute("SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,))
         row = cursor.fetchone()
         if row:
             return {
@@ -199,6 +214,14 @@ class OAuthManager:
         redirect_uri: str,
         state: str,
     ) -> str:
+        if self._backend:
+            return self._backend.generate_authorization_code(  # type: ignore[no-any-return]
+                client_id=client_id,
+                user_id=user_id,
+                code_challenge=code_challenge,
+                redirect_uri=redirect_uri,
+                state=state,
+            )
         # Validate PKCE challenge
         if not code_challenge or code_challenge.strip() == "":
             raise OAuthError("code_challenge required")
@@ -224,12 +247,16 @@ class OAuthManager:
                 ),
             )
 
-        self._conn_manager.execute_atomic(_do_insert)
+        self._conn_manager.execute_atomic(_do_insert)  # type: ignore[union-attr]
         return code
 
     def exchange_code_for_token(
         self, code: str, code_verifier: str, client_id: str
     ) -> Dict[str, Any]:
+        if self._backend:
+            return self._backend.exchange_code_for_token(  # type: ignore[no-any-return]
+                code=code, code_verifier=code_verifier, client_id=client_id
+            )
         # Prepare new token values before entering the atomic block
         token_id = secrets.token_urlsafe(32)
         access_token = secrets.token_urlsafe(48)
@@ -241,7 +268,7 @@ class OAuthManager:
 
         def _do_exchange(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT * FROM oauth_codes WHERE code = ? AND client_id = ?",
                 (code, client_id),
@@ -289,7 +316,7 @@ class OAuthManager:
             result["access_token"] = access_token
             result["refresh_token"] = refresh_token
 
-        self._conn_manager.execute_atomic(_do_exchange)
+        self._conn_manager.execute_atomic(_do_exchange)  # type: ignore[union-attr]
 
         return {
             "access_token": result["access_token"],
@@ -299,9 +326,11 @@ class OAuthManager:
         }
 
     def validate_token(self, access_token: str) -> Optional[Dict[str, Any]]:
-        conn = self._conn_manager.get_connection()
+        if self._backend:
+            return self._backend.validate_token(access_token)  # type: ignore[no-any-return]
+        conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
         )
@@ -320,9 +349,11 @@ class OAuthManager:
         }
 
     def extend_token_on_activity(self, access_token: str) -> bool:
-        conn = self._conn_manager.get_connection()
+        if self._backend:
+            return self._backend.extend_token_on_activity(access_token)  # type: ignore[no-any-return]
+        conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
         )
@@ -345,13 +376,17 @@ class OAuthManager:
                 (new_expires_at.isoformat(), now.isoformat(), access_token),
             )
 
-        self._conn_manager.execute_atomic(_do_extend)
+        self._conn_manager.execute_atomic(_do_extend)  # type: ignore[union-attr]
         return True
 
     def refresh_access_token(
         self, refresh_token: str, client_id: str
     ) -> Dict[str, Any]:
         """Exchange refresh token for new access and refresh tokens."""
+        if self._backend:
+            return self._backend.refresh_access_token(  # type: ignore[no-any-return]
+                refresh_token=refresh_token, client_id=client_id
+            )
         new_access_token = secrets.token_urlsafe(48)
         new_refresh_token = secrets.token_urlsafe(48)
         now = datetime.now(timezone.utc)
@@ -359,7 +394,7 @@ class OAuthManager:
 
         def _do_refresh(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (refresh_token,)
             )
@@ -380,7 +415,7 @@ class OAuthManager:
                 ),
             )
 
-        self._conn_manager.execute_atomic(_do_refresh)
+        self._conn_manager.execute_atomic(_do_refresh)  # type: ignore[union-attr]
 
         return {
             "access_token": new_access_token,
@@ -403,11 +438,15 @@ class OAuthManager:
             Dictionary with username and token_type if found, None values if not found.
             Per OAuth 2.1 spec, endpoint should return 200 either way.
         """
+        if self._backend:
+            return self._backend.revoke_token(  # type: ignore[no-any-return]
+                token=token, token_type_hint=token_type_hint
+            )
         result: Dict[str, Optional[str]] = {"username": None, "token_type": None}
 
         def _do_revoke(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
 
             # Find token - SELECT and DELETE are atomic within this transaction
             if token_type_hint == "access_token":
@@ -433,9 +472,7 @@ class OAuthManager:
             user_id = row["user_id"]
             access_token_val = row["access_token"]
 
-            cursor.execute(
-                "DELETE FROM oauth_tokens WHERE token_id = ?", (token_id,)
-            )
+            cursor.execute("DELETE FROM oauth_tokens WHERE token_id = ?", (token_id,))
 
             # Determine which token type was revoked
             determined_type = (
@@ -444,7 +481,7 @@ class OAuthManager:
             result["username"] = user_id
             result["token_type"] = determined_type
 
-        self._conn_manager.execute_atomic(_do_revoke)
+        self._conn_manager.execute_atomic(_do_revoke)  # type: ignore[union-attr]
 
         return result
 
@@ -470,6 +507,13 @@ class OAuthManager:
         Raises:
             OAuthError: If credentials are invalid or missing
         """
+        if self._backend:
+            return self._backend.handle_client_credentials_grant(  # type: ignore[no-any-return]
+                client_id=client_id,
+                client_secret=client_secret,
+                scope=scope,
+                mcp_credential_manager=mcp_credential_manager,
+            )
         # Validate parameters
         if not client_id or not client_secret:
             raise OAuthError("client_id and client_secret required")
@@ -506,7 +550,7 @@ class OAuthManager:
                 ),
             )
 
-        self._conn_manager.execute_atomic(_do_insert)
+        self._conn_manager.execute_atomic(_do_insert)  # type: ignore[union-attr]
 
         return {
             "access_token": access_token,

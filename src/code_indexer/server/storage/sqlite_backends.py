@@ -3528,4 +3528,1003 @@ class PayloadCacheSqliteBackend:
 
     def close(self) -> None:
         """No-op: connections are managed by DatabaseConnectionManager."""
+
+
+class OAuthSqliteBackend:
+    """
+    SQLite backend for OAuth 2.1 storage.
+
+    Satisfies the OAuthBackend Protocol (protocols.py).
+    Replicates OAuthManager data operations as a standalone backend
+    using DatabaseConnectionManager for thread-safe atomic operations.
+    """
+
+    ACCESS_TOKEN_LIFETIME_HOURS = 8
+    REFRESH_TOKEN_LIFETIME_DAYS = 30
+    HARD_EXPIRATION_DAYS = 30
+    EXTENSION_THRESHOLD_HOURS = 4
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend.
+
+        Args:
+            db_path: Path to SQLite database file.
+        """
+        import secrets as _secrets
+        import hashlib as _hashlib
+        import base64 as _base64
+
+        self._secrets = _secrets
+        self._hashlib = _hashlib
+        self._base64 = _base64
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create all OAuth tables if they do not already exist."""
+
+        def _do_init(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS oauth_clients (
+                    client_id TEXT PRIMARY KEY,
+                    client_name TEXT NOT NULL,
+                    redirect_uris TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    metadata TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS oauth_codes (
+                    code TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    code_challenge TEXT NOT NULL,
+                    redirect_uri TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used INTEGER DEFAULT 0,
+                    FOREIGN KEY (client_id) REFERENCES oauth_clients (client_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS oauth_tokens (
+                    token_id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    access_token TEXT UNIQUE NOT NULL,
+                    refresh_token TEXT UNIQUE,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_activity TEXT NOT NULL,
+                    hard_expires_at TEXT NOT NULL,
+                    FOREIGN KEY (client_id) REFERENCES oauth_clients (client_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tokens_access ON oauth_tokens (access_token)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS oidc_identity_links (
+                    username TEXT NOT NULL PRIMARY KEY,
+                    subject TEXT NOT NULL UNIQUE,
+                    email TEXT,
+                    linked_at TEXT NOT NULL,
+                    last_login TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_oidc_subject ON oidc_identity_links (subject)"
+            )
+            # Seed synthetic client_credentials row to satisfy FK constraint.
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO oauth_clients
+                    (client_id, client_name, redirect_uris, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    "client_credentials",
+                    "System: Client Credentials Grant",
+                    "[]",
+                    "2000-01-01T00:00:00+00:00",
+                    "{}",
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_init)
+
+    def register_client(
+        self,
+        client_name: str,
+        redirect_uris: List[str],
+        grant_types: Optional[List[str]] = None,
+        response_types: Optional[List[str]] = None,
+        token_endpoint_auth_method: Optional[str] = None,
+        scope: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Register a new OAuth client and return its registration data."""
+        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+
+        if not client_name or client_name.strip() == "":
+            raise OAuthError("client_name cannot be empty")
+        client_id = self._secrets.token_urlsafe(32)
+        created_at = datetime.now(timezone.utc).isoformat()
+        metadata = {
+            "token_endpoint_auth_method": token_endpoint_auth_method or "none",
+            "grant_types": grant_types or ["authorization_code", "refresh_token"],
+            "response_types": response_types or ["code"],
+            "scope": scope,
+        }
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO oauth_clients (client_id, client_name, redirect_uris, created_at, metadata) VALUES (?, ?, ?, ?, ?)",
+                (
+                    client_id,
+                    client_name,
+                    json.dumps(redirect_uris),
+                    created_at,
+                    json.dumps(metadata),
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_insert)
+        return {
+            "client_id": client_id,
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "client_secret_expires_at": 0,
+            "token_endpoint_auth_method": token_endpoint_auth_method or "none",
+            "grant_types": grant_types or ["authorization_code", "refresh_token"],
+            "response_types": response_types or ["code"],
+        }
+
+    def get_client(self, client_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a registered client by its client_id."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute("SELECT * FROM oauth_clients WHERE client_id = ?", (client_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "client_id": row["client_id"],
+                "client_name": row["client_name"],
+                "redirect_uris": json.loads(row["redirect_uris"]),
+                "created_at": row["created_at"],
+            }
+        return None
+
+    def generate_authorization_code(
+        self,
+        client_id: str,
+        user_id: str,
+        code_challenge: str,
+        redirect_uri: str,
+        state: str,
+    ) -> str:
+        """Generate a one-time PKCE authorization code."""
+        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+
+        if not code_challenge or code_challenge.strip() == "":
+            raise OAuthError("code_challenge required")
+
+        client = self.get_client(client_id)
+        if not client:
+            raise OAuthError(f"Invalid client_id: {client_id}")
+        if redirect_uri not in client["redirect_uris"]:
+            raise OAuthError(f"Invalid redirect_uri: {redirect_uri}")
+
+        code = self._secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO oauth_codes (code, client_id, user_id, code_challenge, redirect_uri, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    code,
+                    client_id,
+                    user_id,
+                    code_challenge,
+                    redirect_uri,
+                    expires_at.isoformat(),
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_insert)
+        return code
+
+    def exchange_code_for_token(
+        self, code: str, code_verifier: str, client_id: str
+    ) -> Dict[str, Any]:
+        """Exchange a PKCE authorization code for access and refresh tokens."""
+        from code_indexer.server.auth.oauth.oauth_manager import (
+            OAuthError,
+            PKCEVerificationError,
+        )
+
+        token_id = self._secrets.token_urlsafe(32)
+        access_token = self._secrets.token_urlsafe(48)
+        refresh_token = self._secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
+
+        result: Dict[str, Any] = {}
+
+        def _do_exchange(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+            cursor.execute(
+                "SELECT * FROM oauth_codes WHERE code = ? AND client_id = ?",
+                (code, client_id),
+            )
+            code_row = cursor.fetchone()
+            if not code_row:
+                raise OAuthError("Invalid authorization code")
+            if code_row["used"]:
+                raise OAuthError("Authorization code already used")
+            expires_at_dt = datetime.fromisoformat(code_row["expires_at"])
+            if datetime.now(timezone.utc) > expires_at_dt:
+                raise OAuthError("Authorization code expired")
+
+            # PKCE verification
+            code_challenge = code_row["code_challenge"]
+            computed_challenge = (
+                self._base64.urlsafe_b64encode(
+                    self._hashlib.sha256(code_verifier.encode()).digest()
+                )
+                .decode()
+                .rstrip("=")
+            )
+            if computed_challenge != code_challenge:
+                raise PKCEVerificationError("PKCE verification failed")
+
+            conn.execute("UPDATE oauth_codes SET used = 1 WHERE code = ?", (code,))
+
+            token_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+
+            conn.execute(
+                """INSERT INTO oauth_tokens (token_id, client_id, user_id, access_token, refresh_token,
+                   expires_at, created_at, last_activity, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    token_id,
+                    code_row["client_id"],
+                    code_row["user_id"],
+                    access_token,
+                    refresh_token,
+                    token_expires_at.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
+                    hard_expires_at.isoformat(),
+                ),
+            )
+            result["access_token"] = access_token
+            result["refresh_token"] = refresh_token
+
+        self._conn_manager.execute_atomic(_do_exchange)
+
+        return {
+            "access_token": result["access_token"],
+            "token_type": "Bearer",
+            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
+            "refresh_token": result["refresh_token"],
+        }
+
+    def validate_token(self, access_token: str) -> Optional[Dict[str, Any]]:
+        """Validate an access token and return its associated data."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute(
+            "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        if datetime.now(timezone.utc) > expires_at:
+            return None
+        return {
+            "token_id": row["token_id"],
+            "client_id": row["client_id"],
+            "user_id": row["user_id"],
+            "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+        }
+
+    def extend_token_on_activity(self, access_token: str) -> bool:
+        """Extend an access token's expiry if it is within the extension threshold."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute(
+            "SELECT * FROM oauth_tokens WHERE access_token = ?", (access_token,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        now = datetime.now(timezone.utc)
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        hard_expires_at = datetime.fromisoformat(row["hard_expires_at"])
+        remaining = (expires_at - now).total_seconds() / 3600
+        if remaining >= self.EXTENSION_THRESHOLD_HOURS:
+            return False
+        new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+        if new_expires_at > hard_expires_at:
+            new_expires_at = hard_expires_at
+
+        def _do_extend(c: sqlite3.Connection) -> None:
+            c.execute(
+                "UPDATE oauth_tokens SET expires_at = ?, last_activity = ? WHERE access_token = ?",
+                (new_expires_at.isoformat(), now.isoformat(), access_token),
+            )
+
+        self._conn_manager.execute_atomic(_do_extend)
+        return True
+
+    def refresh_access_token(
+        self, refresh_token: str, client_id: str
+    ) -> Dict[str, Any]:
+        """Exchange a refresh token for new access and refresh tokens."""
+        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+
+        new_access_token = self._secrets.token_urlsafe(48)
+        new_refresh_token = self._secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        new_expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+
+        def _do_refresh(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+            cursor.execute(
+                "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (refresh_token,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise OAuthError("Invalid refresh token")
+
+            conn.execute(
+                """UPDATE oauth_tokens
+                   SET access_token = ?, refresh_token = ?, expires_at = ?, last_activity = ?
+                   WHERE refresh_token = ?""",
+                (
+                    new_access_token,
+                    new_refresh_token,
+                    new_expires_at.isoformat(),
+                    now.isoformat(),
+                    refresh_token,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_refresh)
+
+        return {
+            "access_token": new_access_token,
+            "token_type": "Bearer",
+            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
+            "refresh_token": new_refresh_token,
+        }
+
+    def revoke_token(
+        self, token: str, token_type_hint: Optional[str] = None
+    ) -> Dict[str, Optional[str]]:
+        """Revoke an access or refresh token."""
+        result: Dict[str, Optional[str]] = {"username": None, "token_type": None}
+
+        def _do_revoke(conn: sqlite3.Connection) -> None:
+            cursor = conn.cursor()
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+
+            if token_type_hint == "access_token":
+                cursor.execute(
+                    "SELECT * FROM oauth_tokens WHERE access_token = ?", (token,)
+                )
+            elif token_type_hint == "refresh_token":
+                cursor.execute(
+                    "SELECT * FROM oauth_tokens WHERE refresh_token = ?", (token,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM oauth_tokens WHERE access_token = ? OR refresh_token = ?",
+                    (token, token),
+                )
+
+            row = cursor.fetchone()
+            if not row:
+                return
+
+            token_id = row["token_id"]
+            user_id = row["user_id"]
+            access_token_val = row["access_token"]
+
+            cursor.execute("DELETE FROM oauth_tokens WHERE token_id = ?", (token_id,))
+
+            determined_type = (
+                "access_token" if access_token_val == token else "refresh_token"
+            )
+            result["username"] = user_id
+            result["token_type"] = determined_type
+
+        self._conn_manager.execute_atomic(_do_revoke)
+
+        return result
+
+    def handle_client_credentials_grant(
+        self,
+        client_id: str,
+        client_secret: str,
+        scope: Optional[str] = None,
+        mcp_credential_manager: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Handle OAuth 2.1 client_credentials grant type."""
+        from code_indexer.server.auth.oauth.oauth_manager import OAuthError
+
+        if not client_id or not client_secret:
+            raise OAuthError("client_id and client_secret required")
+
+        if not mcp_credential_manager:
+            raise OAuthError("MCPCredentialManager not available")
+
+        user_id = mcp_credential_manager.verify_credential(client_id, client_secret)
+        if not user_id:
+            raise OAuthError("Invalid client credentials")
+
+        token_id = self._secrets.token_urlsafe(32)
+        access_token = self._secrets.token_urlsafe(48)
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(hours=self.ACCESS_TOKEN_LIFETIME_HOURS)
+        hard_expires_at = now + timedelta(days=self.HARD_EXPIRATION_DAYS)
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """INSERT INTO oauth_tokens (token_id, client_id, user_id, access_token, refresh_token,
+                   expires_at, created_at, last_activity, hard_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    token_id,
+                    "client_credentials",
+                    user_id,
+                    access_token,
+                    None,
+                    expires_at.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
+                    hard_expires_at.isoformat(),
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_do_insert)
+
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": int(self.ACCESS_TOKEN_LIFETIME_HOURS * 3600),
+        }
+
+    def link_oidc_identity(
+        self, username: str, subject: str, email: Optional[str] = None
+    ) -> None:
+        """Link an OIDC subject to a local username."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _do_link(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO oidc_identity_links (username, subject, email, linked_at, last_login)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (username, subject, email, now, now),
+            )
+
+        self._conn_manager.execute_atomic(_do_link)
+
+    def get_oidc_identity(self, subject: str) -> Optional[Dict[str, Any]]:
+        """Retrieve an OIDC identity link by subject."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute(
+            "SELECT * FROM oidc_identity_links WHERE subject = ?", (subject,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return {
+                "username": row["username"],
+                "subject": row["subject"],
+                "email": row["email"],
+            }
+        return None
+
+    def delete_oidc_identity(self, subject: str) -> None:
+        """Delete a stale OIDC identity link by subject."""
+
+        def _do_delete(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "DELETE FROM oidc_identity_links WHERE subject = ?", (subject,)
+            )
+
+        self._conn_manager.execute_atomic(_do_delete)
+
+    def close(self) -> None:
+        """No-op: connections are managed by DatabaseConnectionManager."""
         pass
+
+
+class SCIPAuditSqliteBackend:
+    """
+    SQLite backend for SCIP dependency installation audit records (Story #516).
+
+    Implements the SCIPAuditBackend Protocol.
+    Adds node_id column to the original SCIPAuditRepository schema for
+    cluster node identification.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend.
+
+        Args:
+            db_path: Path to SQLite database file (scip_audit.db).
+        """
+        from pathlib import Path
+
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the scip_dependency_installations table and indexes if they don't exist."""
+
+        def _do_init(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scip_dependency_installations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    job_id VARCHAR(36) NOT NULL,
+                    repo_alias VARCHAR(255) NOT NULL,
+                    project_path VARCHAR(255),
+                    project_language VARCHAR(50),
+                    project_build_system VARCHAR(50),
+                    package VARCHAR(255) NOT NULL,
+                    command TEXT NOT NULL,
+                    reasoning TEXT,
+                    username VARCHAR(255),
+                    node_id VARCHAR(255)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_timestamp
+                ON scip_dependency_installations (timestamp)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_repo_alias
+                ON scip_dependency_installations (repo_alias)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_job_id
+                ON scip_dependency_installations (job_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_project_language
+                ON scip_dependency_installations (project_language)
+                """
+            )
+
+        self._conn_manager.execute_atomic(_do_init)
+
+    def create_audit_record(
+        self,
+        job_id: str,
+        repo_alias: str,
+        package: str,
+        command: str,
+        project_path: Optional[str] = None,
+        project_language: Optional[str] = None,
+        project_build_system: Optional[str] = None,
+        reasoning: Optional[str] = None,
+        username: Optional[str] = None,
+        node_id: Optional[str] = None,
+    ) -> int:
+        """Create an audit record for a dependency installation.
+
+        Args:
+            job_id: Background job ID that triggered installation.
+            repo_alias: Repository alias being processed.
+            package: Package name that was installed.
+            command: Full installation command executed.
+            project_path: Project path within repository (optional).
+            project_language: Programming language (optional).
+            project_build_system: Build system used (optional).
+            reasoning: Claude's reasoning for installation (optional).
+            username: User who triggered the job (optional).
+            node_id: Cluster node identifier (optional, Story #516 AC1).
+
+        Returns:
+            Record ID of created audit record.
+        """
+        result: Dict[str, Any] = {}
+
+        def _do_insert(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                """
+                INSERT INTO scip_dependency_installations
+                (job_id, repo_alias, project_path, project_language,
+                 project_build_system, package, command, reasoning, username, node_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    repo_alias,
+                    project_path,
+                    project_language,
+                    project_build_system,
+                    package,
+                    command,
+                    reasoning,
+                    username,
+                    node_id,
+                ),
+            )
+            result["record_id"] = cursor.lastrowid
+
+        self._conn_manager.execute_atomic(_do_insert)
+        record_id = result.get("record_id")
+        if record_id is None:
+            raise RuntimeError("Failed to get record ID after INSERT")
+        return record_id  # type: ignore[no-any-return]
+
+    def query_audit_records(
+        self,
+        job_id: Optional[str] = None,
+        repo_alias: Optional[str] = None,
+        project_language: Optional[str] = None,
+        project_build_system: Optional[str] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Query audit records with filtering and pagination.
+
+        Args:
+            job_id: Filter by job ID (optional).
+            repo_alias: Filter by repository alias (optional).
+            project_language: Filter by project language (optional).
+            project_build_system: Filter by build system (optional).
+            since: Filter records after this ISO timestamp (optional).
+            until: Filter records before this ISO timestamp (optional).
+            limit: Maximum records to return (default 100).
+            offset: Number of records to skip (default 0).
+
+        Returns:
+            Tuple of (records list, total count).
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+
+        where_sql, params = self._build_where_clause(
+            job_id=job_id,
+            repo_alias=repo_alias,
+            project_language=project_language,
+            project_build_system=project_build_system,
+            since=since,
+            until=until,
+        )
+
+        count_sql = f"""
+            SELECT COUNT(*) as total
+            FROM scip_dependency_installations
+            {where_sql}
+        """
+        cursor.execute(count_sql, params)
+        total = cursor.fetchone()["total"]
+
+        query_sql = f"""
+            SELECT
+                id, timestamp, job_id, repo_alias, project_path,
+                project_language, project_build_system, package,
+                command, reasoning, username, node_id
+            FROM scip_dependency_installations
+            {where_sql}
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+        """
+        cursor.execute(query_sql, params + [limit, offset])
+        records = [dict(row) for row in cursor.fetchall()]
+        return records, total
+
+    def _build_where_clause(
+        self,
+        job_id: Optional[str],
+        repo_alias: Optional[str],
+        project_language: Optional[str],
+        project_build_system: Optional[str],
+        since: Optional[str],
+        until: Optional[str],
+    ) -> Tuple[str, List[Any]]:
+        """Build WHERE clause and parameters for query filtering."""
+        where_clauses = []
+        params: List[Any] = []
+
+        if job_id:
+            where_clauses.append("job_id = ?")
+            params.append(job_id)
+        if repo_alias:
+            where_clauses.append("repo_alias = ?")
+            params.append(repo_alias)
+        if project_language:
+            where_clauses.append("project_language = ?")
+            params.append(project_language)
+        if project_build_system:
+            where_clauses.append("project_build_system = ?")
+            params.append(project_build_system)
+        if since:
+            where_clauses.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            where_clauses.append("timestamp <= ?")
+            params.append(until)
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        return where_sql, params
+
+    def close(self) -> None:
+        """No-op: connections are managed by DatabaseConnectionManager."""
+        pass
+
+
+class RefreshTokenSqliteBackend:
+    """
+    SQLite backend for refresh token storage (Story #515).
+
+    Manages token_families and refresh_tokens tables for JWT refresh token
+    rotation with family-based revocation and reuse detection.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend.
+
+        Args:
+            db_path: Path to SQLite database file.
+        """
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create token_families and refresh_tokens tables if they do not already exist."""
+
+        def _do_init(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS token_families (
+                    family_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL,
+                    is_revoked INTEGER DEFAULT 0,
+                    revocation_reason TEXT
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_family_username ON token_families (username)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_family_revoked ON token_families (is_revoked)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS refresh_tokens (
+                    token_id TEXT PRIMARY KEY,
+                    family_id TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    is_used INTEGER DEFAULT 0,
+                    used_at TEXT,
+                    parent_token_id TEXT,
+                    FOREIGN KEY (family_id) REFERENCES token_families (family_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_family ON refresh_tokens (family_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_username ON refresh_tokens (username)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_hash ON refresh_tokens (token_hash)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_expires ON refresh_tokens (expires_at)"
+            )
+
+        self._conn_manager.execute_atomic(_do_init)
+
+    def create_token_family(
+        self, family_id: str, username: str, created_at: str, last_used_at: str
+    ) -> None:
+        """Insert a new token family record."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO token_families (family_id, username, created_at, last_used_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (family_id, username, created_at, last_used_at),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def get_token_family(self, family_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a token family by its ID, or None if not found."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute("SELECT * FROM token_families WHERE family_id = ?", (family_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def revoke_token_family(self, family_id: str, reason: str) -> None:
+        """Mark a token family as revoked with the given reason."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                UPDATE token_families
+                SET is_revoked = 1, revocation_reason = ?
+                WHERE family_id = ?
+                """,
+                (reason, family_id),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def revoke_user_families(self, username: str, reason: str) -> int:
+        """Revoke all token families for a user. Returns count of revoked families."""
+        result: Dict[str, Any] = {}
+
+        def _op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                """
+                UPDATE token_families
+                SET is_revoked = 1, revocation_reason = ?
+                WHERE username = ? AND is_revoked = 0
+                """,
+                (reason, username),
+            )
+            result["count"] = cursor.rowcount
+
+        self._conn_manager.execute_atomic(_op)
+        return result.get("count", 0)  # type: ignore[no-any-return]
+
+    def update_family_last_used(self, family_id: str, last_used_at: str) -> None:
+        """Update the last_used_at timestamp for a token family."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE token_families SET last_used_at = ? WHERE family_id = ?",
+                (last_used_at, family_id),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def store_refresh_token(
+        self,
+        token_id: str,
+        family_id: str,
+        username: str,
+        token_hash: str,
+        created_at: str,
+        expires_at: str,
+        parent_token_id: Optional[str] = None,
+    ) -> None:
+        """Insert a new refresh token record."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO refresh_tokens
+                    (token_id, family_id, username, token_hash, created_at,
+                     expires_at, parent_token_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token_id,
+                    family_id,
+                    username,
+                    token_hash,
+                    created_at,
+                    expires_at,
+                    parent_token_id,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def get_refresh_token_by_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a refresh token by its hash, or None if not found."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute(
+            "SELECT * FROM refresh_tokens WHERE token_hash = ?", (token_hash,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def mark_token_used(self, token_id: str, used_at: str) -> None:
+        """Mark a refresh token as used with the given timestamp."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE refresh_tokens SET is_used = 1, used_at = ? WHERE token_id = ?",
+                (used_at, token_id),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def count_active_tokens_in_family(self, family_id: str) -> int:
+        """Return count of unused (active) tokens in a family."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE family_id = ? AND is_used = 0",
+            (family_id,),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+    def delete_expired_tokens(self, now_iso: str) -> int:
+        """Delete all tokens expired before now_iso. Returns count deleted."""
+        result: Dict[str, Any] = {}
+
+        def _op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                "DELETE FROM refresh_tokens WHERE expires_at < ?", (now_iso,)
+            )
+            result["count"] = cursor.rowcount
+
+        self._conn_manager.execute_atomic(_op)
+        return result.get("count", 0)  # type: ignore[no-any-return]
+
+    def delete_orphaned_families(self) -> int:
+        """Delete token families that have no associated tokens. Returns count deleted."""
+        result: Dict[str, Any] = {}
+
+        def _op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                """
+                DELETE FROM token_families
+                WHERE family_id NOT IN (SELECT DISTINCT family_id FROM refresh_tokens)
+                """
+            )
+            result["count"] = cursor.rowcount
+
+        self._conn_manager.execute_atomic(_op)
+        return result.get("count", 0)  # type: ignore[no-any-return]
+
+    def close(self) -> None:
+        """Close the DatabaseConnectionManager connection."""
+        self._conn_manager.close_all()

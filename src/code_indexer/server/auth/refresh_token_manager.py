@@ -91,6 +91,7 @@ class RefreshTokenManager:
         jwt_manager: JWTManager,
         db_path: Optional[str] = None,
         refresh_token_lifetime_days: int = 7,
+        storage_backend=None,
     ):
         """
         Initialize refresh token manager.
@@ -99,10 +100,19 @@ class RefreshTokenManager:
             jwt_manager: JWT manager for access token creation
             db_path: Database path for token storage (defaults to user home/.cidx-server)
             refresh_token_lifetime_days: Refresh token lifetime (default: 7 days)
+            storage_backend: Optional storage backend for data operations.
+                When provided, skips SQLite setup and delegates all data
+                operations to the backend (used in cluster/PostgreSQL mode).
         """
         self.jwt_manager = jwt_manager
         self.refresh_token_lifetime_days = refresh_token_lifetime_days
         self._lock = threading.Lock()
+        self._backend = storage_backend
+
+        if storage_backend:
+            # Backend handles all storage - no SQLite connection needed
+            self._conn_manager = None
+            return
 
         # Set database path with fallback to user home directory
         if db_path:
@@ -123,6 +133,7 @@ class RefreshTokenManager:
 
     def _init_database(self):
         """Initialize SQLite database for secure token storage."""
+
         def _do_init(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
@@ -205,6 +216,10 @@ class RefreshTokenManager:
         family_id = self._generate_secure_id()
         now = datetime.now(timezone.utc).isoformat()
 
+        if self._backend:
+            self._backend.create_token_family(family_id, username, now, now)
+            return family_id
+
         def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute(
                 """
@@ -215,7 +230,7 @@ class RefreshTokenManager:
                 (family_id, username, now, now),
             )
 
-        self._conn_manager.execute_atomic(_do_insert)
+        self._conn_manager.execute_atomic(_do_insert)  # type: ignore[union-attr]
 
         return family_id
 
@@ -244,24 +259,35 @@ class RefreshTokenManager:
             expires_at = now + timedelta(days=self.refresh_token_lifetime_days)
 
             # Store refresh token
-            def _do_insert(conn: sqlite3.Connection) -> None:
-                conn.execute(
-                    """
-                    INSERT INTO refresh_tokens
-                    (token_id, family_id, username, token_hash, created_at, expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        token_id,
-                        family_id,
-                        username,
-                        token_hash,
-                        now.isoformat(),
-                        expires_at.isoformat(),
-                    ),
+            if self._backend:
+                self._backend.store_refresh_token(
+                    token_id=token_id,
+                    family_id=family_id,
+                    username=username,
+                    token_hash=token_hash,
+                    created_at=now.isoformat(),
+                    expires_at=expires_at.isoformat(),
                 )
+            else:
 
-            self._conn_manager.execute_atomic(_do_insert)
+                def _do_insert(conn: sqlite3.Connection) -> None:
+                    conn.execute(
+                        """
+                        INSERT INTO refresh_tokens
+                        (token_id, family_id, username, token_hash, created_at, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            token_id,
+                            family_id,
+                            username,
+                            token_hash,
+                            now.isoformat(),
+                            expires_at.isoformat(),
+                        ),
+                    )
+
+                self._conn_manager.execute_atomic(_do_insert)  # type: ignore[union-attr]
 
             # Create access token
             access_token = self.jwt_manager.create_token(user_data)
@@ -319,132 +345,203 @@ class RefreshTokenManager:
         token_id: str = ""
         family_id: str = ""
         username: str = ""
-        now = datetime.now(timezone.utc)
 
         with self._lock:
-            # All SQLite operations are inside the lock to ensure atomicity:
-            # - SELECT (read is_used)
-            # - UPDATE (mark old token used)
-            # - INSERT (store new token)
-            # A crash between UPDATE and INSERT would leave the family with a
-            # consumed token and no replacement, breaking the rotation chain.
             result_holder: Dict[str, Any] = {}
 
-            def _do_rotate(conn: sqlite3.Connection) -> None:
-                cursor = conn.execute(
-                    """
-                    SELECT token_id, family_id, username, created_at, expires_at,
-                           is_used, used_at, parent_token_id
-                    FROM refresh_tokens
-                    WHERE token_hash = ?
-                """,
-                    (token_hash,),
-                )
-
-                token_record = cursor.fetchone()
-
+            if self._backend:
+                # Use backend primitives under the same lock for replay-attack safety.
+                # Individual calls are separate transactions in PostgreSQL, which is
+                # acceptable: the threading lock provides the critical-section guarantee
+                # needed to prevent concurrent replay.
+                token_record = self._backend.get_refresh_token_by_hash(token_hash)
                 if not token_record:
                     result_holder["valid"] = False
                     result_holder["error"] = "Invalid refresh token"
                     result_holder["security_incident"] = True
-                    return
+                else:
+                    t_id = token_record["token_id"]
+                    f_id = token_record["family_id"]
+                    uname = token_record["username"]
+                    result_holder["token_id"] = t_id
+                    result_holder["family_id"] = f_id
+                    result_holder["username"] = uname
 
-                (
-                    t_id,
-                    f_id,
-                    uname,
-                    created_at_str,
-                    expires_at_str,
-                    is_used,
-                    used_at_str,
-                    parent_token_id,
-                ) = token_record
+                    if token_record["is_used"]:
+                        result_holder["replay_attack"] = True
+                        result_holder["family_id_for_revoke"] = f_id
+                        result_holder["username_for_revoke"] = uname
+                    else:
+                        expires_at_dt = datetime.fromisoformat(
+                            token_record["expires_at"]
+                        )
+                        if datetime.now(timezone.utc) > expires_at_dt:
+                            result_holder["valid"] = False
+                            result_holder["error"] = "Refresh token has expired"
+                        else:
+                            family_record = self._backend.get_token_family(f_id)
+                            if not family_record or family_record["is_revoked"]:
+                                result_holder["valid"] = False
+                                revocation_reason = (
+                                    family_record["revocation_reason"]
+                                    if family_record
+                                    else None
+                                )
+                                result_holder["error"] = (
+                                    f'Refresh token revoked due to {revocation_reason or "unknown reason"}'
+                                )
+                                result_holder["revocation_reason"] = revocation_reason
+                            else:
+                                rotate_now = datetime.now(timezone.utc)
+                                self._backend.mark_token_used(
+                                    t_id, rotate_now.isoformat()
+                                )
+                                self._backend.update_family_last_used(
+                                    f_id, rotate_now.isoformat()
+                                )
+                                new_expires_at = rotate_now + timedelta(
+                                    days=self.refresh_token_lifetime_days
+                                )
+                                self._backend.store_refresh_token(
+                                    token_id=new_token_id,
+                                    family_id=f_id,
+                                    username=uname,
+                                    token_hash=new_token_hash,
+                                    created_at=rotate_now.isoformat(),
+                                    expires_at=new_expires_at.isoformat(),
+                                    parent_token_id=t_id,
+                                )
+                                result_holder["success"] = True
+                                result_holder["token_id"] = t_id
+                                result_holder["family_id"] = f_id
+                                result_holder["username"] = uname
+            else:
+                # All SQLite operations are inside the lock to ensure atomicity:
+                # - SELECT (read is_used)
+                # - UPDATE (mark old token used)
+                # - INSERT (store new token)
+                # A crash between UPDATE and INSERT would leave the family with a
+                # consumed token and no replacement, breaking the rotation chain.
 
-                result_holder["token_id"] = t_id
-                result_holder["family_id"] = f_id
-                result_holder["username"] = uname
-
-                # Check if token is already used (replay attack detection)
-                if is_used:
-                    result_holder["replay_attack"] = True
-                    result_holder["family_id_for_revoke"] = f_id
-                    result_holder["username_for_revoke"] = uname
-                    return
-
-                # Check expiration
-                expires_at_dt = datetime.fromisoformat(expires_at_str)
-                if datetime.now(timezone.utc) > expires_at_dt:
-                    result_holder["valid"] = False
-                    result_holder["error"] = "Refresh token has expired"
-                    return
-
-                # Check if family is revoked
-                cursor = conn.execute(
-                    """
-                    SELECT is_revoked, revocation_reason
-                    FROM token_families
-                    WHERE family_id = ?
-                """,
-                    (f_id,),
-                )
-
-                family_record = cursor.fetchone()
-                if not family_record or family_record[0]:
-                    result_holder["valid"] = False
-                    result_holder["error"] = f'Refresh token revoked due to {family_record[1] if family_record else "unknown reason"}'
-                    result_holder["revocation_reason"] = (
-                        family_record[1] if family_record else None
+                def _do_rotate(conn: sqlite3.Connection) -> None:
+                    cursor = conn.execute(
+                        """
+                        SELECT token_id, family_id, username, created_at, expires_at,
+                               is_used, used_at, parent_token_id
+                        FROM refresh_tokens
+                        WHERE token_hash = ?
+                    """,
+                        (token_hash,),
                     )
-                    return
 
-                # Mark current token as used (critical write - must be under lock)
-                rotate_now = datetime.now(timezone.utc)
-                conn.execute(
-                    """
-                    UPDATE refresh_tokens
-                    SET is_used = 1, used_at = ?
-                    WHERE token_id = ?
-                """,
-                    (rotate_now.isoformat(), t_id),
-                )
+                    token_record = cursor.fetchone()
 
-                # Update family last used
-                conn.execute(
-                    """
-                    UPDATE token_families
-                    SET last_used_at = ?
-                    WHERE family_id = ?
-                """,
-                    (rotate_now.isoformat(), f_id),
-                )
+                    if not token_record:
+                        result_holder["valid"] = False
+                        result_holder["error"] = "Invalid refresh token"
+                        result_holder["security_incident"] = True
+                        return
 
-                # INSERT new token inside the same lock + transaction as the UPDATE
-                # above.  This keeps UPDATE and INSERT atomic: either both succeed
-                # or neither is committed, preventing a TOCTOU gap.
-                new_expires_at = rotate_now + timedelta(days=self.refresh_token_lifetime_days)
-                conn.execute(
-                    """
-                    INSERT INTO refresh_tokens
-                    (token_id, family_id, username, token_hash, created_at, expires_at, parent_token_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
                     (
-                        new_token_id,
+                        t_id,
                         f_id,
                         uname,
-                        new_token_hash,
-                        rotate_now.isoformat(),
-                        new_expires_at.isoformat(),
-                        t_id,
-                    ),
-                )
+                        created_at_str,
+                        expires_at_str,
+                        is_used,
+                        used_at_str,
+                        parent_token_id,
+                    ) = token_record
 
-                result_holder["success"] = True
-                result_holder["token_id"] = t_id
-                result_holder["family_id"] = f_id
-                result_holder["username"] = uname
+                    result_holder["token_id"] = t_id
+                    result_holder["family_id"] = f_id
+                    result_holder["username"] = uname
 
-            self._conn_manager.execute_atomic(_do_rotate)
+                    # Check if token is already used (replay attack detection)
+                    if is_used:
+                        result_holder["replay_attack"] = True
+                        result_holder["family_id_for_revoke"] = f_id
+                        result_holder["username_for_revoke"] = uname
+                        return
+
+                    # Check expiration
+                    expires_at_dt = datetime.fromisoformat(expires_at_str)
+                    if datetime.now(timezone.utc) > expires_at_dt:
+                        result_holder["valid"] = False
+                        result_holder["error"] = "Refresh token has expired"
+                        return
+
+                    # Check if family is revoked
+                    cursor = conn.execute(
+                        """
+                        SELECT is_revoked, revocation_reason
+                        FROM token_families
+                        WHERE family_id = ?
+                    """,
+                        (f_id,),
+                    )
+
+                    family_record = cursor.fetchone()
+                    if not family_record or family_record[0]:
+                        result_holder["valid"] = False
+                        result_holder["error"] = (
+                            f'Refresh token revoked due to {family_record[1] if family_record else "unknown reason"}'
+                        )
+                        result_holder["revocation_reason"] = (
+                            family_record[1] if family_record else None
+                        )
+                        return
+
+                    # Mark current token as used (critical write - must be under lock)
+                    rotate_now = datetime.now(timezone.utc)
+                    conn.execute(
+                        """
+                        UPDATE refresh_tokens
+                        SET is_used = 1, used_at = ?
+                        WHERE token_id = ?
+                    """,
+                        (rotate_now.isoformat(), t_id),
+                    )
+
+                    # Update family last used
+                    conn.execute(
+                        """
+                        UPDATE token_families
+                        SET last_used_at = ?
+                        WHERE family_id = ?
+                    """,
+                        (rotate_now.isoformat(), f_id),
+                    )
+
+                    # INSERT new token inside the same lock + transaction as the UPDATE
+                    # above.  This keeps UPDATE and INSERT atomic: either both succeed
+                    # or neither is committed, preventing a TOCTOU gap.
+                    new_expires_at = rotate_now + timedelta(
+                        days=self.refresh_token_lifetime_days
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO refresh_tokens
+                        (token_id, family_id, username, token_hash, created_at, expires_at, parent_token_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            new_token_id,
+                            f_id,
+                            uname,
+                            new_token_hash,
+                            rotate_now.isoformat(),
+                            new_expires_at.isoformat(),
+                            t_id,
+                        ),
+                    )
+
+                    result_holder["success"] = True
+                    result_holder["token_id"] = t_id
+                    result_holder["family_id"] = f_id
+                    result_holder["username"] = uname
+
+                self._conn_manager.execute_atomic(_do_rotate)  # type: ignore[union-attr]
 
             if result_holder.get("replay_attack"):
                 self._handle_replay_attack(
@@ -461,7 +558,11 @@ class RefreshTokenManager:
 
             if not result_holder.get("success"):
                 # Pass through error/revocation responses
-                response = {k: v for k, v in result_holder.items() if k not in ("token_id", "family_id", "username")}
+                response = {
+                    k: v
+                    for k, v in result_holder.items()
+                    if k not in ("token_id", "family_id", "username")
+                }
                 if "valid" not in response:
                     response["valid"] = False
                 return response
@@ -476,9 +577,7 @@ class RefreshTokenManager:
             try:
                 user = user_manager.get_user(username)
                 user_role = (
-                    user.role.value
-                    if hasattr(user.role, "value")
-                    else str(user.role)
+                    user.role.value if hasattr(user.role, "value") else str(user.role)
                 )
                 user_data = {
                     "username": username,
@@ -524,17 +623,21 @@ class RefreshTokenManager:
             username: Username for audit logging
             client_ip: Client IP for audit logging
         """
-        def _do_revoke(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                """
-                UPDATE token_families
-                SET is_revoked = 1, revocation_reason = 'replay_attack'
-                WHERE family_id = ?
-            """,
-                (family_id,),
-            )
+        if self._backend:
+            self._backend.revoke_token_family(family_id, "replay_attack")
+        else:
 
-        self._conn_manager.execute_atomic(_do_revoke)
+            def _do_revoke(conn: sqlite3.Connection) -> None:
+                conn.execute(
+                    """
+                    UPDATE token_families
+                    SET is_revoked = 1, revocation_reason = 'replay_attack'
+                    WHERE family_id = ?
+                """,
+                    (family_id,),
+                )
+
+            self._conn_manager.execute_atomic(_do_revoke)  # type: ignore[union-attr]
 
         # Log security incident
         password_audit_logger.log_security_incident(
@@ -557,6 +660,11 @@ class RefreshTokenManager:
         Returns:
             Number of tokens revoked
         """
+        if self._backend:
+            token_count = self._backend.count_active_tokens_in_family(family_id)
+            self._backend.revoke_token_family(family_id, reason)
+            return token_count  # type: ignore[no-any-return]
+
         result: dict = {"token_count": 0}
 
         def _do_revoke(conn: sqlite3.Connection) -> None:
@@ -579,9 +687,9 @@ class RefreshTokenManager:
                 (reason, family_id),
             )
 
-        self._conn_manager.execute_atomic(_do_revoke)
+        self._conn_manager.execute_atomic(_do_revoke)  # type: ignore[union-attr]
 
-        return result["token_count"]
+        return result["token_count"]  # type: ignore[no-any-return]
 
     def revoke_user_tokens(self, username: str, reason: str = "password_change") -> int:
         """
@@ -594,6 +702,9 @@ class RefreshTokenManager:
         Returns:
             Number of token families revoked
         """
+        if self._backend:
+            return self._backend.revoke_user_families(username, reason)  # type: ignore[no-any-return]
+
         result: dict = {"family_count": 0}
 
         def _do_revoke(conn: sqlite3.Connection) -> None:
@@ -616,9 +727,9 @@ class RefreshTokenManager:
                 (reason, username),
             )
 
-        self._conn_manager.execute_atomic(_do_revoke)
+        self._conn_manager.execute_atomic(_do_revoke)  # type: ignore[union-attr]
 
-        return result["family_count"]
+        return result["family_count"]  # type: ignore[no-any-return]
 
     def cleanup_expired_tokens(self) -> int:
         """
@@ -628,6 +739,12 @@ class RefreshTokenManager:
             Number of tokens cleaned up
         """
         now = datetime.now(timezone.utc).isoformat()
+
+        if self._backend:
+            token_count = self._backend.delete_expired_tokens(now)
+            self._backend.delete_orphaned_families()
+            return token_count  # type: ignore[no-any-return]
+
         result: dict = {"token_count": 0}
 
         def _do_cleanup(conn: sqlite3.Connection) -> None:
@@ -658,9 +775,9 @@ class RefreshTokenManager:
             """
             )
 
-        self._conn_manager.execute_atomic(_do_cleanup)
+        self._conn_manager.execute_atomic(_do_cleanup)  # type: ignore[union-attr]
 
-        return result["token_count"]
+        return result["token_count"]  # type: ignore[no-any-return]
 
     def track_token_relationship(
         self, parent_token_id: str, child_token_id: str, family_id: str
@@ -688,7 +805,7 @@ class RefreshTokenManager:
         """
         # Verify database exists and is readable
         try:
-            conn = self._conn_manager.get_connection()
+            conn = self._conn_manager.get_connection()  # type: ignore[union-attr]
             conn.execute("SELECT COUNT(*) FROM refresh_tokens")
             return True
         except Exception:

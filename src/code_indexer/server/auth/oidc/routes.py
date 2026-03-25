@@ -76,11 +76,8 @@ async def sso_callback(code: str, state: str, request: Request):
     # Check if this is OAuth authorization flow
     if state_data.get("flow") == "oauth_authorize":
         # This is OAuth flow - issue OAuth authorization code
-        from code_indexer.server.auth.oauth.oauth_manager import OAuthManager
-        from pathlib import Path
-
-        oauth_db = Path.home() / ".cidx-server" / "oauth.db"
-        oauth_manager = OAuthManager(db_path=str(oauth_db))
+        # Use the backend-aware oauth_manager from app.state (set in app_wiring.py)
+        oauth_manager = request.app.state.oauth_manager
 
         # Generate OAuth authorization code
         oauth_code = oauth_manager.generate_authorization_code(

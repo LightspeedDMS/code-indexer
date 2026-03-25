@@ -49,8 +49,25 @@ from code_indexer.global_repos.alias_manager import AliasManager
 
 logger = logging.getLogger(__name__)
 
-# Initialize SCIP Audit Repository singleton
-scip_audit_repository = SCIPAuditRepository()
+# Fallback SCIP Audit Repository for standalone/SQLite mode (no backend)
+_scip_audit_repository_fallback: Optional[SCIPAuditRepository] = None
+
+
+def _get_scip_audit_repository() -> SCIPAuditRepository:
+    """Get the SCIPAuditRepository instance.
+
+    Returns the backend-aware instance from app.state when available
+    (set during startup in app_wiring.py), otherwise falls back to a
+    module-level SQLite singleton for backward compatibility.
+    """
+    global _scip_audit_repository_fallback
+    repo = getattr(app_module.app.state, "scip_audit_repository", None)
+    if repo is not None:
+        return repo
+    if _scip_audit_repository_fallback is None:
+        _scip_audit_repository_fallback = SCIPAuditRepository()
+    return _scip_audit_repository_fallback
+
 
 # Module-level singleton for HNSWHealthService (Story #59 - fix caching bug)
 _hnsw_health_service: Optional["HNSWHealthService"] = None
@@ -10492,7 +10509,7 @@ def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             offset = 0
 
         # Query audit repository
-        records, total = scip_audit_repository.query_audit_records(
+        records, total = _get_scip_audit_repository().query_audit_records(
             job_id=job_id,
             repo_alias=repo_alias,
             project_language=project_language,

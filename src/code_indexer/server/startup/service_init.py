@@ -187,14 +187,20 @@ def initialize_services() -> Dict[str, Any]:
         db_path=str(db_path),
         storage_backend=_backend_registry.users if _backend_registry else None,
     )
-    refresh_token_manager = RefreshTokenManager(jwt_manager=jwt_manager)
+    refresh_token_manager = RefreshTokenManager(
+        jwt_manager=jwt_manager,
+        storage_backend=_backend_registry.refresh_tokens if _backend_registry else None,
+    )
 
     # Initialize OAuth manager
     oauth_db_path = str(Path(server_data_dir) / "oauth.db")
     from code_indexer.server.auth.oauth.oauth_manager import OAuthManager
 
     oauth_manager = OAuthManager(
-        db_path=oauth_db_path, issuer=None, user_manager=user_manager
+        db_path=oauth_db_path,
+        issuer=None,
+        user_manager=user_manager,
+        storage_backend=_backend_registry.oauth if _backend_registry else None,
     )
 
     # Story #19: Initialize SCIP audit database eagerly at startup
@@ -216,6 +222,13 @@ def initialize_services() -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
+
+    # Initialize SCIPAuditRepository with backend support for cluster mode
+    from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
+
+    scip_audit_repository = SCIPAuditRepository(
+        storage_backend=_backend_registry.scip_audit if _backend_registry else None,
+    )
 
     # Load server configuration for resource limits and timeouts
     from code_indexer.server.utils.config_manager import ServerConfigManager
@@ -391,4 +404,5 @@ def initialize_services() -> Dict[str, Any]:
         "backend_registry": _backend_registry,
         "_server_hnsw_cache": _server_hnsw_cache,
         "_server_fts_cache": _server_fts_cache,
+        "scip_audit_repository": scip_audit_repository,
     }
