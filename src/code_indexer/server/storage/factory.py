@@ -44,6 +44,7 @@ if TYPE_CHECKING:
         PayloadCacheBackend,
         RefreshTokenBackend,
         RepoCategoryBackend,
+        ResearchSessionsBackend,
         SCIPAuditBackend,
         SessionsBackend,
         SSHKeysBackend,
@@ -87,6 +88,7 @@ class BackendRegistry:
     oauth: "OAuthBackend"
     scip_audit: "SCIPAuditBackend"
     refresh_tokens: "RefreshTokenBackend"
+    research_sessions: "ResearchSessionsBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +156,7 @@ class StorageFactory:
             OAuthSqliteBackend,
             PayloadCacheSqliteBackend,
             RefreshTokenSqliteBackend,
+            ResearchSessionsSqliteBackend,
             SCIPAuditSqliteBackend,
             SessionsSqliteBackend,
             SSHKeysSqliteBackend,
@@ -202,6 +205,7 @@ class StorageFactory:
             refresh_tokens=RefreshTokenSqliteBackend(
                 db_path=str(Path(data_dir).parent / "refresh_tokens.db")
             ),
+            research_sessions=ResearchSessionsSqliteBackend(db_path),
         )
 
     # ------------------------------------------------------------------
@@ -288,6 +292,9 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.refresh_token_backend import (
             RefreshTokenPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.research_sessions_backend import (
+            ResearchSessionsPostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
@@ -316,4 +323,5 @@ class StorageFactory:
             oauth=OAuthPostgresBackend(pool),
             scip_audit=SCIPAuditPostgresBackend(pool),
             refresh_tokens=RefreshTokenPostgresBackend(pool),
+            research_sessions=ResearchSessionsPostgresBackend(pool),
         )

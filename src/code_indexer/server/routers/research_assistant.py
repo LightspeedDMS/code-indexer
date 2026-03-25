@@ -43,12 +43,16 @@ def _get_github_token() -> Optional[str]:
 
     # Check cache validity
     current_time = time.time()
-    if _github_token_cache is not None and (current_time - _github_token_cache_time) < _GITHUB_TOKEN_CACHE_TTL:
+    if (
+        _github_token_cache is not None
+        and (current_time - _github_token_cache_time) < _GITHUB_TOKEN_CACHE_TTL
+    ):
         return _github_token_cache
 
     # Cache miss or expired - fetch from CITokenManager
     try:
         from code_indexer.server.services.ci_token_manager import CITokenManager
+
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
         )
@@ -75,9 +79,18 @@ def _get_job_tracker():
     """Get JobTracker from app module for dashboard visibility."""
     try:
         from code_indexer.server.app import job_tracker
+
         return job_tracker
     except (ImportError, AttributeError):
         return None
+
+
+def _get_research_backend(request: Request):
+    """Get ResearchSessionsBackend from BackendRegistry if available (Story #522)."""
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    if backend_registry is not None:
+        return getattr(backend_registry, "research_sessions", None)
+    return None
 
 
 # Helper function for server time in templates (Story #89)
@@ -122,7 +135,11 @@ async def get_research_assistant_page(
     Returns:
         HTML response with research assistant page
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
 
     # Get all sessions (Story #143 AC1)
     sessions = service.get_all_sessions()
@@ -170,7 +187,11 @@ async def send_message(
     Returns:
         Partial HTML with new user message and polling trigger
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
 
     # Use provided session_id or fall back to default
     if session_id:
@@ -229,7 +250,11 @@ async def poll_job(
     Returns:
         Partial HTML with status or final messages when complete
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     status = service.poll_job(job_id, session_id=session_id)
 
     # Get session_id from job status (falls back to param if not in response)
@@ -293,7 +318,11 @@ async def create_session(
     Returns:
         Partial HTML with updated session list
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     new_session = service.create_session()
 
     # Get all sessions for rendering
@@ -328,7 +357,11 @@ async def rename_session(
     Returns:
         Partial HTML with updated session list or error
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     success = service.rename_session(session_id, new_name)
 
     if not success:
@@ -379,7 +412,11 @@ async def delete_session(
     Returns:
         Partial HTML with updated session list (and OOB swap for chat if active session deleted)
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     success = service.delete_session(session_id)
 
     if not success:
@@ -394,7 +431,9 @@ async def delete_session(
         )
 
     # Determine if deleted session was the active one
-    deleted_was_active = (active_session_id == session_id) or (active_session_id is None)
+    deleted_was_active = (active_session_id == session_id) or (
+        active_session_id is None
+    )
 
     # Get remaining sessions
     sessions = service.get_all_sessions()
@@ -460,7 +499,11 @@ async def load_session(
     Returns:
         Partial HTML with session's messages
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     session = service.get_session(session_id)
 
     if not session:
@@ -496,6 +539,7 @@ async def load_session(
 
 @router.post("/sessions/{session_id}/upload")
 async def upload_file(
+    request: Request,
     session_id: str,
     file: UploadFile = File(...),
     session_data: SessionData = Depends(require_admin_session),
@@ -511,7 +555,11 @@ async def upload_file(
     Returns:
         JSON with success/error/filename/size/uploaded_at
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     result = service.upload_file(session_id, file)
 
     if result["success"]:
@@ -522,6 +570,7 @@ async def upload_file(
 
 @router.get("/sessions/{session_id}/files")
 async def list_files(
+    request: Request,
     session_id: str,
     session_data: SessionData = Depends(require_admin_session),
 ) -> JSONResponse:
@@ -535,7 +584,11 @@ async def list_files(
     Returns:
         JSON array of file metadata
     """
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     files = service.list_files(session_id)
 
     return JSONResponse(content={"files": files}, status_code=200)
@@ -543,6 +596,7 @@ async def list_files(
 
 @router.delete("/sessions/{session_id}/files/{filename}")
 async def delete_file(
+    request: Request,
     session_id: str,
     filename: str,
     session_data: SessionData = Depends(require_admin_session),
@@ -564,7 +618,11 @@ async def delete_file(
             content={"success": False, "error": "Invalid filename"}, status_code=400
         )
 
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     success = service.delete_file(session_id, filename)
 
     if success:
@@ -577,6 +635,7 @@ async def delete_file(
 
 @router.get("/sessions/{session_id}/files/{filename}")
 async def download_file(
+    request: Request,
     session_id: str,
     filename: str,
     session_data: SessionData = Depends(require_admin_session),
@@ -598,7 +657,11 @@ async def download_file(
             content={"success": False, "error": "Invalid filename"}, status_code=400
         )
 
-    service = ResearchAssistantService(github_token=_get_github_token(), job_tracker=_get_job_tracker())
+    service = ResearchAssistantService(
+        github_token=_get_github_token(),
+        job_tracker=_get_job_tracker(),
+        storage_backend=_get_research_backend(request),
+    )
     file_path = service.get_file_path(session_id, filename)
 
     if file_path is None:

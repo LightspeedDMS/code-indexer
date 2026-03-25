@@ -19,8 +19,8 @@ from typing import Dict, List, Optional, Any
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
-import bleach
-import markdown
+import bleach  # type: ignore[import-untyped]
+import markdown  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ class ResearchAssistantService:
         db_path: Optional[str] = None,
         github_token: Optional[str] = None,
         job_tracker=None,
+        storage_backend=None,
     ):
         """
         Initialize ResearchAssistantService.
@@ -104,7 +105,12 @@ class ResearchAssistantService:
             db_path: Path to SQLite database. If None, uses default location.
             github_token: GitHub token for bug report creation (Story #202). If None, no token is set.
             job_tracker: Optional JobTracker for dashboard visibility (Story #314).
+            storage_backend: Optional ResearchSessionsBackend for cluster-aware storage (Story #522).
+                             When provided, all DB operations delegate to the backend.
         """
+        # Story #522: Optional backend for cluster-aware storage
+        self._backend = storage_backend
+
         if db_path is not None:
             self.db_path = db_path
         else:
@@ -117,7 +123,10 @@ class ResearchAssistantService:
         self._github_token = github_token
         # Story #314: JobTracker for dashboard visibility (dual tracking with _jobs dict)
         self._job_tracker = job_tracker
-        self._conn_manager = DatabaseConnectionManager.get_instance(self.db_path)
+        if self._backend is None:
+            self._conn_manager = DatabaseConnectionManager.get_instance(self.db_path)
+        else:
+            self._conn_manager = None  # type: ignore[assignment]
 
     def _detect_repo_root(self) -> Optional[str]:
         """
@@ -243,7 +252,7 @@ class ResearchAssistantService:
         """
         conn = self._conn_manager.get_connection()
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        return conn  # type: ignore[no-any-return]
 
     def render_markdown(self, text: str) -> str:
         """
@@ -328,7 +337,7 @@ class ResearchAssistantService:
             protocols=["http", "https", "mailto"],
         )
 
-        return clean_html
+        return clean_html  # type: ignore[no-any-return]
 
     def _get_or_create_claude_session_id(self, session_id: str) -> str:
         """
@@ -347,6 +356,24 @@ class ResearchAssistantService:
         Returns:
             A valid UUID string for Claude CLI (--session-id or --resume)
         """
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            session = self._backend.get_session(session_id)
+            if session is None:
+                logger.warning(
+                    f"Session {session_id} not found, generating new Claude session ID"
+                )
+                return str(uuid.uuid4())
+            existing_id = session.get("claude_session_id")
+            if existing_id is None:
+                new_id = str(uuid.uuid4())
+                self._backend.update_session_claude_id(session_id, new_id)
+                logger.info(
+                    f"Generated new Claude session ID for session {session_id}: {new_id}"
+                )
+                return new_id
+            return existing_id  # type: ignore[no-any-return]
+
         result: dict = {
             "claude_session_id": None,
             "not_found": False,
@@ -355,7 +382,7 @@ class ResearchAssistantService:
 
         def _do_get_or_create(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT claude_session_id FROM research_sessions WHERE id = ?",
                 (session_id,),
@@ -394,7 +421,7 @@ class ResearchAssistantService:
                 f"Generated new Claude session ID for session {session_id}: {result['claude_session_id']}"
             )
 
-        return result["claude_session_id"]
+        return result["claude_session_id"]  # type: ignore[no-any-return]
 
     def get_default_session(self) -> Dict[str, Any]:
         """
@@ -406,13 +433,27 @@ class ResearchAssistantService:
         Returns:
             Dictionary with session data (id, name, folder_path, created_at, updated_at)
         """
+        folder_path = str(Path.home() / ".cidx-server" / "research" / "default")
+
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            session = self._backend.get_session("default")
+            if session is None:
+                self._backend.create_session(
+                    session_id="default",
+                    name="Default Session",
+                    folder_path=folder_path,
+                )
+                session = self._backend.get_session("default")
+            self._ensure_session_folder_setup(session["folder_path"])
+            return session  # type: ignore[no-any-return]
+
         result: dict = {"session": None, "created": False, "folder_path": None}
         now = datetime.now(timezone.utc).isoformat()
-        folder_path = str(Path.home() / ".cidx-server" / "research" / "default")
 
         def _do_get_or_create(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT id, name, folder_path, created_at, updated_at "
                 "FROM research_sessions WHERE id = 'default'"
@@ -437,7 +478,7 @@ class ResearchAssistantService:
         if result["session"] is not None:
             # Ensure folder and softlink exist even if session already in DB
             self._ensure_session_folder_setup(result["session"]["folder_path"])
-            return result["session"]
+            return result["session"]  # type: ignore[no-any-return]
 
         # Ensure folder and softlink exist (AC3)
         self._ensure_session_folder_setup(folder_path)
@@ -445,13 +486,13 @@ class ResearchAssistantService:
         # Return the newly created session
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT id, name, folder_path, created_at, updated_at "
             "FROM research_sessions WHERE id = 'default'"
         )
         row = cursor.fetchone()
-        return dict(row)
+        return dict(row)  # type: ignore[no-any-return]
 
     def delete_session(self, session_id: str) -> bool:
         """
@@ -468,11 +509,25 @@ class ResearchAssistantService:
         """
         import shutil
 
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            session = self._backend.get_session(session_id)
+            if session is None:
+                return False
+            folder_path = session["folder_path"]
+            self._backend.delete_session(session_id)
+            folder = Path(folder_path)
+            if folder.exists():
+                shutil.rmtree(folder)
+                logger.info(f"Deleted session folder: {folder}")
+            self._cleanup_claude_cli_project(folder_path)
+            return True
+
         result: dict = {"found": False, "folder_path": None}
 
         def _do_delete(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
             cursor.execute(
                 "SELECT folder_path FROM research_sessions WHERE id = ?", (session_id,)
             )
@@ -598,6 +653,10 @@ class ResearchAssistantService:
         if not re.match(r"^[a-zA-Z0-9\s\-]+$", new_name):
             return False
 
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            return self._backend.update_session_title(session_id, new_name)  # type: ignore[no-any-return]
+
         # Update in database
         now = datetime.now(timezone.utc).isoformat()
         result: dict = {"found": False}
@@ -616,7 +675,7 @@ class ResearchAssistantService:
             )
 
         self._conn_manager.execute_atomic(_do_rename)
-        return result["found"]
+        return result["found"]  # type: ignore[no-any-return]
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -628,9 +687,13 @@ class ResearchAssistantService:
         Returns:
             Session dictionary or None if not found
         """
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            return self._backend.get_session(session_id)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT id, name, folder_path, created_at, updated_at "
             "FROM research_sessions "
@@ -647,16 +710,20 @@ class ResearchAssistantService:
         Returns:
             List of session dictionaries, most recently updated first
         """
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            return self._backend.list_sessions()  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT id, name, folder_path, created_at, updated_at "
             "FROM research_sessions "
             "ORDER BY updated_at DESC"
         )
         rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in rows]  # type: ignore[no-any-return]
 
     def _get_unique_session_name(
         self, conn: sqlite3.Connection, base_name: str = "New Session"
@@ -673,7 +740,7 @@ class ResearchAssistantService:
         """
         # Get all existing session names that start with base_name
         cur = conn.cursor()
-        cur.row_factory = sqlite3.Row
+        cur.row_factory = sqlite3.Row  # type: ignore[assignment]
         cur.execute(
             "SELECT name FROM research_sessions WHERE name = ? OR name LIKE ?",
             (base_name, f"{base_name} %"),
@@ -714,6 +781,27 @@ class ResearchAssistantService:
         # Create folder path
         folder_path = str(Path.home() / ".cidx-server" / "research" / session_id)
 
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            # Generate unique name from existing sessions
+            existing = self._backend.list_sessions()
+            existing_names = {s["name"] for s in existing}
+            base_name = "New Session"
+            session_name = base_name
+            if session_name in existing_names:
+                counter = 2
+                while f"{base_name} {counter}" in existing_names and counter < 10000:
+                    counter += 1
+                session_name = f"{base_name} {counter}"
+            self._backend.create_session(
+                session_id=session_id,
+                name=session_name,
+                folder_path=folder_path,
+            )
+            self._ensure_session_folder_setup(folder_path)
+            session = self._backend.get_session(session_id)
+            return session  # type: ignore[return-value, no-any-return]
+
         # Create timestamps
         now = datetime.now(timezone.utc).isoformat()
 
@@ -738,14 +826,14 @@ class ResearchAssistantService:
         # Return the created session
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT id, name, folder_path, created_at, updated_at "
             "FROM research_sessions WHERE id = ?",
             (session_id,),
         )
         row = cursor.fetchone()
-        return dict(row)
+        return dict(row)  # type: ignore[no-any-return]
 
     def _ensure_session_folder_setup(self, folder_path: str) -> None:
         """
@@ -846,6 +934,10 @@ class ResearchAssistantService:
         Raises:
             sqlite3.IntegrityError: If session doesn't exist or role is invalid
         """
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            return self._backend.add_message(session_id, role, content)  # type: ignore[no-any-return]
+
         now = datetime.now(timezone.utc).isoformat()
         result: dict = {"message_id": None}
 
@@ -863,14 +955,14 @@ class ResearchAssistantService:
         # Get the inserted message
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT id, session_id, role, content, created_at "
             "FROM research_messages WHERE id = ?",
             (result["message_id"],),
         )
         row = cursor.fetchone()
-        return dict(row)
+        return dict(row)  # type: ignore[no-any-return]
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """
@@ -882,9 +974,13 @@ class ResearchAssistantService:
         Returns:
             List of message dictionaries ordered by created_at (oldest first)
         """
+        # Story #522: delegate to backend when available
+        if self._backend is not None:
+            return self._backend.get_messages(session_id)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT id, session_id, role, content, created_at "
             "FROM research_messages "
@@ -893,7 +989,7 @@ class ResearchAssistantService:
             (session_id,),
         )
         rows = cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in rows]  # type: ignore[no-any-return]
 
     def execute_prompt(self, session_id: str, user_prompt: str) -> str:
         """
@@ -1453,7 +1549,7 @@ class ResearchAssistantService:
                 )
 
         # Sort by upload time (newest first)
-        files.sort(key=lambda f: f["uploaded_at"], reverse=True)
+        files.sort(key=lambda f: f["uploaded_at"], reverse=True)  # type: ignore[arg-type, return-value]
 
         return files
 

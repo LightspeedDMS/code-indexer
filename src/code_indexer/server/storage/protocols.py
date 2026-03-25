@@ -1231,3 +1231,240 @@ class SCIPAuditBackend(Protocol):
     def close(self) -> None:
         """Close the backend and release any held resources."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# ResearchSessionsBackend (Story #522)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ResearchSessionsBackend(Protocol):
+    """Protocol for research sessions storage (Story #522).
+
+    Provides data-level access to research_sessions and research_messages tables.
+    Satisfies PEP 544 structural subtyping: any class implementing all of
+    these methods is accepted as a ResearchSessionsBackend without inheritance.
+    """
+
+    def create_session(
+        self,
+        session_id: str,
+        name: str,
+        folder_path: str,
+        claude_session_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> None: ...
+
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]: ...
+
+    def list_sessions(self) -> List[Dict[str, Any]]: ...
+
+    def delete_session(self, session_id: str) -> bool: ...
+
+    def update_session_title(self, session_id: str, name: str) -> bool: ...
+
+    def update_session_claude_id(
+        self, session_id: str, claude_session_id: str
+    ) -> None: ...
+
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        timestamp: Optional[str] = None,
+    ) -> Dict[str, Any]: ...
+
+    def get_messages(self, session_id: str) -> List[Dict[str, Any]]: ...
+
+    def close(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# DiagnosticsBackend (Story #525)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class DiagnosticsBackend(Protocol):
+    """Protocol for diagnostics results storage (Story #525).
+
+    Provides data-level access to the diagnostic_results table.
+    Satisfies PEP 544 structural subtyping: any class implementing all of
+    these methods is accepted as a DiagnosticsBackend without inheritance.
+    """
+
+    def save_results(self, category: str, results_json: str, run_at: str) -> None:
+        """Persist (upsert) diagnostic results for a category."""
+        ...
+
+    def load_all_results(self) -> "List[Tuple[str, str, str]]":
+        """Return all rows as list of (category, results_json, run_at) tuples."""
+        ...
+
+    def load_category_results(self, category: str) -> "Optional[Tuple[str, str]]":
+        """Return (results_json, run_at) for a category, or None if absent."""
+        ...
+
+    def close(self) -> None:
+        """Close the backend and release any held resources."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# SelfMonitoringBackend (Story #524)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class SelfMonitoringBackend(Protocol):
+    """Protocol for self-monitoring storage (Story #524).
+
+    Provides data-level access to self_monitoring_scans and
+    self_monitoring_issues tables.
+    Satisfies PEP 544 structural subtyping: any class implementing all of
+    these methods is accepted as a SelfMonitoringBackend without inheritance.
+    """
+
+    def create_scan_record(
+        self,
+        scan_id: str,
+        started_at: str,
+        log_id_start: int,
+    ) -> None:
+        """Insert initial scan record with RUNNING status."""
+        ...
+
+    def get_last_scan_log_id(self) -> int:
+        """Return log_id_end from most recent SUCCESS scan, or 0."""
+        ...
+
+    def update_scan_record(
+        self,
+        scan_id: str,
+        status: str,
+        completed_at: str,
+        log_id_end: "Optional[int]" = None,
+        issues_created: "Optional[int]" = None,
+        error_message: "Optional[str]" = None,
+    ) -> None:
+        """Update scan record with completion status and metrics."""
+        ...
+
+    def cleanup_orphaned_scans(self, cutoff_iso: str) -> int:
+        """Mark scans started before cutoff_iso with no completed_at as FAILURE.
+
+        Returns count of scans updated.
+        """
+        ...
+
+    def get_last_started_at(self) -> "Optional[str]":
+        """Return started_at from most recent scan (any status), or None."""
+        ...
+
+    def fetch_stored_fingerprints(
+        self, retention_days: int
+    ) -> "List[Tuple[str, str, str, str, str]]":
+        """Return fingerprint rows (fingerprint, classification, error_codes, title, created_at)."""
+        ...
+
+    def store_issue_metadata(
+        self,
+        scan_id: str,
+        github_issue_number: "Optional[int]",
+        github_issue_url: "Optional[str]",
+        classification: str,
+        title: str,
+        error_codes: str,
+        fingerprint: str,
+        source_log_ids: str,
+        source_files: str,
+        created_at: str,
+    ) -> None:
+        """Persist issue metadata in self_monitoring_issues."""
+        ...
+
+    def close(self) -> None:
+        """Close the backend and release any held resources."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# WikiCacheBackend (Story #523)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class WikiCacheBackend(Protocol):
+    """Protocol for wiki cache storage (Story #523).
+
+    Provides data-level access to wiki_cache, wiki_sidebar_cache, and
+    wiki_article_views tables.
+    Satisfies PEP 544 structural subtyping: any class implementing all of
+    these methods is accepted as a WikiCacheBackend without inheritance.
+    """
+
+    def get_article(
+        self, repo_alias: str, article_path: str
+    ) -> "Optional[Dict[str, Any]]":
+        """Return dict with rendered_html, title, file_mtime, file_size, metadata_json or None."""
+        ...
+
+    def put_article(
+        self,
+        repo_alias: str,
+        article_path: str,
+        html: str,
+        title: str,
+        file_mtime: float,
+        file_size: int,
+        rendered_at: str,
+        metadata_json: "Optional[str]",
+    ) -> None:
+        """Store (upsert) rendered article row."""
+        ...
+
+    def get_sidebar(self, repo_alias: str) -> "Optional[str]":
+        """Return sidebar_json string for repo_alias, or None."""
+        ...
+
+    def put_sidebar(
+        self,
+        repo_alias: str,
+        sidebar_json: str,
+        max_mtime: float,
+        built_at: str,
+    ) -> None:
+        """Store (upsert) sidebar row."""
+        ...
+
+    def invalidate_repo(self, repo_alias: str) -> None:
+        """Delete all wiki_cache and wiki_sidebar_cache rows for repo_alias."""
+        ...
+
+    def increment_view(self, repo_alias: str, article_path: str, now: str) -> None:
+        """Upsert wiki_article_views, incrementing real_views."""
+        ...
+
+    def get_view_count(self, repo_alias: str, article_path: str) -> int:
+        """Return real_views count for article, or 0."""
+        ...
+
+    def get_all_view_counts(self, repo_alias: str) -> "List[Dict[str, Any]]":
+        """Return all view records for repo as list of dicts."""
+        ...
+
+    def delete_views_for_repo(self, repo_alias: str) -> None:
+        """Delete all wiki_article_views rows for repo_alias."""
+        ...
+
+    def insert_initial_views(
+        self, repo_alias: str, article_path: str, views: int, now: str
+    ) -> None:
+        """Insert initial view count (INSERT OR IGNORE)."""
+        ...
+
+    def close(self) -> None:
+        """Close the backend and release any held resources."""
+        ...
