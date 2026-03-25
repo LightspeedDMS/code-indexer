@@ -50,6 +50,10 @@ def make_lifespan(
         )
         golden_repos_dir = Path(server_data_dir) / "data" / "golden-repos"
 
+        # Story #505/#506: Store storage_mode in app.state early so web routes
+        # and MCP handlers can access it without re-reading config.
+        app.state.storage_mode = storage_mode
+
         # Startup: Initialize SQLite log handler FIRST (to capture all startup logs)
         logger.info(
             "Server startup: Initializing SQLite log handler",
@@ -1417,6 +1421,23 @@ def make_lifespan(
                     _cluster_services.append(("reconciliation", _reconciliation))
 
                     app.state.leader_election = _leader_election
+                    # Story #505/#506: Store node_id and postgres_dsn in app.state
+                    # so check_health MCP handler and web routes can read them.
+                    app.state.node_id = _node_id
+                    app.state.postgres_dsn = _pg_dsn
+
+                    # Story #505: Initialize DatabaseHealthService singleton with
+                    # postgres mode so dashboard shows PostgreSQL health instead
+                    # of migrated SQLite databases.
+                    from code_indexer.server.services.database_health_service import (
+                        get_database_health_service,
+                    )
+
+                    get_database_health_service(
+                        storage_mode="postgres",
+                        postgres_dsn=_pg_dsn,
+                    )
+
                     logger.info(
                         f"Cluster services started: node_id={_node_id}, "
                         f"is_leader={_leader_election.is_leader}",

@@ -2763,11 +2763,17 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Call the actual method (not async)
         health_response = health_service.get_system_health()
+
+        # Story #506: Include node_id in response for cluster mode identification.
+        # In standalone mode node_id is None (app.state.node_id not set).
+        node_id = getattr(app_module.app.state, "node_id", None)
+
         # Use mode='json' to serialize datetime objects to ISO format strings
         return _mcp_response(
             {
                 "success": True,
                 "server_version": __version__,
+                "node_id": node_id,
                 "health": health_response.model_dump(mode="json"),
             }
         )

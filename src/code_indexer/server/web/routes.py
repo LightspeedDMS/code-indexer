@@ -368,9 +368,12 @@ def dashboard_health_partial(request: Request):
     # Story #30 Bug Fix: Use singleton to ensure cache is shared across requests.
     # Previously, creating new DatabaseHealthService() on each request meant the
     # instance-level cache was always empty.
+    # Story #505: Pass storage_mode so postgres mode skips migrated SQLite DBs
+    # and shows PostgreSQL health instead.
     from ..services.database_health_service import get_database_health_service
 
-    db_health_service = get_database_health_service()
+    _storage_mode = getattr(request.app.state, "storage_mode", "sqlite")
+    db_health_service = get_database_health_service(storage_mode=_storage_mode)
     database_health = db_health_service.get_all_database_health_cached()
 
     # Story #492: Read node metrics from DB for cluster carousel (AC3)

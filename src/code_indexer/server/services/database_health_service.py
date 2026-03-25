@@ -4,6 +4,8 @@ Database Health Service for monitoring all 8 central databases.
 Story #712: Dashboard Refinements - Database Health Honeycomb
 Story #3: Removed search_config.db and file_content_limits.db (migrated to config.json)
          Added scip_audit.db for SCIP indexing audit tracking
+Story #505: Storage-mode-aware health - skip migrated DBs in postgres mode,
+            add PostgreSQL health entry instead.
 
 Implements 5-point health checks per database:
 1. Connect - Open SQLite connection
@@ -31,6 +33,18 @@ CACHE_TTL_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
+# Story #505: Databases migrated to PostgreSQL in cluster mode.
+# These SQLite files are no longer used when storage_mode == "postgres".
+POSTGRES_MIGRATED_DATABASES = frozenset(
+    {
+        "cidx_server.db",
+        "logs.db",
+        "api_metrics.db",
+        "payload_cache.db",
+        "groups.db",
+    }
+)
+
 # Story #30 Bug Fix: Module-level singleton instance
 # The cache must be shared across all callers. Creating new DatabaseHealthService()
 # instances on each request means the instance-level cache is always empty.
@@ -40,6 +54,8 @@ _db_health_service_instance: Optional["DatabaseHealthService"] = None
 
 def get_database_health_service(
     server_dir: Optional[str] = None,
+    storage_mode: str = "sqlite",
+    postgres_dsn: Optional[str] = None,
 ) -> "DatabaseHealthService":
     """
     Get the singleton DatabaseHealthService instance.
@@ -48,16 +64,26 @@ def get_database_health_service(
     callers. Previously, creating new DatabaseHealthService() instances on
     each request meant the instance-level cache was always empty.
 
+    Story #505: Accepts storage_mode and postgres_dsn so the singleton is
+    created with the correct mode on first call (during startup wiring).
+
     Args:
         server_dir: Path to server data directory. Only used on first call
                    to create the singleton. Ignored on subsequent calls.
+        storage_mode: "sqlite" (default) or "postgres". Only used on first call.
+        postgres_dsn: PostgreSQL DSN for health check in postgres mode. Only
+                      used on first call.
 
     Returns:
         The singleton DatabaseHealthService instance
     """
     global _db_health_service_instance
     if _db_health_service_instance is None:
-        _db_health_service_instance = DatabaseHealthService(server_dir)
+        _db_health_service_instance = DatabaseHealthService(
+            server_dir=server_dir,
+            storage_mode=storage_mode,
+            postgres_dsn=postgres_dsn,
+        )
     return _db_health_service_instance
 
 
@@ -172,15 +198,28 @@ class DatabaseHealthService:
 
     Performs 5-point health checks on each database and determines
     overall status (healthy/warning/error).
+
+    Story #505: In postgres mode, migrated databases are skipped and
+    a PostgreSQL connectivity check is included instead.
     """
 
-    def __init__(self, server_dir: Optional[str] = None):
+    def __init__(
+        self,
+        server_dir: Optional[str] = None,
+        storage_mode: str = "sqlite",
+        postgres_dsn: Optional[str] = None,
+    ):
         """
         Initialize the database health service.
 
         Args:
             server_dir: Path to server data directory. If None, uses
                        CIDX_SERVER_DATA_DIR env var or ~/.cidx-server
+            storage_mode: "sqlite" (default) or "postgres". Controls which
+                         databases are checked and whether PostgreSQL health
+                         is included.
+            postgres_dsn: PostgreSQL connection string for health check when
+                         storage_mode == "postgres".
         """
         if server_dir:
             self.server_dir = Path(server_dir)
@@ -190,6 +229,9 @@ class DatabaseHealthService:
                     "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
                 )
             )
+
+        self.storage_mode = storage_mode
+        self.postgres_dsn = postgres_dsn
 
         # Story #30 AC2: Initialize cache for database health results
         # Cache structure: {db_path: (DatabaseHealthResult, timestamp)}
@@ -229,29 +271,37 @@ class DatabaseHealthService:
 
         return result
 
+    def _resolve_db_path(self, file_name: str) -> Path:
+        """Resolve the filesystem path for a given database file name."""
+        if file_name in ("cidx_server.db", "api_metrics.db"):
+            return self.server_dir / "data" / file_name
+        elif file_name == "payload_cache.db":
+            return self.server_dir / "data" / "golden-repos" / ".cache" / file_name
+        else:
+            return self.server_dir / file_name
+
     def get_all_database_health(self) -> List[DatabaseHealthResult]:
         """
-        Check health of all 8 central databases (uncached).
+        Check health of all central databases (uncached).
+
+        Story #505: In postgres mode, POSTGRES_MIGRATED_DATABASES are skipped
+        and a PostgreSQL connectivity check is prepended to the result list.
 
         Returns:
             List of DatabaseHealthResult for each database
         """
         results = []
 
-        for file_name, display_name in DATABASE_DISPLAY_NAMES.items():
-            # Determine correct path based on database location
-            if file_name in ("cidx_server.db", "api_metrics.db"):
-                # Main server DB and API metrics DB are in data/ subdirectory
-                db_path = self.server_dir / "data" / file_name
-            elif file_name == "payload_cache.db":
-                # Payload cache is in golden-repos cache directory
-                db_path = (
-                    self.server_dir / "data" / "golden-repos" / ".cache" / file_name
-                )
-            else:
-                # All other databases are in server root
-                db_path = self.server_dir / file_name
+        if self.storage_mode == "postgres":
+            results.append(self._check_postgresql_health())
 
+        for file_name, display_name in DATABASE_DISPLAY_NAMES.items():
+            if (
+                self.storage_mode == "postgres"
+                and file_name in POSTGRES_MIGRATED_DATABASES
+            ):
+                continue
+            db_path = self._resolve_db_path(file_name)
             result = self.check_database_health(str(db_path), display_name)
             results.append(result)
 
@@ -259,34 +309,94 @@ class DatabaseHealthService:
 
     def get_all_database_health_cached(self) -> List[DatabaseHealthResult]:
         """
-        Check health of all 8 central databases with caching (Story #30 AC6).
+        Check health of all central databases with caching (Story #30 AC6).
 
         Uses check_database_health_cached for each database, returning
         cached results when within 60-second TTL.
+
+        Story #505: In postgres mode, POSTGRES_MIGRATED_DATABASES are skipped
+        and a PostgreSQL connectivity check is prepended to the result list.
 
         Returns:
             List of DatabaseHealthResult for each database
         """
         results = []
 
-        for file_name, display_name in DATABASE_DISPLAY_NAMES.items():
-            # Determine correct path based on database location
-            if file_name in ("cidx_server.db", "api_metrics.db"):
-                # Main server DB and API metrics DB are in data/ subdirectory
-                db_path = self.server_dir / "data" / file_name
-            elif file_name == "payload_cache.db":
-                # Payload cache is in golden-repos cache directory
-                db_path = (
-                    self.server_dir / "data" / "golden-repos" / ".cache" / file_name
-                )
-            else:
-                # All other databases are in server root
-                db_path = self.server_dir / file_name
+        if self.storage_mode == "postgres":
+            results.append(self._check_postgresql_health())
 
+        for file_name, display_name in DATABASE_DISPLAY_NAMES.items():
+            if (
+                self.storage_mode == "postgres"
+                and file_name in POSTGRES_MIGRATED_DATABASES
+            ):
+                continue
+            db_path = self._resolve_db_path(file_name)
             result = self.check_database_health_cached(str(db_path), display_name)
             results.append(result)
 
         return results
+
+    def _check_postgresql_health(self) -> DatabaseHealthResult:
+        """
+        Story #505: Simple PostgreSQL connectivity check via SELECT 1.
+
+        Returns a DatabaseHealthResult with file_name="postgresql" so the
+        dashboard template renders it as a hexagon alongside SQLite entries.
+        """
+        display_name = "PostgreSQL"
+        checks: Dict[str, CheckResult] = {}
+
+        if not self.postgres_dsn:
+            checks["connect"] = CheckResult(
+                passed=False, error_message="No postgres_dsn configured"
+            )
+            for key in ("read", "write", "integrity", "not_locked"):
+                checks[key] = CheckResult(
+                    passed=False, error_message="Connection required"
+                )
+            return DatabaseHealthResult(
+                file_name="postgresql",
+                display_name=display_name,
+                status=DatabaseHealthStatus.ERROR,
+                checks=checks,
+                db_path="",
+            )
+
+        try:
+            import psycopg  # type: ignore
+
+            start = time.time()
+            with psycopg.connect(self.postgres_dsn, connect_timeout=5) as conn:
+                conn.execute("SELECT 1")
+            latency_ms = int((time.time() - start) * 1000)
+            checks["connect"] = CheckResult(passed=True)
+            checks["read"] = CheckResult(passed=True)
+            # write/integrity/not_locked are SQLite concepts; mark as passed for PG
+            checks["write"] = CheckResult(passed=True)
+            checks["integrity"] = CheckResult(passed=True)
+            checks["not_locked"] = CheckResult(passed=True)
+            status = DatabaseHealthStatus.HEALTHY
+            db_path = f"postgres (latency: {latency_ms}ms)"
+        except Exception as exc:
+            logger.warning("PostgreSQL health check failed: %s", exc)
+            checks["connect"] = CheckResult(
+                passed=False, error_message=f"Connection failed: {exc}"
+            )
+            for key in ("read", "write", "integrity", "not_locked"):
+                checks[key] = CheckResult(
+                    passed=False, error_message="Connection required"
+                )
+            status = DatabaseHealthStatus.ERROR
+            db_path = self.postgres_dsn
+
+        return DatabaseHealthResult(
+            file_name="postgresql",
+            display_name=display_name,
+            status=status,
+            checks=checks,
+            db_path=db_path,
+        )
 
     @staticmethod
     def check_database_health(
@@ -369,9 +479,7 @@ class DatabaseHealthService:
         try:
             conn = DatabaseConnectionManager.get_instance(db_path).get_connection()
             # Read sqlite_master to verify read capability
-            conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
-            )
+            conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
             return CheckResult(passed=True)
         except Exception as e:
             return CheckResult(passed=False, error_message=f"Read failed: {e}")
