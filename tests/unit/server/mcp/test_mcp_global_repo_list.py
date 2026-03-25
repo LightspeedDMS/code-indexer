@@ -325,7 +325,7 @@ class TestListRepositoriesWithGlobalRepos:
             ) as mock_registry_factory:
                 list_repositories({}, mock_user)
 
-                mock_registry_factory.assert_called_once_with(str(temp_golden_dir))
+                mock_registry_factory.assert_called_once()
 
     def test_duplicate_alias_names_handled(self, mock_user, mock_global_registry_data):
         """Test that duplicate alias names between activated and global repos are handled."""
@@ -371,33 +371,28 @@ class TestListRepositoriesClusterMode:
     PostgreSQL via backend_registry.global_repos, not from local SQLite files.
     """
 
-    def test_cluster_mode_uses_backend_registry_global_repos(
+    def test_unified_backend_returns_all_global_repos(
         self, mock_user, mock_global_registry_data
     ):
-        """Bug #494: In cluster mode, list_repositories reads from backend_registry.
+        """Bug #494/#495: list_repositories always uses _list_global_repos().
 
-        When app.state.backend_registry is set (cluster/postgres mode), the handler
-        must use backend_registry.global_repos.list_repos() instead of creating a
-        new SQLite-backed GlobalRegistry from the filesystem.
+        ONE code path for both SQLite and PostgreSQL modes via BackendRegistry.
+        No cluster vs standalone branching.
         """
         import json
 
-        mock_backend_registry = Mock()
-        mock_global_repos_backend = Mock()
-        mock_global_repos_backend.list_repos.return_value = dict(
-            mock_global_registry_data
-        )
-        mock_backend_registry.global_repos = mock_global_repos_backend
-
         with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
             _setup_mock_app(mock_app, activated_repos=[])
-            mock_app.app.state.backend_registry = mock_backend_registry
-            mock_app.app.state.golden_repos_dir = "/fake/golden-repos"
+
+            mock_repos_list = list(mock_global_registry_data.values())
 
             with patch(
-                "code_indexer.server.mcp.handlers._list_global_repos"
-            ) as mock_registry_factory:
+                "code_indexer.server.mcp.handlers._list_global_repos",
+                return_value=mock_repos_list,
+            ) as mock_list_fn:
                 result = list_repositories({}, mock_user)
+
+                mock_list_fn.assert_called_once()
 
                 response_data = json.loads(result["content"][0]["text"])
                 assert response_data["success"] is True
@@ -410,9 +405,6 @@ class TestListRepositoriesClusterMode:
                 assert "cidx-meta-global" in global_aliases
                 assert "click-global" in global_aliases
                 assert "pytest-global" in global_aliases
-
-                mock_global_repos_backend.list_repos.assert_called_once()
-                mock_registry_factory.assert_not_called()
 
     def test_standalone_mode_uses_sqlite_registry(
         self, mock_user, mock_global_registry_data

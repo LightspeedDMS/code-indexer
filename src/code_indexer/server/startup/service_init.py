@@ -168,6 +168,12 @@ def initialize_services() -> Dict[str, Any]:
             _storage_mode = "sqlite"
             _backend_registry = None
     else:
+        from code_indexer.server.storage.factory import StorageFactory
+
+        _backend_registry = StorageFactory.create_backends(
+            config={"storage_mode": "sqlite"},
+            data_dir=data_dir,
+        )
         logger.info(
             "Storage mode: SQLite (standalone)",
             extra={"correlation_id": get_correlation_id()},

@@ -284,7 +284,7 @@ class TestGlobalRegistryTemporalStorage:
             enable_temporal=True,
         )
 
-        repo = registry.return_value("test-repo-global")
+        repo = registry.get_global_repo("test-repo-global")
         assert repo is not None, "Repository not found in registry"
         assert "enable_temporal" in repo, "enable_temporal not stored in registry"
         assert repo["enable_temporal"] is True, "enable_temporal value not correct"
@@ -315,7 +315,7 @@ class TestGlobalRegistryTemporalStorage:
             temporal_options=temporal_options,
         )
 
-        repo = registry.return_value("test-repo-global")
+        repo = registry.get_global_repo("test-repo-global")
         assert repo is not None, "Repository not found in registry"
         assert "temporal_options" in repo, "temporal_options not stored in registry"
         assert (
@@ -339,7 +339,7 @@ class TestGlobalRegistryTemporalStorage:
             index_path=str(tmp_path / "index"),
         )
 
-        repo = registry.return_value("test-repo-global")
+        repo = registry.get_global_repo("test-repo-global")
         assert repo is not None
         # Should default to False
         assert repo.get("enable_temporal", False) is False
@@ -366,7 +366,7 @@ class TestGlobalRegistryTemporalStorage:
         # Create new registry instance (simulates restart)
         registry2 = GlobalRegistry(str(golden_repos_dir))
 
-        repo = registry2.return_value("test-repo-global")
+        repo = registry2.get_global_repo("test-repo-global")
         assert repo is not None
         assert repo.get("enable_temporal") is True
         assert repo.get("temporal_options") == {"max_commits": 500}
@@ -401,7 +401,7 @@ class TestGlobalActivatorTemporalPassing:
             enable_temporal=True,
         )
 
-        repo = activator.registry.return_value("test-repo-global")
+        repo = activator.registry.get_global_repo("test-repo-global")
         assert repo is not None
         assert repo.get("enable_temporal") is True
 
@@ -431,7 +431,7 @@ class TestGlobalActivatorTemporalPassing:
             temporal_options=temporal_options,
         )
 
-        repo = activator.registry.return_value("test-repo-global")
+        repo = activator.registry.get_global_repo("test-repo-global")
         assert repo is not None
         assert repo.get("temporal_options") == temporal_options
 

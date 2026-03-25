@@ -3280,11 +3280,7 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
 
 def handle_list_global_repos(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for list_global_repos tool."""
-    from code_indexer.global_repos.shared_operations import GlobalRepoOperations
-
-    golden_repos_dir = _get_golden_repos_dir()
-    ops = GlobalRepoOperations(golden_repos_dir)
-    repos = ops.list_repos()
+    repos = _list_global_repos()
 
     # Story #316: Apply group-based access filtering
     access_filtering_service = _get_access_filtering_service()
