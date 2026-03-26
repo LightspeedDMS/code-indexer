@@ -1,49 +1,31 @@
 <!-- Story #69: Granular partial for API metrics data ONLY -->
 <!-- Story #531: Per-node card rows -->
 {% if is_cluster_mode and per_node_metrics %}
-<div style="grid-column: 1 / -1; font-size: 0.8rem; color: #9ca3af; padding-left: 0.25rem;">Total (All Nodes)</div>
-{% endif %}
-<article class="stat-card">
-    <header>
-        <h3>Semantic Searches</h3>
-    </header>
-    <div class="stat-value">{{ api_metrics.semantic_searches if api_metrics else 0 }}</div>
-    <footer>
-        <small>search_code (semantic)</small>
-    </footer>
-</article>
-
-<article class="stat-card">
-    <header>
-        <h3>Other Index Searches</h3>
-    </header>
-    <div class="stat-value">{{ api_metrics.other_index_searches if api_metrics else 0 }}</div>
-    <footer>
-        <small>FTS, temporal, hybrid</small>
-    </footer>
-</article>
-
-<article class="stat-card">
-    <header>
-        <h3>Regex Searches</h3>
-    </header>
-    <div class="stat-value">{{ api_metrics.regex_searches if api_metrics else 0 }}</div>
-    <footer>
-        <small>regex_search calls</small>
-    </footer>
-</article>
-
-<article class="stat-card">
-    <header>
-        <h3>Other API Calls</h3>
-    </header>
-    <div class="stat-value">{{ api_metrics.other_api_calls if api_metrics else 0 }}</div>
-    <footer>
-        <small>All other endpoints</small>
-    </footer>
-</article>
-
-{% if is_cluster_mode and per_node_metrics %}
+<div style="grid-column: 1 / -1;">
+    <div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">Total (All Nodes)</div>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;">
+        <article class="stat-card">
+            <header><h3>Semantic Searches</h3></header>
+            <div class="stat-value">{{ api_metrics.semantic_searches if api_metrics else 0 }}</div>
+            <footer><small>search_code (semantic)</small></footer>
+        </article>
+        <article class="stat-card">
+            <header><h3>Other Index Searches</h3></header>
+            <div class="stat-value">{{ api_metrics.other_index_searches if api_metrics else 0 }}</div>
+            <footer><small>FTS, temporal, hybrid</small></footer>
+        </article>
+        <article class="stat-card">
+            <header><h3>Regex Searches</h3></header>
+            <div class="stat-value">{{ api_metrics.regex_searches if api_metrics else 0 }}</div>
+            <footer><small>regex_search calls</small></footer>
+        </article>
+        <article class="stat-card">
+            <header><h3>Other API Calls</h3></header>
+            <div class="stat-value">{{ api_metrics.other_api_calls if api_metrics else 0 }}</div>
+            <footer><small>All other endpoints</small></footer>
+        </article>
+    </div>
+</div>
 {% for entry in per_node_metrics %}
 <div style="grid-column: 1 / -1; margin-top: 0.5rem;">
     <div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">{{ entry.node_id }}</div>
@@ -71,4 +53,25 @@
     </div>
 </div>
 {% endfor %}
+{% else %}
+<article class="stat-card">
+    <header><h3>Semantic Searches</h3></header>
+    <div class="stat-value">{{ api_metrics.semantic_searches if api_metrics else 0 }}</div>
+    <footer><small>search_code (semantic)</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Other Index Searches</h3></header>
+    <div class="stat-value">{{ api_metrics.other_index_searches if api_metrics else 0 }}</div>
+    <footer><small>FTS, temporal, hybrid</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Regex Searches</h3></header>
+    <div class="stat-value">{{ api_metrics.regex_searches if api_metrics else 0 }}</div>
+    <footer><small>regex_search calls</small></footer>
+</article>
+<article class="stat-card">
+    <header><h3>Other API Calls</h3></header>
+    <div class="stat-value">{{ api_metrics.other_api_calls if api_metrics else 0 }}</div>
+    <footer><small>All other endpoints</small></footer>
+</article>
 {% endif %}

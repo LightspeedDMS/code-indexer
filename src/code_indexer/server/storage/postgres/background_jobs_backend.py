@@ -81,13 +81,20 @@ class BackgroundJobsPostgresBackend:
     @staticmethod
     def _row_to_dict(row) -> Dict[str, Any]:
         """Convert a psycopg row (sequence) to a job dictionary."""
+
+        # Convert PG datetime objects to ISO strings for consistency with SQLite
+        def _dt(val: Any) -> Any:
+            from datetime import datetime as _dt_cls
+
+            return val.isoformat() if isinstance(val, _dt_cls) else val
+
         return {
             "job_id": row[0],
             "operation_type": row[1],
             "status": row[2],
-            "created_at": row[3],
-            "started_at": row[4],
-            "completed_at": row[5],
+            "created_at": _dt(row[3]),
+            "started_at": _dt(row[4]),
+            "completed_at": _dt(row[5]),
             "result": json.loads(row[6]) if row[6] else None,
             "error": row[7],
             "progress": row[8],
