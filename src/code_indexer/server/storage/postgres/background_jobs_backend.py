@@ -88,6 +88,16 @@ class BackgroundJobsPostgresBackend:
 
             return val.isoformat() if isinstance(val, _dt_cls) else val
 
+        # Handle JSONB columns: psycopg returns dicts, but strings from migration
+        def _json_col(val: Any) -> Any:
+            if val is None:
+                return None
+            if isinstance(val, (dict, list)):
+                return val  # Already parsed by psycopg
+            if isinstance(val, str):
+                return json.loads(val)
+            return val
+
         return {
             "job_id": row[0],
             "operation_type": row[1],
@@ -95,7 +105,7 @@ class BackgroundJobsPostgresBackend:
             "created_at": _dt(row[3]),
             "started_at": _dt(row[4]),
             "completed_at": _dt(row[5]),
-            "result": json.loads(row[6]) if row[6] else None,
+            "result": _json_col(row[6]),
             "error": row[7],
             "progress": row[8],
             "username": row[9],
@@ -103,10 +113,10 @@ class BackgroundJobsPostgresBackend:
             "cancelled": bool(row[11]),
             "repo_alias": row[12],
             "resolution_attempts": row[13],
-            "claude_actions": json.loads(row[14]) if row[14] else None,
+            "claude_actions": _json_col(row[14]),
             "failure_reason": row[15],
-            "extended_error": json.loads(row[16]) if row[16] else None,
-            "language_resolution_status": json.loads(row[17]) if row[17] else None,
+            "extended_error": _json_col(row[16]),
+            "language_resolution_status": _json_col(row[17]),
             "progress_info": row[18] if len(row) > 18 else None,
             "metadata": json.loads(row[19]) if len(row) > 19 and row[19] else None,
         }
