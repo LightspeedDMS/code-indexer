@@ -212,6 +212,24 @@ class BackgroundJobManager:
         """
         stale_threshold = self.STALE_JOB_THRESHOLD_SECONDS
 
+        if self._sqlite_backend is not None:
+            try:
+                running_jobs = self._sqlite_backend.list_jobs(
+                    status="running", operation_type=operation_type
+                )
+                pending_jobs = self._sqlite_backend.list_jobs(
+                    status="pending", operation_type=operation_type
+                )
+                for job_dict in running_jobs + pending_jobs:
+                    if job_dict.get("repo_alias") == repo_alias:
+                        return job_dict.get("job_id", "unknown")  # type: ignore[no-any-return]
+                return None
+            except Exception as e:
+                logging.warning(
+                    "Failed to check operation conflict from SQLite, falling back to in-memory: %s",
+                    e,
+                )
+
         for job in self.jobs.values():
             if (
                 job.operation_type == operation_type
@@ -822,11 +840,20 @@ class BackgroundJobManager:
 
     def get_active_job_count(self) -> int:
         """
-        Get count of currently active/running jobs.
+        Get count of currently active/running jobs (DB-first for cluster correctness).
 
         Returns:
             Number of active jobs
         """
+        if self._sqlite_backend is not None:
+            try:
+                counts = self._sqlite_backend.count_jobs_by_status()
+                return counts.get("running", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.warning(
+                    "Failed to get active job count from SQLite, falling back to in-memory: %s",
+                    e,
+                )
         with self._lock:
             return sum(
                 1 for job in self.jobs.values() if job.status == JobStatus.RUNNING
@@ -834,11 +861,20 @@ class BackgroundJobManager:
 
     def get_pending_job_count(self) -> int:
         """
-        Get count of pending jobs waiting to be executed.
+        Get count of pending jobs waiting to be executed (DB-first for cluster correctness).
 
         Returns:
             Number of pending jobs
         """
+        if self._sqlite_backend is not None:
+            try:
+                counts = self._sqlite_backend.count_jobs_by_status()
+                return counts.get("pending", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logging.warning(
+                    "Failed to get pending job count from SQLite, falling back to in-memory: %s",
+                    e,
+                )
         with self._lock:
             return sum(
                 1 for job in self.jobs.values() if job.status == JobStatus.PENDING
@@ -895,11 +931,25 @@ class BackgroundJobManager:
 
     def get_job_queue_metrics(self) -> Dict[str, int]:
         """
-        Get combined job queue metrics (Story #26).
+        Get combined job queue metrics (Story #26, DB-first for cluster correctness).
 
         Returns:
             Dictionary with running_count, queued_count, and max_concurrent
         """
+        if self._sqlite_backend is not None:
+            try:
+                counts = self._sqlite_backend.count_jobs_by_status()
+                return {
+                    "running_count": counts.get("running", 0),
+                    "queued_count": counts.get("pending", 0),
+                    "max_concurrent": self.max_concurrent_jobs,
+                }
+            except Exception as e:
+                logging.warning(
+                    "Failed to get job queue metrics from SQLite, falling back to in-memory: %s",
+                    e,
+                )
+
         with self._lock:
             running_count = sum(
                 1 for job in self.jobs.values() if job.status == JobStatus.RUNNING

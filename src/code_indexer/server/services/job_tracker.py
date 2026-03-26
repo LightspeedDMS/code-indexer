@@ -592,6 +592,30 @@ class JobTracker:
         Raises:
             DuplicateJobError: If a conflicting job is found.
         """
+        if self._backend is not None:
+            try:
+                running_jobs = self._backend.list_jobs(
+                    status="running", operation_type=operation_type
+                )
+                pending_jobs = self._backend.list_jobs(
+                    status="pending", operation_type=operation_type
+                )
+                for job_dict in running_jobs + pending_jobs:
+                    if job_dict.get("repo_alias") == repo_alias:
+                        raise DuplicateJobError(
+                            operation_type=operation_type,
+                            repo_alias=repo_alias,
+                            existing_job_id=job_dict.get("job_id", "unknown"),
+                        )
+                return
+            except DuplicateJobError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "Failed to check operation conflict from backend, falling back to in-memory: %s",
+                    e,
+                )
+
         with self._lock:
             for job in self._active_jobs.values():
                 if (
@@ -727,12 +751,30 @@ class JobTracker:
         return sqlite_count
 
     def get_active_job_count(self) -> int:
-        """Return the number of in-memory jobs with status 'running'."""
+        """Return the number of jobs with status 'running' (DB-first for cluster correctness)."""
+        if self._backend is not None:
+            try:
+                counts = self._backend.count_jobs_by_status()
+                return counts.get("running", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logger.warning(
+                    "Failed to get active job count from backend, falling back to in-memory: %s",
+                    e,
+                )
         with self._lock:
             return sum(1 for j in self._active_jobs.values() if j.status == "running")
 
     def get_pending_job_count(self) -> int:
-        """Return the number of in-memory jobs with status 'pending'."""
+        """Return the number of jobs with status 'pending' (DB-first for cluster correctness)."""
+        if self._backend is not None:
+            try:
+                counts = self._backend.count_jobs_by_status()
+                return counts.get("pending", 0)  # type: ignore[no-any-return]
+            except Exception as e:
+                logger.warning(
+                    "Failed to get pending job count from backend, falling back to in-memory: %s",
+                    e,
+                )
         with self._lock:
             return sum(1 for j in self._active_jobs.values() if j.status == "pending")
 
