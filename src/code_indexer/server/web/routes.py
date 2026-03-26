@@ -8772,19 +8772,63 @@ async def unified_login_sso(
 # ==============================================================================
 
 
+def _add_scan_duration(scans: List[Dict]) -> None:
+    """Add a 'duration' field to each scan dict in-place."""
+    from datetime import datetime
+
+    for scan in scans:
+        if scan.get("completed_at") and scan.get("started_at"):
+            try:
+                started = datetime.fromisoformat(scan["started_at"])
+                completed = datetime.fromisoformat(scan["completed_at"])
+                duration_seconds = (completed - started).total_seconds()
+                minutes = int(duration_seconds // 60)
+                seconds = int(duration_seconds % 60)
+                scan["duration"] = f"{minutes}m {seconds}s"
+            except (ValueError, TypeError):
+                scan["duration"] = "N/A"
+        elif scan.get("status") == "RUNNING":
+            scan["duration"] = "In progress"
+        else:
+            scan["duration"] = "N/A"
+
+
 def _load_self_monitoring_data(
-    db_path: Path, session: SessionData
+    db_path: Path,
+    session: SessionData,
+    backend: Optional[Any] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Load self-monitoring scans and issues from database (Story #74 AC4, AC5).
 
+    In postgres mode, delegates to the SelfMonitoringBackend protocol methods
+    instead of direct SQLite access.
+
     Args:
-        db_path: Path to SQLite database
-        session: Current user session (for logging)
+        db_path:  Path to SQLite database (used when backend is None)
+        session:  Current user session (for logging)
+        backend:  Optional SelfMonitoringBackend; when provided, used instead
+                  of direct SQLite access.
 
     Returns:
         Tuple of (scans, issues) as lists of dicts
     """
+    if backend is not None:
+        try:
+            scans = backend.list_scans(limit=SCAN_HISTORY_LIMIT)
+            _add_scan_duration(scans)
+            issues = backend.list_issues(limit=ISSUES_HISTORY_LIMIT)
+            return scans, issues
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "WEB-SELF-MONITORING-001",
+                    f"Failed to load self-monitoring data via backend: {e}",
+                ),
+                extra=get_log_extra("WEB-SELF-MONITORING-001"),
+            )
+            return [], []
+
     scans = []
     issues = []
 
@@ -8805,28 +8849,7 @@ def _load_self_monitoring_data(
             (SCAN_HISTORY_LIMIT,),
         )
         scans = [dict(row) for row in cursor.fetchall()]
-
-        # Add duration calculation for each scan
-        from datetime import datetime
-
-        for scan in scans:
-            if scan["completed_at"] and scan["started_at"]:
-                # Parse timestamps and calculate duration
-                try:
-                    started = datetime.fromisoformat(scan["started_at"])
-                    completed = datetime.fromisoformat(scan["completed_at"])
-                    duration_seconds = (completed - started).total_seconds()
-
-                    # Format as "Xm Ys"
-                    minutes = int(duration_seconds // 60)
-                    seconds = int(duration_seconds % 60)
-                    scan["duration"] = f"{minutes}m {seconds}s"
-                except (ValueError, TypeError):
-                    scan["duration"] = "N/A"
-            elif scan["status"] == "RUNNING":
-                scan["duration"] = "In progress"
-            else:
-                scan["duration"] = "N/A"
+        _add_scan_duration(scans)
 
         # Load issues (most recent first)
         cursor.execute(
@@ -8871,16 +8894,36 @@ def _load_default_prompt() -> str:
     return ""
 
 
-def _get_last_scan_time(db_path: Path) -> Optional[str]:
+def _get_last_scan_time(
+    db_path: Path,
+    backend: Optional[Any] = None,
+) -> Optional[str]:
     """
-    Get timestamp of most recent scan from database (Bug #129 Fix - Problem 1).
+    Get timestamp of most recent scan (Bug #129 Fix - Problem 1).
+
+    In postgres mode, delegates to the SelfMonitoringBackend protocol.
 
     Args:
-        db_path: Path to SQLite database
+        db_path:  Path to SQLite database (used when backend is None)
+        backend:  Optional SelfMonitoringBackend; when provided, used instead
+                  of direct SQLite access.
 
     Returns:
         started_at timestamp of most recent scan, or None if no scans exist
     """
+    if backend is not None:
+        try:
+            return backend.get_last_started_at()  # type: ignore[no-any-return]
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "WEB-SELF-MONITORING-002",
+                    f"Failed to get last scan time via backend: {e}",
+                ),
+                extra=get_log_extra("WEB-SELF-MONITORING-002"),
+            )
+            return None
+
     try:
         conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
         cursor = conn.cursor()
@@ -8939,16 +8982,37 @@ def _calculate_next_scan_time(
         return None
 
 
-def _get_scan_status(db_path: Path) -> str:
+def _get_scan_status(
+    db_path: Path,
+    backend: Optional[Any] = None,
+) -> str:
     """
-    Get current scan status by checking background jobs table (Bug #129 Fix - Problem 3).
+    Get current scan status (Bug #129 Fix - Problem 3).
+
+    In postgres mode, delegates to the SelfMonitoringBackend protocol.
 
     Args:
-        db_path: Path to SQLite database
+        db_path:  Path to SQLite database (used when backend is None)
+        backend:  Optional SelfMonitoringBackend; when provided, used instead
+                  of direct SQLite access.
 
     Returns:
         "Running..." if self_monitoring job is running, "Idle" otherwise
     """
+    if backend is not None:
+        try:
+            count = backend.get_running_scan_count()
+            return "Running..." if count > 0 else "Idle"
+        except Exception as e:
+            logger.error(
+                format_error_log(
+                    "WEB-SELF-MONITORING-004",
+                    f"Failed to get scan status via backend: {e}",
+                ),
+                extra=get_log_extra("WEB-SELF-MONITORING-004"),
+            )
+            return "Idle"
+
     try:
         conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
         cursor = conn.cursor()
@@ -8983,6 +9047,7 @@ def _create_self_monitoring_page_response(
     db_path: Path,
     success_message: Optional[str] = None,
     error_message: Optional[str] = None,
+    backend: Optional[Any] = None,
 ):
     """
     Build self-monitoring page response with template context (Story #74, Bug #129).
@@ -8995,19 +9060,21 @@ def _create_self_monitoring_page_response(
         current_prompt: Current prompt (config or default)
         scans: Scan history list
         issues: Issues history list
-        db_path: Path to database (for status calculations - Bug #129)
+        db_path: Path to database (for status calculations - Bug #129, SQLite mode)
         success_message: Optional success message to display
         error_message: Optional error message to display
+        backend: Optional SelfMonitoringBackend; when provided (PG mode), used
+                 instead of direct SQLite for status queries.
 
     Returns:
         TemplateResponse with CSRF cookie set
     """
-    # Bug #129 Fix: Calculate status values from database
-    last_scan = _get_last_scan_time(db_path)
+    # Bug #129 Fix: Calculate status values from database (or backend in PG mode)
+    last_scan = _get_last_scan_time(db_path, backend=backend)
     next_scan = _calculate_next_scan_time(
         last_scan, self_monitoring_config.cadence_minutes
     )
-    scan_status = _get_scan_status(db_path)
+    scan_status = _get_scan_status(db_path, backend=backend)
 
     # Format values for display
     last_scan_display = last_scan if last_scan else "Never"
@@ -9067,10 +9134,14 @@ def self_monitoring_page(request: Request):
     # Get current prompt (use default if empty)
     current_prompt = self_monitoring_config.prompt_template or default_prompt  # type: ignore[union-attr]
 
-    # Load scan history and issues from database
+    # Load scan history and issues from database (or backend in PG mode)
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
-    scans, issues = _load_self_monitoring_data(db_path, session)
+    _backend_registry = getattr(request.app.state, "backend_registry", None)
+    _sm_backend = (
+        _backend_registry.self_monitoring if _backend_registry is not None else None
+    )
+    scans, issues = _load_self_monitoring_data(db_path, session, backend=_sm_backend)
 
     return _create_self_monitoring_page_response(
         request,
@@ -9081,6 +9152,7 @@ def self_monitoring_page(request: Request):
         scans,
         issues,
         db_path,
+        backend=_sm_backend,
     )
 
 
@@ -9107,10 +9179,16 @@ async def save_self_monitoring_config(
     default_prompt = _load_default_prompt()
 
     # Validate CSRF token
+    _backend_registry = getattr(request.app.state, "backend_registry", None)
+    _sm_backend = (
+        _backend_registry.self_monitoring if _backend_registry is not None else None
+    )
     if not validate_login_csrf_token(request, csrf_token):
         server_dir = config_service.config_manager.server_dir
         db_path = server_dir / "data" / "cidx_server.db"
-        scans, issues = _load_self_monitoring_data(db_path, session)
+        scans, issues = _load_self_monitoring_data(
+            db_path, session, backend=_sm_backend
+        )
         current_prompt = config.self_monitoring_config.prompt_template or default_prompt  # type: ignore[union-attr]
         return _create_self_monitoring_page_response(
             request,
@@ -9122,6 +9200,7 @@ async def save_self_monitoring_config(
             issues,
             db_path,
             error_message="Invalid CSRF token",
+            backend=_sm_backend,
         )
 
     # Parse form data
@@ -9172,7 +9251,7 @@ async def save_self_monitoring_config(
     current_prompt = prompt_template or default_prompt
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
-    scans, issues = _load_self_monitoring_data(db_path, session)
+    scans, issues = _load_self_monitoring_data(db_path, session, backend=_sm_backend)
 
     return _create_self_monitoring_page_response(
         request,
@@ -9184,6 +9263,7 @@ async def save_self_monitoring_config(
         issues,
         db_path,
         success_message="Self-monitoring configuration saved successfully",
+        backend=_sm_backend,
     )
 
 

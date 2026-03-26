@@ -48,6 +48,7 @@ DISK_CRITICAL_THRESHOLD_PERCENT = 90.0  # 90% used = 10% free = critical
 RESPONSE_TIME_WARNING = 1000  # 1 second
 RESPONSE_TIME_CRITICAL = 5000  # 5 seconds
 MAX_FAILURE_REASONS = 3  # Story #727 AC5: Limit displayed failure reasons
+PG_CONNECT_TIMEOUT_SECONDS = 5  # Timeout for PostgreSQL connectivity check
 
 # CPU sustained threshold detection (Story #727 AC4)
 CPU_SUSTAINED_THRESHOLD = 95.0  # CPU % threshold for sustained high load detection
@@ -101,10 +102,20 @@ def _load_thresholds_from_config() -> None:
 class HealthCheckService:
     """Service for system health monitoring."""
 
-    def __init__(self):
-        """Initialize the health check service with real dependencies."""
+    def __init__(
+        self,
+        storage_mode: str = "sqlite",
+        postgres_dsn: Optional[str] = None,
+    ):
+        """Initialize the health check service with real dependencies.
+
+        Args:
+            storage_mode: "sqlite" (default) or "postgres". Controls which
+                         backend is used for the database connectivity check.
+            postgres_dsn: PostgreSQL DSN for connectivity check when
+                         storage_mode == "postgres".
+        """
         # CLAUDE.md Foundation #1: Direct instantiation of real services only
-        # NO dependency injection parameters that enable mocking
         try:
             config_manager = ConfigManager.create_with_backtrack()
             self.config = config_manager.get_config()
@@ -113,9 +124,12 @@ class HealthCheckService:
             self.data_dir = Path.home() / ".cidx-server" / "data"
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
-            # Real database URL for health checks
-            # Use SQLite as the default database for CIDX Server
+            # Real database URL for health checks (SQLite mode)
             self.database_url = f"sqlite:///{self.data_dir}/cidx_server.db"
+
+            # Storage-mode awareness
+            self.storage_mode = storage_mode
+            self.postgres_dsn = postgres_dsn
 
             # State tracking for interval-averaged I/O metrics
             # These store the previous readings to calculate rates
@@ -191,31 +205,18 @@ class HealthCheckService:
         """
         Check database connectivity and performance.
 
+        In postgres mode, checks PG connectivity. In sqlite mode, checks SQLite.
+
         Returns:
             Database service health information
         """
         start_time = time.time()
 
         try:
-            # Real database connection check
-            try:
-                from sqlalchemy import create_engine, text
-            except ImportError:
-                # SQLAlchemy not available - fall back to basic SQLite check
-                # Extract database path from SQLite URL
-                db_path = self.database_url.replace("sqlite:///", "")
-                connection = DatabaseConnectionManager.get_instance(
-                    db_path
-                ).get_connection()
-                cursor = connection.cursor()
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
+            if self.storage_mode == "postgres":
+                self._check_pg_connectivity()
             else:
-                # Use SQLAlchemy if available
-                engine = create_engine(self.database_url, pool_pre_ping=True)
-                with engine.connect() as connection:
-                    # Execute simple query to verify database health
-                    connection.execute(text("SELECT 1"))
+                self._check_sqlite_connectivity()
 
             response_time = int((time.time() - start_time) * 1000)
 
@@ -245,6 +246,40 @@ class HealthCheckService:
                 response_time_ms=response_time,
                 error_message=str(e),
             )
+
+    def _check_pg_connectivity(self) -> None:
+        """Verify PostgreSQL connectivity via SELECT 1. Raises on failure."""
+        if not self.postgres_dsn:
+            raise RuntimeError("postgres_dsn not configured for postgres storage mode")
+        import psycopg  # type: ignore
+
+        with psycopg.connect(
+            self.postgres_dsn, connect_timeout=PG_CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            conn.execute("SELECT 1")
+
+    def _check_sqlite_connectivity(self) -> None:
+        """Verify SQLite connectivity via SELECT 1. Raises on failure."""
+        try:
+            from sqlalchemy import create_engine, text
+        except ImportError:
+            db_path = self.database_url.replace("sqlite:///", "")
+            connection = DatabaseConnectionManager.get_instance(
+                db_path
+            ).get_connection()
+            cursor = connection.cursor()
+            try:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            finally:
+                cursor.close()
+        else:
+            engine = create_engine(self.database_url, pool_pre_ping=True)
+            try:
+                with engine.connect() as connection:
+                    connection.execute(text("SELECT 1"))
+            finally:
+                engine.dispose()
 
     def _check_storage_health(self) -> ServiceHealthInfo:
         """
@@ -405,6 +440,7 @@ class HealthCheckService:
         # Index memory from caches (HNSW heap + FTS mmap) - direct call avoids
         # race condition where SystemMetricsCollector background cache stays at 0.0
         from ..cache import get_total_index_memory_mb
+
         index_memory_mb = get_total_index_memory_mb()
 
         return SystemHealthInfo(
@@ -789,5 +825,52 @@ class HealthCheckService:
         return 0
 
 
-# Global service instance
-health_service = HealthCheckService()
+# Lazy singleton - initialized on first call to get_health_service()
+# or on first import of the module-level `health_service` alias.
+_health_service_instance: Optional[HealthCheckService] = None
+
+
+def get_health_service(
+    storage_mode: str = "sqlite",
+    postgres_dsn: Optional[str] = None,
+) -> HealthCheckService:
+    """
+    Get or create the singleton HealthCheckService instance.
+
+    On first call, creates the instance with the given parameters.
+    Subsequent calls return the existing instance regardless of parameters
+    (call reset_health_service() to force re-creation in tests).
+
+    Args:
+        storage_mode: "sqlite" (default) or "postgres".
+        postgres_dsn: PostgreSQL DSN required when storage_mode == "postgres".
+
+    Returns:
+        The singleton HealthCheckService instance.
+    """
+    global _health_service_instance
+    if _health_service_instance is None:
+        _health_service_instance = HealthCheckService(
+            storage_mode=storage_mode,
+            postgres_dsn=postgres_dsn,
+        )
+    return _health_service_instance
+
+
+def _reset_health_service_for_testing() -> None:
+    """Reset the singleton for test isolation. Never call in production."""
+    global _health_service_instance
+    _health_service_instance = None
+
+
+# Backward-compatible module-level alias.
+# Callers that do `from .health_service import health_service` get the
+# singleton on demand without needing to call get_health_service() explicitly.
+class _LazyHealthServiceProxy:
+    """Proxy that lazily forwards attribute access to get_health_service()."""
+
+    def __getattr__(self, name: str):  # type: ignore[override]
+        return getattr(get_health_service(), name)
+
+
+health_service: Any = _LazyHealthServiceProxy()

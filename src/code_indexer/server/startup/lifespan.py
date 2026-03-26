@@ -767,6 +767,8 @@ def make_lifespan(
                 groups_db_path=_drp_groups_db_path,
                 config_service=_drp_config_service,
                 job_tracker=job_tracker,
+                storage_mode=storage_mode,
+                backend_registry=backend_registry,
             )
             data_retention_scheduler.start()
             app.state.data_retention_scheduler = data_retention_scheduler
@@ -1442,6 +1444,17 @@ def make_lifespan(
                     )
 
                     get_database_health_service(
+                        storage_mode="postgres",
+                        postgres_dsn=_pg_dsn,
+                    )
+
+                    # Story #527: Initialize HealthCheckService singleton with
+                    # postgres mode so _check_database_health uses PG connectivity.
+                    from code_indexer.server.services.health_service import (
+                        get_health_service,
+                    )
+
+                    get_health_service(
                         storage_mode="postgres",
                         postgres_dsn=_pg_dsn,
                     )

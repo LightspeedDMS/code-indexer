@@ -44,23 +44,32 @@ class DataRetentionScheduler:
         groups_db_path: Path,
         config_service: Any,
         job_tracker: Optional[Any] = None,
+        storage_mode: str = "sqlite",
+        backend_registry: Optional[Any] = None,
     ) -> None:
         """
         Initialize the scheduler.
 
         Args:
-            log_db_path:    Path to logs.db
-            main_db_path:   Path to cidx_server.db
-            groups_db_path: Path to groups.db
-            config_service: Object with get_config() returning a config with
-                            data_retention_config attribute.
-            job_tracker:    Optional JobTracker for unified job tracking.
+            log_db_path:      Path to logs.db
+            main_db_path:     Path to cidx_server.db
+            groups_db_path:   Path to groups.db
+            config_service:   Object with get_config() returning a config with
+                              data_retention_config attribute.
+            job_tracker:      Optional JobTracker for unified job tracking.
+            storage_mode:     "sqlite" (default) or "postgres". In postgres mode
+                              cleanup is delegated to backend protocol methods
+                              instead of direct SQLite access.
+            backend_registry: BackendRegistry instance required when
+                              storage_mode == "postgres".
         """
         self._log_db_path = Path(log_db_path)
         self._main_db_path = Path(main_db_path)
         self._groups_db_path = Path(groups_db_path)
         self._config_service = config_service
         self._job_tracker = job_tracker
+        self._storage_mode = storage_mode
+        self._backend_registry = backend_registry
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -100,7 +109,11 @@ class DataRetentionScheduler:
             try:
                 self._execute_cleanup()
             except Exception as e:
-                logger.error("DataRetentionScheduler: unexpected error in cleanup: %s", e, exc_info=True)
+                logger.error(
+                    "DataRetentionScheduler: unexpected error in cleanup: %s",
+                    e,
+                    exc_info=True,
+                )
 
             # Re-read interval from config each iteration
             try:
@@ -120,6 +133,7 @@ class DataRetentionScheduler:
         """
         Run one cleanup cycle across all five tables.
         Registers the job with JobTracker if available.
+        In postgres mode, delegates to _execute_cleanup_pg().
         """
         job_id = f"data-retention-{uuid.uuid4().hex[:8]}"
 
@@ -133,58 +147,12 @@ class DataRetentionScheduler:
             self._job_tracker.update_status(job_id, status="running")
 
         try:
-            cfg = self._config_service.get_config().data_retention_config
+            if self._storage_mode == "postgres" and self._backend_registry is not None:
+                result = self._execute_cleanup_pg()
+            else:
+                result = self._execute_cleanup_sqlite()
 
-            logs_deleted = self._cleanup_table(
-                self._log_db_path,
-                "logs",
-                "timestamp",
-                retention_hours=cfg.operational_logs_retention_hours,
-            )
-
-            audit_logs_deleted = self._cleanup_table(
-                self._groups_db_path,
-                "audit_logs",
-                "timestamp",
-                retention_hours=cfg.audit_logs_retention_hours,
-            )
-
-            sync_jobs_deleted = self._cleanup_table(
-                self._main_db_path,
-                "sync_jobs",
-                "completed_at",
-                retention_hours=cfg.sync_jobs_retention_hours,
-                status_filter="status IN ('completed', 'failed')",
-            )
-
-            dep_map_history_deleted = self._cleanup_dep_map_history(cfg)
-
-            background_jobs_deleted = self._cleanup_table(
-                self._main_db_path,
-                "background_jobs",
-                "completed_at",
-                retention_hours=cfg.background_jobs_retention_hours,
-                status_filter="status IN ('completed', 'failed', 'cancelled')",
-            )
-
-            result = {
-                "logs_deleted": logs_deleted,
-                "audit_logs_deleted": audit_logs_deleted,
-                "sync_jobs_deleted": sync_jobs_deleted,
-                "dep_map_history_deleted": dep_map_history_deleted,
-                "background_jobs_deleted": background_jobs_deleted,
-                "total_deleted": (
-                    logs_deleted
-                    + audit_logs_deleted
-                    + sync_jobs_deleted
-                    + dep_map_history_deleted
-                    + background_jobs_deleted
-                ),
-            }
-
-            logger.info(
-                "DataRetentionScheduler: cleanup complete %s", result
-            )
+            logger.info("DataRetentionScheduler: cleanup complete %s", result)
 
             if self._job_tracker is not None:
                 self._job_tracker.complete_job(job_id, result=result)
@@ -193,6 +161,107 @@ class DataRetentionScheduler:
             logger.error("DataRetentionScheduler: cleanup failed: %s", e, exc_info=True)
             if self._job_tracker is not None:
                 self._job_tracker.fail_job(job_id, error=str(e))
+
+    def _execute_cleanup_sqlite(self) -> dict:
+        """Run cleanup cycle using direct SQLite access (sqlite mode)."""
+        cfg = self._config_service.get_config().data_retention_config
+
+        logs_deleted = self._cleanup_table(
+            self._log_db_path,
+            "logs",
+            "timestamp",
+            retention_hours=cfg.operational_logs_retention_hours,
+        )
+
+        audit_logs_deleted = self._cleanup_table(
+            self._groups_db_path,
+            "audit_logs",
+            "timestamp",
+            retention_hours=cfg.audit_logs_retention_hours,
+        )
+
+        sync_jobs_deleted = self._cleanup_table(
+            self._main_db_path,
+            "sync_jobs",
+            "completed_at",
+            retention_hours=cfg.sync_jobs_retention_hours,
+            status_filter="status IN ('completed', 'failed')",
+        )
+
+        dep_map_history_deleted = self._cleanup_dep_map_history(cfg)
+
+        background_jobs_deleted = self._cleanup_table(
+            self._main_db_path,
+            "background_jobs",
+            "completed_at",
+            retention_hours=cfg.background_jobs_retention_hours,
+            status_filter="status IN ('completed', 'failed', 'cancelled')",
+        )
+
+        return {
+            "logs_deleted": logs_deleted,
+            "audit_logs_deleted": audit_logs_deleted,
+            "sync_jobs_deleted": sync_jobs_deleted,
+            "dep_map_history_deleted": dep_map_history_deleted,
+            "background_jobs_deleted": background_jobs_deleted,
+            "total_deleted": (
+                logs_deleted
+                + audit_logs_deleted
+                + sync_jobs_deleted
+                + dep_map_history_deleted
+                + background_jobs_deleted
+            ),
+        }
+
+    def _execute_cleanup_pg(self) -> dict:
+        """Run cleanup cycle via backend protocol methods (postgres mode)."""
+        cfg = self._config_service.get_config().data_retention_config
+        reg = self._backend_registry
+
+        # LogsBackend.cleanup_old_logs takes days_to_keep
+        logs_days = max(1, cfg.operational_logs_retention_hours // 24)
+        logs_deleted = reg.logs.cleanup_old_logs(days_to_keep=logs_days)  # type: ignore[union-attr]
+
+        # AuditLogBackend.cleanup_old_logs takes cutoff_iso
+        audit_cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=cfg.audit_logs_retention_hours)
+        ).isoformat()
+        audit_logs_deleted = reg.audit_log.cleanup_old_logs(cutoff_iso=audit_cutoff)  # type: ignore[union-attr]
+
+        # SyncJobsBackend.cleanup_old_completed takes cutoff_iso
+        sync_cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=cfg.sync_jobs_retention_hours)
+        ).isoformat()
+        sync_jobs_deleted = reg.sync_jobs.cleanup_old_completed(cutoff_iso=sync_cutoff)  # type: ignore[union-attr]
+
+        # DependencyMapTrackingBackend.cleanup_old_history takes cutoff_iso
+        dep_cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=cfg.dep_map_history_retention_hours)
+        ).isoformat()
+        dep_map_history_deleted = reg.dependency_map_tracking.cleanup_old_history(  # type: ignore[union-attr]
+            cutoff_iso=dep_cutoff
+        )
+
+        # BackgroundJobsBackend.cleanup_old_jobs takes max_age_hours
+        background_jobs_deleted = reg.background_jobs.cleanup_old_jobs(  # type: ignore[union-attr]
+            max_age_hours=cfg.background_jobs_retention_hours
+        )
+
+        return {
+            "logs_deleted": logs_deleted,
+            "audit_logs_deleted": audit_logs_deleted,
+            "sync_jobs_deleted": sync_jobs_deleted,
+            "dep_map_history_deleted": dep_map_history_deleted,
+            "background_jobs_deleted": background_jobs_deleted,
+            "total_deleted": (
+                logs_deleted
+                + audit_logs_deleted
+                + sync_jobs_deleted
+                + dep_map_history_deleted
+                + background_jobs_deleted
+            ),
+        }
 
     def _cleanup_dep_map_history(self, cfg: Any) -> int:
         """
