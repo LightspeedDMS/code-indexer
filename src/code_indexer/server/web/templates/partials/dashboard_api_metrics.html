@@ -1,7 +1,7 @@
 <!-- Story #69: Granular partial for API metrics data ONLY -->
-<!-- Story #531: Per-node card rows with full-width stats-grid per node -->
+<!-- Story #531: Per-node card rows -->
 {% if is_cluster_mode and per_node_metrics %}
-<div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">Total (All Nodes)</div>
+<div style="grid-column: 1 / -1; font-size: 0.8rem; color: #9ca3af; padding-left: 0.25rem;">Total (All Nodes)</div>
 {% endif %}
 <article class="stat-card">
     <header>
@@ -45,44 +45,30 @@
 
 {% if is_cluster_mode and per_node_metrics %}
 {% for entry in per_node_metrics %}
+<div style="grid-column: 1 / -1; margin-top: 0.5rem;">
+    <div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">{{ entry.node_id }}</div>
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem;">
+        <article class="stat-card">
+            <header><h3>Semantic Searches</h3></header>
+            <div class="stat-value">{{ entry.metrics.semantic_searches }}</div>
+            <footer><small>{{ entry.node_id }}</small></footer>
+        </article>
+        <article class="stat-card">
+            <header><h3>Other Index Searches</h3></header>
+            <div class="stat-value">{{ entry.metrics.other_index_searches }}</div>
+            <footer><small>{{ entry.node_id }}</small></footer>
+        </article>
+        <article class="stat-card">
+            <header><h3>Regex Searches</h3></header>
+            <div class="stat-value">{{ entry.metrics.regex_searches }}</div>
+            <footer><small>{{ entry.node_id }}</small></footer>
+        </article>
+        <article class="stat-card">
+            <header><h3>Other API Calls</h3></header>
+            <div class="stat-value">{{ entry.metrics.other_api_calls }}</div>
+            <footer><small>{{ entry.node_id }}</small></footer>
+        </article>
+    </div>
 </div>
-<div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">{{ entry.node_id }}</div>
-<div class="stats-grid">
-<article class="stat-card">
-    <header>
-        <h3>Semantic Searches</h3>
-    </header>
-    <div class="stat-value">{{ entry.metrics.semantic_searches }}</div>
-    <footer>
-        <small>{{ entry.node_id }}</small>
-    </footer>
-</article>
-<article class="stat-card">
-    <header>
-        <h3>Other Index Searches</h3>
-    </header>
-    <div class="stat-value">{{ entry.metrics.other_index_searches }}</div>
-    <footer>
-        <small>{{ entry.node_id }}</small>
-    </footer>
-</article>
-<article class="stat-card">
-    <header>
-        <h3>Regex Searches</h3>
-    </header>
-    <div class="stat-value">{{ entry.metrics.regex_searches }}</div>
-    <footer>
-        <small>{{ entry.node_id }}</small>
-    </footer>
-</article>
-<article class="stat-card">
-    <header>
-        <h3>Other API Calls</h3>
-    </header>
-    <div class="stat-value">{{ entry.metrics.other_api_calls }}</div>
-    <footer>
-        <small>{{ entry.node_id }}</small>
-    </footer>
-</article>
 {% endfor %}
 {% endif %}

@@ -1443,6 +1443,20 @@ def make_lifespan(
                     app.state.node_id = _node_id
                     app.state.postgres_dsn = _pg_dsn
 
+                    # Story #531: Inject cluster node_id into ApiMetricsService
+                    # so api_metrics.node_id matches node_metrics.node_id
+                    try:
+                        from code_indexer.server.services.api_metrics_service import (
+                            api_metrics_service as _ams,
+                        )
+
+                        _ams.set_node_id(_node_id)
+                    except (ImportError, AttributeError) as exc:
+                        logger.warning(
+                            "Failed to inject node_id into ApiMetricsService: %s",
+                            exc,
+                        )
+
                     # Story #505: Initialize DatabaseHealthService singleton with
                     # postgres mode so dashboard shows PostgreSQL health instead
                     # of migrated SQLite databases.

@@ -246,6 +246,14 @@ class ApiMetricsService:
         """Record an other API call timestamp."""
         self._insert_metric("other_api")
 
+    def set_node_id(self, node_id: str) -> None:
+        """Update the node_id used for metric tagging.
+
+        Called after cluster config resolves the configured node identifier,
+        which may differ from the default socket.gethostname().
+        """
+        self._node_id = node_id
+
     def get_metrics(
         self, window_seconds: int = 60, node_id: Optional[str] = None
     ) -> Dict[str, int]:
