@@ -1335,14 +1335,22 @@ def make_lifespan(
         # Story #500 AC4: Inject LogsBackend into SQLiteLogHandler for delegated writes.
         # The handler was created earlier (before backend_registry existed); now that
         # backend_registry is available, wire it in so emit() routes through the backend.
+        # Story #526: Only call set_logs_backend() if backend not already set at construction.
         if backend_registry is not None and hasattr(backend_registry, "logs"):
             app.state.logs_backend = backend_registry.logs
             if hasattr(app.state, "sqlite_log_handler"):
-                app.state.sqlite_log_handler.set_logs_backend(backend_registry.logs)
-                logger.info(
-                    "Story #500 AC4: LogsBackend injected into SQLiteLogHandler",
-                    extra={"correlation_id": get_correlation_id()},
-                )
+                _handler = app.state.sqlite_log_handler
+                if _handler._logs_backend is None:
+                    _handler.set_logs_backend(backend_registry.logs)
+                    logger.info(
+                        "Story #500 AC4: LogsBackend injected into SQLiteLogHandler",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                else:
+                    logger.info(
+                        "Story #526: LogsBackend already set at construction, skipping set_logs_backend()",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
 
         # Epic #408: Start cluster services when in postgres mode
         _cluster_services = []

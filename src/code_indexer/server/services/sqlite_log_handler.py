@@ -48,24 +48,33 @@ class SQLiteLogHandler(logging.Handler):
         Each thread gets its own database connection.
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, logs_backend: Optional[Any] = None):
         """
         Initialize SQLiteLogHandler.
 
         Args:
             db_path: Path to SQLite database file (e.g., ~/.cidx-server/logs.db)
+            logs_backend: Optional LogsBackend for delegated writes (Story #526).
+                When provided, SQLite initialization is skipped entirely and all
+                emit() calls delegate to this backend from the start.
         """
         super().__init__()
         self.db_path = Path(db_path)
 
-        # Optional LogsBackend for delegated writes (Story #500 AC4).
-        # When set, emit() delegates to this backend instead of writing directly.
-        self._logs_backend: Optional[Any] = None
+        # Optional LogsBackend for delegated writes (Story #500 AC4, Story #526).
+        # When set at construction time, SQLite init is skipped (AC2).
+        # When set via set_logs_backend(), emit() switches to backend path.
+        self._logs_backend: Optional[Any] = logs_backend
 
         # Optional cluster node identifier (Story #501 AC3).
         # When set, log records are tagged with this node_id so the admin UI
         # can aggregate and filter logs per node in cluster deployments.
         self._node_id: Optional[str] = None
+
+        if logs_backend is not None:
+            # AC2: Skip SQLite init entirely when backend provided at construction.
+            # No local database file is created in PG mode.
+            return
 
         # Create database and schema on initialization
         self._init_database()
@@ -77,9 +86,18 @@ class SQLiteLogHandler(logging.Handler):
         directly to the local SQLite file.  The direct-SQLite path remains
         intact when no backend is set, preserving backwards compatibility.
 
+        Deprecated: Pass logs_backend to the constructor instead (Story #526).
+
         Args:
             backend: A LogsBackend-conforming object (SQLite or PostgreSQL).
         """
+        import warnings
+
+        warnings.warn(
+            "set_logs_backend() is deprecated. Pass logs_backend to constructor instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._logs_backend = backend
 
     def set_node_id(self, node_id: str) -> None:
