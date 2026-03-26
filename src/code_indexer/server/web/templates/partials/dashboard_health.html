@@ -155,10 +155,13 @@
                         <div class="nm-volumes">
                             <div class="nm-volumes-header">Disk Storage</div>
                             {% for vol in volumes %}
+                            {% set mp = vol.mount_point | default('') %}
+                            {% set fs = vol.fstype | default('') %}
+                            {% if not (mp.startswith('/run/media/') or mp.startswith('/media/') or fs in ('iso9660', 'udf', 'squashfs')) %}
                             <div class="volume-entry">
                                 <div class="volume-header">
-                                    <span class="volume-mount" title="{{ vol.device | default('') }}">{{ vol.mount_point }}</span>
-                                    <span class="volume-fstype">{{ vol.fstype | default('') }}</span>
+                                    <span class="volume-mount" title="{{ vol.device | default('') }}">{{ mp }}</span>
+                                    <span class="volume-fstype">{{ fs }}</span>
                                 </div>
                                 <div class="volume-bar">
                                     <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
@@ -169,6 +172,7 @@
                                     <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
                                 </div>
                             </div>
+                            {% endif %}
                             {% endfor %}
                         </div>
                     </div>
@@ -211,10 +215,13 @@
         {% if health.system and health.system.volumes %}
         <div class="volumes-container">
             {% for vol in health.system.volumes %}
+            {% set mp = vol.mount_point | default('') %}
+            {% set fs = vol.fstype | default('') %}
+            {% if not (mp.startswith('/run/media/') or mp.startswith('/media/') or fs in ('iso9660', 'udf', 'squashfs')) %}
             <div class="volume-entry">
                 <div class="volume-header">
-                    <span class="volume-mount" title="{{ vol.device }}">{{ vol.mount_point }}</span>
-                    <span class="volume-fstype">{{ vol.fstype }}</span>
+                    <span class="volume-mount" title="{{ vol.device }}">{{ mp }}</span>
+                    <span class="volume-fstype">{{ fs }}</span>
                 </div>
                 <div class="volume-bar">
                     <div class="volume-bar-fill {% if vol.used_percent > 90 %}critical{% elif vol.used_percent > 75 %}warning{% endif %}"
@@ -225,6 +232,7 @@
                     <span class="volume-free">{{ "%.1f"|format(vol.free_gb) }} GB free</span>
                 </div>
             </div>
+            {% endif %}
             {% endfor %}
         </div>
         {% else %}
