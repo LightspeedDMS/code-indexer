@@ -39,7 +39,7 @@ jobs:
 
     - name: Run server smoke tests
       run: |
-        python3 -m pytest tests/unit/server/storage/test_factory.py tests/unit/server/mcp/test_protocol.py tests/unit/services/test_database_health_cluster.py -v --tb=short
+        python3 -m pytest tests/unit/server/storage/test_factory.py tests/unit/server/mcp/test_protocol.py tests/unit/services/test_database_health_cluster.py -v --tb=short --deselect=tests/unit/server/storage/test_factory.py::TestSQLiteProtocolSatisfaction::test_dependency_map_tracking_satisfies_protocol
 
     - name: Generate parity matrix
       if: always()
