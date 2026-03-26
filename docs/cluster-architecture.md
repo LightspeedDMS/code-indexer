@@ -139,11 +139,23 @@ All storage operations in CIDX Server go through Python Protocol interfaces defi
 - `SSHKeysBackend` - SSH key management
 - `GoldenRepoMetadataBackend` - golden repository metadata
 - `DependencyMapTrackingBackend` - dependency map state
+- `DescriptionRefreshTrackingBackend` - description refresh tracking
 - `GitCredentialsBackend` - per-user git credentials
 - `RepoCategoryBackend` - repository categories
 - `GroupsBackend` - group access management
 - `AuditLogBackend` - audit log writes and queries
 - `NodeMetricsBackend` - per-node system metrics snapshots
+- `LogsBackend` - server log storage
+- `ApiMetricsBackend` - API call metrics
+- `PayloadCacheBackend` - search result payload cache
+- `OAuthBackend` - OAuth token and client management
+- `SCIPAuditBackend` - SCIP code intelligence audit records
+- `RefreshTokenBackend` - refresh token storage
+- `ResearchSessionsBackend` - research assistant sessions
+- `WikiCacheBackend` - wiki article view counts
+- `SelfMonitoringBackend` - self-monitoring diagnostic results
+- `DiagnosticsBackend` - system diagnostics results
+- `MaintenanceBackend` - maintenance mode coordination
 
 All Protocols are decorated with `@runtime_checkable`, enabling `isinstance()` checks in tests and at runtime. Application code depends only on these Protocol interfaces, never on concrete backend classes.
 
@@ -157,13 +169,13 @@ The factory has two private paths:
 
 `_create_sqlite_backends(data_dir)`: Instantiates all SQLite backend classes from `src/code_indexer/server/storage/sqlite_backends.py`. The main database is `~/.cidx-server/data/cidx_server.db`. Groups and audit log use `~/.cidx-server/groups.db`.
 
-`_create_postgres_backends(config)`: Instantiates all PostgreSQL backend classes from `src/code_indexer/server/storage/postgres/`. All PostgreSQL backends share a single `ConnectionPool` instance wrapping `psycopg_pool.ConnectionPool` with default `min_size=1`, `max_size=5`. psycopg imports are lazy inside this method; standalone servers never import psycopg.
+`_create_postgres_backends(config)`: Instantiates all PostgreSQL backend classes from `src/code_indexer/server/storage/postgres/`. All PostgreSQL backends share a single `ConnectionPool` instance wrapping `psycopg_pool.ConnectionPool` with default `min_size=1`, `max_size=20`. The pool size is configurable via the `postgres_pool_max_size` field in `config.json`. psycopg imports are lazy inside this method; standalone servers never import psycopg.
 
 When `storage_mode` is an unrecognized value, `StorageFactory.create_backends()` raises `ValueError`.
 
 ### Mode Detection at Startup
 
-`src/code_indexer/server/startup/lifespan.py` reads `config.json` at startup and calls `StorageFactory.create_backends()` via `service_init.py`. If `storage_mode` is `"postgres"` but PostgreSQL backend creation fails, the error is logged and the `backend_registry` is set to `None`. The lifespan handler then skips starting cluster services (leader election, heartbeat, job reconciliation) because the condition `storage_mode == "postgres" and backend_registry is not None` is not met. There is no automatic transparent fallback to SQLite for the main storage layer; the server will start but without cluster services and without a working PostgreSQL backend.
+If `storage_mode` is `"postgres"` but PostgreSQL initialization fails (connection refused, authentication error, migration failure), the server logs a FATAL error and **refuses to start**. This fail-fast behavior (Bug #532) prevents a cluster node from silently operating on local SQLite, which would cause data divergence across the cluster within minutes. The server process exits with a `RuntimeError` containing the underlying connection error. To recover, fix the PostgreSQL connection or change `storage_mode` to `"sqlite"` in `config.json`.
 
 ## PostgreSQL Connection Pool
 
@@ -175,7 +187,7 @@ with pool.connection() as conn:
         cur.execute("SELECT 1")
 ```
 
-Default pool sizes: `min_size=1`, `max_size=5`. The pool is initialized with `open=True`, establishing connections immediately on construction. Callers must not close the connection; the pool reclaims it on context exit.
+Default pool sizes: `min_size=1`, `max_size=20` (configurable via `postgres_pool_max_size` in config.json). The pool is initialized with `open=True`, establishing connections immediately on construction. Callers must not close the connection; the pool reclaims it on context exit.
 
 ## Cluster Services
 
@@ -191,11 +203,13 @@ The lock identifier is the 64-bit integer `0x434944585F4C4452` (ASCII encoding o
 
 The lock is held on a dedicated psycopg connection that is kept open for the duration of leadership. This is the key mechanism: PostgreSQL automatically releases an advisory lock when the connection that holds it closes, whether by graceful shutdown or by network failure or process crash. Another node can then acquire the lock.
 
+The dedicated lock connection is configured with TCP keepalive parameters: `keepalives=1`, `keepalives_idle=10`, `keepalives_interval=5`, `keepalives_count=3`. This detects dead connections at the TCP level within approximately 25 seconds, complementing the application-level `SELECT 1` ping. Without TCP keepalive, a half-open TCP connection (caused by network partition or firewall state loss) could leave a ghost leader for the duration of the OS TCP timeout (typically 15+ minutes on Linux).
+
 Leadership acquisition uses `SELECT pg_try_advisory_lock(%s)` with `autocommit=True`. A session-level advisory lock (as opposed to a transaction-level lock) remains held until the connection closes, not until the transaction ends.
 
 The service runs a background monitor thread (`LeaderElection-{node_id}`) that wakes every 10 seconds (configurable via `check_interval` parameter). On each iteration:
 
-1. If this node is currently the leader, the monitor pings the dedicated connection with `SELECT 1`. If the connection is dead, leadership is relinquished locally and `try_acquire_leadership()` is called immediately.
+1. If this node is currently the leader, the monitor pings the dedicated connection with `SELECT 1`. If the connection is dead, leadership is relinquished locally, `on_lose_leadership()` completes, and re-election is deferred to the next monitor loop iteration (preventing a race between stopping and starting scheduler services).
 2. If this node is not the leader, `try_acquire_leadership()` is called to attempt acquisition.
 
 Leadership transition callbacks are registered at startup:
@@ -291,6 +305,8 @@ PostgreSQL schema is managed by numbered SQL migration files in `src/code_indexe
 
 Migrations are forward-only. Once applied, a migration file must not be modified (the checksum detects tampering).
 
+In PostgreSQL mode, `MigrationRunner.run()` is called automatically during server startup (Story #519), before backends are created. If any migration fails, the server refuses to start. This ensures the database schema is always up to date after a code deployment. Manual migration invocation is still supported but no longer required for normal operation.
+
 Current migrations:
 
 - `001_initial_schema.sql`: All tables including users, sessions, global_repos, background_jobs, ssh_keys, cluster_nodes, node_metrics (this migration also includes the node_metrics table before migration 003 was added)
@@ -349,6 +365,20 @@ The `background_jobs` table has two cluster-specific columns added in migration 
 
 These columns are `NULL` for jobs in `pending` or `completed`/`failed` states.
 
+### Distributed Job Claiming
+
+`src/code_indexer/server/services/distributed_job_claimer.py`
+
+In cluster mode, jobs are claimed atomically using PostgreSQL's `FOR UPDATE SKIP LOCKED` pattern. When a node picks up a job from the shared queue, it executes:
+
+```sql
+UPDATE background_jobs SET executing_node = %s, status = 'running', claimed_at = NOW()
+WHERE job_id = (SELECT job_id FROM background_jobs WHERE status = 'pending' FOR UPDATE SKIP LOCKED LIMIT 1)
+RETURNING *
+```
+
+This guarantees exactly-once claiming across concurrent nodes. The `SKIP LOCKED` clause ensures that if another node is already claiming a job, this node skips it and picks the next available one. All subsequent status updates (`complete_job`, `fail_job`, `release_job`) include an `AND executing_node = %s` guard to prevent one node from accidentally modifying another node's job.
+
 ## Configuration Fields
 
 The following fields in `~/.cidx-server/config.json` control cluster behavior:
@@ -389,6 +419,12 @@ Example configuration:
   }
 }
 ```
+
+### postgres_pool_max_size
+
+Type: integer. Default: `20`.
+
+Maximum number of connections in the PostgreSQL connection pool. All backends share this pool. Increase for high-concurrency deployments or when running many concurrent background jobs.
 
 ### ontap (OntapConfig)
 

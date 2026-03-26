@@ -52,6 +52,14 @@ Golden repositories (source code clones) must be accessible at the same filesyst
 
 This section assumes you are setting up a new cluster with no existing CIDX Server data.
 
+Note: The `scripts/` directory contains automation scripts that perform many of these steps:
+- `scripts/cluster-join.sh` -- Automates joining a new node to an existing cluster
+- `scripts/cluster-migrate.sh` -- Automates SQLite-to-PostgreSQL data migration
+- `scripts/cluster-join-test.sh` -- Test harness for cluster join
+- `scripts/cluster-migrate-lib.sh` -- Shared library used by the scripts above
+
+These scripts can be used instead of the manual steps below.
+
 ### Step 1: Install and Configure PostgreSQL
 
 On the PostgreSQL host:
@@ -325,22 +333,13 @@ Edit `~/.cidx-server/config.json` with the same `postgres_dsn` as the other node
 
 Each node must have a distinct `node_id`. Duplicate node IDs cause heartbeat conflicts in the `cluster_nodes` table (the table has a PRIMARY KEY on `node_id`).
 
-### Step 2b: Copy JWT Secret from an Existing Node
+### Step 2b: JWT Secret Sharing
 
-All cluster nodes must share the same JWT signing secret so that authentication tokens issued by one node are accepted by all others. The secret is stored in `~/.cidx-server/.jwt_secret`.
+All cluster nodes must share the same JWT signing secret so that authentication tokens issued by one node are accepted by all others.
 
-Copy the secret from any existing cluster node:
+In PostgreSQL mode, JWT secret sharing is automatic. The `JWTSecretManager` stores the shared secret in the `cluster_secrets` PostgreSQL table. The first node to start generates the secret and writes it to PostgreSQL; subsequent nodes read it from the database. No manual file copying is required.
 
-```bash
-# On an existing node:
-cat ~/.cidx-server/.jwt_secret
-
-# On the new node, write the same value:
-echo 'the-secret-value-from-existing-node' > ~/.cidx-server/.jwt_secret
-chmod 600 ~/.cidx-server/.jwt_secret
-```
-
-If you skip this step, tokens created on other nodes will be rejected by the new node with "Authentication required" errors.
+Note: The file `~/.cidx-server/.jwt_secret` may still exist on each node as a local cache, but the authoritative source in cluster mode is the `cluster_secrets` table in PostgreSQL.
 
 ### Step 2c: Open Firewall Port
 
@@ -518,13 +517,14 @@ WHERE status = 'running'
 
 `config.json` has `storage_mode: "postgres"` but no `postgres_dsn` field. Add the `postgres_dsn` key with a valid connection string.
 
-**"Failed to initialize PostgreSQL backends: ... Falling back to SQLite"**
+**"FATAL: PostgreSQL configured but initialization failed: ... Refusing to start"**
 
-The server could not connect to PostgreSQL on startup. The error message in the log contains the underlying psycopg exception. Check:
+The server could not connect to PostgreSQL on startup and has refused to start (Bug #532 fail-fast behavior). The server process exits with a RuntimeError. The log message contains the underlying psycopg exception. Check:
 - PostgreSQL is running and reachable at the DSN host and port
 - The database user has `CONNECT` privilege on the database
 - Network firewalls allow the connection
-- The migrations have been applied (missing tables cause immediate errors on first backend use)
+- The `postgres_dsn` in config.json is correct (host, port, database name, credentials)
+- Migrations are applied automatically on startup, but if migration itself fails, the server also refuses to start
 
 **"psycopg (v3) is not installed; leader election is not available"**
 

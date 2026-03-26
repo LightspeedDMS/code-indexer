@@ -2,6 +2,8 @@
 
 This guide covers deploying and configuring the CIDX server for multi-user team collaboration with server-side performance optimizations.
 
+Note: This guide covers standalone (single-node) deployment with SQLite storage. For multi-node cluster deployment with PostgreSQL, see [Cluster Architecture](cluster-architecture.md) and [Cluster Setup Guide](cluster-setup.md).
+
 ## Overview
 
 CIDX server provides:

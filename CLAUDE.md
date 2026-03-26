@@ -443,6 +443,8 @@ development → staging → master
 - ~5ms cached vs ~1s disk
 - Auto-starts on first query when enabled
 
+**Server mode** is a separate deployment model described in `/docs/server-deployment.md`. In cluster configuration (`storage_mode: postgres`), multiple server nodes share a PostgreSQL database. See `/docs/cluster-architecture.md`.
+
 ---
 
 ## 3. Architecture Details
