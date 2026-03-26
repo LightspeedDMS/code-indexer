@@ -40,7 +40,7 @@ The binary distribution of psycopg includes the C extension and libpq. It is suf
 
 ### Load Balancer
 
-HAProxy or any HTTP load balancer that distributes requests across the node IP addresses on port 8000. The nodes do not need sticky sessions; all state is in the shared PostgreSQL database.
+HAProxy or any HTTP load balancer that distributes requests across the node IP addresses on port 8000. Session affinity (sticky sessions) is recommended: the Research Assistant feature runs Claude CLI in a background thread on the node that received the request, and poll responses are only available from that same node until the result is persisted to the database. Use HAProxy cookie-based affinity (`cookie SERVERID insert indirect nocache`) to pin a browser session to one node.
 
 ### Shared Storage
 
@@ -202,14 +202,17 @@ Add an HAProxy configuration for the CIDX Server backend. Each server line point
 ```
 backend cidx_servers
     balance roundrobin
-    option httpchk GET /health
-    server node-1 192.168.1.11:8000 check
-    server node-2 192.168.1.12:8000 check
+    option httpchk GET /docs
+    cookie SERVERID insert indirect nocache
+    server node-1 192.168.1.11:8000 check cookie node1
+    server node-2 192.168.1.12:8000 check cookie node2
 
 frontend cidx_frontend
     bind *:80
     default_backend cidx_servers
 ```
+
+The `cookie SERVERID insert indirect nocache` directive enables session affinity. Each node is assigned a cookie value (`node1`, `node2`). Once a client receives the cookie, subsequent requests are routed to the same node. This is required for the Research Assistant feature and recommended for consistent Web UI behavior.
 
 After adding all nodes, reload HAProxy:
 
