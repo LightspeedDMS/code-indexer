@@ -150,6 +150,20 @@ def execute(self) -> bool:
 
 ---
 
+## CRITICAL: DATABASE MIGRATIONS MUST BE BACKWARD COMPATIBLE
+
+**ALL database migrations (SQLite and PostgreSQL) MUST be backward compatible.** In a cluster, nodes are upgraded one at a time via rolling restarts. During the upgrade window, some nodes run old code while others run new code. Both must work against the same database schema.
+
+**Allowed migration operations**: `CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ADD COLUMN`, `CREATE INDEX IF NOT EXISTS`, adding new tables, adding new columns with defaults or NULLable.
+
+**NEVER in a migration**: `DROP TABLE`, `DROP COLUMN`, `RENAME TABLE`, `RENAME COLUMN`, `ALTER COLUMN TYPE` (changing type), removing NOT NULL constraints that old code depends on. If a column or table is no longer needed, leave it in place -- dead schema is harmless, broken old code is not.
+
+**Why**: MigrationRunner auto-runs on startup (Story #519). Each node applies new migrations before serving traffic. Old nodes that haven't restarted yet must still work against the migrated schema.
+
+*Recorded 2026-03-26 (Bug #534 analysis)*
+
+---
+
 ## CRITICAL: GOLDEN REPO VERSIONED PATH ARCHITECTURE
 
 **Versioned content is IMMUTABLE. NEVER modify files inside `.versioned/` directories.**
