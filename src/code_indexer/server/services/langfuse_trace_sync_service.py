@@ -6,12 +6,14 @@ to the filesystem using overlap window + content hash strategy to handle
 trace mutations.
 """
 
+import glob
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import socket
 import threading
 import time
 import uuid
@@ -144,10 +146,36 @@ class LangfuseTraceSyncService:
             logger.info("Langfuse trace sync service stopped")
 
     def get_metrics(self) -> Dict[str, dict]:
-        """Return per-project sync metrics for dashboard."""
+        """Return per-project sync metrics for dashboard.
+
+        Reads from persisted state files for cluster-wide visibility.
+        In-memory metrics are used as override for the local node's
+        most recent (possibly not yet persisted) data.
+        """
+        result: Dict[str, dict] = {}
+
+        # Read from state files (visible across cluster nodes)
+        try:
+            state_pattern = str(Path(self._data_dir) / "langfuse_sync_state_*.json")
+            for state_file in glob.glob(state_pattern):
+                try:
+                    state = json.loads(Path(state_file).read_text(encoding="utf-8"))
+                    saved_metrics = state.get("metrics")
+                    if saved_metrics:
+                        # Extract project name from filename stem
+                        fname = Path(state_file).stem  # langfuse_sync_state_ProjectName
+                        project = fname.replace("langfuse_sync_state_", "")
+                        result[project] = saved_metrics
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.debug("Skipping unreadable state file %s: %s", state_file, e)
+                    continue
+        except Exception as e:
+            logger.debug("Failed to read state files for cluster metrics: %s", e)
+
+        # Override with in-memory metrics for local node (fresher data)
         with self._lock:
-            return {
-                project: {
+            for project, m in self._metrics.items():
+                result[project] = {
                     "traces_checked": m.traces_checked,
                     "traces_written_new": m.traces_written_new,
                     "traces_written_updated": m.traces_written_updated,
@@ -156,8 +184,8 @@ class LangfuseTraceSyncService:
                     "last_sync_time": m.last_sync_time,
                     "last_sync_duration_ms": m.last_sync_duration_ms,
                 }
-                for project, m in self._metrics.items()
-            }
+
+        return result
 
     def trigger_sync(self) -> bool:
         """
@@ -484,6 +512,17 @@ class LangfuseTraceSyncService:
 
         state["last_sync_timestamp"] = now.isoformat()
         state["trace_hashes"] = pruned_hashes  # Finding 1: save pruned hashes
+        # Persist metrics in state file for cluster-wide visibility
+        state["metrics"] = {
+            "traces_checked": metrics.traces_checked,
+            "traces_written_new": metrics.traces_written_new,
+            "traces_written_updated": metrics.traces_written_updated,
+            "traces_unchanged": metrics.traces_unchanged,
+            "errors_count": metrics.errors_count,
+            "last_sync_time": metrics.last_sync_time,
+            "last_sync_duration_ms": metrics.last_sync_duration_ms,
+            "node_id": socket.gethostname(),
+        }
         self._save_sync_state(project_name, state)
 
         with self._lock:
