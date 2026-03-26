@@ -192,7 +192,14 @@ def make_lifespan(
             )
 
             metrics_db_path = Path(server_data_dir) / "data" / "api_metrics.db"
-            api_metrics_service.initialize(str(metrics_db_path))
+            # Story #531: Pass backend so metrics flow through PG in cluster mode
+            _api_backend = (
+                backend_registry.api_metrics if backend_registry is not None else None
+            )
+            api_metrics_service.initialize(
+                str(metrics_db_path),
+                storage_backend=_api_backend,
+            )
 
             logger.info(
                 f"ApiMetricsService initialized: {metrics_db_path}",

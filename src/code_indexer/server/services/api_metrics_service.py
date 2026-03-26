@@ -13,12 +13,13 @@ Timestamps older than 24 hours are automatically cleaned up.
 
 import logging
 import random
+import socket
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -54,20 +55,41 @@ class ApiMetricsService:
         self._conn_manager: Optional[DatabaseConnectionManager] = None
         self._insert_count = 0
         self._insert_count_lock = threading.Lock()
+        self._backend: Optional[Any] = None
+        self._node_id: Optional[str] = None
 
-    def initialize(self, db_path: str) -> None:
+    def initialize(
+        self,
+        db_path: str,
+        storage_backend: Optional[Any] = None,
+        node_id: Optional[str] = None,
+    ) -> None:
         """Initialize the database connection and create schema.
 
         Args:
-            db_path: Path to SQLite database file
+            db_path: Path to SQLite database file (used only when storage_backend is None)
+            storage_backend: Optional injected storage backend (e.g. ApiMetricsSqliteBackend
+                or ApiMetricsPostgresBackend). When provided, SQLite setup is skipped.
+            node_id: Optional cluster node identifier. Defaults to socket.gethostname()
+                when not provided.
 
         Raises:
-            ValueError: If db_path is None or empty
+            ValueError: If db_path is None or empty and no storage_backend is provided
 
         Note:
             Can be called multiple times safely (idempotent).
-            Creates the api_metrics table and index if they don't exist.
+            Creates the api_metrics table and index if they don't exist (SQLite-only mode).
         """
+        self._node_id = node_id or socket.gethostname()
+        self._backend = storage_backend
+
+        if storage_backend is not None:
+            logger.debug(
+                f"ApiMetricsService using injected storage backend "
+                f"(node_id={self._node_id!r})"
+            )
+            return
+
         if not db_path:
             raise ValueError("db_path must be a non-empty string")
 
@@ -91,7 +113,8 @@ class ApiMetricsService:
                 CREATE TABLE IF NOT EXISTS api_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     metric_type TEXT NOT NULL,
-                    timestamp TEXT NOT NULL
+                    timestamp TEXT NOT NULL,
+                    node_id TEXT
                 )
                 """
             )
@@ -103,6 +126,12 @@ class ApiMetricsService:
                 """
             )
 
+            # Migrate existing databases: add node_id column if missing
+            cursor.execute("PRAGMA table_info(api_metrics)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "node_id" not in columns:
+                cursor.execute("ALTER TABLE api_metrics ADD COLUMN node_id TEXT")
+
         self._conn_manager.execute_atomic(_do_schema)
 
         logger.debug(f"ApiMetricsService initialized with database: {db_path}")
@@ -113,6 +142,8 @@ class ApiMetricsService:
         Deletes all records with timestamps older than MAX_TIMESTAMP_AGE_SECONDS.
         Called automatically on each insert to keep the database size bounded.
         """
+        if self._backend is not None:
+            return  # Backend handles its own cleanup
         if not self._conn_manager:
             return
 
@@ -139,6 +170,21 @@ class ApiMetricsService:
             Uses retry logic with exponential backoff for database lock errors.
             Gracefully degrades (logs warning, no crash) if all retries fail.
         """
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Story #531: Backend delegation path (PG or SQLite via registry)
+        if self._backend is not None:
+            try:
+                self._backend.insert_metric(metric_type, now, self._node_id)
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-048",
+                        f"Failed to insert metric {metric_type} via backend: {e}",
+                    )
+                )
+            return
+
         if not self._conn_manager:
             logger.warning(
                 format_error_log(
@@ -148,15 +194,16 @@ class ApiMetricsService:
             )
             return
 
-        now = datetime.now(timezone.utc).isoformat()
+        node_id = self._node_id
 
         # Retry logic for database lock errors
         for attempt in range(MAX_RETRIES):
             try:
+
                 def _do_insert(conn: sqlite3.Connection) -> None:
                     conn.cursor().execute(
-                        "INSERT INTO api_metrics (metric_type, timestamp) VALUES (?, ?)",
-                        (metric_type, now),
+                        "INSERT INTO api_metrics (metric_type, timestamp, node_id) VALUES (?, ?, ?)",
+                        (metric_type, now, node_id),
                     )
 
                 self._conn_manager.execute_atomic(_do_insert)
@@ -199,24 +246,43 @@ class ApiMetricsService:
         """Record an other API call timestamp."""
         self._insert_metric("other_api")
 
-    def get_metrics(self, window_seconds: int = 60) -> Dict[str, int]:
+    def get_metrics(
+        self, window_seconds: int = 60, node_id: Optional[str] = None
+    ) -> Dict[str, int]:
         """Get metrics for the specified time window.
 
         Args:
             window_seconds: Time window in seconds. Default is 60 (1 minute).
                 Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
+            node_id: When provided, filter to metrics from this node only.
+                     When None, aggregate across all nodes.
 
         Returns:
             Dictionary with counts for each metric category within the window.
         """
+        _zeros: Dict[str, int] = {
+            "semantic_searches": 0,
+            "other_index_searches": 0,
+            "regex_searches": 0,
+            "other_api_calls": 0,
+        }
+
+        # Story #531: Backend delegation path
+        if self._backend is not None:
+            try:
+                return self._backend.get_metrics(window_seconds, node_id=node_id)  # type: ignore[no-any-return]
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "APP-GENERAL-049",
+                        f"Failed to get metrics via backend: {e}",
+                    )
+                )
+                return _zeros
+
         # Return zeros if not initialized
         if not self._conn_manager:
-            return {
-                "semantic_searches": 0,
-                "other_index_searches": 0,
-                "regex_searches": 0,
-                "other_api_calls": 0,
-            }
+            return _zeros
 
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=window_seconds)

@@ -1,5 +1,6 @@
 <!-- Story #69: Granular partial for API metrics data ONLY -->
-<!-- Story #503: Cluster-wide aggregation; per-node breakdown in cluster mode -->
+<!-- Story #503: Cluster-wide aggregation -->
+<!-- Story #531: Per-node card rows replacing table -->
 <article class="stat-card">
     <header>
         <h3>Semantic Searches</h3>
@@ -41,29 +42,43 @@
 </article>
 
 {% if is_cluster_mode and per_node_metrics %}
-<section class="cluster-node-metrics">
-    <h4>Per-Node Breakdown</h4>
-    <table>
-        <thead>
-            <tr>
-                <th>Node</th>
-                <th>Semantic</th>
-                <th>Other Index</th>
-                <th>Regex</th>
-                <th>Other API</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for entry in per_node_metrics %}
-            <tr>
-                <td>{{ entry.node_id }}</td>
-                <td>{{ entry.metrics.semantic_searches }}</td>
-                <td>{{ entry.metrics.other_index_searches }}</td>
-                <td>{{ entry.metrics.regex_searches }}</td>
-                <td>{{ entry.metrics.other_api_calls }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</section>
+{% for entry in per_node_metrics %}
+<div style="grid-column: 1 / -1; font-size: 0.75rem; color: #9ca3af; margin-top: 0.75rem; padding-left: 0.25rem;">{{ entry.node_id }}</div>
+<article class="stat-card">
+    <header>
+        <h3>Semantic Searches</h3>
+    </header>
+    <div class="stat-value">{{ entry.metrics.semantic_searches }}</div>
+    <footer>
+        <small>{{ entry.node_id }}</small>
+    </footer>
+</article>
+<article class="stat-card">
+    <header>
+        <h3>Other Index Searches</h3>
+    </header>
+    <div class="stat-value">{{ entry.metrics.other_index_searches }}</div>
+    <footer>
+        <small>{{ entry.node_id }}</small>
+    </footer>
+</article>
+<article class="stat-card">
+    <header>
+        <h3>Regex Searches</h3>
+    </header>
+    <div class="stat-value">{{ entry.metrics.regex_searches }}</div>
+    <footer>
+        <small>{{ entry.node_id }}</small>
+    </footer>
+</article>
+<article class="stat-card">
+    <header>
+        <h3>Other API Calls</h3>
+    </header>
+    <div class="stat-value">{{ entry.metrics.other_api_calls }}</div>
+    <footer>
+        <small>{{ entry.node_id }}</small>
+    </footer>
+</article>
+{% endfor %}
 {% endif %}

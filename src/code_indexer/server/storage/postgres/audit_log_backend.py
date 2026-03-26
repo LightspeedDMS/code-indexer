@@ -283,3 +283,21 @@ class AuditLogPostgresBackend:
                     params + [limit, offset],
                 )
                 return list(cur.fetchall())
+
+    def cleanup_old_logs(self, cutoff_iso: str) -> int:
+        """Delete audit log records older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; records before this are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with self._conn() as conn:
+            result = conn.execute(
+                "DELETE FROM audit_logs WHERE timestamp < %s",
+                (cutoff_iso,),
+            )
+            deleted = result.rowcount if result.rowcount else 0
+            conn.commit()
+        return deleted
