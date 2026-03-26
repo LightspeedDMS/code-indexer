@@ -997,6 +997,39 @@ class SyncJobsSqliteBackend:
             )
         return count
 
+    def cleanup_old_completed(self, cutoff_iso: str) -> int:
+        """Delete completed or failed sync jobs older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; jobs with completed_at before this
+                        value and status IN ('completed', 'failed') are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        total_deleted = 0
+
+        def operation(conn) -> int:
+            cursor = conn.execute(
+                """DELETE FROM sync_jobs
+                   WHERE rowid IN (
+                       SELECT rowid FROM sync_jobs
+                       WHERE completed_at < ?
+                         AND status IN ('completed', 'failed')
+                       LIMIT 1000
+                   )""",
+                (cutoff_iso,),
+            )
+            return cursor.rowcount  # type: ignore[no-any-return]
+
+        while True:
+            batch: int = self._conn_manager.execute_atomic(operation)
+            if batch == 0:
+                break
+            total_deleted += batch
+
+        return total_deleted
+
     def close(self) -> None:
         """Close database connections."""
         self._conn_manager.close_all()
@@ -5002,6 +5035,68 @@ class SelfMonitoringSqliteBackend:
 
         self._conn_manager.execute_atomic(_op)
 
+    def list_scans(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return scan history records, most recent first."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """
+            SELECT scan_id, started_at, completed_at, status,
+                   log_id_start, log_id_end, issues_created, error_message
+            FROM self_monitoring_scans
+            ORDER BY started_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        cols = [
+            "scan_id",
+            "started_at",
+            "completed_at",
+            "status",
+            "log_id_start",
+            "log_id_end",
+            "issues_created",
+            "error_message",
+        ]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def list_issues(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return issue records, most recent first."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            """
+            SELECT id, scan_id, github_issue_number, github_issue_url,
+                   classification, title, fingerprint,
+                   source_log_ids, source_files, created_at
+            FROM self_monitoring_issues
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        cols = [
+            "id",
+            "scan_id",
+            "github_issue_number",
+            "github_issue_url",
+            "classification",
+            "title",
+            "fingerprint",
+            "source_log_ids",
+            "source_files",
+            "created_at",
+        ]
+        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+    def get_running_scan_count(self) -> int:
+        """Return count of scans where completed_at IS NULL."""
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM self_monitoring_scans WHERE completed_at IS NULL"
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
     def close(self) -> None:
         """Close the DatabaseConnectionManager connection."""
         self._conn_manager.close_all()
@@ -5240,6 +5335,106 @@ class WikiCacheSqliteBackend:
             )
 
         self._conn_manager.execute_atomic(_op)
+
+    def close(self) -> None:
+        """Close the DatabaseConnectionManager connection."""
+        self._conn_manager.close_all()
+
+
+class MaintenanceSqliteBackend:
+    """
+    SQLite backend for maintenance mode state storage (Story #529).
+
+    Satisfies the MaintenanceBackend Protocol.
+    Uses the main cidx_server.db with a single-row maintenance_state table.
+
+    In standalone (SQLite) mode the MaintenanceService reads this table so
+    maintenance state survives server restarts. In cluster (PostgreSQL) mode
+    the MaintenancePostgresBackend provides cross-node coordination.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend.
+
+        Args:
+            db_path: Path to SQLite database file (cidx_server.db).
+        """
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create maintenance_state table if it does not already exist."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    reason TEXT,
+                    started_at TEXT,
+                    started_by TEXT
+                )
+                """
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def enter_maintenance(self, started_by: str, reason: str, started_at: str) -> None:
+        """Persist maintenance mode as active (upsert single row).
+
+        Args:
+            started_by: Username or identifier of who activated maintenance mode.
+            reason: Human-readable reason for entering maintenance mode.
+            started_at: ISO 8601 timestamp when maintenance mode was activated.
+        """
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO maintenance_state
+                    (id, enabled, reason, started_at, started_by)
+                VALUES (1, 1, ?, ?, ?)
+                """,
+                (reason, started_at, started_by),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def exit_maintenance(self) -> None:
+        """Mark maintenance mode as inactive."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute("UPDATE maintenance_state SET enabled = 0 WHERE id = 1")
+
+        self._conn_manager.execute_atomic(_op)
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return current maintenance state dict.
+
+        Returns:
+            Dict with keys: enabled (bool), reason, started_at, started_by.
+            enabled is False when no row exists or row has enabled=0.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT enabled, reason, started_at, started_by FROM maintenance_state WHERE id = 1"
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return {
+                "enabled": False,
+                "reason": None,
+                "started_at": None,
+                "started_by": None,
+            }
+        return {
+            "enabled": bool(row[0]),
+            "reason": row[1],
+            "started_at": row[2],
+            "started_by": row[3],
+        }
 
     def close(self) -> None:
         """Close the DatabaseConnectionManager connection."""

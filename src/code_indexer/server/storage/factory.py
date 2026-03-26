@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         GoldenRepoMetadataBackend,
         GroupsBackend,
         LogsBackend,
+        MaintenanceBackend,
         NodeMetricsBackend,
         OAuthBackend,
         PayloadCacheBackend,
@@ -95,6 +96,7 @@ class BackendRegistry:
     wiki_cache: "WikiCacheBackend"
     self_monitoring: "SelfMonitoringBackend"
     diagnostics: "DiagnosticsBackend"
+    maintenance: "MaintenanceBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +161,7 @@ class StorageFactory:
             GlobalReposSqliteBackend,
             GoldenRepoMetadataSqliteBackend,
             LogsSqliteBackend,
+            MaintenanceSqliteBackend,
             NodeMetricsSqliteBackend,
             OAuthSqliteBackend,
             PayloadCacheSqliteBackend,
@@ -218,6 +221,7 @@ class StorageFactory:
             wiki_cache=WikiCacheSqliteBackend(db_path),
             self_monitoring=SelfMonitoringSqliteBackend(db_path),
             diagnostics=DiagnosticsSqliteBackend(db_path),
+            maintenance=MaintenanceSqliteBackend(db_path),
         )
 
     # ------------------------------------------------------------------
@@ -316,6 +320,9 @@ class StorageFactory:
         from code_indexer.server.storage.postgres.diagnostics_backend import (
             DiagnosticsPostgresBackend,
         )
+        from code_indexer.server.storage.postgres.maintenance_backend import (
+            MaintenancePostgresBackend,
+        )
 
         dsn = config["postgres_dsn"]
         pool = ConnectionPool(dsn)
@@ -348,4 +355,5 @@ class StorageFactory:
             wiki_cache=WikiCachePostgresBackend(pool),
             self_monitoring=SelfMonitoringPostgresBackend(pool),
             diagnostics=DiagnosticsPostgresBackend(pool),
+            maintenance=MaintenancePostgresBackend(pool),
         )

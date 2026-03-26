@@ -59,10 +59,11 @@ class AuditLogService:
     # ------------------------------------------------------------------
 
     def _get_connection(self) -> sqlite3.Connection:
-        return self._conn_manager.get_connection()
+        return self._conn_manager.get_connection()  # type: ignore[no-any-return]
 
     def _ensure_schema(self) -> None:
         """Create audit_logs table and indexes if they don't exist."""
+
         def _do_schema(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
             cursor.execute(
@@ -139,6 +140,7 @@ class AuditLogService:
         details: Optional[str] = None,
     ) -> None:
         """Insert an audit entry with an explicit timestamp (for migration use)."""
+
         def _do_log_raw(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
@@ -205,10 +207,8 @@ class AuditLogService:
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
-        cursor.execute(
-            f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params
-        )
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
+        cursor.execute(f"SELECT COUNT(*) AS cnt FROM audit_logs {where}", params)
         total = cursor.fetchone()["cnt"]
 
         query_sql = f"""
@@ -261,7 +261,7 @@ class AuditLogService:
 
         where = "WHERE " + " AND ".join(conditions)
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             f"""
             SELECT id, timestamp, admin_id, action_type, target_type,
@@ -304,7 +304,7 @@ class AuditLogService:
 
         where = "WHERE " + " AND ".join(conditions)
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             f"""
             SELECT id, timestamp, admin_id, action_type, target_type,
@@ -318,10 +318,39 @@ class AuditLogService:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def cleanup_old_logs(self, cutoff_iso: str) -> int:
+        """Delete audit log records older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; records with timestamp before
+                        this value are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        total_deleted = 0
+        while True:
+            batch: List[int] = [0]
+
+            def _do_batch(conn: sqlite3.Connection) -> None:
+                conn.execute(
+                    "DELETE FROM audit_logs WHERE rowid IN "
+                    "(SELECT rowid FROM audit_logs WHERE timestamp < ? LIMIT 1000)",
+                    (cutoff_iso,),
+                )
+                batch[0] = conn.execute("SELECT changes()").fetchone()[0]
+
+            self._conn_manager.execute_atomic(_do_batch)
+            if batch[0] == 0:
+                break
+            total_deleted += batch[0]
+        return total_deleted
+
 
 # ---------------------------------------------------------------------------
 # Flat-file migration (AC4)
 # ---------------------------------------------------------------------------
+
 
 def _extract_actor(entry: dict) -> str:
     """Derive admin_id from a migrated flat-file entry."""
@@ -345,7 +374,9 @@ def _extract_target_id(entry: dict) -> str:
         return str(entry.get("repo_path") or "unknown")
     # Impersonation: target is the impersonated user
     if event_type in ("impersonation_set", "impersonation_cleared"):
-        return str(entry.get("target_username") or entry.get("previous_target") or "unknown")
+        return str(
+            entry.get("target_username") or entry.get("previous_target") or "unknown"
+        )
     # Auth events: use username or email
     for key in ("username", "actor_username", "email"):
         if entry.get(key):
@@ -402,7 +433,9 @@ def migrate_flat_file_to_sqlite(
 
                 actor = _extract_actor(entry)
                 target_id = _extract_target_id(entry)
-                timestamp = entry.get("timestamp") or datetime.now(timezone.utc).isoformat()
+                timestamp = (
+                    entry.get("timestamp") or datetime.now(timezone.utc).isoformat()
+                )
                 details = json.dumps(entry)
 
                 # All PasswordChangeAuditLogger events use target_type="auth" by design.

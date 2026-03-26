@@ -266,6 +266,18 @@ class SyncJobsBackend(Protocol):
 
     def cleanup_orphaned_jobs_on_startup(self) -> int: ...
 
+    def cleanup_old_completed(self, cutoff_iso: str) -> int:
+        """Delete completed or failed sync jobs older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; jobs with completed_at before
+                        this value and status IN ('completed', 'failed') are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        ...
+
     def close(self) -> None: ...
 
 
@@ -426,6 +438,18 @@ class DependencyMapTrackingBackend(Protocol):
     def record_run_metrics(self, metrics: Dict[str, Any]) -> None: ...
 
     def get_run_history(self, limit: int = 5) -> List[Dict[str, Any]]: ...
+
+    def cleanup_old_history(self, cutoff_iso: str) -> int:
+        """Delete dependency_map_run_history records older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; records with timestamp before
+                        this value are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        ...
 
     def close(self) -> None: ...
 
@@ -628,6 +652,18 @@ class AuditLogBackend(Protocol):
         limit: int = 100,
         offset: int = 0,
     ) -> List[dict]: ...
+
+    def cleanup_old_logs(self, cutoff_iso: str) -> int:
+        """Delete audit log records older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; records with timestamp before
+                        this value are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -1385,6 +1421,39 @@ class SelfMonitoringBackend(Protocol):
         """Persist issue metadata in self_monitoring_issues."""
         ...
 
+    def list_scans(self, limit: int = 50) -> "List[Dict[str, Any]]":
+        """Return scan history records, most recent first.
+
+        Args:
+            limit: Maximum number of records to return.
+
+        Returns:
+            List of dicts with keys: scan_id, started_at, completed_at, status,
+            log_id_start, log_id_end, issues_created, error_message.
+        """
+        ...
+
+    def list_issues(self, limit: int = 100) -> "List[Dict[str, Any]]":
+        """Return issue records, most recent first.
+
+        Args:
+            limit: Maximum number of records to return.
+
+        Returns:
+            List of dicts with keys: id, scan_id, github_issue_number,
+            github_issue_url, classification, title, fingerprint,
+            source_log_ids, source_files, created_at.
+        """
+        ...
+
+    def get_running_scan_count(self) -> int:
+        """Return count of scans where completed_at IS NULL (currently running).
+
+        Returns:
+            Integer count of running scans.
+        """
+        ...
+
     def close(self) -> None:
         """Close the backend and release any held resources."""
         ...
@@ -1463,6 +1532,52 @@ class WikiCacheBackend(Protocol):
         self, repo_alias: str, article_path: str, views: int, now: str
     ) -> None:
         """Insert initial view count (INSERT OR IGNORE)."""
+        ...
+
+    def close(self) -> None:
+        """Close the backend and release any held resources."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# MaintenanceBackend (Story #529)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class MaintenanceBackend(Protocol):
+    """Protocol for maintenance mode state storage (Story #529).
+
+    Provides cluster-wide coordination of maintenance mode by persisting
+    state to the shared storage backend (PostgreSQL in cluster mode,
+    SQLite in standalone mode).
+
+    Satisfies PEP 544 structural subtyping: any class implementing all of
+    these methods is accepted as a MaintenanceBackend without inheritance.
+    """
+
+    def enter_maintenance(self, started_by: str, reason: str, started_at: str) -> None:
+        """Persist maintenance mode as active.
+
+        Args:
+            started_by: Username or identifier of who activated maintenance mode.
+            reason: Human-readable reason for entering maintenance mode.
+            started_at: ISO 8601 timestamp when maintenance mode was activated.
+        """
+        ...
+
+    def exit_maintenance(self) -> None:
+        """Mark maintenance mode as inactive (disable it)."""
+        ...
+
+    def get_status(self) -> "Optional[Dict[str, Any]]":
+        """Return current maintenance state.
+
+        Returns:
+            Dict with keys: enabled (bool), reason (str or None),
+            started_at (str or None), started_by (str or None).
+            Always returns a dict (never None); enabled=False when inactive.
+        """
         ...
 
     def close(self) -> None:
