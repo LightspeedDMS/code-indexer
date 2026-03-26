@@ -146,6 +146,29 @@ def initialize_services() -> Dict[str, Any]:
                 raise ValueError("postgres_dsn required when storage_mode=postgres")
             from code_indexer.server.storage.factory import StorageFactory
 
+            # Story #519 AC4: Auto-run SQL schema migrations before creating backends
+            # Schema must exist before StorageFactory creates PG backend instances.
+            try:
+                from code_indexer.server.storage.postgres.migrations.runner import (
+                    MigrationRunner,
+                )
+
+                _migration_runner = MigrationRunner(_postgres_dsn)
+                _migrations_applied = _migration_runner.run()
+                if _migrations_applied > 0:
+                    logger.info(
+                        f"Applied {_migrations_applied} SQL schema migration(s)",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+            except Exception as _mig_err:
+                # AC5: Fail-fast — schema must be ready for PG mode
+                logger.error(
+                    f"FATAL: PostgreSQL schema migration failed: {_mig_err}. "
+                    "Server cannot start in cluster mode without a valid schema.",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                raise
+
             _backend_registry = StorageFactory.create_backends(
                 config=_raw_config,
                 data_dir=data_dir,
