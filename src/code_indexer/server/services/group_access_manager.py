@@ -109,19 +109,25 @@ class GroupAccessManager:
     - Records assignment metadata (who assigned, when)
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, storage_backend: Any = None):
         """
         Initialize the GroupAccessManager.
 
         Args:
-            db_path: Path to the SQLite database file for groups
+            db_path:          Path to the SQLite database file for groups
+            storage_backend:  Optional backend implementing GroupsBackend protocol.
+                              When provided (PG mode), all DB operations delegate to it.
         """
-        self.db_path = Path(db_path)
-        self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
         # Bug #338: Callbacks invoked after any repo access change (grant or revoke)
         self._on_repo_change_callbacks: List[Callable[[], None]] = []
         # Story #399: Optional AuditLogService delegation
         self._audit_service: Optional["AuditLogService"] = None
+        self._backend = storage_backend
+        if self._backend is not None:
+            # PG mode: backend owns its own schema and bootstrap; skip SQLite init
+            return
+        self.db_path = Path(db_path)
+        self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
         self._ensure_schema()
         self._bootstrap_default_groups()
 
@@ -164,10 +170,11 @@ class GroupAccessManager:
         # DatabaseConnectionManager sets PRAGMA foreign_keys = ON internally,
         # but we re-execute here to ensure it is active on this thread-local connection.
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        return conn  # type: ignore[no-any-return]
 
     def _ensure_schema(self) -> None:
         """Create database tables if they don't exist."""
+
         def _do_schema(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
 
@@ -316,9 +323,11 @@ class GroupAccessManager:
             - Default groups first (is_default DESC)
             - Then by name alphabetically (name ASC)
         """
+        if self._backend is not None:
+            return self._backend.get_all_groups()  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         # AC9: Sort default groups first, then custom groups by name
         cursor.execute("SELECT * FROM groups ORDER BY is_default DESC, name ASC")
         rows = cursor.fetchall()
@@ -334,9 +343,11 @@ class GroupAccessManager:
         Returns:
             Group object if found, None otherwise
         """
+        if self._backend is not None:
+            return self._backend.get_group(group_id)  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute("SELECT * FROM groups WHERE id = ?", (group_id,))
         row = cursor.fetchone()
         return self._row_to_group(row) if row else None
@@ -351,9 +362,11 @@ class GroupAccessManager:
         Returns:
             Group object if found, None otherwise
         """
+        if self._backend is not None:
+            return self._backend.get_group_by_name(name)  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute("SELECT * FROM groups WHERE LOWER(name) = LOWER(?)", (name,))
         row = cursor.fetchone()
         return self._row_to_group(row) if row else None
@@ -374,6 +387,8 @@ class GroupAccessManager:
         Raises:
             ValueError: If a group with the same name already exists (case-insensitive)
         """
+        if self._backend is not None:
+            return self._backend.create_group(name, description)  # type: ignore[no-any-return]
         now = datetime.now(timezone.utc).isoformat()
         result: dict = {}
 
@@ -428,6 +443,10 @@ class GroupAccessManager:
         Raises:
             ValueError: If attempting to update a default group or duplicate name
         """
+        if self._backend is not None:
+            return self._backend.update_group(  # type: ignore[no-any-return]
+                group_id, name=name, description=description
+            )
         # First check if group exists
         group = self.get_group(group_id)
         if group is None:
@@ -495,11 +514,13 @@ class GroupAccessManager:
             DefaultGroupCannotBeDeletedError: If attempting to delete a default group (AC5)
             GroupHasUsersError: If the group has users assigned (AC6)
         """
+        if self._backend is not None:
+            return self._backend.delete_group(group_id)  # type: ignore[no-any-return]
         result: dict = {"deleted": False}
 
         def _do_delete(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
-            cursor.row_factory = sqlite3.Row
+            cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
 
             # Check if group exists - WITHIN the transaction
             cursor.execute("SELECT * FROM groups WHERE id = ?", (group_id,))
@@ -543,7 +564,7 @@ class GroupAccessManager:
             result["deleted"] = True
 
         self._conn_manager.execute_atomic(_do_delete)
-        return result["deleted"]
+        return result["deleted"]  # type: ignore[no-any-return]
 
     def assign_user_to_group(
         self, user_id: str, group_id: int, assigned_by: str
@@ -559,6 +580,9 @@ class GroupAccessManager:
             group_id: The target group's ID
             assigned_by: The admin user ID who made the assignment
         """
+        if self._backend is not None:
+            self._backend.assign_user_to_group(user_id, group_id, assigned_by)
+            return
         now = datetime.now(timezone.utc).isoformat()
 
         def _do_assign(conn: sqlite3.Connection) -> None:
@@ -591,6 +615,9 @@ class GroupAccessManager:
         Returns:
             True if operation succeeded (user removed or wasn't in that group)
         """
+        if self._backend is not None:
+            return self._backend.remove_user_from_group(user_id, group_id)  # type: ignore[no-any-return]
+
         def _do_remove(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
             # Only delete if user is actually in this specific group
@@ -615,9 +642,11 @@ class GroupAccessManager:
         Returns:
             The Group the user belongs to, or None if not assigned
         """
+        if self._backend is not None:
+            return self._backend.get_user_group(user_id)  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             """
             SELECT g.* FROM groups g
@@ -639,9 +668,11 @@ class GroupAccessManager:
         Returns:
             GroupMembership object if found, None otherwise
         """
+        if self._backend is not None:
+            return self._backend.get_user_membership(user_id)  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT * FROM user_group_membership WHERE user_id = ?", (user_id,)
         )
@@ -652,9 +683,7 @@ class GroupAccessManager:
 
         assigned_at_str = row["assigned_at"]
         if isinstance(assigned_at_str, str):
-            assigned_at = datetime.fromisoformat(
-                assigned_at_str.replace("Z", "+00:00")
-            )
+            assigned_at = datetime.fromisoformat(assigned_at_str.replace("Z", "+00:00"))
         else:
             assigned_at = assigned_at_str
 
@@ -675,9 +704,11 @@ class GroupAccessManager:
         Returns:
             List of user IDs in the group
         """
+        if self._backend is not None:
+            return self._backend.get_users_in_group(group_id)  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT user_id FROM user_group_membership WHERE group_id = ?",
             (group_id,),
@@ -695,9 +726,11 @@ class GroupAccessManager:
         Returns:
             Number of users in the group
         """
+        if self._backend is not None:
+            return self._backend.get_user_count_in_group(group_id)  # type: ignore[no-any-return]
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT COUNT(*) as count FROM user_group_membership WHERE group_id = ?",
             (group_id,),
@@ -724,6 +757,12 @@ class GroupAccessManager:
         Raises:
             ValueError: If the group does not exist
         """
+        if self._backend is not None:
+            granted = self._backend.grant_repo_access(repo_name, group_id, granted_by)
+            if granted:
+                for cb in self._on_repo_change_callbacks:
+                    cb()
+            return granted  # type: ignore[no-any-return]
         # Validate group exists
         group = self.get_group(group_id)
         if group is None:
@@ -750,7 +789,7 @@ class GroupAccessManager:
         if result["granted"]:
             for cb in self._on_repo_change_callbacks:
                 cb()
-        return result["granted"]
+        return result["granted"]  # type: ignore[no-any-return]
 
     def revoke_repo_access(self, repo_name: str, group_id: int) -> bool:
         """
@@ -789,7 +828,7 @@ class GroupAccessManager:
         if result["revoked"]:
             for cb in self._on_repo_change_callbacks:
                 cb()
-        return result["revoked"]
+        return result["revoked"]  # type: ignore[no-any-return]
 
     def get_group_repos(self, group_id: int) -> List[str]:
         """
@@ -805,7 +844,7 @@ class GroupAccessManager:
         """
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             """
             SELECT repo_name FROM repo_group_access
@@ -839,7 +878,7 @@ class GroupAccessManager:
 
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             """
             SELECT g.* FROM groups g
@@ -867,7 +906,7 @@ class GroupAccessManager:
         """
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             """
             SELECT * FROM repo_group_access
@@ -882,9 +921,7 @@ class GroupAccessManager:
 
         granted_at_str = row["granted_at"]
         if isinstance(granted_at_str, str):
-            granted_at = datetime.fromisoformat(
-                granted_at_str.replace("Z", "+00:00")
-            )
+            granted_at = datetime.fromisoformat(granted_at_str.replace("Z", "+00:00"))
         else:
             granted_at = granted_at_str
 
@@ -937,7 +974,7 @@ class GroupAccessManager:
         """
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
 
         # Get total count first
         cursor.execute("SELECT COUNT(*) as count FROM user_group_membership")
@@ -992,7 +1029,7 @@ class GroupAccessManager:
         """
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
         cursor.execute(
             "SELECT 1 FROM user_group_membership WHERE user_id = ?",
             (user_id,),
@@ -1080,7 +1117,7 @@ class GroupAccessManager:
             Tuple of (list of log dicts, total count)
         """
         if self._audit_service is not None:
-            return self._audit_service.query(
+            return self._audit_service.query(  # type: ignore[no-any-return]
                 action_type=action_type,
                 target_type=target_type,
                 admin_id=admin_id,
@@ -1093,7 +1130,7 @@ class GroupAccessManager:
 
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.row_factory = sqlite3.Row
+        cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
 
         # Build WHERE clause
         conditions: list[str] = []

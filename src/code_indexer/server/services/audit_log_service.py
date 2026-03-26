@@ -49,7 +49,11 @@ class AuditLogService:
     safe to initialise alongside GroupAccessManager.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, storage_backend: Any = None) -> None:
+        self._backend = storage_backend
+        if self._backend is not None:
+            # PG mode: backend owns its own schema; skip SQLite init
+            return
         self._db_path = db_path
         self._conn_manager = DatabaseConnectionManager.get_instance(str(db_path))
         self._ensure_schema()
@@ -116,6 +120,15 @@ class AuditLogService:
             target_id:   Identifier of the specific target.
             details:     Optional JSON string with extra event data.
         """
+        if self._backend is not None:
+            self._backend.log(
+                admin_id=admin_id,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=target_id,
+                details=details,
+            )
+            return
         now = datetime.now(timezone.utc).isoformat()
 
         def _do_log(conn: sqlite3.Connection) -> None:
@@ -140,6 +153,16 @@ class AuditLogService:
         details: Optional[str] = None,
     ) -> None:
         """Insert an audit entry with an explicit timestamp (for migration use)."""
+        if self._backend is not None:
+            self._backend.log_raw(
+                timestamp=timestamp,
+                admin_id=admin_id,
+                action_type=action_type,
+                target_type=target_type,
+                target_id=target_id,
+                details=details,
+            )
+            return
 
         def _do_log_raw(conn: sqlite3.Connection) -> None:
             conn.execute(
@@ -181,6 +204,18 @@ class AuditLogService:
         Returns:
             (list_of_dicts, total_matching_count)
         """
+        if self._backend is not None:
+            return self._backend.query(  # type: ignore[no-any-return]
+                action_type=action_type,
+                target_type=target_type,
+                admin_id=admin_id,
+                date_from=date_from,
+                date_to=date_to,
+                exclude_target_type=exclude_target_type,
+                limit=limit,
+                offset=offset,
+            )
+
         conn = self._get_connection()
         conditions: List[str] = []
         params: List[Any] = []
@@ -250,6 +285,12 @@ class AuditLogService:
         Returns:
             List of audit log dicts (newest first).
         """
+        if self._backend is not None:
+            return self._backend.get_pr_logs(  # type: ignore[no-any-return]
+                repo_alias=repo_alias,
+                limit=limit,
+                offset=offset,
+            )
         conn = self._get_connection()
         placeholders = ",".join("?" * len(_PR_ACTION_TYPES))
         conditions = [f"action_type IN ({placeholders})"]
@@ -294,6 +335,12 @@ class AuditLogService:
         Returns:
             List of audit log dicts (newest first).
         """
+        if self._backend is not None:
+            return self._backend.get_cleanup_logs(  # type: ignore[no-any-return]
+                repo_path=repo_path,
+                limit=limit,
+                offset=offset,
+            )
         conn = self._get_connection()
         conditions = ["action_type = ?"]
         params: List[Any] = [_CLEANUP_ACTION_TYPE]
@@ -328,6 +375,8 @@ class AuditLogService:
         Returns:
             Number of rows deleted.
         """
+        if self._backend is not None:
+            return self._backend.cleanup_old_logs(cutoff_iso)  # type: ignore[no-any-return]
         total_deleted = 0
         while True:
             batch: List[int] = [0]

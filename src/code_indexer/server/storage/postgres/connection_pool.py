@@ -42,7 +42,7 @@ class ConnectionPool:
     """
 
     def __init__(
-        self, connection_string: str, min_size: int = 1, max_size: int = 5
+        self, connection_string: str, min_size: int = 1, max_size: int = 20
     ) -> None:
         """
         Initialize the connection pool.

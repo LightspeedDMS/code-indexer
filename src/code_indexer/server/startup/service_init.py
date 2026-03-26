@@ -178,12 +178,18 @@ def initialize_services() -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         except Exception as _e:
-            logger.error(
-                f"Failed to initialize PostgreSQL backends: {_e}. Falling back to SQLite.",
+            # Bug #532: NEVER silently fall back to SQLite when postgres is
+            # explicitly configured.  A cluster node running on local SQLite
+            # would diverge from the shared PG state within minutes.
+            logger.critical(
+                f"FATAL: PostgreSQL configured but initialization failed: {_e}. "
+                "Refusing to start — cluster mode requires a working PostgreSQL connection. "
+                "Fix the connection or change storage_mode to 'sqlite' in config.json.",
                 extra={"correlation_id": get_correlation_id()},
             )
-            _storage_mode = "sqlite"
-            _backend_registry = None
+            raise RuntimeError(
+                f"PostgreSQL initialization failed (storage_mode=postgres): {_e}"
+            ) from _e
     else:
         from code_indexer.server.storage.factory import StorageFactory
 

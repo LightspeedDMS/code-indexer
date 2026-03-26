@@ -79,6 +79,7 @@ class CITokenManager:
         server_dir_path: Optional[str] = None,
         use_sqlite: bool = False,
         db_path: Optional[str] = None,
+        storage_backend: Optional[Any] = None,
     ):
         """
         Initialize the token manager.
@@ -88,8 +89,11 @@ class CITokenManager:
                            Defaults to ~/.cidx-server
             use_sqlite: If True, use SQLite backend instead of JSON file (Story #702)
             db_path: Path to SQLite database file (required when use_sqlite=True)
+            storage_backend: Optional CITokensBackend for delegation
+                             (used in PG/cluster mode, Bug #532). When set,
+                             use_sqlite and db_path are ignored and the
+                             provided backend is used directly.
         """
-        self._use_sqlite = use_sqlite
         self._sqlite_backend: Optional[Any] = None
 
         if server_dir_path:
@@ -99,7 +103,12 @@ class CITokenManager:
 
         self._encryption_key = self._derive_encryption_key()
 
-        if use_sqlite:
+        if storage_backend is not None:
+            # PG/cluster mode: use the provided backend directly via existing plumbing
+            self._use_sqlite = True
+            self._sqlite_backend = storage_backend
+        elif use_sqlite:
+            self._use_sqlite = True
             if db_path is None:
                 raise ValueError("db_path is required when use_sqlite=True")
             from code_indexer.server.storage.sqlite_backends import (
@@ -108,6 +117,7 @@ class CITokenManager:
 
             self._sqlite_backend = CITokensSqliteBackend(db_path)
         else:
+            self._use_sqlite = False
             # JSON file storage (backward compatible)
             self.token_file = self.server_dir / "ci_tokens.json"
 

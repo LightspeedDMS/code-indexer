@@ -92,16 +92,17 @@ def test_try_acquire_stores_dedicated_connection():
 
 def test_try_acquire_sets_autocommit():
     """
-    AC1: autocommit must be set to True so the advisory lock persists
-    beyond transaction boundaries.
+    AC1: autocommit must be passed as True to psycopg.connect() so the
+    advisory lock persists beyond transaction boundaries.
     """
     service = _make_service()
     conn = _make_conn(advisory_result=True)
 
-    with patch("psycopg.connect", return_value=conn):
+    with patch("psycopg.connect", return_value=conn) as mock_connect:
         service.try_acquire_leadership()
 
-    assert conn.autocommit is True
+    _, kwargs = mock_connect.call_args
+    assert kwargs.get("autocommit") is True
 
 
 def test_try_acquire_executes_correct_sql():

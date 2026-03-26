@@ -232,54 +232,58 @@ class TestPostgresModeIncludesPostgreSQLHealth:
         assert pg_result.checks["read"].passed
 
 
-class TestPostgresModeKeepsLocalOnlyDatabases:
+class TestAllDatabasesMigratedToPostgres:
     """
-    Databases not in POSTGRES_MIGRATED_DATABASES must remain in postgres mode results.
-
-    Local-only databases: oauth.db, refresh_tokens.db, scip_audit.db
+    Bug #532: All databases are now migrated to PostgreSQL.
+    oauth.db, refresh_tokens.db, scip_audit.db were previously local-only
+    (Story #505) but are now PG-backed via storage abstraction layer.
     """
 
-    def test_local_only_databases_present_in_postgres_mode(self, tmp_path):
-        """
-        Story #505: oauth.db, refresh_tokens.db and scip_audit.db are
-        NOT migrated to PostgreSQL and must still appear in postgres mode.
-        """
+    def test_all_databases_are_postgres_migrated(self):
+        """Every database in DATABASE_DISPLAY_NAMES is in POSTGRES_MIGRATED_DATABASES."""
         local_only_dbs = (
             set(DATABASE_DISPLAY_NAMES.keys()) - POSTGRES_MIGRATED_DATABASES
         )
-        assert local_only_dbs, "There should be local-only databases"
+        assert not local_only_dbs, f"All databases should be PG-migrated, but found local-only: {local_only_dbs}"
 
+    def test_postgres_mode_skips_all_sqlite_checks(self, tmp_path):
+        """In postgres mode, no SQLite health checks are performed — only PG check."""
         service = DatabaseHealthService(
             server_dir=str(tmp_path),
             storage_mode="postgres",
             postgres_dsn=None,
         )
 
-        with patch.object(
-            DatabaseHealthService,
-            "check_database_health",
-            side_effect=_make_mock_health_result,
+        with (
+            patch.object(
+                DatabaseHealthService,
+                "check_database_health",
+                side_effect=_make_mock_health_result,
+            ),
+            patch.object(
+                DatabaseHealthService,
+                "_check_postgresql_health",
+                return_value=_make_mock_health_result("postgresql", "PostgreSQL"),
+            ),
         ):
             results = service.get_all_database_health()
 
         result_file_names = {r.file_name for r in results}
+        assert result_file_names == {
+            "postgresql"
+        }, f"In PG mode, only PostgreSQL check should run, got: {result_file_names}"
 
-        for local_db in local_only_dbs:
-            assert (
-                local_db in result_file_names
-            ), f"Local-only database '{local_db}' must remain in postgres mode results"
+    def test_oauth_db_is_postgres_migrated(self):
+        """oauth.db is now in POSTGRES_MIGRATED_DATABASES."""
+        assert "oauth.db" in POSTGRES_MIGRATED_DATABASES
 
-    def test_oauth_db_is_local_only(self):
-        """oauth.db is a local-only database - not in POSTGRES_MIGRATED_DATABASES."""
-        assert "oauth.db" not in POSTGRES_MIGRATED_DATABASES
+    def test_refresh_tokens_db_is_postgres_migrated(self):
+        """refresh_tokens.db is now in POSTGRES_MIGRATED_DATABASES."""
+        assert "refresh_tokens.db" in POSTGRES_MIGRATED_DATABASES
 
-    def test_refresh_tokens_db_is_local_only(self):
-        """refresh_tokens.db is local-only - not in POSTGRES_MIGRATED_DATABASES."""
-        assert "refresh_tokens.db" not in POSTGRES_MIGRATED_DATABASES
-
-    def test_scip_audit_db_is_local_only(self):
-        """scip_audit.db is local-only - not in POSTGRES_MIGRATED_DATABASES."""
-        assert "scip_audit.db" not in POSTGRES_MIGRATED_DATABASES
+    def test_scip_audit_db_is_postgres_migrated(self):
+        """scip_audit.db is now in POSTGRES_MIGRATED_DATABASES."""
+        assert "scip_audit.db" in POSTGRES_MIGRATED_DATABASES
 
 
 class TestSingletonStorageMode:

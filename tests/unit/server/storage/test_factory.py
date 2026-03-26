@@ -133,6 +133,10 @@ class TestSQLiteModeNoKey:
         registry = StorageFactory.create_backends(config={}, data_dir=data_dir)
 
         for field in dataclasses.fields(registry):
+            # Skip optional fields that are intentionally None in SQLite mode
+            # (e.g. connection_pool, which is only set in PostgreSQL mode).
+            if field.default is None:
+                continue
             value = getattr(registry, field.name)
             assert value is not None, f"Field {field.name!r} is None"
 

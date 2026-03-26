@@ -276,7 +276,12 @@ def make_lifespan(
             from code_indexer.server.auth.audit_logger import password_audit_logger
 
             groups_db_path = Path(server_data_dir) / "groups.db"
-            group_manager = GroupAccessManager(groups_db_path)
+            group_manager = GroupAccessManager(
+                groups_db_path,
+                storage_backend=backend_registry.groups
+                if backend_registry is not None
+                else None,
+            )
             set_group_manager(group_manager)
             app.state.group_manager = group_manager
 
@@ -292,7 +297,12 @@ def make_lifespan(
                 migrate_flat_file_to_sqlite,
             )
 
-            audit_service = AuditLogService(groups_db_path)
+            audit_service = AuditLogService(
+                groups_db_path,
+                storage_backend=backend_registry.audit_log
+                if backend_registry is not None
+                else None,
+            )
             app.state.audit_service = audit_service
             group_manager.set_audit_service(audit_service)
             # Inject into the module-level singleton so all log/query
@@ -464,7 +474,11 @@ def make_lifespan(
             )
             cache_db_path = Path(golden_repos_dir) / ".cache" / "payload_cache.db"
             payload_cache = PayloadCache(
-                db_path=cache_db_path, config=payload_cache_config
+                db_path=cache_db_path,
+                config=payload_cache_config,
+                storage_backend=backend_registry.payload_cache
+                if backend_registry is not None
+                else None,
             )
             payload_cache.initialize()
             payload_cache.start_background_cleanup()
@@ -688,11 +702,14 @@ def make_lifespan(
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove
-            from code_indexer.server.storage.sqlite_backends import (
-                DescriptionRefreshTrackingBackend,
-            )
+            if backend_registry is not None:
+                tracking_backend = backend_registry.description_refresh_tracking
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    DescriptionRefreshTrackingBackend,
+                )
 
-            tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+                tracking_backend = DescriptionRefreshTrackingBackend(db_path)
             meta_description_hook.set_tracking_backend(tracking_backend)
             meta_description_hook.set_scheduler(description_refresh_scheduler)
 
@@ -806,9 +823,6 @@ def make_lifespan(
             from code_indexer.global_repos.dependency_map_analyzer import (
                 DependencyMapAnalyzer,
             )
-            from code_indexer.server.storage.sqlite_backends import (
-                DependencyMapTrackingBackend,
-            )
             from code_indexer.server.services.config_service import get_config_service
 
             # Get dependencies
@@ -818,7 +832,14 @@ def make_lifespan(
             golden_repos_manager = golden_repo_manager
 
             # Create tracking backend
-            tracking_backend = DependencyMapTrackingBackend(db_path)
+            if backend_registry is not None:
+                tracking_backend = backend_registry.dependency_map_tracking
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    DependencyMapTrackingBackend,
+                )
+
+                tracking_backend = DependencyMapTrackingBackend(db_path)
             tracking_backend.cleanup_stale_status_on_startup()
 
             # Bug #383: Clean stale staging directory on server startup.
@@ -972,6 +993,9 @@ def make_lifespan(
                         server_dir_path=server_data_dir,
                         use_sqlite=True,
                         db_path=db_path,
+                        storage_backend=backend_registry.ci_tokens
+                        if backend_registry is not None
+                        else None,
                     )
                     github_token_data = token_manager.get_token("github")
                     github_token = (
@@ -1341,6 +1365,20 @@ def make_lifespan(
         # MCP handlers use app.state.backend_registry unconditionally.
         app.state.backend_registry = backend_registry
 
+        # Bug #532: Inject DiagnosticsBackend into the module-level diagnostics_service
+        # singleton. The singleton is created at import time with no backend; we inject
+        # it here after backend_registry is available.
+        if backend_registry is not None and hasattr(backend_registry, "diagnostics"):
+            from code_indexer.server.routers.diagnostics import (
+                diagnostics_service as _diagnostics_service,
+            )
+
+            _diagnostics_service._backend = backend_registry.diagnostics
+            logger.info(
+                "Bug #532: DiagnosticsBackend injected into diagnostics_service singleton",
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Story #500 AC4: Inject LogsBackend into SQLiteLogHandler for delegated writes.
         # The handler was created earlier (before backend_registry existed); now that
         # backend_registry is available, wire it in so emit() routes through the backend.
@@ -1365,10 +1403,6 @@ def make_lifespan(
         _cluster_services = []
         if storage_mode == "postgres" and backend_registry is not None:
             try:
-                from code_indexer.server.storage.postgres.connection_pool import (
-                    ConnectionPool,
-                )
-
                 _pg_dsn = ""
                 _configured_node_id = ""
                 try:
@@ -1386,7 +1420,9 @@ def make_lifespan(
                     pass
 
                 if _pg_dsn:
-                    _cluster_pool = ConnectionPool(_pg_dsn)
+                    # Reuse the factory pool (stored in BackendRegistry.connection_pool)
+                    # instead of creating a second pool for cluster services.
+                    _cluster_pool = backend_registry.connection_pool
                     _node_id = (
                         _configured_node_id
                         if _configured_node_id

@@ -18,6 +18,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import CacheConfig
+    from code_indexer.server.storage.protocols import PayloadCacheBackend
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -91,17 +92,29 @@ class PayloadCache:
 
     Uses WAL mode for concurrent read/write access and stores content
     with UUID4 handles for later retrieval.
+
+    When storage_backend is provided (PG/cluster mode), all persistence
+    operations are delegated to it and the SQLite path is bypassed.
     """
 
-    def __init__(self, db_path: Path, config: PayloadCacheConfig):
+    def __init__(
+        self,
+        db_path: Path,
+        config: PayloadCacheConfig,
+        storage_backend: "Optional[PayloadCacheBackend]" = None,
+    ):
         """Initialize PayloadCache.
 
         Args:
             db_path: Path to SQLite database file
             config: Cache configuration
+            storage_backend: Optional PayloadCacheBackend for delegation
+                             (used in PG/cluster mode). When set, SQLite
+                             schema creation is skipped.
         """
         self.db_path = db_path
         self.config = config
+        self._backend = storage_backend
         self._cleanup_thread: Optional[threading.Thread] = None
         self._stop_cleanup = threading.Event()
         self._initialized = threading.Event()  # Bug #178: Gate to prevent race
@@ -112,7 +125,17 @@ class PayloadCache:
 
         Story #50: Converted from async to sync for FastAPI thread pool execution.
         Uses connection-per-operation pattern for thread safety.
+
+        When storage_backend is set (PG/cluster mode), SQLite schema creation
+        is skipped because the backend manages its own schema. The _initialized
+        event is still set to unblock the background cleanup thread (Bug #178).
         """
+        if self._backend is not None:
+            # PG/cluster mode: backend manages its own schema
+            # Bug #178: Still signal init complete so cleanup thread can start
+            self._initialized.set()
+            return
+
         # Ensure parent directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -206,9 +229,16 @@ class PayloadCache:
         Returns:
             UUID4 handle for retrieving the content
         """
+        handle = str(uuid.uuid4())
+
+        if self._backend is not None:
+            # PG/cluster mode: delegate to backend
+            preview = content[: self.config.preview_size_chars]
+            self._backend.store(handle, content, preview, self.config.cache_ttl_seconds)
+            return handle
+
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
-        handle = str(uuid.uuid4())
         created_at = time.time()
         total_size = len(content)
 
@@ -238,6 +268,12 @@ class PayloadCache:
             key: Explicit key for storage (e.g., "delegation:job-uuid")
             content: Content to cache
         """
+        if self._backend is not None:
+            # PG/cluster mode: delegate to backend
+            preview = content[: self.config.preview_size_chars]
+            self._backend.store(key, content, preview, self.config.cache_ttl_seconds)
+            return
+
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
         created_at = time.time()
@@ -269,6 +305,10 @@ class PayloadCache:
         Returns:
             True if key exists in cache, False otherwise
         """
+        if self._backend is not None:
+            # PG/cluster mode: delegate to backend (retrieve returns None if missing)
+            return self._backend.retrieve(key) is not None
+
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
         conn = self._conn_manager.get_connection()
@@ -296,6 +336,34 @@ class PayloadCache:
         """
         if page < 0:
             raise CacheNotFoundError(f"Invalid page number: {page}")
+
+        if self._backend is not None:
+            # PG/cluster mode: delegate retrieval, then apply pagination logic
+            row = self._backend.retrieve(handle)
+            if row is None:
+                raise CacheNotFoundError(f"Cache handle not found: {handle}")
+
+            content = row["content"]
+            total_size = len(content)
+            page_size = self.config.max_fetch_size_chars
+
+            total_pages = max(1, math.ceil(total_size / page_size))
+
+            if page >= total_pages:
+                raise CacheNotFoundError(
+                    f"Page {page} out of range for handle {handle} (total: {total_pages})"
+                )
+
+            start = page * page_size
+            end = start + page_size
+            page_content = content[start:end]
+
+            return CacheRetrievalResult(
+                content=page_content,
+                page=page,
+                total_pages=total_pages,
+                has_more=page < total_pages - 1,
+            )
 
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
@@ -379,6 +447,10 @@ class PayloadCache:
         Returns:
             Number of entries deleted
         """
+        if self._backend is not None:
+            # PG/cluster mode: delegate to backend
+            return self._backend.cleanup_expired()  # type: ignore[no-any-return]
+
         if self._conn_manager is None:
             raise RuntimeError("PayloadCache not initialized - call initialize() first")
         cutoff_time = time.time() - self.config.cache_ttl_seconds

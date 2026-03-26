@@ -22,9 +22,9 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.storage.protocols import (
@@ -97,6 +97,10 @@ class BackendRegistry:
     self_monitoring: "SelfMonitoringBackend"
     diagnostics: "DiagnosticsBackend"
     maintenance: "MaintenanceBackend"
+    # Optional: the shared ConnectionPool instance (PostgreSQL mode only).
+    # None in SQLite mode. Exposed here so lifespan.py cluster services can
+    # reuse the factory pool instead of creating a second one.
+    connection_pool: Optional[Any] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +329,8 @@ class StorageFactory:
         )
 
         dsn = config["postgres_dsn"]
-        pool = ConnectionPool(dsn)
+        pool_max_size = config.get("postgres_pool_max_size", 20)
+        pool = ConnectionPool(dsn, max_size=pool_max_size)
 
         return BackendRegistry(
             global_repos=GlobalReposPostgresBackend(pool),
@@ -356,4 +361,5 @@ class StorageFactory:
             self_monitoring=SelfMonitoringPostgresBackend(pool),
             diagnostics=DiagnosticsPostgresBackend(pool),
             maintenance=MaintenancePostgresBackend(pool),
+            connection_pool=pool,
         )

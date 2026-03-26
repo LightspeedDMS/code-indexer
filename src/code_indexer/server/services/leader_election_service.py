@@ -117,11 +117,17 @@ class LeaderElectionService:
             return False
 
         try:
-            conn = psycopg.connect(self._connection_string)
-            # autocommit=True so pg_try_advisory_lock works outside a
-            # transaction; advisory locks in transaction mode are released
-            # at transaction end, not connection close.
-            conn.autocommit = True
+            conn = psycopg.connect(
+                self._connection_string,
+                autocommit=True,
+                # TCP keepalive: detect dead connections within ~25 seconds
+                # (idle=10s, interval=5s, probes=3) to prevent ghost leader
+                # on network partition.
+                keepalives=1,
+                keepalives_idle=10,
+                keepalives_interval=5,
+                keepalives_count=3,
+            )
             with conn.cursor() as cur:
                 cur.execute("SELECT pg_try_advisory_lock(%s)", (_LOCK_ID,))
                 row = cur.fetchone()
@@ -278,8 +284,9 @@ class LeaderElectionService:
                                     "LeaderElectionService [%s]: on_lose_leadership raised",
                                     self._node_id,
                                 )
-                        # Immediately attempt re-election
-                        self.try_acquire_leadership()
+                        # Defer re-election to the next monitor loop iteration
+                        # so on_lose_leadership() has completed before we
+                        # attempt to re-acquire the lock.
                 else:
                     self.try_acquire_leadership()
             except Exception:
