@@ -100,6 +100,7 @@ class GitPushRequest(BaseModel):
 
     remote: str = Field("origin", description="Remote name")
     branch: Optional[str] = Field(None, description="Branch name (optional)")
+    set_upstream: bool = Field(True, description="Set upstream tracking after push")
 
 
 class GitPushResponse(BaseModel):

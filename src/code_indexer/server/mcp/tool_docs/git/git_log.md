@@ -46,6 +46,12 @@ inputSchema:
         - flat
         - grouped
       default: flat
+    aggregation_mode:
+      type: string
+      description: 'Result aggregation mode for multi-repo queries: global (merge all) or per_repo (group by repository)'
+      enum:
+        - global
+        - per_repo
   required:
   - repository_alias
 outputSchema:

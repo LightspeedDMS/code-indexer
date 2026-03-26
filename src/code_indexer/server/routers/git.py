@@ -452,6 +452,7 @@ def git_push(
             username=user.username,
             remote=request.remote,
             branch=request.branch,
+            set_upstream=request.set_upstream,
         )
         return GitPushResponse(**result)
     except FileNotFoundError as e:
