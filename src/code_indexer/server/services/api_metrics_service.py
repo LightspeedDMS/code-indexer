@@ -326,6 +326,10 @@ class ApiMetricsService:
         Note: With rolling window approach, this method is largely unnecessary
         as timestamps naturally age out. Kept for backward compatibility and testing.
         """
+        if self._backend is not None:
+            self._backend.reset()
+            return
+
         if not self._conn_manager:
             return
 

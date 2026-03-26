@@ -811,6 +811,9 @@ class GroupAccessManager:
                 f"{CIDX_META_REPO} access cannot be revoked from any group"
             )
 
+        if self._backend is not None:
+            return self._backend.revoke_repo_access(repo_name, group_id)  # type: ignore[no-any-return]
+
         result: dict = {"revoked": False}
 
         def _do_revoke(conn: sqlite3.Connection) -> None:
@@ -842,6 +845,9 @@ class GroupAccessManager:
         Returns:
             List of repository names, with cidx-meta always first
         """
+        if self._backend is not None:
+            return self._backend.get_group_repos(group_id)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
@@ -876,6 +882,9 @@ class GroupAccessManager:
         if repo_name == CIDX_META_REPO:
             return self.get_all_groups()
 
+        if self._backend is not None:
+            return self._backend.get_repo_groups(repo_name)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
@@ -904,6 +913,9 @@ class GroupAccessManager:
         Returns:
             RepoGroupAccess record if found, None otherwise
         """
+        if self._backend is not None:
+            return self._backend.get_repo_access(repo_name, group_id)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
@@ -972,6 +984,9 @@ class GroupAccessManager:
             Tuple of (list of user dicts, total count)
             Each dict contains: user_id, group_id, group_name, assigned_at, assigned_by
         """
+        if self._backend is not None:
+            return self._backend.get_all_users_with_groups(limit=limit, offset=offset)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
@@ -1027,6 +1042,9 @@ class GroupAccessManager:
         Returns:
             True if user exists, False otherwise
         """
+        if self._backend is not None:
+            return self._backend.user_exists(user_id)  # type: ignore[no-any-return]
+
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.row_factory = sqlite3.Row  # type: ignore[assignment]
