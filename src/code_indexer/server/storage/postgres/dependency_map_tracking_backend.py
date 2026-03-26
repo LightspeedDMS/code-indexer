@@ -235,7 +235,7 @@ class DependencyMapTrackingPostgresBackend:
         """
         with self._pool.connection() as conn:
             result = conn.execute(
-                "DELETE FROM dependency_map_tracking WHERE last_updated < %s",
+                "DELETE FROM dependency_map_tracking WHERE last_run < %s",
                 (cutoff_iso,),
             )
             deleted = result.rowcount if result.rowcount else 0
