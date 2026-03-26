@@ -85,6 +85,11 @@ class BackgroundJob:
     phase_detail: Optional[str] = None  # e.g., "150/500 files indexed"
 
 
+# Upper bound for DB fetch when performing client-side dedup/sort/pagination.
+# Large enough to cover realistic workloads; avoids unbounded queries.
+_MAX_DB_FETCH_FOR_PAGINATION = 10000
+
+
 class BackgroundJobManager:
     """
     Enhanced background job manager for long-running operations.
@@ -426,6 +431,29 @@ class BackgroundJobManager:
 
         return None
 
+    def _job_to_dict(self, job: "BackgroundJob") -> Dict[str, Any]:
+        """Convert an in-memory BackgroundJob to the standard response dictionary format."""
+        return {
+            "job_id": job.job_id,
+            "operation_type": job.operation_type,
+            "status": job.status.value,
+            "created_at": job.created_at.isoformat(),
+            "started_at": (job.started_at.isoformat() if job.started_at else None),
+            "completed_at": (
+                job.completed_at.isoformat() if job.completed_at else None
+            ),
+            "progress": job.progress,
+            "result": job.result,
+            "error": job.error,
+            "username": job.username,
+            "repo_alias": job.repo_alias,
+            "resolution_attempts": job.resolution_attempts,
+            "claude_actions": job.claude_actions,
+            "failure_reason": job.failure_reason,
+            "extended_error": job.extended_error,
+            "language_resolution_status": job.language_resolution_status,
+        }
+
     def list_jobs(
         self,
         username: str,
@@ -436,6 +464,10 @@ class BackgroundJobManager:
         """
         List jobs for a user with filtering and pagination.
 
+        When a SQLite backend is configured, queries it as the primary source so
+        jobs from other cluster nodes are included.  In-memory jobs are merged in
+        (overriding DB entries for the same job_id) to provide fresher progress data.
+
         Args:
             username: Username to filter jobs for
             status_filter: Optional status filter
@@ -445,6 +477,41 @@ class BackgroundJobManager:
         Returns:
             Dictionary with jobs list and total count
         """
+        if self._sqlite_backend is not None:
+            try:
+                # Fetch all matching jobs from DB; paginate client-side after merging
+                db_jobs = self._sqlite_backend.list_jobs(
+                    username=username,
+                    status=status_filter,
+                    limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                )
+                # Build dict keyed by job_id from DB results
+                merged: Dict[str, Any] = {j["job_id"]: j for j in db_jobs}
+                # Override with in-memory jobs (fresher progress) for matching criteria
+                with self._lock:
+                    for job in self.jobs.values():
+                        if job.username != username:
+                            continue
+                        if status_filter and job.status.value != status_filter:
+                            continue
+                        merged[job.job_id] = self._job_to_dict(job)
+                # Sort by created_at descending (all values are isoformat strings)
+                all_jobs = sorted(
+                    merged.values(),
+                    key=lambda j: j.get("created_at") or "",
+                    reverse=True,
+                )
+                total_count = len(all_jobs)
+                paginated = all_jobs[offset : offset + limit]
+                return {
+                    "jobs": paginated,
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            except Exception as e:
+                logging.error(f"Failed to list jobs from SQLite backend: {e}")
+
         with self._lock:
             # Filter jobs by user
             user_jobs = [job for job in self.jobs.values() if job.username == username]
@@ -463,37 +530,8 @@ class BackgroundJobManager:
             # Apply pagination
             paginated_jobs = user_jobs[offset : offset + limit]
 
-            # Convert to dictionary format
-            job_dicts = []
-            for job in paginated_jobs:
-                job_dicts.append(
-                    {
-                        "job_id": job.job_id,
-                        "operation_type": job.operation_type,
-                        "status": job.status.value,
-                        "created_at": job.created_at.isoformat(),
-                        "started_at": (
-                            job.started_at.isoformat() if job.started_at else None
-                        ),
-                        "completed_at": (
-                            job.completed_at.isoformat() if job.completed_at else None
-                        ),
-                        "progress": job.progress,
-                        "result": job.result,
-                        "error": job.error,
-                        "username": job.username,
-                        "repo_alias": job.repo_alias,  # AC5: Include repo_alias in list
-                        # AC6: Extended self-healing fields
-                        "resolution_attempts": job.resolution_attempts,
-                        "claude_actions": job.claude_actions,
-                        "failure_reason": job.failure_reason,
-                        "extended_error": job.extended_error,
-                        "language_resolution_status": job.language_resolution_status,
-                    }
-                )
-
             return {
-                "jobs": job_dicts,
+                "jobs": [self._job_to_dict(job) for job in paginated_jobs],
                 "total": total_count,
                 "limit": limit,
                 "offset": offset,
@@ -502,6 +540,10 @@ class BackgroundJobManager:
     def cancel_job(self, job_id: str, username: str) -> Dict[str, Any]:
         """
         Cancel a running or pending job.
+
+        When the job is not in memory but a SQLite backend is configured, the job
+        may belong to another cluster node.  In that case the cancellation is written
+        directly to the DB; the executing node will detect it on its next progress check.
 
         Args:
             job_id: Job ID to cancel
@@ -512,32 +554,64 @@ class BackgroundJobManager:
         """
         with self._lock:
             job = self.jobs.get(job_id)
-            if not job or job.username != username:
+
+        if job is not None:
+            # Local job — use existing in-memory path
+            if job.username != username:
                 return {"success": False, "message": "Job not found or not authorized"}
 
-            if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
-                return {
-                    "success": False,
-                    "message": f"Cannot cancel job in {job.status.value} status",
-                }
+            with self._lock:
+                if job.status not in [JobStatus.PENDING, JobStatus.RUNNING]:
+                    return {
+                        "success": False,
+                        "message": f"Cannot cancel job in {job.status.value} status",
+                    }
 
-            # Mark job as cancelled
-            job.cancelled = True
+                # Mark job as cancelled
+                job.cancelled = True
 
-            if job.status == JobStatus.PENDING:
-                # If pending, immediately mark as cancelled
-                job.status = JobStatus.CANCELLED
-                job.completed_at = datetime.now(timezone.utc)
-            elif job.status == JobStatus.RUNNING:
+                if job.status == JobStatus.PENDING:
+                    # If pending, immediately mark as cancelled
+                    job.status = JobStatus.CANCELLED
+                    job.completed_at = datetime.now(timezone.utc)
                 # For running jobs, the job execution will detect cancellation
                 # and update status accordingly
-                pass
 
-        # Story #267 Component 3-4: Persist outside lock
-        self._persist_jobs(job_id=job_id)
+            # Story #267 Component 3-4: Persist outside lock
+            self._persist_jobs(job_id=job_id)
+            logging.info(f"Job {job_id} cancelled by user {username}")
+            return {"success": True, "message": "Job cancelled successfully"}
 
-        logging.info(f"Job {job_id} cancelled by user {username}")
-        return {"success": True, "message": "Job cancelled successfully"}
+        # Job not in memory — check DB backend for cross-node jobs
+        if self._sqlite_backend is not None:
+            try:
+                db_job = self._sqlite_backend.get_job(job_id)
+                if db_job is None or db_job.get("username") != username:
+                    return {
+                        "success": False,
+                        "message": "Job not found or not authorized",
+                    }
+
+                db_status = db_job.get("status", "")
+                if db_status not in ("pending", "running"):
+                    return {
+                        "success": False,
+                        "message": f"Cannot cancel job in {db_status} status",
+                    }
+
+                self._sqlite_backend.update_job(
+                    job_id,
+                    status="cancelled",
+                    cancelled=True,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                )
+                logging.info(f"Job {job_id} cancelled in DB by user {username}")
+                return {"success": True, "message": "Job cancelled successfully"}
+            except Exception as e:
+                logging.error(f"Failed to cancel job {job_id} via SQLite backend: {e}")
+                return {"success": False, "message": "Failed to cancel job"}
+
+        return {"success": False, "message": "Job not found or not authorized"}
 
     def _execute_job(
         self, job_id: str, func: Callable[[], Dict[str, Any]], args: tuple, kwargs: dict
@@ -1016,8 +1090,9 @@ class BackgroundJobManager:
         """
         Get jobs by operation type and optional parameter filtering.
 
-        This is a simplified implementation for repository deletion job cancellation.
-        In a real implementation, this would parse job parameters and filter accordingly.
+        When a SQLite backend is configured, queries it per operation type so jobs from
+        other cluster nodes are included.  In-memory jobs override DB entries for the same
+        job_id (fresher progress data).
 
         Args:
             operation_types: List of operation types to filter by
@@ -1026,31 +1101,33 @@ class BackgroundJobManager:
         Returns:
             List of job dictionaries matching the criteria
         """
-        with self._lock:
-            matching_jobs = []
-            for job in self.jobs.values():
-                if job.operation_type in operation_types:
-                    # For now, return basic job info
-                    # In a real implementation, we'd parse stored parameters and filter
-                    job_dict = {
-                        "job_id": job.job_id,
-                        "operation_type": job.operation_type,
-                        "status": job.status.value,
-                        "username": job.username,
-                        "created_at": job.created_at.isoformat(),
-                        "started_at": (
-                            job.started_at.isoformat() if job.started_at else None
-                        ),
-                        "completed_at": (
-                            job.completed_at.isoformat() if job.completed_at else None
-                        ),
-                        "progress": job.progress,
-                        "result": job.result,
-                        "error": job.error,
-                    }
-                    matching_jobs.append(job_dict)
+        if self._sqlite_backend is not None:
+            try:
+                merged: Dict[str, Any] = {}
+                for op_type in operation_types:
+                    db_jobs = self._sqlite_backend.list_jobs(
+                        operation_type=op_type,
+                        limit=_MAX_DB_FETCH_FOR_PAGINATION,
+                    )
+                    for j in db_jobs:
+                        merged[j["job_id"]] = j
+                # Override with in-memory jobs (fresher progress)
+                with self._lock:
+                    for job in self.jobs.values():
+                        if job.operation_type in operation_types:
+                            merged[job.job_id] = self._job_to_dict(job)
+                return list(merged.values())
+            except Exception as e:
+                logging.error(
+                    f"Failed to get jobs by operation from SQLite backend: {e}"
+                )
 
-            return matching_jobs
+        with self._lock:
+            return [
+                self._job_to_dict(job)
+                for job in self.jobs.values()
+                if job.operation_type in operation_types
+            ]
 
     def _snapshot_job(self, job: "BackgroundJob") -> Dict[str, Any]:
         """Create a serializable snapshot of job state for persistence outside lock.

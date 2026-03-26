@@ -440,11 +440,34 @@ class JobTracker:
 
     def get_active_jobs(self) -> List[TrackedJob]:
         """
-        Return a snapshot of all in-memory active/pending jobs.
+        Return a snapshot of all active/pending jobs.
+
+        When a backend is configured, queries the DB for running+pending jobs
+        so jobs started by other cluster nodes are included.  In-memory entries
+        override DB entries for the same job_id (fresher progress data).
 
         Returns:
             List of TrackedJob instances (copies, not references).
         """
+        if self._backend is not None:
+            try:
+                db_running = self._backend.list_jobs(status="running")
+                db_pending = self._backend.list_jobs(status="pending")
+                # Build dict keyed by job_id from DB results (converted to TrackedJob)
+                merged: Dict[str, TrackedJob] = {}
+                for job_dict in db_running + db_pending:
+                    merged[job_dict["job_id"]] = _dict_to_tracked_job(job_dict)
+                # Override with in-memory TrackedJob objects (fresher progress)
+                with self._lock:
+                    for job_id, tracked in self._active_jobs.items():
+                        if tracked.status in ("running", "pending"):
+                            merged[job_id] = tracked
+                return list(merged.values())
+            except Exception as e:
+                logger.warning(
+                    "Failed to query backend for active jobs, falling back to in-memory: %s",
+                    e,
+                )
         with self._lock:
             return list(self._active_jobs.values())
 
