@@ -3050,12 +3050,13 @@ class LogsSqliteBackend:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
             )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_id ON logs(node_id)")
             # Migrate existing databases: add node_id column if missing
+            # (must run BEFORE creating the index on node_id)
             cursor = conn.execute("PRAGMA table_info(logs)")
             columns = {row[1] for row in cursor.fetchall()}
             if "node_id" not in columns:
                 conn.execute("ALTER TABLE logs ADD COLUMN node_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_id ON logs(node_id)")
 
         self._conn_manager.execute_atomic(operation)
 
@@ -3276,14 +3277,15 @@ class ApiMetricsSqliteBackend:
                 ON api_metrics(metric_type, timestamp)
                 """
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_api_metrics_node_id ON api_metrics(node_id)"
-            )
             # Migrate existing databases: add node_id column if missing
+            # (must run BEFORE creating the index on node_id)
             cursor = conn.execute("PRAGMA table_info(api_metrics)")
             columns = {row[1] for row in cursor.fetchall()}
             if "node_id" not in columns:
                 conn.execute("ALTER TABLE api_metrics ADD COLUMN node_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_api_metrics_node_id ON api_metrics(node_id)"
+            )
 
         self._conn_manager.execute_atomic(operation)
 
