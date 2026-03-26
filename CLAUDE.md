@@ -260,21 +260,34 @@ setting = config.some_setting
 
 **NEVER** run fast-automation.sh iteratively. Wastes hours.
 
+**Two test suites, both must pass**:
+
+| Suite | Scope | When Required | Time |
+|-------|-------|---------------|------|
+| `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~6-7 min |
+| `server-fast-automation.sh` | Server: MCP, REST, services, auth, storage backends | When touching `src/code_indexer/server/` | ~10-15 min |
+
+**CRITICAL**: `fast-automation.sh` does NOT run server tests (it ignores `tests/unit/server/` entirely — 10,000+ tests skipped). If you touch server code and only run fast-automation, you have NOT tested your changes. You MUST also run `server-fast-automation.sh`.
+
 **Hierarchy**:
 1. **Targeted tests** (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
 2. **Manual testing**: Verify feature works E2E
-3. **fast-automation.sh** (final gate): Must pass before done
+3. **fast-automation.sh** (final gate for CLI/core): Must pass, zero failures
+4. **server-fast-automation.sh** (final gate for server): Must pass when server code touched, zero failures
+5. Both must pass before marking work as done
 
 **Examples**:
-| File Changed | Run |
-|--------------|-----|
-| `base_client.py` | `pytest tests/unit/api_clients/test_base_*.py -v --tb=short` |
-| `auth_client.py` | `pytest tests/unit/api_clients/test_auth_*.py -v --tb=short` |
-| `handlers.py` | `pytest tests/unit/server/mcp/test_handlers*.py -v --tb=short` |
+| File Changed | Run First | Final Gate |
+|--------------|-----------|------------|
+| `base_client.py` | `pytest tests/unit/api_clients/test_base_*.py` | fast-automation.sh |
+| `auth_client.py` | `pytest tests/unit/api_clients/test_auth_*.py` | fast-automation.sh |
+| `handlers.py` | `pytest tests/unit/server/mcp/test_handlers*.py` | server-fast-automation.sh |
+| `lifespan.py` | `pytest tests/unit/server/` (targeted) | server-fast-automation.sh |
+| `background_jobs.py` | `pytest tests/unit/server/repositories/test_background*` | server-fast-automation.sh |
 
-**Times**: Targeted=seconds, fast-automation=6-7min (865+ tests)
+**Times**: Targeted=seconds, fast-automation=6-7min, server-fast-automation=10-15min
 
-*Recorded 2026-01-27*
+*Recorded 2026-01-27, Updated 2026-03-26*
 
 ---
 
