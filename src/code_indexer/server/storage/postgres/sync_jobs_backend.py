@@ -227,6 +227,24 @@ class SyncJobsPostgresBackend:
             )
         return count
 
+    def cleanup_old_completed(self, cutoff_iso: str) -> int:
+        """Delete completed sync jobs older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; completed jobs before this are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with self._pool.connection() as conn:
+            result = conn.execute(
+                "DELETE FROM sync_jobs WHERE status = 'completed' AND created_at < %s",
+                (cutoff_iso,),
+            )
+            deleted = result.rowcount if result.rowcount else 0
+            conn.commit()
+        return deleted
+
     def close(self) -> None:
         """Close the underlying connection pool."""
         self._pool.close()

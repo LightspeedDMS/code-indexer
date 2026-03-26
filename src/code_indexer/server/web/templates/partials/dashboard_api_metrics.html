@@ -1,6 +1,8 @@
 <!-- Story #69: Granular partial for API metrics data ONLY -->
-<!-- Story #503: Cluster-wide aggregation -->
-<!-- Story #531: Per-node card rows replacing table -->
+<!-- Story #531: Per-node card rows with full-width stats-grid per node -->
+{% if is_cluster_mode and per_node_metrics %}
+<div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">Total (All Nodes)</div>
+{% endif %}
 <article class="stat-card">
     <header>
         <h3>Semantic Searches</h3>
@@ -43,7 +45,9 @@
 
 {% if is_cluster_mode and per_node_metrics %}
 {% for entry in per_node_metrics %}
-<div style="grid-column: 1 / -1; font-size: 0.75rem; color: #9ca3af; margin-top: 0.75rem; padding-left: 0.25rem;">{{ entry.node_id }}</div>
+</div>
+<div style="font-size: 0.8rem; color: #9ca3af; margin-bottom: 0.25rem; padding-left: 0.25rem;">{{ entry.node_id }}</div>
+<div class="stats-grid">
 <article class="stat-card">
     <header>
         <h3>Semantic Searches</h3>

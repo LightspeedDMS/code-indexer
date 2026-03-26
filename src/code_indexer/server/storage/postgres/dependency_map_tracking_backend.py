@@ -224,6 +224,24 @@ class DependencyMapTrackingPostgresBackend:
             for row in rows
         ]
 
+    def cleanup_old_history(self, cutoff_iso: str) -> int:
+        """Delete dependency map history records older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; records before this are deleted.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with self._pool.connection() as conn:
+            result = conn.execute(
+                "DELETE FROM dependency_map_tracking WHERE last_updated < %s",
+                (cutoff_iso,),
+            )
+            deleted = result.rowcount if result.rowcount else 0
+            conn.commit()
+        return deleted
+
     def close(self) -> None:
         """Close the connection pool."""
         self._pool.close()
