@@ -143,6 +143,8 @@ Warning: always set `cluster.node_id` explicitly. If the field is absent or empt
 
 The migration runner applies all numbered `.sql` files in `src/code_indexer/server/storage/postgres/migrations/sql/` in numeric order. It is idempotent: already-applied migrations are skipped.
 
+Note: Migrations are also run automatically on server startup (Story #519). This manual step is optional but useful for validating the PostgreSQL connection before starting the server for the first time.
+
 ```bash
 cd ~/code-indexer
 PYTHONPATH=src python3 -m code_indexer.server.storage.postgres.migrations.runner \

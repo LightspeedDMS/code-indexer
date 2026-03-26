@@ -78,7 +78,7 @@ Each node runs independently and handles requests without inter-node communicati
          |
          v
     HAProxy (:8000)
-         |  roundrobin with health check (GET /docs, 5s interval)
+         |  roundrobin with health check (GET /health, 5s interval)
          |
     +----+----+
     |         |

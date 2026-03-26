@@ -607,7 +607,7 @@ Job-aware server updates with graceful drain mode.
 
 ### Cluster Mode
 
-When `storage_mode` is set to `"postgres"` in `~/.cidx-server/config.json`, the server operates in cluster mode. Multiple CIDX nodes share a PostgreSQL database for all state and coordinate via leader election, heartbeat, and distributed job claiming. All nodes are identical peers -- any node can serve queries, handle API/MCP requests, and execute background jobs. See [Cluster Architecture](../docs/cluster-architecture.md) for details.
+When `storage_mode` is set to `"postgres"` in `~/.cidx-server/config.json`, the server operates in cluster mode. Multiple CIDX nodes share a PostgreSQL database for all state and coordinate via leader election, heartbeat, and distributed job claiming. All nodes are identical peers -- any node can serve queries, handle API/MCP requests, and execute background jobs. See [Cluster Architecture](cluster-architecture.md) for details.
 
 ## Switching Between Modes
 
