@@ -1,13 +1,17 @@
 """SQLite render cache for wiki articles with stat-based coherence (Story #283)."""
+
 import json
 import logging
 import sqlite3
 import threading
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.protocols import WikiCacheBackend
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +81,11 @@ def _max_mtime_of_md_files(repo_dir: Path) -> float:
 class WikiCache:
     """SQLite-backed render cache for wiki articles and sidebars."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(
+        self, db_path: str, storage_backend: Optional["WikiCacheBackend"] = None
+    ) -> None:
         self._db_path = db_path
+        self._backend = storage_backend
         self._increment_lock = threading.Lock()
         self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
 
@@ -98,8 +105,7 @@ class WikiCache:
             c.execute(_CREATE_WIKI_ARTICLE_VIEWS_TABLE)
             # Migration: add metadata_json column if it does not exist (Story #289)
             existing_cols = {
-                r[1]
-                for r in c.execute("PRAGMA table_info(wiki_cache)").fetchall()
+                r[1] for r in c.execute("PRAGMA table_info(wiki_cache)").fetchall()
             }
             if "metadata_json" not in existing_cols:
                 c.execute(_ALTER_WIKI_CACHE_ADD_METADATA_JSON)
@@ -117,6 +123,10 @@ class WikiCache:
         with self._increment_lock:
             now = datetime.utcnow().isoformat()
             try:
+                if self._backend is not None:
+                    self._backend.increment_view(repo_alias, article_path, now)
+                    return
+
                 def _do_increment(conn: sqlite3.Connection) -> None:
                     conn.execute("PRAGMA journal_mode=WAL")
                     conn.execute(
@@ -133,10 +143,17 @@ class WikiCache:
 
                 self._conn_manager.execute_atomic(_do_increment)
             except Exception as exc:
-                logger.warning("Failed to increment view for %s/%s: %s", repo_alias, article_path, exc)
+                logger.warning(
+                    "Failed to increment view for %s/%s: %s",
+                    repo_alias,
+                    article_path,
+                    exc,
+                )
 
     def get_view_count(self, repo_alias: str, article_path: str) -> int:
         """Return current real_views count for an article, or 0 if no record exists."""
+        if self._backend is not None:
+            return self._backend.get_view_count(repo_alias, article_path)  # type: ignore[no-any-return]
         conn = self._conn_manager.get_connection()
         row = conn.execute(
             "SELECT real_views FROM wiki_article_views WHERE repo_alias=? AND article_path=?",
@@ -146,6 +163,8 @@ class WikiCache:
 
     def get_all_view_counts(self, repo_alias: str) -> List[Dict]:
         """Return all view records for a repo as a list of dicts with article_path and real_views."""
+        if self._backend is not None:
+            return self._backend.get_all_view_counts(repo_alias)  # type: ignore[no-any-return]
         conn = self._conn_manager.get_connection()
         rows = conn.execute(
             "SELECT article_path, real_views, first_viewed_at, last_viewed_at "
@@ -164,6 +183,10 @@ class WikiCache:
 
     def delete_views_for_repo(self, repo_alias: str) -> None:
         """Delete all wiki_article_views records for a repo (called on repo removal, AC4)."""
+        if self._backend is not None:
+            self._backend.delete_views_for_repo(repo_alias)
+            return
+
         def _do_delete(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "DELETE FROM wiki_article_views WHERE repo_alias=?",
@@ -172,9 +195,15 @@ class WikiCache:
 
         self._conn_manager.execute_atomic(_do_delete)
 
-    def insert_initial_views(self, repo_alias: str, article_path: str, views: int) -> None:
+    def insert_initial_views(
+        self, repo_alias: str, article_path: str, views: int
+    ) -> None:
         """Insert an initial view count row (from front matter population). Uses INSERT OR IGNORE."""
         now = datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.insert_initial_views(repo_alias, article_path, views, now)
+            return
 
         def _do_insert(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -189,7 +218,9 @@ class WikiCache:
 
         self._conn_manager.execute_atomic(_do_insert)
 
-    def get_article(self, repo_alias: str, article_path: str, file_path: Path) -> Optional[Dict]:
+    def get_article(
+        self, repo_alias: str, article_path: str, file_path: Path
+    ) -> Optional[Dict]:
         """Return cached article dict if stat values match, else None.
 
         Result dict contains 'html', 'title', and 'metadata' (dict or None).
@@ -198,6 +229,30 @@ class WikiCache:
             stat = file_path.stat()
         except OSError:
             return None
+        if self._backend is not None:
+            row_dict = self._backend.get_article(repo_alias, article_path)
+            if row_dict is None:
+                return None
+            stored_mtime = row_dict.get("file_mtime")
+            stored_size = row_dict.get("file_size")
+            if stored_mtime != stat.st_mtime or stored_size != stat.st_size:
+                return None
+            metadata: Optional[Dict] = None
+            stored_metadata_json = row_dict.get("metadata_json")
+            if stored_metadata_json:
+                try:
+                    metadata = json.loads(stored_metadata_json)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Failed to parse cached metadata_json for %s/%s",
+                        repo_alias,
+                        article_path,
+                    )
+            return {
+                "html": row_dict["rendered_html"],
+                "title": row_dict["title"],
+                "metadata": metadata,
+            }
         conn = self._conn_manager.get_connection()
         row = conn.execute(
             "SELECT rendered_html, title, file_mtime, file_size, metadata_json "
@@ -209,12 +264,16 @@ class WikiCache:
         stored_html, stored_title, stored_mtime, stored_size, stored_metadata_json = row
         if stored_mtime != stat.st_mtime or stored_size != stat.st_size:
             return None
-        metadata: Optional[Dict] = None
+        metadata = None
         if stored_metadata_json:
             try:
                 metadata = json.loads(stored_metadata_json)
             except (ValueError, TypeError):
-                logger.warning("Failed to parse cached metadata_json for %s/%s", repo_alias, article_path)
+                logger.warning(
+                    "Failed to parse cached metadata_json for %s/%s",
+                    repo_alias,
+                    article_path,
+                )
         return {"html": stored_html, "title": stored_title, "metadata": metadata}
 
     def put_article(
@@ -233,14 +292,40 @@ class WikiCache:
         """
         stat = file_path.stat()
         rendered_at = datetime.utcnow().isoformat()
-        metadata_json_str: Optional[str] = json.dumps(metadata, default=_json_default) if metadata is not None else None
+        metadata_json_str: Optional[str] = (
+            json.dumps(metadata, default=_json_default)
+            if metadata is not None
+            else None
+        )
+
+        if self._backend is not None:
+            self._backend.put_article(
+                repo_alias,
+                article_path,
+                html,
+                title,
+                stat.st_mtime,
+                stat.st_size,
+                rendered_at,
+                metadata_json_str,
+            )
+            return
 
         def _do_put(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT OR REPLACE INTO wiki_cache "
                 "(repo_alias, article_path, rendered_html, title, file_mtime, file_size, rendered_at, metadata_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (repo_alias, article_path, html, title, stat.st_mtime, stat.st_size, rendered_at, metadata_json_str),
+                (
+                    repo_alias,
+                    article_path,
+                    html,
+                    title,
+                    stat.st_mtime,
+                    stat.st_size,
+                    rendered_at,
+                    metadata_json_str,
+                ),
             )
 
         self._conn_manager.execute_atomic(_do_put)
@@ -254,6 +339,11 @@ class WikiCache:
         The repo_dir parameter is retained for backward compatibility with callers
         but is no longer used in this method.
         """
+        if self._backend is not None:
+            raw = self._backend.get_sidebar(repo_alias)
+            if raw is None:
+                return None
+            return json.loads(raw)  # type: ignore[no-any-return]
         conn = self._conn_manager.get_connection()
         row = conn.execute(
             "SELECT sidebar_json FROM wiki_sidebar_cache WHERE repo_alias=?",
@@ -261,12 +351,18 @@ class WikiCache:
         ).fetchone()
         if row is None:
             return None
-        return json.loads(row[0])
+        return json.loads(row[0])  # type: ignore[no-any-return]
 
     def put_sidebar(self, repo_alias: str, sidebar_data: List, repo_dir: Path) -> None:
         """Store sidebar JSON with current max_mtime of .md files."""
         max_mtime = _max_mtime_of_md_files(repo_dir)
         built_at = datetime.utcnow().isoformat()
+
+        if self._backend is not None:
+            self._backend.put_sidebar(
+                repo_alias, json.dumps(sidebar_data), max_mtime, built_at
+            )
+            return
 
         def _do_put(conn: sqlite3.Connection) -> None:
             conn.execute(
@@ -279,9 +375,15 @@ class WikiCache:
 
     def invalidate_repo(self, repo_alias: str) -> None:
         """Delete all wiki_cache and wiki_sidebar_cache entries for this repo."""
+        if self._backend is not None:
+            self._backend.invalidate_repo(repo_alias)
+            return
+
         def _do_invalidate(conn: sqlite3.Connection) -> None:
             conn.execute("DELETE FROM wiki_cache WHERE repo_alias=?", (repo_alias,))
-            conn.execute("DELETE FROM wiki_sidebar_cache WHERE repo_alias=?", (repo_alias,))
+            conn.execute(
+                "DELETE FROM wiki_sidebar_cache WHERE repo_alias=?", (repo_alias,)
+            )
 
         self._conn_manager.execute_atomic(_do_invalidate)
 

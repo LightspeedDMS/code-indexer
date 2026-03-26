@@ -17,6 +17,7 @@ from code_indexer.server.storage.database_manager import DatabaseConnectionManag
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
+    from code_indexer.server.storage.protocols import SelfMonitoringBackend
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class SelfMonitoringService:
         repo_root: Optional[str] = None,
         github_token: Optional[str] = None,
         server_name: Optional[str] = None,
+        storage_backend: Optional["SelfMonitoringBackend"] = None,
     ):
         """
         Initialize the self-monitoring service.
@@ -63,6 +65,7 @@ class SelfMonitoringService:
             repo_root: Path to repo root for Claude to run in (working directory)
             github_token: GitHub token for authentication (optional, Bug #87)
             server_name: Server display name for issue identification (optional, Bug #87)
+            storage_backend: Optional SelfMonitoringBackend for DB delegation
         """
         self._enabled = enabled
         self._cadence_minutes = cadence_minutes
@@ -75,6 +78,7 @@ class SelfMonitoringService:
         self._repo_root = repo_root
         self._github_token = github_token
         self._server_name = server_name
+        self._backend = storage_backend
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -159,6 +163,26 @@ class SelfMonitoringService:
 
         This prevents "stuck Running..." status caused by crashed scans.
         """
+        if self._backend is not None:
+            try:
+                from datetime import datetime, timedelta, timezone
+
+                cutoff_iso = (
+                    datetime.now(timezone.utc) - timedelta(hours=2)
+                ).isoformat()
+                count = self._backend.cleanup_orphaned_scans(cutoff_iso)
+                if count > 0:
+                    logger.info(f"Cleaned up {count} orphaned scans older than 2 hours")
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "MONITOR-GENERAL-013",
+                        f"Failed to cleanup orphaned scans: {e}",
+                    ),
+                    exc_info=True,
+                )
+            return
+
         if not self._db_path:
             logger.debug("No database path configured, skipping orphaned scan cleanup")
             return
@@ -180,7 +204,9 @@ class SelfMonitoringService:
                 )
                 result["orphaned_count"] = cursor.rowcount
 
-            DatabaseConnectionManager.get_instance(self._db_path).execute_atomic(_do_cleanup)
+            DatabaseConnectionManager.get_instance(self._db_path).execute_atomic(
+                _do_cleanup
+            )
 
             if result["orphaned_count"] > 0:
                 logger.info(
@@ -212,6 +238,47 @@ class SelfMonitoringService:
             - Last scan was longer ago than cadence (scan overdue)
             - Database error occurs (fail-safe: run immediately)
         """
+        if self._backend is not None:
+            try:
+                from datetime import datetime, timezone
+
+                last_scan_iso = self._backend.get_last_started_at()
+                if not last_scan_iso:
+                    logger.info("No previous scans found, running immediately")
+                    return 0.0
+                # Parse and calculate remaining wait (same logic as below)
+                if last_scan_iso.endswith("Z"):
+                    last_scan_time = datetime.fromisoformat(
+                        last_scan_iso.replace("Z", "+00:00")
+                    )
+                else:
+                    last_scan_time = datetime.fromisoformat(last_scan_iso)
+                if last_scan_time.tzinfo is None:
+                    last_scan_time = last_scan_time.replace(tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                elapsed_seconds = (now - last_scan_time).total_seconds()
+                remaining_seconds = interval_seconds - elapsed_seconds
+                if remaining_seconds <= 0:
+                    logger.info(
+                        f"Last scan was {elapsed_seconds/60:.1f} minutes ago "
+                        f"(cadence: {interval_seconds/60:.1f} minutes), running immediately"
+                    )
+                    return 0.0
+                logger.info(
+                    f"Last scan was {elapsed_seconds/60:.1f} minutes ago, "
+                    f"waiting {remaining_seconds/60:.1f} minutes before first scan"
+                )
+                return remaining_seconds
+            except Exception as e:
+                logger.warning(
+                    format_error_log(
+                        "MONITOR-GENERAL-012",
+                        f"Failed to calculate initial wait time: {e}. Running immediately.",
+                    ),
+                    exc_info=True,
+                )
+                return 0.0
+
         if not self._db_path:
             logger.debug(
                 "No database path configured, skipping initial wait calculation"
@@ -221,7 +288,9 @@ class SelfMonitoringService:
         try:
             from datetime import datetime, timezone
 
-            conn = DatabaseConnectionManager.get_instance(self._db_path).get_connection()
+            conn = DatabaseConnectionManager.get_instance(
+                self._db_path
+            ).get_connection()
             cursor = conn.cursor()
 
             # Query for most recent scan
@@ -429,7 +498,7 @@ class SelfMonitoringService:
         logger.debug(
             f"[SELF-MON-DEBUG] _execute_scan: scanner.execute_scan() returned - status={result.get('status')}"
         )
-        return result
+        return result  # type: ignore[no-any-return]
 
     @property
     def is_running(self) -> bool:

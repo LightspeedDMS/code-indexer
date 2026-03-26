@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Any, Optional, Tuple
 
 import httpx
 
@@ -33,6 +33,9 @@ from code_indexer.server.services.ci_token_manager import (
 from code_indexer.server.config.delegation_config import ClaudeDelegationManager
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
+
+if TYPE_CHECKING:
+    from code_indexer.server.storage.protocols import DiagnosticsBackend
 
 # Timeout for individual diagnostic checks (seconds)
 DIAGNOSTIC_TIMEOUT_SECONDS = 10.0
@@ -140,13 +143,18 @@ class DiagnosticsService:
     - Exception isolation ensures all categories run independently
     """
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        storage_backend: "Optional[DiagnosticsBackend]" = None,
+    ):
         """
         Initialize diagnostics service with empty cache.
 
         Args:
             db_path: Path to SQLite database file. If None, uses default location
                      from CIDX_SERVER_DATA_DIR or ~/.cidx-server/data/cidx_server.db
+            storage_backend: Optional DiagnosticsBackend for DB delegation
         """
         self._cache: Dict[DiagnosticCategory, List[DiagnosticResult]] = {}
         self._cache_timestamps: Dict[DiagnosticCategory, datetime] = {}
@@ -156,6 +164,7 @@ class DiagnosticsService:
         self._lock = asyncio.Lock()
         # Feedback cache: cache_key -> (timestamp, feedback_text)
         self._feedback_cache: Dict[str, Tuple[datetime, str]] = {}
+        self._backend = storage_backend
 
         # Database path for persistence
         if db_path is not None:
@@ -292,6 +301,7 @@ class DiagnosticsService:
         Sets running flag while executing.
         """
         import logging
+
         logger = logging.getLogger(__name__)
 
         async with self._lock:
@@ -316,12 +326,14 @@ class DiagnosticsService:
                 except Exception as e:
                     # Log error but continue with other categories
                     logger.error(f"Diagnostic category {category.value} failed: {e}")
-                    results = [DiagnosticResult(
-                        name=f"{category.value} diagnostics",
-                        status=DiagnosticStatus.ERROR,
-                        message=f"Category diagnostic failed: {str(e)}",
-                        details={"error_type": type(e).__name__},
-                    )]
+                    results = [
+                        DiagnosticResult(
+                            name=f"{category.value} diagnostics",
+                            status=DiagnosticStatus.ERROR,
+                            message=f"Category diagnostic failed: {str(e)}",
+                            details={"error_type": type(e).__name__},
+                        )
+                    ]
 
                 # Store results in cache (always executes, even after exception)
                 now = datetime.now()
@@ -575,9 +587,9 @@ class DiagnosticsService:
         # Run all CLI tool checks in parallel
         tasks = [
             self.check_cli_tool(
-                tool["name"],
-                tool["command"],
-                required_sdk=tool["required_sdk"],
+                tool["name"],  # type: ignore[index]
+                tool["command"],  # type: ignore[index]
+                required_sdk=tool["required_sdk"],  # type: ignore[index]
                 sdk_available=sdk_available,
             )
             for tool in CLI_TOOLS
@@ -634,6 +646,10 @@ class DiagnosticsService:
             results_json = json.dumps([r.to_dict() for r in results])
             run_at = datetime.now().isoformat()
 
+            if self._backend is not None:
+                self._backend.save_results(category.value, results_json, run_at)
+                return
+
             # Save to database
             def _do_save(conn: sqlite3.Connection) -> None:
                 conn.execute(
@@ -658,15 +674,18 @@ class DiagnosticsService:
         is empty or has errors, cache remains empty (will use placeholders).
         """
         try:
-            # Check if database file exists
-            if not Path(self._db_path).exists():
-                return
+            if self._backend is not None:
+                rows = self._backend.load_all_results()
+            else:
+                # Check if database file exists
+                if not Path(self._db_path).exists():
+                    return
 
-            conn = self._conn_manager.get_connection()
-            cursor = conn.execute(
-                "SELECT category, results_json, run_at FROM diagnostic_results"
-            )
-            rows = cursor.fetchall()
+                conn = self._conn_manager.get_connection()
+                cursor = conn.execute(
+                    "SELECT category, results_json, run_at FROM diagnostic_results"
+                )
+                rows = cursor.fetchall()
 
             for row in rows:
                 category_str, results_json, run_at = row
@@ -716,21 +735,27 @@ class DiagnosticsService:
             True if results were loaded from database, False otherwise
         """
         try:
-            # Check if database file exists
-            if not Path(self._db_path).exists():
-                return False
+            if self._backend is not None:
+                result_row = self._backend.load_category_results(category.value)
+                if result_row is None:
+                    return False
+                results_json, run_at = result_row
+            else:
+                # Check if database file exists
+                if not Path(self._db_path).exists():
+                    return False
 
-            conn = self._conn_manager.get_connection()
-            cursor = conn.execute(
-                "SELECT results_json, run_at FROM diagnostic_results WHERE category = ?",
-                (category.value,)
-            )
-            row = cursor.fetchone()
+                conn = self._conn_manager.get_connection()
+                cursor = conn.execute(
+                    "SELECT results_json, run_at FROM diagnostic_results WHERE category = ?",
+                    (category.value,),
+                )
+                db_row = cursor.fetchone()
 
-            if row is None:
-                return False
+                if db_row is None:
+                    return False
 
-            results_json, run_at = row
+                results_json, run_at = db_row
 
             # Deserialize results
             results_data = json.loads(results_json)
@@ -892,12 +917,11 @@ class DiagnosticsService:
         # Bug #149 Fix: Query database for registered golden repos instead of scanning filesystem
         try:
             conn = self._conn_manager.get_connection()
-            cursor = conn.execute(
-                "SELECT alias, clone_path FROM golden_repos_metadata"
-            )
+            cursor = conn.execute("SELECT alias, clone_path FROM golden_repos_metadata")
             registered_repos = cursor.fetchall()
         except Exception as e:
             import logging
+
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to query registered repos from database: {e}")
             # Return empty results if database query fails
@@ -955,10 +979,12 @@ class DiagnosticsService:
             # Check for .code-indexer/index/ directory
             index_base_path = actual_repo_dir / ".code-indexer" / "index"
             if not index_base_path.exists() or not index_base_path.is_dir():
-                repos_with_issues.append({
-                    "repo": repo_name,
-                    "issue": "Missing .code-indexer/index directory"
-                })
+                repos_with_issues.append(
+                    {
+                        "repo": repo_name,
+                        "issue": "Missing .code-indexer/index directory",
+                    }
+                )
                 continue
 
             # Scan for collection directories (voyage-code-3, code-indexer-temporal, etc.)
@@ -972,17 +998,18 @@ class DiagnosticsService:
                 index_types_found.add(collection_name)
 
                 # Validate this collection's health
-                collection_issue = self._check_collection_health(collection_dir, repo_name, collection_name)
+                collection_issue = self._check_collection_health(
+                    collection_dir, repo_name, collection_name
+                )
                 if collection_issue:
                     repos_with_issues.append(collection_issue)
                     repo_has_issues = True
 
             # If repo had no collections, that's an issue
             if collections_found == 0:
-                repos_with_issues.append({
-                    "repo": repo_name,
-                    "issue": "No index collections found"
-                })
+                repos_with_issues.append(
+                    {"repo": repo_name, "issue": "No index collections found"}
+                )
                 repo_has_issues = True
 
             # Track healthy repos
@@ -1026,23 +1053,23 @@ class DiagnosticsService:
             if not meta_file.exists():
                 return {
                     "repo": repo_name,
-                    "issue": f"Missing collection_meta.json in temporal collection {collection_name}"
+                    "issue": f"Missing collection_meta.json in temporal collection {collection_name}",
                 }
 
             if not projection_file.exists():
                 return {
                     "repo": repo_name,
-                    "issue": f"Missing projection_matrix.npy in temporal collection {collection_name}"
+                    "issue": f"Missing projection_matrix.npy in temporal collection {collection_name}",
                 }
 
             # Validate metadata is valid JSON
             try:
-                with open(meta_file, 'r') as f:
+                with open(meta_file, "r") as f:
                     json.load(f)
             except json.JSONDecodeError:
                 return {
                     "repo": repo_name,
-                    "issue": f"Corrupted metadata JSON in temporal collection {collection_name}"
+                    "issue": f"Corrupted metadata JSON in temporal collection {collection_name}",
                 }
 
             # Temporal collection is healthy
@@ -1056,11 +1083,13 @@ class DiagnosticsService:
             # Check if this is an empty collection (legitimately has no HNSW file)
             if meta_file.exists():
                 try:
-                    with open(meta_file, 'r') as f:
+                    with open(meta_file, "r") as f:
                         metadata = json.load(f)
 
                     # Get vector count from metadata (if hnsw_index section exists)
-                    vector_count = metadata.get("hnsw_index", {}).get("vector_count", None)
+                    vector_count = metadata.get("hnsw_index", {}).get(
+                        "vector_count", None
+                    )
                     unique_file_count = metadata.get("unique_file_count", None)
 
                     # Empty collection is healthy - no HNSW file expected
@@ -1068,8 +1097,13 @@ class DiagnosticsService:
                     # 1. vector_count == 0 (finalized empty collection)
                     # 2. unique_file_count == 0 (no files indexed)
                     # 3. No hnsw_index section at all (never finalized)
-                    if vector_count == 0 or unique_file_count == 0 or "hnsw_index" not in metadata:
+                    if (
+                        vector_count == 0
+                        or unique_file_count == 0
+                        or "hnsw_index" not in metadata
+                    ):
                         import logging
+
                         logger = logging.getLogger(__name__)
                         logger.debug(
                             f"Empty collection '{collection_name}' in repo '{repo_name}' "
@@ -1085,42 +1119,46 @@ class DiagnosticsService:
             # Missing HNSW file with nonzero vectors (or no metadata) is a real problem
             return {
                 "repo": repo_name,
-                "issue": f"Missing HNSW index file in {collection_name}"
+                "issue": f"Missing HNSW index file in {collection_name}",
             }
 
         if not meta_file.exists():
             return {
                 "repo": repo_name,
-                "issue": f"Missing metadata file in {collection_name}"
+                "issue": f"Missing metadata file in {collection_name}",
             }
 
         # Attempt to load the HNSW index to verify it's not corrupted
         try:
             # Read metadata to get vector_dim
-            with open(meta_file, 'r') as f:
+            with open(meta_file, "r") as f:
                 metadata = json.load(f)
 
-            vector_dim = metadata.get("vector_size") or metadata.get("hnsw_index", {}).get("vector_dim", 1024)
+            vector_dim = metadata.get("vector_size") or metadata.get(
+                "hnsw_index", {}
+            ).get("vector_dim", 1024)
 
             # Try to load the index
             manager = HNSWIndexManager(vector_dim=vector_dim, space="cosine")
-            loaded_index = manager.load_index(collection_dir, max_elements=DEFAULT_HNSW_MAX_ELEMENTS)
+            loaded_index = manager.load_index(
+                collection_dir, max_elements=DEFAULT_HNSW_MAX_ELEMENTS
+            )
 
             if loaded_index is None:
                 return {
                     "repo": repo_name,
-                    "issue": f"Failed to load HNSW index in {collection_name}"
+                    "issue": f"Failed to load HNSW index in {collection_name}",
                 }
 
         except json.JSONDecodeError:
             return {
                 "repo": repo_name,
-                "issue": f"Corrupted metadata JSON in {collection_name}"
+                "issue": f"Corrupted metadata JSON in {collection_name}",
             }
         except Exception as e:
             return {
                 "repo": repo_name,
-                "issue": f"Error loading HNSW index in {collection_name}: {str(e)}"
+                "issue": f"Error loading HNSW index in {collection_name}: {str(e)}",
             }
 
         # Collection is healthy
@@ -1605,7 +1643,10 @@ class DiagnosticsService:
         # Check for successful authentication
         # GitHub: "successfully authenticated" in stderr, exit code 1
         # GitLab: "Welcome to GitLab" in output, exit code 0
-        if "successfully authenticated" in output.lower() or "welcome to gitlab" in output.lower():
+        if (
+            "successfully authenticated" in output.lower()
+            or "welcome to gitlab" in output.lower()
+        ):
             return DiagnosticResult(
                 name="SSH Keys",
                 status=DiagnosticStatus.WORKING,
@@ -1666,8 +1707,10 @@ class DiagnosticsService:
                 asyncio.create_subprocess_exec(
                     "ssh",
                     "-T",
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "BatchMode=yes",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "BatchMode=yes",
                     "git@github.com",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -1683,7 +1726,7 @@ class DiagnosticsService:
             output = stderr_text or stdout_text
 
             # Parse output and return result
-            return self._parse_ssh_output(output, process.returncode)
+            return self._parse_ssh_output(output, process.returncode)  # type: ignore[arg-type]
 
         except asyncio.TimeoutError:
             return DiagnosticResult(
@@ -1740,7 +1783,11 @@ class DiagnosticsService:
                     name="GitHub Token",
                     status=DiagnosticStatus.WARNING,
                     message="GitHub token has invalid format (expected ghp_* or github_pat_*)",
-                    details={"token_prefix": token_data.token[:10] if len(token_data.token) >= 10 else ""},
+                    details={
+                        "token_prefix": token_data.token[:10]
+                        if len(token_data.token) >= 10
+                        else ""
+                    },
                 )
 
             # Test API call with timeout (AC7: 30 seconds)
@@ -1995,7 +2042,9 @@ class DiagnosticsService:
 
             # Try to connect and validate
             try:
-                conn = DatabaseConnectionManager.get_instance(str(db_path)).get_connection()
+                conn = DatabaseConnectionManager.get_instance(
+                    str(db_path)
+                ).get_connection()
                 # Check database integrity
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA integrity_check(1)")
@@ -2026,8 +2075,8 @@ class DiagnosticsService:
                         "size_bytes": file_size,
                         "integrity": "ok",
                         "schema_valid": True,
-                        },
-                    )
+                    },
+                )
             except PermissionError:
                 return self._create_db_error_result(
                     "Permission denied accessing database file"
@@ -2048,9 +2097,7 @@ class DiagnosticsService:
                 {"error_type": type(e).__name__},
             )
 
-    async def get_actionable_feedback(
-        self, result: DiagnosticResult
-    ) -> Optional[str]:
+    async def get_actionable_feedback(self, result: DiagnosticResult) -> Optional[str]:
         """
         Get Claude-generated troubleshooting guidance for failed diagnostic.
 
@@ -2106,7 +2153,9 @@ class DiagnosticsService:
         Raises:
             FileNotFoundError: If template file doesn't exist
         """
-        template_path = Path(__file__).parent.parent / "feedback" / "prompts" / template_name
+        template_path = (
+            Path(__file__).parent.parent / "feedback" / "prompts" / template_name
+        )
         if not template_path.exists():
             raise FileNotFoundError(f"Prompt template not found: {template_path}")
         return template_path.read_text()
