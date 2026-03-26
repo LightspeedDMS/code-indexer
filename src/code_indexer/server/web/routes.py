@@ -435,7 +435,7 @@ def dashboard_stats_partial(
     request: Request,
     time_filter: str = "24h",
     recent_filter: str = "24h",
-    api_filter: int = 60,
+    api_filter: int = 900,
 ):
     """
     Partial refresh endpoint for dashboard statistics section.
@@ -572,7 +572,7 @@ def dashboard_recent_jobs_partial(
 @web_router.get("/partials/dashboard-api-metrics", response_class=HTMLResponse)
 def dashboard_api_metrics_partial(
     request: Request,
-    api_filter: int = 60,
+    api_filter: int = 900,
 ):
     """
     Story #69: Granular partial endpoint for API metrics data ONLY.

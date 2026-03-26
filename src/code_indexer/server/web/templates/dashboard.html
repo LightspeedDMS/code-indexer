@@ -167,7 +167,7 @@ function refreshAll() {
     // Preserve current filter selections during auto-refresh
     // Use optional chaining because elements may not exist on first page load
     const timeFilter = document.getElementById('time-filter')?.value || '24h';
-    const apiFilter = document.getElementById('api-filter')?.value || '60';
+    const apiFilter = document.getElementById('api-filter')?.value || '900';
 
     // Fire all 4 requests in parallel using fetch(); use Promise.allSettled so
     // one failure does not block the others from updating the DOM.
