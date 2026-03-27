@@ -26,6 +26,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _unwrap_json(value):
+    """Unwrap psycopg Json wrapper if present, otherwise return as-is."""
+    return getattr(value, "obj", value)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -211,9 +216,10 @@ class TestRowTransformation:
         }
         transformed = m._transform_row("background_jobs", row)
 
-        assert isinstance(transformed["result"], dict)
-        assert transformed["result"]["status"] == "ok"
-        assert transformed["result"]["count"] == 5
+        result = _unwrap_json(transformed["result"])
+        assert isinstance(result, dict)
+        assert result["status"] == "ok"
+        assert result["count"] == 5
 
     def test_null_json_column_stays_none(self, tmp_path: Path, migrator_class) -> None:
         """
@@ -256,7 +262,7 @@ class TestRowTransformation:
         m = migrator_class("x.db", "g.db", "pg://x")
         row = {"result": "not-valid-json{{{"}
         transformed = m._transform_row("background_jobs", row)
-        assert transformed["result"] == "not-valid-json{{{"
+        assert _unwrap_json(transformed["result"]) == "not-valid-json{{{"
 
     def test_already_parsed_dict_in_json_column_returned_as_is(
         self, tmp_path: Path, migrator_class
@@ -270,7 +276,7 @@ class TestRowTransformation:
         data = {"key": "value"}
         row = {"result": data}
         transformed = m._transform_row("background_jobs", row)
-        assert transformed["result"] == data
+        assert _unwrap_json(transformed["result"]) == data
 
     def test_temporal_options_json_in_global_repos(
         self, tmp_path: Path, migrator_class
@@ -286,8 +292,9 @@ class TestRowTransformation:
             "temporal_options": '{"max_commits": 500}',
         }
         transformed = m._transform_row("global_repos", row)
-        assert isinstance(transformed["temporal_options"], dict)
-        assert transformed["temporal_options"]["max_commits"] == 500
+        temporal = _unwrap_json(transformed["temporal_options"])
+        assert isinstance(temporal, dict)
+        assert temporal["max_commits"] == 500
 
     def test_unknown_table_passes_row_through(
         self, tmp_path: Path, migrator_class
