@@ -80,6 +80,7 @@ class CITokenManager:
         use_sqlite: bool = False,
         db_path: Optional[str] = None,
         storage_backend: Optional[Any] = None,
+        cluster_secret: Optional[str] = None,
     ):
         """
         Initialize the token manager.
@@ -93,8 +94,13 @@ class CITokenManager:
                              (used in PG/cluster mode, Bug #532). When set,
                              use_sqlite and db_path are ignored and the
                              provided backend is used directly.
+            cluster_secret: Shared secret for encryption key derivation in
+                            cluster mode (Bug #533). When provided, all nodes
+                            derive the same key so tokens are readable
+                            cluster-wide. When None, uses hostname (standalone).
         """
         self._sqlite_backend: Optional[Any] = None
+        self._cluster_secret = cluster_secret
 
         if server_dir_path:
             self.server_dir = Path(server_dir_path)
@@ -130,10 +136,13 @@ class CITokenManager:
         Returns:
             32-byte AES-256 key
         """
-        # Use machine-specific data as salt
-        # In production, this could be from a more secure source
-        machine_id = os.uname().nodename.encode("utf-8")
-        salt = hashlib.sha256(machine_id).digest()
+        # Bug #533: In cluster mode, use shared secret so all nodes derive
+        # the same key. In standalone mode, use hostname (backward compatible).
+        if self._cluster_secret is not None:
+            salt_input = self._cluster_secret.encode("utf-8")
+        else:
+            salt_input = os.uname().nodename.encode("utf-8")
+        salt = hashlib.sha256(salt_input).digest()
 
         # Derive key using PBKDF2
         key = hashlib.pbkdf2_hmac(

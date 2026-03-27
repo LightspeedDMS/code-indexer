@@ -989,6 +989,14 @@ def make_lifespan(
                         CITokenManager,
                     )
 
+                    # Bug #533: In cluster mode, read JWT secret for shared
+                    # encryption key so CI tokens are readable across all nodes.
+                    _cluster_secret = None
+                    if backend_registry is not None:
+                        _jwt_file = Path(server_data_dir) / ".jwt_secret"
+                        if _jwt_file.exists():
+                            _cluster_secret = _jwt_file.read_text().strip()
+
                     token_manager = CITokenManager(
                         server_dir_path=server_data_dir,
                         use_sqlite=True,
@@ -996,6 +1004,7 @@ def make_lifespan(
                         storage_backend=backend_registry.ci_tokens
                         if backend_registry is not None
                         else None,
+                        cluster_secret=_cluster_secret,
                     )
                     github_token_data = token_manager.get_token("github")
                     github_token = (
