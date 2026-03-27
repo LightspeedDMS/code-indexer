@@ -73,9 +73,8 @@ def scheduler(
 class TestSchedulerLoopExcludesLocalRepos:
     """C1: local:// repos must NOT reach _submit_refresh_job in the scheduler loop."""
 
-    def test_scheduler_loop_skips_local_repo(
-        self, scheduler, mock_registry
-    ):
+    @pytest.mark.slow
+    def test_scheduler_loop_skips_local_repo(self, scheduler, mock_registry):
         """
         _scheduler_loop() must NOT call _submit_refresh_job for local:// repos.
 
@@ -118,9 +117,10 @@ class TestSchedulerLoopExcludesLocalRepos:
         def capture_submit(alias_name):
             submitted.append(alias_name)
 
-        with patch.object(
-            scheduler, "_submit_refresh_job", side_effect=capture_submit
-        ), patch.object(scheduler, "get_refresh_interval", return_value=0):
+        with (
+            patch.object(scheduler, "_submit_refresh_job", side_effect=capture_submit),
+            patch.object(scheduler, "get_refresh_interval", return_value=0),
+        ):
             scheduler._running = True
             scheduler._stop_event.clear()
             t = threading.Thread(target=scheduler._scheduler_loop, daemon=True)
@@ -152,9 +152,7 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         scheduler.registry.update_enable_temporal = MagicMock()
         scheduler.registry.update_enable_scip = MagicMock()
 
-    def test_local_repo_calls_has_local_changes(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_local_repo_calls_has_local_changes(self, scheduler, temp_golden_repos_dir):
         """
         _execute_refresh must call _has_local_changes for local:// repos.
 
@@ -184,17 +182,13 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         with patch.object(
             scheduler, "_has_local_changes", side_effect=capture_has_local_changes
         ):
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     scheduler._execute_refresh(alias_name)
 
-        assert len(mtime_calls) == 1, (
-            "_has_local_changes must be called exactly once for local:// repos"
-        )
+        assert (
+            len(mtime_calls) == 1
+        ), "_has_local_changes must be called exactly once for local:// repos"
         _, called_alias = mtime_calls[0]
         assert called_alias == alias_name
 
@@ -219,12 +213,8 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         self._setup_mocks(scheduler, alias_name, str(live_dir), repo_info)
 
         with patch.object(scheduler, "_has_local_changes", return_value=False):
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
         assert result["success"] is True
@@ -254,7 +244,9 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         mtime_calls = []
 
         with patch.object(
-            scheduler, "_has_local_changes", side_effect=lambda *a: mtime_calls.append(a) or False
+            scheduler,
+            "_has_local_changes",
+            side_effect=lambda *a: mtime_calls.append(a) or False,
         ):
             with patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -263,14 +255,10 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
                 with patch.object(
                     scheduler, "_detect_existing_indexes", return_value={}
                 ):
-                    with patch.object(
-                        scheduler, "_reconcile_registry_with_filesystem"
-                    ):
+                    with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         scheduler._execute_refresh(alias_name)
 
-        assert mtime_calls == [], (
-            "_has_local_changes must NOT be called for git repos"
-        )
+        assert mtime_calls == [], "_has_local_changes must NOT be called for git repos"
 
 
 # ---------------------------------------------------------------------------
@@ -281,9 +269,7 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
 class TestExecuteRefreshLocalRepoSourcePath:
     """C3: _execute_refresh() must use live directory as source_path for local repos."""
 
-    def test_local_repo_skips_git_pull_updater(
-        self, scheduler, temp_golden_repos_dir
-    ):
+    def test_local_repo_skips_git_pull_updater(self, scheduler, temp_golden_repos_dir):
         """
         GitPullUpdater must NOT be instantiated for local:// repos.
 
@@ -310,9 +296,7 @@ class TestExecuteRefreshLocalRepoSourcePath:
                 with patch.object(
                     scheduler, "_detect_existing_indexes", return_value={}
                 ):
-                    with patch.object(
-                        scheduler, "_reconcile_registry_with_filesystem"
-                    ):
+                    with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         scheduler._execute_refresh(alias_name)
 
         mock_git_cls.assert_not_called()
@@ -335,10 +319,7 @@ class TestExecuteRefreshLocalRepoSourcePath:
 
         # Alias points to versioned snapshot (NOT the live dir)
         versioned_target = (
-            Path(temp_golden_repos_dir)
-            / ".versioned"
-            / "cidx-meta"
-            / "v_1700000000"
+            Path(temp_golden_repos_dir) / ".versioned" / "cidx-meta" / "v_1700000000"
         )
         versioned_target.mkdir(parents=True, exist_ok=True)
 
@@ -368,9 +349,7 @@ class TestExecuteRefreshLocalRepoSourcePath:
                 with patch.object(
                     scheduler, "_detect_existing_indexes", return_value={}
                 ):
-                    with patch.object(
-                        scheduler, "_reconcile_registry_with_filesystem"
-                    ):
+                    with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         with pytest.raises(RuntimeError):
                             scheduler._execute_refresh(alias_name)
 
@@ -410,12 +389,8 @@ class TestExecuteRefreshLocalRepoSourcePath:
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
             return_value=mock_updater,
         ) as mock_git_cls:
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     scheduler._execute_refresh(alias_name)
 
         mock_git_cls.assert_called_once()

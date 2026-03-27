@@ -11,14 +11,18 @@ logic around the cursor.execute() call.
 Test strategy: Spawn 8+ threads that all call save_metadata() concurrently
 and verify no OperationalError is raised.
 """
+
 import tempfile
 import threading
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from code_indexer.storage.temporal_metadata_store import TemporalMetadataStore
 
 
+@pytest.mark.slow
 class TestBug484SqliteLocking:
     """Verify concurrent writes to TemporalMetadataStore don't raise OperationalError."""
 
@@ -31,6 +35,7 @@ class TestBug484SqliteLocking:
     def teardown_method(self):
         import shutil
         import os
+
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 
@@ -62,9 +67,13 @@ class TestBug484SqliteLocking:
                 except sqlite3.OperationalError as e:
                     errors.append(f"Thread {thread_id}, write {i}: {e}")
                 except Exception as e:
-                    errors.append(f"Thread {thread_id}, write {i} (unexpected): {type(e).__name__}: {e}")
+                    errors.append(
+                        f"Thread {thread_id}, write {i} (unexpected): {type(e).__name__}: {e}"
+                    )
 
-        threads = [threading.Thread(target=worker, args=(t,)) for t in range(num_threads)]
+        threads = [
+            threading.Thread(target=worker, args=(t,)) for t in range(num_threads)
+        ]
         for t in threads:
             t.start()
         for t in threads:
@@ -76,9 +85,9 @@ class TestBug484SqliteLocking:
         )
         # All writes should have succeeded
         expected_total = num_threads * writes_per_thread
-        assert len(results) == expected_total, (
-            f"Expected {expected_total} successful writes, got {len(results)}"
-        )
+        assert (
+            len(results) == expected_total
+        ), f"Expected {expected_total} successful writes, got {len(results)}"
 
     def test_wal_mode_enabled_on_connection(self):
         """

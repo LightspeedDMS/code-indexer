@@ -58,6 +58,7 @@ class TestRefreshSchedulerLocalRepoSkip:
         """Create an AliasManager instance."""
         return AliasManager(str(golden_repos_dir / "aliases"))
 
+    @pytest.mark.slow
     def test_scheduler_loop_submits_only_remote_repos(
         self,
         golden_repos_dir,

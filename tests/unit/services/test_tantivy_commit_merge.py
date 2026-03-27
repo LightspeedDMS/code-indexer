@@ -60,6 +60,7 @@ def _count_segments(index_dir: Path) -> int:
     return len(uuid_prefixes)
 
 
+@pytest.mark.slow
 class TestTantivyCommitMerge:
     """Verify that commit() awaits merging threads to keep segment count bounded."""
 
