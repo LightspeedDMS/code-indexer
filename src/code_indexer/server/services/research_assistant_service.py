@@ -1248,70 +1248,137 @@ class ResearchAssistantService:
                 cleanup_script_rule = None
 
             # Story #554: Build permission settings JSON for CLI-level enforcement.
-            # Specific allow rules for Write/Edit on cidx-meta take precedence over
-            # the general deny rules for Write/Edit (Claude Code allow-over-deny semantics).
             #
-            # HIGH-3: Claude Code's Bash rules are shell-operator-aware:
+            # CRITICAL: With --dangerously-skip-permissions, "allow" rules only control
+            # whether a prompt is shown (irrelevant since we skip prompts). Only "deny"
+            # rules actually BLOCK execution. Therefore, security enforcement MUST use
+            # deny rules for all dangerous commands.
+            #
+            # Strategy:
+            # - allow: Write/Edit scoped to cidx-meta (overrides general Write/Edit deny)
+            # - deny: All dangerous Bash commands + unscoped Write/Edit/WebFetch/WebSearch
+            #
+            # Claude Code's Bash rules are shell-operator-aware:
             # `Bash(cmd *)` blocks `cmd && blocked` and `cmd | blocked`.
-            # See Claude Code permission docs for shell operator behavior.
-            # This documents the security assumption for audit purposes.
             import json as _json
 
-            bash_allow_rules = [
-                "Bash(sqlite3 *)",
-                "Bash(journalctl *)",
-                "Bash(systemctl status *)",
-                "Bash(ls *)",
-                "Bash(cat *)",
-                "Bash(head *)",
-                "Bash(tail *)",
-                "Bash(grep *)",
-                # NOTE: 'find' is intentionally excluded — find -exec allows arbitrary
-                # command execution. Use grep -r, ls -R, cidx query --fts --regex, or Glob.
-                # NOTE: 'xargs' is intentionally excluded — xargs can execute any blocked
-                # command (xargs curl, xargs python3, xargs rm) and bypasses the allowlist.
-                "Bash(ps *)",
-                "Bash(top -bn1 *)",
-                "Bash(wc *)",
-                "Bash(du *)",
-                "Bash(df *)",
-                "Bash(uptime)",
-                "Bash(hostname)",
-                "Bash(uname *)",
-                "Bash(git log *)",
-                "Bash(git diff *)",
-                "Bash(git status *)",
-                "Bash(git show *)",
-                "Bash(git blame *)",
-                "Bash(cidx *)",
-                "Bash(stat *)",
-                "Bash(file *)",
-                "Bash(diff *)",
-                "Bash(sort *)",
-                "Bash(uniq *)",
-                "Bash(cut *)",
-                "Bash(tr *)",
+            # Deny rules for dangerous Bash commands — these are ENFORCED even with
+            # --dangerously-skip-permissions. Any command not denied is allowed.
+            bash_deny_rules = [
+                # Network tools — prevent data exfiltration and lateral movement
+                "Bash(curl *)",
+                "Bash(wget *)",
+                "Bash(ssh *)",
+                "Bash(scp *)",
+                "Bash(nc *)",
+                "Bash(ncat *)",
+                "Bash(nmap *)",
+                "Bash(netcat *)",
+                "Bash(socat *)",
+                "Bash(telnet *)",
+                "Bash(ftp *)",
+                "Bash(sftp *)",
+                "Bash(rsync *)",
+                # Scripting interpreters — prevent arbitrary code execution
+                "Bash(python3 *)",
+                "Bash(python *)",
+                "Bash(perl *)",
+                "Bash(ruby *)",
+                "Bash(node *)",
+                "Bash(php *)",
+                "Bash(lua *)",
+                # Shell escape hatches
+                "Bash(bash *)",
+                "Bash(sh *)",
+                "Bash(zsh *)",
+                "Bash(exec *)",
+                "Bash(eval *)",
+                # Command multipliers — can execute any blocked command
+                "Bash(xargs *)",
+                "Bash(find *)",  # find -exec allows arbitrary command execution
+                # Privilege escalation
+                "Bash(sudo *)",
+                "Bash(su *)",
+                "Bash(doas *)",
+                # Destructive file operations
+                "Bash(rm *)",
+                "Bash(mv *)",
+                "Bash(cp *)",
+                "Bash(chmod *)",
+                "Bash(chown *)",
+                "Bash(chgrp *)",
+                "Bash(mkdir *)",
+                "Bash(rmdir *)",
+                "Bash(touch *)",
+                "Bash(ln *)",
+                "Bash(install *)",
+                # Package management
+                "Bash(apt *)",
+                "Bash(apt-get *)",
+                "Bash(dnf *)",
+                "Bash(yum *)",
+                "Bash(pip *)",
+                "Bash(pip3 *)",
+                "Bash(npm *)",
+                "Bash(gem *)",
+                # Service management (except status which is read-only)
+                "Bash(systemctl restart *)",
+                "Bash(systemctl stop *)",
+                "Bash(systemctl start *)",
+                "Bash(systemctl enable *)",
+                "Bash(systemctl disable *)",
+                "Bash(systemctl reload *)",
+                "Bash(service *)",
+                # Git write operations
+                "Bash(git push *)",
+                "Bash(git commit *)",
+                "Bash(git checkout *)",
+                "Bash(git reset *)",
+                "Bash(git rebase *)",
+                "Bash(git merge *)",
+                "Bash(git stash *)",
+                "Bash(git clean *)",
+                "Bash(git restore *)",
+                # Redirection/pipe to file (data exfiltration via file)
+                "Bash(tee *)",
+                # Process control
+                "Bash(kill *)",
+                "Bash(killall *)",
+                "Bash(pkill *)",
+                # Disk/mount operations
+                "Bash(mount *)",
+                "Bash(umount *)",
+                "Bash(mkfs *)",
+                "Bash(fdisk *)",
+                # Cron/scheduling (persistence mechanism)
+                "Bash(crontab *)",
+                "Bash(at *)",
+            ]
+
+            # Allow rules: cidx-meta Write/Edit (overrides general deny),
+            # plus the cleanup script if available
+            allow_rules = [
+                "Read",
+                "Glob",
+                "Grep",
+                "TodoWrite",
+                f"Write({cidx_meta_path}/**)",
+                f"Edit({cidx_meta_path}/**)",
             ]
             if cleanup_script_rule is not None:
-                bash_allow_rules.append(cleanup_script_rule)
+                allow_rules.append(cleanup_script_rule)
 
             permission_settings = {
                 "permissions": {
-                    "allow": [
-                        "Read",
-                        "Glob",
-                        "Grep",
-                        "TodoWrite",
-                        f"Write({cidx_meta_path}/**)",
-                        f"Edit({cidx_meta_path}/**)",
-                    ]
-                    + bash_allow_rules,
+                    "allow": allow_rules,
                     "deny": [
+                        # Tool-level denies
                         "Write",
                         "Edit",
                         "WebFetch",
                         "WebSearch",
-                    ],
+                    ]
+                    + bash_deny_rules,
                 }
             }
 

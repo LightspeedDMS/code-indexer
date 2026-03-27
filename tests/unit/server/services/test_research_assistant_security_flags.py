@@ -217,73 +217,64 @@ class TestSecurityHardeningCommandFlags:
             f"Got allow list: {allow_list}"
         )
 
-    def test_settings_allow_includes_safe_bash_commands(self, research_service):
+    def test_settings_deny_blocks_dangerous_bash_commands(self, research_service):
         """
-        AC2: permissions.allow must include safe Bash command patterns:
-        sqlite3, journalctl, ls, cat, grep, git log, cidx, systemctl status.
-        Note: 'find' and 'xargs' are intentionally excluded (CRITICAL-1, CRITICAL-2):
-        - find -exec allows arbitrary command execution
-        - xargs can chain into any blocked command
-        Alternatives: grep -r, ls -R, cidx query --fts --regex, Glob tool.
+        AC1: permissions.deny must include deny rules for all dangerous Bash commands.
+        With --dangerously-skip-permissions, only deny rules actually block execution.
+        Allow rules only control prompting (useless with skip-permissions).
+        Categories: network (curl, wget, ssh, scp, nc, nmap), interpreters (python3,
+        python, perl, ruby, node), shell escapes (bash, sh, xargs, find), privilege
+        (sudo), destructive (rm, mv, cp, chmod), packages (apt, pip), service mgmt
+        (systemctl restart/stop/start), git writes (push/commit/checkout), process
+        control (kill), exfiltration (tee), persistence (crontab).
         """
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1
 
-        allow_list = self._get_settings(calls[0])["permissions"]["allow"]
-        bash_rules = [r for r in allow_list if r.startswith("Bash(")]
+        deny_list = self._get_settings(calls[0])["permissions"]["deny"]
+        bash_deny_rules = [r for r in deny_list if r.startswith("Bash(")]
 
-        required_patterns = [
-            "sqlite3",
-            "journalctl",
-            "ls",
-            "cat",
-            "grep",
-            "git log",
-            "cidx",
-            "systemctl status",
+        required_denies = [
+            "curl",
+            "wget",
+            "ssh",
+            "scp",
+            "python3",
+            "python ",
+            "perl",
+            "ruby",
+            "node",
+            "sudo",
+            "rm ",
+            "mv ",
+            "cp ",
+            "chmod",
+            "xargs",
+            "find",
+            "bash ",
+            "sh ",
+            "nc ",
+            "nmap",
+            "apt ",
+            "pip ",
+            "systemctl restart",
+            "systemctl stop",
+            "systemctl start",
+            "git push",
+            "git commit",
+            "git checkout",
+            "kill ",
+            "tee ",
+            "crontab",
         ]
 
-        for pattern in required_patterns:
-            matching = [r for r in bash_rules if pattern in r]
+        for pattern in required_denies:
+            matching = [r for r in bash_deny_rules if pattern in r]
             assert len(matching) >= 1, (
-                f"Bash({pattern!r} *) must be in allow list. "
-                f"Got bash rules: {bash_rules}"
+                f"Bash deny rule for {pattern!r} must be in deny list. "
+                f"With --dangerously-skip-permissions, only deny rules block execution. "
+                f"Got bash deny rules: {bash_deny_rules}"
             )
-
-    def test_xargs_not_in_allow_list(self, research_service):
-        """
-        CRITICAL-1: 'xargs' must NOT appear in the Bash allow list.
-        xargs can execute arbitrary commands (xargs curl, xargs python3, xargs rm)
-        which would bypass the entire allowlist.
-        """
-        calls = self._run_and_capture_calls(research_service, "Test question")
-        assert len(calls) >= 1
-
-        allow_list = self._get_settings(calls[0])["permissions"]["allow"]
-        xargs_rules = [r for r in allow_list if "xargs" in r]
-        assert len(xargs_rules) == 0, (
-            f"CRITICAL: 'xargs' must NOT be in the Bash allow list — "
-            f"it can execute arbitrary commands and bypasses the allowlist. "
-            f"Found: {xargs_rules}"
-        )
-
-    def test_find_not_in_allow_list(self, research_service):
-        """
-        CRITICAL-2: 'find' must NOT appear as a standalone Bash allow rule.
-        find -exec allows arbitrary command execution.
-        Use grep -r, ls -R, cidx query --fts --regex, or Glob tool instead.
-        """
-        calls = self._run_and_capture_calls(research_service, "Test question")
-        assert len(calls) >= 1
-
-        allow_list = self._get_settings(calls[0])["permissions"]["allow"]
-        # Allow rules like "Bash(find *)" grant find -exec which is dangerous
-        find_rules = [r for r in allow_list if r.startswith("Bash(find")]
-        assert len(find_rules) == 0, (
-            f"CRITICAL: 'Bash(find *)' must NOT be in the allow list — "
-            f"find -exec allows arbitrary command execution. "
-            f"Found: {find_rules}"
-        )
 
     def test_cleanup_script_uses_fully_qualified_path(self, research_service):
         """
