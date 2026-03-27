@@ -192,10 +192,13 @@ class NodeHeartbeatService:
     # ------------------------------------------------------------------
 
     def _ensure_table(self) -> None:
-        """Create cluster_nodes table if it does not yet exist."""
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(_CREATE_TABLE_SQL)
+        """No-op: table creation handled by MigrationRunner (Story #519).
+
+        Bug #547: The original DDL here was a minimal 3-column schema that
+        mismatched the richer migration schema. Since migrations auto-run
+        on startup before this service starts, the table always exists.
+        """
+        pass
 
     def _upsert_node(self, status: str) -> None:
         """Insert or update this node's row with the given status."""
