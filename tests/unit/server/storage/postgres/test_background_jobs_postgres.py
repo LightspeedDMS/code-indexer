@@ -661,6 +661,100 @@ class TestCleanupOrphanedJobsOnStartup:
 
 
 # ---------------------------------------------------------------------------
+# cleanup_orphaned_jobs_on_startup — node-scoped (Issue #535)
+# ---------------------------------------------------------------------------
+
+
+class TestCleanupOrphanedJobsOnStartupNodeScoped:
+    """In PG mode, cleanup must be scoped to the restarting node only."""
+
+    def test_cleanup_with_node_id_none_returns_zero_and_executes_no_sql(self):
+        """
+        When cleanup_orphaned_jobs_on_startup() is called with node_id=None
+        in postgres mode, it must return 0 and NOT execute any UPDATE SQL.
+
+        This is the safe default — without a node_id we cannot know which jobs
+        belong to this node, so we do nothing rather than kill jobs on healthy
+        nodes.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=5)
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        count = backend.cleanup_orphaned_jobs_on_startup(node_id=None)
+
+        assert count == 0
+        # No UPDATE must have been executed
+        cur.execute.assert_not_called()
+
+    def test_cleanup_with_node_id_scopes_where_to_executing_node(self):
+        """
+        When cleanup_orphaned_jobs_on_startup(node_id='node-A') is called,
+        the UPDATE SQL must include AND executing_node = %s with 'node-A'.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=1)
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        count = backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
+
+        assert count == 1
+        sql, params = cur.execute.call_args[0]
+        assert "executing_node" in sql
+        assert "node-A" in params
+
+    def test_cleanup_with_node_id_does_not_affect_other_nodes(self):
+        """
+        When cleanup_orphaned_jobs_on_startup(node_id='node-A') is called,
+        the WHERE clause must NOT match jobs from other nodes.
+        Specifically, 'node-B' must not appear as a param or unbounded condition.
+        """
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=1)
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        backend.cleanup_orphaned_jobs_on_startup(node_id="node-A")
+
+        sql, params = cur.execute.call_args[0]
+        # The only node value in params must be 'node-A', not 'node-B'
+        assert "node-B" not in params
+        # The SQL must not be an unbounded UPDATE (no executing_node filter missing)
+        assert "executing_node" in sql
+
+    def test_cleanup_no_node_id_logs_warning(self, caplog):
+        """
+        When cleanup_orphaned_jobs_on_startup() is called with node_id=None,
+        a WARNING must be logged explaining the no-op decision.
+        """
+        import logging
+
+        from code_indexer.server.storage.postgres.background_jobs_backend import (
+            BackgroundJobsPostgresBackend,
+        )
+
+        pool, conn, cur = _make_pool(rowcount=0)
+        backend = BackgroundJobsPostgresBackend(pool)
+
+        with caplog.at_level(logging.WARNING):
+            backend.cleanup_orphaned_jobs_on_startup(node_id=None)
+
+        assert any(
+            "node_id" in record.message.lower() or "node" in record.message.lower()
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+        )
+
+
+# ---------------------------------------------------------------------------
 # Protocol conformance
 # ---------------------------------------------------------------------------
 

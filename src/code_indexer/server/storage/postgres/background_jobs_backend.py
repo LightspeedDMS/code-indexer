@@ -416,33 +416,31 @@ class BackgroundJobsPostgresBackend:
         Returns:
             Number of orphaned jobs cleaned up.
         """
+        if node_id is None:
+            # Bug #535: In cluster mode, cleaning ALL jobs is dangerous —
+            # it kills jobs on healthy nodes during rolling restarts.
+            # Return 0 (no-op) as a safe default when node_id is not provided.
+            logger.warning(
+                "cleanup_orphaned_jobs_on_startup called without node_id — "
+                "skipping cleanup to protect cross-node jobs"
+            )
+            return 0
+
         interrupted_at = datetime.now(timezone.utc).isoformat()
         error_message = "Job interrupted by server restart"
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
-                if node_id is not None:
-                    cur.execute(
-                        """
-                        UPDATE background_jobs
-                        SET status = 'failed',
-                            error = %s,
-                            completed_at = %s
-                        WHERE status IN ('running', 'pending')
-                          AND executing_node = %s
-                        """,
-                        (error_message, interrupted_at, node_id),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        UPDATE background_jobs
-                        SET status = 'failed',
-                            error = %s,
-                            completed_at = %s
-                        WHERE status IN ('running', 'pending')
-                        """,
-                        (error_message, interrupted_at),
-                    )
+                cur.execute(
+                    """
+                    UPDATE background_jobs
+                    SET status = 'failed',
+                        error = %s,
+                        completed_at = %s
+                    WHERE status IN ('running', 'pending')
+                      AND executing_node = %s
+                    """,
+                    (error_message, interrupted_at, node_id),
+                )
                 count: int = cur.rowcount
         if count > 0:
             logger.info("Cleaned up %d orphaned jobs on server startup", count)
