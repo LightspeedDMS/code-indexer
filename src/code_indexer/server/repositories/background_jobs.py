@@ -254,6 +254,8 @@ class BackgroundJobManager:
                         job.status = JobStatus.FAILED
                         job.completed_at = datetime.now(timezone.utc)
                         job.error = f"Auto-expired: exceeded stale threshold ({elapsed:.0f}s > {stale_threshold}s)"
+                        # Bug #546: Persist to DB so other nodes see the expiry
+                        self._persist_jobs(job_id=job.job_id)
                         return None  # Allow new submission
                 return job.job_id
         return None
@@ -360,9 +362,11 @@ class BackgroundJobManager:
 
         # Execute job in background thread
         thread = threading.Thread(
-            target=self._execute_job, args=(job_id, func, args, kwargs)
+            target=self._execute_job,
+            args=(job_id, func, args, kwargs),
+            daemon=True,  # Bug #549: daemon thread allows graceful shutdown;
+            # orphaned jobs are reclaimed by JobReconciliationService
         )
-        # Thread is not daemon to ensure proper shutdown
         thread.start()
 
         # Track running thread
@@ -840,8 +844,7 @@ class BackgroundJobManager:
                 exception_queue.put(e)
 
         # Start function in separate thread
-        worker_thread = threading.Thread(target=worker)
-        # Worker thread is not daemon to ensure proper shutdown
+        worker_thread = threading.Thread(target=worker, daemon=True)
         worker_thread.start()
 
         # Poll for completion or cancellation
