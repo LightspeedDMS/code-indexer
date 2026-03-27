@@ -413,7 +413,7 @@ def test_monitor_detects_lost_connection_and_fires_callback():
     dead_conn.cursor.return_value = dead_cur
 
     # Force initial state: we are leader with the dead connection
-    service._is_leader = True
+    service._is_leader_event.set()
     service._lock_conn = dead_conn
 
     # After detecting the loss, try_acquire will be called — keep it failing

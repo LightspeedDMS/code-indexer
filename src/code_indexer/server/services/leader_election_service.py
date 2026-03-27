@@ -60,7 +60,9 @@ class LeaderElectionService:
         """
         self._connection_string = connection_string
         self._node_id = node_id
-        self._is_leader: bool = False
+        self._is_leader_event = (
+            threading.Event()
+        )  # Bug #552: thread-safe leadership flag
         self._lock_conn = None  # Dedicated connection holding the advisory lock
         self._monitor_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -74,7 +76,7 @@ class LeaderElectionService:
     @property
     def is_leader(self) -> bool:
         """Whether this node currently holds leadership."""
-        return self._is_leader
+        return self._is_leader_event.is_set()
 
     def register_leader_callbacks(
         self,
@@ -135,8 +137,8 @@ class LeaderElectionService:
 
             if acquired:
                 self._lock_conn = conn
-                was_leader = self._is_leader
-                self._is_leader = True
+                was_leader = self._is_leader_event.is_set()
+                self._is_leader_event.set()
                 logger.info(
                     "LeaderElectionService [%s]: acquired leadership (lock_id=%s)",
                     self._node_id,
@@ -146,10 +148,21 @@ class LeaderElectionService:
                     try:
                         self._on_become_leader()
                     except Exception:
+                        # Bug #540: Release leadership if callback fails.
+                        # Without this, the node holds the lock but never
+                        # starts scheduler services — cluster is headless.
                         logger.exception(
-                            "LeaderElectionService [%s]: on_become_leader callback raised",
+                            "LeaderElectionService [%s]: on_become_leader callback "
+                            "raised — releasing leadership so another node can try",
                             self._node_id,
                         )
+                        self._is_leader_event.clear()
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        self._lock_conn = None
+                        return False
                 return True
             else:
                 conn.close()
@@ -185,8 +198,8 @@ class LeaderElectionService:
             finally:
                 self._lock_conn = None
 
-        was_leader = self._is_leader
-        self._is_leader = False
+        was_leader = self._is_leader_event.is_set()
+        self._is_leader_event.clear()
 
         if was_leader:
             logger.info(
@@ -265,7 +278,7 @@ class LeaderElectionService:
         """
         while not self._stop_event.is_set():
             try:
-                if self._is_leader:
+                if self._is_leader_event.is_set():
                     if not self._connection_alive():
                         logger.warning(
                             "LeaderElectionService [%s]: lock connection lost; "
@@ -274,8 +287,8 @@ class LeaderElectionService:
                         )
                         # Null out the dead connection before releasing
                         self._lock_conn = None
-                        was_leader = self._is_leader
-                        self._is_leader = False
+                        was_leader = self._is_leader_event.is_set()
+                        self._is_leader_event.clear()
                         if was_leader and self._on_lose_leadership is not None:
                             try:
                                 self._on_lose_leadership()

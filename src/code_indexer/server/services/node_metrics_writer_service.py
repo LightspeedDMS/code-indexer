@@ -242,6 +242,7 @@ class NodeMetricsWriterService:
         self._thread: Optional[threading.Thread] = None
         # Persistent state for I/O rate calculation across write cycles
         self._io_state: Dict[str, Any] = {}
+        self._io_state_lock = threading.Lock()  # Bug #548: protect concurrent access
 
     @property
     def node_id(self) -> str:
@@ -256,7 +257,10 @@ class NodeMetricsWriterService:
     def write_once(self) -> None:
         """Collect metrics, write one snapshot, and clean up old records."""
         try:
-            snapshot = _collect_metrics(self._node_id, self._node_ip, self._io_state)
+            with self._io_state_lock:
+                snapshot = _collect_metrics(
+                    self._node_id, self._node_ip, self._io_state
+                )
             self._backend.write_snapshot(snapshot)
         except Exception:
             logger.exception(
