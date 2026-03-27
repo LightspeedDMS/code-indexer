@@ -148,54 +148,76 @@ class BackgroundJobsPostgresBackend:
         progress_info: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Insert a new background job row."""
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO background_jobs (
-                        job_id, operation_type, status, created_at, started_at,
-                        completed_at, result, error, progress, username, is_admin,
-                        cancelled, repo_alias, resolution_attempts, claude_actions,
-                        failure_reason, extended_error, language_resolution_status,
-                        progress_info, metadata
-                    ) VALUES (
-                        %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s,
-                        %s, %s, %s,
-                        %s, %s
+        """Insert a new background job row.
+
+        Raises:
+            IntegrityError: When a duplicate active job exists for the same
+                (operation_type, repo_alias), enforced by partial unique index
+                idx_active_job_per_repo (migration 004, Bug #536).
+        """
+        try:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO background_jobs (
+                            job_id, operation_type, status, created_at, started_at,
+                            completed_at, result, error, progress, username, is_admin,
+                            cancelled, repo_alias, resolution_attempts, claude_actions,
+                            failure_reason, extended_error, language_resolution_status,
+                            progress_info, metadata
+                        ) VALUES (
+                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s
+                        )
+                        """,
+                        (
+                            job_id,
+                            operation_type,
+                            status,
+                            created_at,
+                            started_at,
+                            completed_at,
+                            json.dumps(result) if result is not None else None,
+                            error,
+                            progress,
+                            username,
+                            is_admin,
+                            cancelled,
+                            repo_alias,
+                            resolution_attempts,
+                            json.dumps(claude_actions)
+                            if claude_actions is not None
+                            else None,
+                            failure_reason,
+                            json.dumps(extended_error)
+                            if extended_error is not None
+                            else None,
+                            json.dumps(language_resolution_status)
+                            if language_resolution_status is not None
+                            else None,
+                            progress_info,
+                            json.dumps(metadata) if metadata is not None else None,
+                        ),
                     )
-                    """,
-                    (
-                        job_id,
-                        operation_type,
-                        status,
-                        created_at,
-                        started_at,
-                        completed_at,
-                        json.dumps(result) if result is not None else None,
-                        error,
-                        progress,
-                        username,
-                        is_admin,
-                        cancelled,
-                        repo_alias,
-                        resolution_attempts,
-                        json.dumps(claude_actions)
-                        if claude_actions is not None
-                        else None,
-                        failure_reason,
-                        json.dumps(extended_error)
-                        if extended_error is not None
-                        else None,
-                        json.dumps(language_resolution_status)
-                        if language_resolution_status is not None
-                        else None,
-                        progress_info,
-                        json.dumps(metadata) if metadata is not None else None,
-                    ),
+        except Exception as exc:
+            # Bug #536: Catch unique violation from partial index on active jobs.
+            # psycopg wraps UniqueViolation as IntegrityError.
+            if "UniqueViolation" in type(exc).__name__ or (
+                hasattr(exc, "sqlstate") and getattr(exc, "sqlstate") == "23505"
+            ):
+                logger.warning(
+                    "Duplicate active job rejected by database: "
+                    "operation_type=%s, repo_alias=%s (job_id=%s)",
+                    operation_type,
+                    repo_alias,
+                    job_id,
                 )
+                raise
+            raise
         logger.debug("Saved background job: %s", job_id)
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
