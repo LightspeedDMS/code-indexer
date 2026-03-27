@@ -232,6 +232,15 @@ class DistributedJobClaimer:
 
         if completed:
             logger.debug("Node %s completed job %s", self._node_id, job_id)
+        else:
+            # Bug #537: Job was reclaimed by reconciliation while executing.
+            # The work is lost — log at WARNING so operators can investigate.
+            logger.warning(
+                "Node %s tried to complete job %s but rowcount=0 — "
+                "job was likely reclaimed by reconciliation",
+                self._node_id,
+                job_id,
+            )
         return completed
 
     def fail_job(self, job_id: str, error: str) -> bool:
@@ -266,6 +275,13 @@ class DistributedJobClaimer:
 
         if failed:
             logger.debug("Node %s failed job %s: %s", self._node_id, job_id, error)
+        else:
+            logger.warning(
+                "Node %s tried to fail job %s but rowcount=0 — "
+                "job was likely reclaimed by reconciliation",
+                self._node_id,
+                job_id,
+            )
         return failed
 
     def get_node_jobs(self) -> List[Dict[str, Any]]:

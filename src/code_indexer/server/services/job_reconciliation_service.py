@@ -159,6 +159,10 @@ class JobReconciliationService:
             )
             return 0
 
+        # Bug #537: Add grace period — only reclaim jobs where claimed_at
+        # is old enough that the node genuinely appears dead, not just
+        # experiencing a brief heartbeat delay (GC pause, connection contention).
+        grace_seconds = self._sweep_interval * 3  # 3x sweep interval as grace
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -171,9 +175,11 @@ class JobReconciliationService:
                     WHERE  status         = 'running'
                       AND  executing_node IS NOT NULL
                       AND  executing_node != ALL(%s)
+                      AND  (claimed_at IS NULL
+                            OR claimed_at < NOW() - %s * INTERVAL '1 second')
                     RETURNING job_id, executing_node
                     """,
-                    (active_nodes,),
+                    (active_nodes, grace_seconds),
                 )
                 rows = cur.fetchall()
             conn.commit()
