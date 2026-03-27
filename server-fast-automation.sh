@@ -54,7 +54,19 @@ print_success "Python version checked"
 
 # 1. Install dependencies
 print_step "Installing dependencies"
-python3 -m pip install --break-system-packages -e ".[dev]"
+# Workaround for pip compatibility: try --break-system-packages first (Python 3.11+),
+# fall back to --user, fall back to bare pip install
+PROJECT_DIR=$(pwd)
+PROJECT_NAME=$(basename "$PROJECT_DIR")
+cd ..
+if pip install -e "./$PROJECT_NAME[dev]" --break-system-packages 2>/dev/null; then
+    :
+elif pip install -e "./$PROJECT_NAME[dev]" --user 2>/dev/null; then
+    :
+else
+    pip install -e "./$PROJECT_NAME[dev]"
+fi
+cd "$PROJECT_DIR"
 print_success "Dependencies installed"
 
 # 2. Lint server code with ruff
