@@ -15,6 +15,7 @@ Zero behavior change: same paths, methods, response models, and handler logic.
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import (
     FastAPI,
@@ -46,6 +47,10 @@ from ..auth.rate_limiter import refresh_token_rate_limiter
 from ..auth.token_bucket import rate_limiter
 from ..auth.audit_logger import password_audit_logger
 from ..auth.auth_error_handler import auth_error_handler, AuthErrorType
+from ..auth.login_rate_limiter import (
+    LoginRateLimiter,
+    login_rate_limiter as _default_login_rate_limiter,
+)
 
 
 def register_auth_routes(
@@ -54,6 +59,7 @@ def register_auth_routes(
     jwt_manager,
     user_manager,
     refresh_token_manager,
+    login_rate_limiter: Optional[LoginRateLimiter] = None,
 ) -> None:
     """
     Register auth and API key route handlers onto the FastAPI app.
@@ -67,7 +73,14 @@ def register_auth_routes(
         jwt_manager: JWTManager instance
         user_manager: UserManager instance
         refresh_token_manager: RefreshTokenManager instance
+        login_rate_limiter: Optional LoginRateLimiter for account lockout (Story #557)
     """
+    # Story #557: Use provided limiter or fall back to module-level singleton
+    _lockout_limiter = (
+        login_rate_limiter
+        if login_rate_limiter is not None
+        else _default_login_rate_limiter
+    )
 
     @app.post("/auth/login", response_model=LoginResponse)
     def login(login_data: LoginRequest, request: Request):
@@ -104,6 +117,16 @@ def register_auth_routes(
                 headers={"Retry-After": str(math.ceil(retry_after))},
             )
 
+        # Story #557: Account lockout check (complementary to token-bucket above).
+        # Token bucket handles burst; this handles sustained failures (>= 5 in window).
+        is_locked, lockout_remaining = _lockout_limiter.is_locked(login_data.username)
+        if is_locked:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"account_locked: Too many failed attempts. Try again in {int(lockout_remaining)} seconds.",
+                headers={"Retry-After": str(int(lockout_remaining))},
+            )
+
         def authenticate_with_security():
             # Authenticate user
             user = user_manager.authenticate_user(
@@ -113,6 +136,9 @@ def register_auth_routes(
             if user is None:
                 # Perform dummy password work to prevent timing-based user enumeration
                 auth_error_handler.perform_dummy_password_work()
+
+                # Story #557: Record failure in lockout limiter (audit-logs internally)
+                _lockout_limiter.check_and_record_failure(login_data.username)
 
                 # Create standardized error response with audit logging
                 error_response = auth_error_handler.create_error_response(
@@ -138,6 +164,9 @@ def register_auth_routes(
 
         # Story #555: Refund rate limit token on successful authentication.
         rate_limiter.refund(login_data.username)
+
+        # Story #557: Clear lockout failure history on successful login (AC1)
+        _lockout_limiter.record_success(login_data.username)
 
         # Create JWT token and refresh token
         user_data = {

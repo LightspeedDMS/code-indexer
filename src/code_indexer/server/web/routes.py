@@ -36,8 +36,12 @@ from code_indexer import __version__ as cidx_version
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
 from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Story #557: Login rate limiter for Web UI login (shared instance)
+login_rate_limiter = LoginRateLimiter()
 
 # Self-Monitoring constants (Story #74)
 SCAN_HISTORY_LIMIT = 50

@@ -815,6 +815,15 @@ class ClusterConfig:
 
 
 @dataclass
+class LoginSecurityConfig:
+    """Login security settings (Story #557)."""
+
+    login_rate_limiting_enabled: bool = True
+    max_failed_login_attempts: int = 5
+    login_lockout_duration_minutes: int = 15
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -889,6 +898,7 @@ class ServerConfig:
 
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
+    login_security_config: Optional[LoginSecurityConfig] = None  # Story #557
 
     # Epic #408 - Cluster mode configuration
     storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
@@ -969,6 +979,8 @@ class ServerConfig:
         # Story #400 - Initialize data retention config
         if self.data_retention_config is None:
             self.data_retention_config = DataRetentionConfig()
+        if self.login_security_config is None:
+            self.login_security_config = LoginSecurityConfig()
 
 
 class ServerConfigManager:
