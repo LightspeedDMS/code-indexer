@@ -97,7 +97,10 @@ class TestSelfMonitoringServiceLogScannerIntegration:
     """Test suite for SelfMonitoringService integration with LogScanner (Bug #87)."""
 
     def test_service_accepts_database_and_config_parameters(self):
-        """Test that service accepts db_path, log_db_path, github_repo, prompt_template, and model."""
+        """Test that service accepts db_path, log_db_path, github_repo, and model.
+
+        Story #566: prompt_template parameter removed from service constructor.
+        """
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
 
         service = SelfMonitoringService(
@@ -107,21 +110,20 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             db_path="/path/to/cidx_server.db",
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
-            prompt_template="Custom prompt with {last_scan_log_id} and {dedup_context}",
             model="sonnet",
         )
 
         assert service._db_path == "/path/to/cidx_server.db"
         assert service._log_db_path == "/path/to/logs.db"
         assert service._github_repo == "owner/repo"
-        assert (
-            service._prompt_template
-            == "Custom prompt with {last_scan_log_id} and {dedup_context}"
-        )
         assert service._model == "sonnet"
 
     def test_service_uses_default_prompt_when_template_empty(self):
-        """Test that service loads default prompt when prompt_template is empty."""
+        """Test that service always loads default prompt from file.
+
+        Story #566: prompt_template parameter removed. Service always loads
+        the prompt from default_analysis_prompt.md at scan execution time.
+        """
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
         from unittest.mock import patch, MagicMock
         import tempfile
@@ -137,7 +139,6 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             db_path=temp_db.name,
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
-            prompt_template="",  # Empty - should load default
             model="opus",
         )
 
@@ -150,7 +151,7 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             mock_scanner_class.return_value = mock_scanner_instance
 
             # Execute scan (this should load default prompt)
-            result = service._execute_scan()
+            _result = service._execute_scan()
 
             # Verify LogScanner was created with default prompt
             mock_scanner_class.assert_called_once()
@@ -165,7 +166,11 @@ class TestSelfMonitoringServiceLogScannerIntegration:
         os.unlink(temp_db.name)
 
     def test_service_execute_scan_creates_log_scanner_with_correct_params(self):
-        """Test that _execute_scan creates LogScanner with correct parameters."""
+        """Test that _execute_scan creates LogScanner with correct parameters.
+
+        Story #566: prompt_template parameter removed from constructor.
+        Service now always loads the prompt from default_analysis_prompt.md.
+        """
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
         from unittest.mock import patch, MagicMock
         import tempfile
@@ -181,7 +186,6 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             db_path=temp_db.name,
             log_db_path="/path/to/logs.db",
             github_repo="owner/repo",
-            prompt_template="Custom prompt: {last_scan_log_id}, {dedup_context}",
             model="opus",
         )
 
@@ -209,10 +213,8 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             assert call_kwargs["db_path"] == temp_db.name
             assert call_kwargs["log_db_path"] == "/path/to/logs.db"
             assert call_kwargs["github_repo"] == "owner/repo"
-            assert (
-                call_kwargs["prompt_template"]
-                == "Custom prompt: {last_scan_log_id}, {dedup_context}"
-            )
+            # Story #566: prompt is loaded from file, must contain expected placeholders
+            assert "{last_scan_log_id}" in call_kwargs["prompt_template"]
             assert call_kwargs["model"] == "opus"
             assert "scan_id" in call_kwargs
 
@@ -238,7 +240,6 @@ class TestSelfMonitoringServiceLogScannerIntegration:
             db_path=None,  # Not configured
             log_db_path=None,
             github_repo="owner/repo",
-            prompt_template="",
             model="opus",
         )
 
@@ -902,7 +903,6 @@ class TestOrphanedScanCleanup:
         from code_indexer.server.self_monitoring.service import SelfMonitoringService
         from datetime import datetime, timedelta
         from unittest.mock import patch
-        import logging
 
         # Create database with 2 orphaned scans and 1 recent scan
         three_hours_ago = (datetime.utcnow() - timedelta(hours=3)).isoformat()

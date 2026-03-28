@@ -12,6 +12,8 @@ import sqlite3
 import threading
 from typing import Optional, TYPE_CHECKING
 
+from code_indexer.server.self_monitoring.prompts import get_default_prompt
+
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -43,7 +45,6 @@ class SelfMonitoringService:
         db_path: Optional[str] = None,
         log_db_path: Optional[str] = None,
         github_repo: Optional[str] = None,
-        prompt_template: str = "",
         model: str = "opus",
         repo_root: Optional[str] = None,
         github_token: Optional[str] = None,
@@ -60,12 +61,14 @@ class SelfMonitoringService:
             db_path: Path to self-monitoring SQLite database
             log_db_path: Path to logs database
             github_repo: GitHub repository in format "owner/repo"
-            prompt_template: Template string for Claude prompt (empty = use default)
             model: Claude model to use (opus, sonnet, haiku)
             repo_root: Path to repo root for Claude to run in (working directory)
             github_token: GitHub token for authentication (optional, Bug #87)
             server_name: Server display name for issue identification (optional, Bug #87)
             storage_backend: Optional SelfMonitoringBackend for DB delegation
+
+        Note (Story #566): The analysis prompt is no longer configurable at runtime.
+        It is always loaded from default_analysis_prompt.md at scan execution time.
         """
         self._enabled = enabled
         self._cadence_minutes = cadence_minutes
@@ -73,7 +76,6 @@ class SelfMonitoringService:
         self._db_path = db_path
         self._log_db_path = log_db_path
         self._github_repo = github_repo
-        self._prompt_template = prompt_template
         self._model = model
         self._repo_root = repo_root
         self._github_token = github_token
@@ -465,13 +467,13 @@ class SelfMonitoringService:
         )
 
         from code_indexer.server.self_monitoring.scanner import LogScanner
-        from code_indexer.server.self_monitoring.prompts import get_default_prompt
         import uuid
 
-        # Load default prompt if not configured
-        prompt = self._prompt_template or get_default_prompt()
+        # Story #566: Always load prompt from default_analysis_prompt.md.
+        # The prompt is no longer configurable at runtime via UI or constructor.
+        prompt = get_default_prompt()
         logger.debug(
-            f"[SELF-MON-DEBUG] _execute_scan: Prompt loaded - using_default={not self._prompt_template}, length={len(prompt)}"
+            f"[SELF-MON-DEBUG] _execute_scan: Prompt loaded from file - length={len(prompt)}"
         )
 
         # Generate unique scan ID

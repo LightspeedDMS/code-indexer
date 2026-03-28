@@ -1021,7 +1021,6 @@ def make_lifespan(
                         db_path=db_path,
                         log_db_path=log_db_path_val,
                         github_repo=github_repo,
-                        prompt_template=sm_config.prompt_template,
                         model=sm_config.model,
                         repo_root=str(repo_root),  # For Claude to run in repo context
                         github_token=github_token,

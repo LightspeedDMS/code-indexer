@@ -676,6 +676,10 @@ class SelfMonitoringConfig:
 
     Controls automatic log analysis using Claude CLI to detect issues,
     create bug reports, and maintain operational excellence.
+
+    Story #566: prompt_template and prompt_user_modified removed.
+    The analysis prompt is now managed exclusively in code via
+    default_analysis_prompt.md and is no longer user-configurable.
     """
 
     # Enable/disable self-monitoring
@@ -684,10 +688,6 @@ class SelfMonitoringConfig:
     cadence_minutes: int = 60
     # Claude model to use for analysis (opus, sonnet, haiku)
     model: str = "opus"
-    # Prompt template for log analysis
-    prompt_template: str = ""
-    # User modified flag - prevents automatic prompt upgrades
-    prompt_user_modified: bool = False
 
 
 @dataclass
@@ -1380,12 +1380,15 @@ class ServerConfigManager:
                 )
 
             # Story #72: Convert self_monitoring_config dict to SelfMonitoringConfig
+            # Story #566: Strip stale prompt_template and prompt_user_modified fields
+            # from existing config files for backward compatibility.
             if "self_monitoring_config" in config_dict and isinstance(
                 config_dict["self_monitoring_config"], dict
             ):
-                config_dict["self_monitoring_config"] = SelfMonitoringConfig(
-                    **config_dict["self_monitoring_config"]
-                )
+                sm_dict = config_dict["self_monitoring_config"]
+                sm_dict.pop("prompt_template", None)
+                sm_dict.pop("prompt_user_modified", None)
+                config_dict["self_monitoring_config"] = SelfMonitoringConfig(**sm_dict)
 
             # Story #136: Convert langfuse_config dict to LangfuseConfig
             if "langfuse_config" in config_dict and isinstance(

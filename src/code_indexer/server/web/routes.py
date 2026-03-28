@@ -9040,8 +9040,6 @@ def _create_self_monitoring_page_response(
     request: Request,
     session: SessionData,
     self_monitoring_config,
-    default_prompt: str,
-    current_prompt: str,
     scans: List[Dict],
     issues: List[Dict],
     db_path: Path,
@@ -9056,8 +9054,6 @@ def _create_self_monitoring_page_response(
         request: FastAPI request
         session: Current user session
         self_monitoring_config: SelfMonitoringConfig instance
-        default_prompt: Default prompt template text
-        current_prompt: Current prompt (config or default)
         scans: Scan history list
         issues: Issues history list
         db_path: Path to database (for status calculations - Bug #129, SQLite mode)
@@ -9068,6 +9064,9 @@ def _create_self_monitoring_page_response(
 
     Returns:
         TemplateResponse with CSRF cookie set
+
+    Note (Story #566): default_prompt and current_prompt parameters removed.
+    The prompt is now managed exclusively in code via default_analysis_prompt.md.
     """
     # Bug #129 Fix: Calculate status values from database (or backend in PG mode)
     last_scan = _get_last_scan_time(db_path, backend=backend)
@@ -9090,8 +9089,6 @@ def _create_self_monitoring_page_response(
             "show_nav": True,
             "csrf_token": csrf_token,
             "config": self_monitoring_config,
-            "default_prompt": default_prompt,
-            "current_prompt": current_prompt,
             "scans": scans,
             "issues": issues,
             "success_message": success_message,
@@ -9128,12 +9125,6 @@ def self_monitoring_page(request: Request):
     config = config_service.get_config()
     self_monitoring_config = config.self_monitoring_config
 
-    # Load default prompt template
-    default_prompt = _load_default_prompt()
-
-    # Get current prompt (use default if empty)
-    current_prompt = self_monitoring_config.prompt_template or default_prompt  # type: ignore[union-attr]
-
     # Load scan history and issues from database (or backend in PG mode)
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
@@ -9147,8 +9138,6 @@ def self_monitoring_page(request: Request):
         request,
         session,
         self_monitoring_config,
-        default_prompt,
-        current_prompt,
         scans,
         issues,
         db_path,
@@ -9176,7 +9165,6 @@ async def save_self_monitoring_config(
 
     config_service = get_config_service()
     config = config_service.get_config()
-    default_prompt = _load_default_prompt()
 
     # Validate CSRF token
     _backend_registry = getattr(request.app.state, "backend_registry", None)
@@ -9189,13 +9177,10 @@ async def save_self_monitoring_config(
         scans, issues = _load_self_monitoring_data(
             db_path, session, backend=_sm_backend
         )
-        current_prompt = config.self_monitoring_config.prompt_template or default_prompt  # type: ignore[union-attr]
         return _create_self_monitoring_page_response(
             request,
             session,
             config.self_monitoring_config,
-            default_prompt,
-            current_prompt,
             scans,
             issues,
             db_path,
@@ -9204,6 +9189,8 @@ async def save_self_monitoring_config(
         )
 
     # Parse form data
+    # Story #566: prompt_template is intentionally not read from form data.
+    # The analysis prompt is managed exclusively in code via default_analysis_prompt.md.
     form_data = await request.form()
 
     enabled = form_data.get("enabled") == "on"
@@ -9215,19 +9202,11 @@ async def save_self_monitoring_config(
         cadence_minutes = 60
 
     model = form_data.get("model", "opus").strip()  # type: ignore[union-attr]
-    prompt_template = form_data.get("prompt_template", "").strip()  # type: ignore[union-attr]
 
-    # Determine if prompt was user-modified
-    prompt_user_modified = config.self_monitoring_config.prompt_user_modified  # type: ignore[union-attr]
-    if prompt_template and prompt_template != default_prompt:
-        prompt_user_modified = True
-
-    # Update configuration
+    # Update configuration (enabled, cadence, and model only)
     config.self_monitoring_config.enabled = enabled  # type: ignore[union-attr]
     config.self_monitoring_config.cadence_minutes = cadence_minutes  # type: ignore[union-attr]
     config.self_monitoring_config.model = model  # type: ignore[union-attr]
-    config.self_monitoring_config.prompt_template = prompt_template  # type: ignore[union-attr]
-    config.self_monitoring_config.prompt_user_modified = prompt_user_modified  # type: ignore[union-attr]
 
     # Save configuration
     config_service.config_manager.save_config(config)
@@ -9248,7 +9227,6 @@ async def save_self_monitoring_config(
             logger.info("Self-monitoring service stopped via configuration toggle")
 
     # Re-render page with success message
-    current_prompt = prompt_template or default_prompt
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
     scans, issues = _load_self_monitoring_data(db_path, session, backend=_sm_backend)
@@ -9257,8 +9235,6 @@ async def save_self_monitoring_config(
         request,
         session,
         config.self_monitoring_config,
-        default_prompt,
-        current_prompt,
         scans,
         issues,
         db_path,
@@ -9389,7 +9365,6 @@ async def trigger_manual_scan(
         db_path=db_path,
         log_db_path=log_db_path,
         github_repo=github_repo,
-        prompt_template=config.self_monitoring_config.prompt_template,  # type: ignore[union-attr]
         model=config.self_monitoring_config.model,  # type: ignore[union-attr]
         repo_root=str(repo_root) if repo_root else None,
         github_token=github_token,
