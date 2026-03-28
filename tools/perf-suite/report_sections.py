@@ -66,7 +66,9 @@ def _collect_scenario_stats(
 
         highest_error = levels[highest_key].get("error_rate_pct", 0.0)
         if highest_error > _ERROR_PRONE_PCT:
-            error_prone.append(f"{name} ({highest_error:.1f}% at level {sorted_keys[-1]})")
+            error_prone.append(
+                f"{name} ({highest_error:.1f}% at level {sorted_keys[-1]})"
+            )
 
     return baselines, inflections, error_prone
 
@@ -172,14 +174,16 @@ def render_executive_summary(
         for i, (name, lvl) in enumerate(most_sensitive, 1):
             lines.append(f"{i}. `{name}` — inflection at concurrency {lvl}")
     else:
-        lines.append("All tested scenarios showed stable performance (no inflection detected).")
+        lines.append(
+            "All tested scenarios showed stable performance (no inflection detected)."
+        )
 
     lines += ["", "### Error-Prone Under Load (>10% errors at highest concurrency)\n"]
-    lines += [f"- {e}" for e in error_prone] if error_prone else ["No scenarios exceeded 10% error rate."]
+    lines += (
+        [f"- {e}" for e in error_prone]
+        if error_prone
+        else ["No scenarios exceeded 10% error rate."]
+    )
 
     lines += ["", _format_capacity_recommendation(most_sensitive, max_level)]
     return "\n".join(lines) + "\n"
-
-
-
-

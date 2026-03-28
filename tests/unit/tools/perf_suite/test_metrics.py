@@ -12,7 +12,9 @@ import sys
 import os
 
 # Add the perf-suite directory to path so we can import from it
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite")
+)
 
 
 class TestPercentileCalculation:
@@ -85,7 +87,9 @@ class TestThroughputCalculation:
         from metrics import calculate_throughput
 
         # 20 requests in 10 seconds = 2.0 rps
-        assert calculate_throughput(total_requests=20, total_elapsed_seconds=10.0) == 2.0
+        assert (
+            calculate_throughput(total_requests=20, total_elapsed_seconds=10.0) == 2.0
+        )
 
     def test_throughput_with_zero_elapsed(self):
         from metrics import calculate_throughput

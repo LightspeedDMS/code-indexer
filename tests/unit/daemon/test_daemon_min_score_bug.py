@@ -40,9 +40,7 @@ class TestDaemonMinScoreParameterExtraction:
         ):
             # Setup mocks
             mock_config = Mock()
-            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
-                mock_config
-            )
+            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = mock_config
 
             mock_embedding_provider = Mock()
             mock_embedding_factory.create.return_value = mock_embedding_provider
@@ -96,9 +94,7 @@ class TestDaemonMinScoreParameterExtraction:
         ):
             # Setup mocks
             mock_config = Mock()
-            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
-                mock_config
-            )
+            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = mock_config
 
             mock_embedding_provider = Mock()
             mock_embedding_factory.create.return_value = mock_embedding_provider
@@ -152,9 +148,7 @@ class TestDaemonMinScoreParameterExtraction:
         ):
             # Setup mocks
             mock_config = Mock()
-            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
-                mock_config
-            )
+            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = mock_config
 
             mock_embedding_provider = Mock()
             mock_embedding_factory.create.return_value = mock_embedding_provider
@@ -198,9 +192,7 @@ class TestDaemonMinScoreParameterExtraction:
         ):
             # Setup mocks
             mock_config = Mock()
-            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = (
-                mock_config
-            )
+            mock_config_mgr.create_with_backtrack.return_value.get_config.return_value = mock_config
 
             mock_embedding_provider = Mock()
             mock_embedding_factory.create.return_value = mock_embedding_provider

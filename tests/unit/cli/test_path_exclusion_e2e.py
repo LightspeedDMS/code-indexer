@@ -27,9 +27,7 @@ class TestCLIPathExclusionIntegration:
                 "code_indexer.cli.EmbeddingProviderFactory.create"
             ) as mock_embed:
                 # Setup mocks
-                mock_backend.return_value.get_vector_store_client.return_value.health_check.return_value = (
-                    True
-                )
+                mock_backend.return_value.get_vector_store_client.return_value.health_check.return_value = True
                 mock_embed.return_value.health_check.return_value = True
                 mock_embed.return_value.get_provider_name.return_value = "voyageai"
                 mock_embed.return_value.get_model_info.return_value = {

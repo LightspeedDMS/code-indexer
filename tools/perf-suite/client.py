@@ -36,7 +36,9 @@ class TokenTracker:
         return elapsed >= TOKEN_REFRESH_SECONDS
 
 
-def build_mcp_envelope(tool_name: str, arguments: dict[str, Any], request_id: int) -> dict[str, Any]:
+def build_mcp_envelope(
+    tool_name: str, arguments: dict[str, Any], request_id: int
+) -> dict[str, Any]:
     """Build a JSON-RPC 2.0 envelope for an MCP tool/call request."""
     return {
         "jsonrpc": "2.0",
@@ -89,11 +91,15 @@ class PerfClient:
             json={"username": self.username, "password": self.password},
         )
         if response.status_code != 200:
-            raise RuntimeError(f"Authentication failed: HTTP {response.status_code} - {response.text}")
+            raise RuntimeError(
+                f"Authentication failed: HTTP {response.status_code} - {response.text}"
+            )
         data = response.json()
         token = data.get("access_token")
         if not token:
-            raise RuntimeError(f"Authentication response missing 'access_token': {data}")
+            raise RuntimeError(
+                f"Authentication response missing 'access_token': {data}"
+            )
         self._token_tracker = TokenTracker(token=token, acquired_at=time.time())
 
     async def _ensure_valid_token(self, client: httpx.AsyncClient) -> str:
@@ -207,11 +213,17 @@ class PerfClient:
 
         start_time = time.monotonic()
         try:
-            response = await client.post(url, json=payload, headers=headers, timeout=timeout)
+            response = await client.post(
+                url, json=payload, headers=headers, timeout=timeout
+            )
             elapsed_ms = (time.monotonic() - start_time) * 1000.0
             response_bytes = len(response.content)
             success = response.status_code < 400
-            error_message = None if success else f"HTTP {response.status_code}: {response.text[:200]}"
+            error_message = (
+                None
+                if success
+                else f"HTTP {response.status_code}: {response.text[:200]}"
+            )
 
             return RequestResult(
                 response_time_ms=elapsed_ms,

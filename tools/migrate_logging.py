@@ -69,7 +69,7 @@ def extract_message_and_context(log_call: str) -> Tuple[str, List[str]]:
     Returns:
         (message_template, context_variables)
     """
-    match = re.search(r'logger\.(warning|error|critical)\((.*)\)', log_call, re.DOTALL)
+    match = re.search(r"logger\.(warning|error|critical)\((.*)\)", log_call, re.DOTALL)
     if not match:
         return ("Migration required", [])
 
@@ -77,7 +77,7 @@ def extract_message_and_context(log_call: str) -> Tuple[str, List[str]]:
 
     # Check if it's an f-string
     if args.startswith('f"') or args.startswith("f'"):
-        variables = re.findall(r'\{([^}]+)\}', args)
+        variables = re.findall(r"\{([^}]+)\}", args)
         message = args
 
         # Remove f-string syntax
@@ -134,7 +134,7 @@ def migrate_logger_call(line_content: str, subsystem: str) -> str:
         context_str = ", " + ", ".join(context_parts)
 
     # Detect indentation
-    indent_match = re.match(r'^(\s+)', line_content)
+    indent_match = re.match(r"^(\s+)", line_content)
     indent = indent_match.group(1) if indent_match else ""
 
     # Determine method
@@ -146,10 +146,12 @@ def migrate_logger_call(line_content: str, subsystem: str) -> str:
         method = "critical"
 
     # Format new call
-    new_call = f'{indent}logger.{method}(\n'
-    new_call += f'{indent}    format_error_log("{error_code}", "{message}"{context_str}),\n'
+    new_call = f"{indent}logger.{method}(\n"
+    new_call += (
+        f'{indent}    format_error_log("{error_code}", "{message}"{context_str}),\n'
+    )
     new_call += f'{indent}    extra=get_log_extra("{error_code}")\n'
-    new_call += f'{indent})'
+    new_call += f"{indent})"
 
     return new_call
 
@@ -163,7 +165,7 @@ def check_imports(content: str) -> Tuple[bool, bool]:
 
 def add_imports(content: str) -> str:
     """Add missing imports to file."""
-    lines = content.split('\n')
+    lines = content.split("\n")
 
     # Check if imports already exist
     has_format, has_extra = check_imports(content)
@@ -174,18 +176,20 @@ def add_imports(content: str) -> str:
     # Find insertion point
     import_idx = 0
     for i, line in enumerate(lines):
-        if line.startswith('import ') or line.startswith('from '):
+        if line.startswith("import ") or line.startswith("from "):
             import_idx = i + 1
         elif import_idx > 0 and not line.strip():
             break
 
     # Insert import
-    import_line = "from code_indexer.server.logging_utils import format_error_log, get_log_extra"
+    import_line = (
+        "from code_indexer.server.logging_utils import format_error_log, get_log_extra"
+    )
 
     if import_line not in content:
         lines.insert(import_idx, import_line)
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def migrate_file(file_path: Path) -> Tuple[int, str]:
@@ -196,27 +200,31 @@ def migrate_file(file_path: Path) -> Tuple[int, str]:
         (num_migrations, new_content)
     """
     try:
-        content = file_path.read_text(encoding='utf-8')
+        content = file_path.read_text(encoding="utf-8")
     except (IOError, UnicodeDecodeError) as e:
         print(f"Error reading {file_path}: {e}", file=sys.stderr)
         return (0, "")
 
     subsystem = determine_subsystem(str(file_path))
 
-    lines = content.split('\n')
+    lines = content.split("\n")
     new_lines = []
     migrations = 0
 
     for i, line in enumerate(lines):
         # Check if line has unmigrated logger call
-        if re.search(r'logger\.(warning|error|critical)\(', line):
+        if re.search(r"logger\.(warning|error|critical)\(", line):
             # Check if already migrated
-            if 'format_error_log' in line:
+            if "format_error_log" in line:
                 new_lines.append(line)
                 continue
 
             # Check if this is single-line
-            if not (line.strip().endswith(')') or line.strip().endswith('))') or line.strip().endswith('),')):
+            if not (
+                line.strip().endswith(")")
+                or line.strip().endswith("))")
+                or line.strip().endswith("),")
+            ):
                 new_lines.append(line)
                 continue
 
@@ -232,7 +240,7 @@ def migrate_file(file_path: Path) -> Tuple[int, str]:
             new_lines.append(line)
 
     if migrations > 0:
-        new_content = '\n'.join(new_lines)
+        new_content = "\n".join(new_lines)
         new_content = add_imports(new_content)
         return (migrations, new_content)
 
@@ -261,7 +269,7 @@ def main():
     total_migrations = 0
 
     for file_path in sorted(files_to_process):
-        if 'test' in str(file_path) or 'migrate_logging.py' in str(file_path):
+        if "test" in str(file_path) or "migrate_logging.py" in str(file_path):
             continue
 
         print(f"Processing {file_path}...")
@@ -269,14 +277,14 @@ def main():
 
         if migrations > 0:
             try:
-                file_path.write_text(new_content, encoding='utf-8')
+                file_path.write_text(new_content, encoding="utf-8")
                 print(f"  Migrated {migrations} statements")
                 total_migrations += migrations
             except (IOError, OSError) as e:
                 print(f"  Error writing {file_path}: {e}", file=sys.stderr)
                 continue
         else:
-            print(f"  No migrations needed")
+            print("  No migrations needed")
 
     print(f"\nTotal migrations: {total_migrations}")
 

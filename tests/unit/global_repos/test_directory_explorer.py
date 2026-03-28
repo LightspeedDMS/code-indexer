@@ -391,7 +391,9 @@ class TestHiddenFileHandling:
 
         # Verify in tree structure
         hidden_dirs = [
-            c.name for c in result.root.children if c.is_directory and c.name.startswith(".")
+            c.name
+            for c in result.root.children
+            if c.is_directory and c.name.startswith(".")
         ]
         assert ".git" not in hidden_dirs
         assert ".code-indexer" not in hidden_dirs

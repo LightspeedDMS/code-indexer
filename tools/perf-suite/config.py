@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 VALID_PROTOCOLS = {"mcp", "rest"}
 VALID_PRIORITIES = {"highest", "high", "medium"}
-REQUIRED_FIELDS = ("name", "endpoint", "protocol", "method", "parameters", "repo_alias", "priority")
+REQUIRED_FIELDS = (
+    "name",
+    "endpoint",
+    "protocol",
+    "method",
+    "parameters",
+    "repo_alias",
+    "priority",
+)
 
 
 @dataclass
@@ -41,9 +49,7 @@ def _validate_scenario(data: dict[str, Any]) -> Scenario:
     """
     for required in REQUIRED_FIELDS:
         if required not in data:
-            raise ValueError(
-                f"Scenario is missing required field '{required}': {data}"
-            )
+            raise ValueError(f"Scenario is missing required field '{required}': {data}")
 
     protocol = data["protocol"]
     if protocol not in VALID_PROTOCOLS:

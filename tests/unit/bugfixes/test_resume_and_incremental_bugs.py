@@ -122,9 +122,7 @@ class TestResumeAndIncrementalBugs:
                     mock_file_finder.find_files.return_value = [
                         Path(tmpdir) / f for f in test_files
                     ]
-                    mock_file_finder.find_modified_files.return_value = (
-                        []
-                    )  # No modified files on first run
+                    mock_file_finder.find_modified_files.return_value = []  # No modified files on first run
 
                     stats1 = indexer.smart_index(force_full=False)  # Not forcing full
 
@@ -153,9 +151,7 @@ class TestResumeAndIncrementalBugs:
                     mock_file_finder.find_files.return_value = [
                         Path(tmpdir) / f for f in test_files
                     ]
-                    mock_file_finder.find_modified_files.return_value = (
-                        []
-                    )  # No files modified since first run
+                    mock_file_finder.find_modified_files.return_value = []  # No files modified since first run
 
                     stats2 = indexer.smart_index(force_full=False)  # Not forcing full
 

@@ -360,7 +360,9 @@ class RAGContextExtractor:
             relevance_level = (
                 "HIGH"
                 if context.match_score > 0.8
-                else "MEDIUM" if context.match_score > 0.5 else "LOW"
+                else "MEDIUM"
+                if context.match_score > 0.5
+                else "LOW"
             )
             header += f"\n**Lines {context.line_start}-{context.line_end}/{context.total_lines}** | "
             header += f"**Relevance: {context.match_score:.3f} ({relevance_level})** | "

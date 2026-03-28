@@ -64,7 +64,7 @@ def extract_log_statements(file_path: Path) -> List[Tuple[int, str, str]]:
 
         for i, line in enumerate(lines, start=1):
             # Match logger.warning/error/critical calls
-            match = re.search(r'logger\.(warning|error|critical)\s*\(', line)
+            match = re.search(r"logger\.(warning|error|critical)\s*\(", line)
             if match:
                 log_level = match.group(1)
                 results.append((i, log_level, line.strip()))

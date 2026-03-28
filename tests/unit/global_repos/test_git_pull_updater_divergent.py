@@ -76,11 +76,11 @@ class TestDivergentBranchAutoRecovery:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                git_status_ok,   # git status --porcelain
-                git_pull_fail,   # git pull -> fails with divergent branches
-                git_rev_parse,   # git rev-parse --abbrev-ref HEAD
-                git_fetch,       # git fetch origin
-                git_reset,       # git reset --hard origin/main
+                git_status_ok,  # git status --porcelain
+                git_pull_fail,  # git pull -> fails with divergent branches
+                git_rev_parse,  # git rev-parse --abbrev-ref HEAD
+                git_fetch,  # git fetch origin
+                git_reset,  # git reset --hard origin/main
             ]
             # Should NOT raise - auto-recovery succeeds
             updater.update()
@@ -145,7 +145,12 @@ class TestDivergentBranchAutoRecovery:
             updater.update()
 
         reset_call = mock_run.call_args_list[4]
-        assert reset_call[0][0] == ["git", "reset", "--hard", "origin/feature/my-feature"]
+        assert reset_call[0][0] == [
+            "git",
+            "reset",
+            "--hard",
+            "origin/feature/my-feature",
+        ]
 
     def test_successful_git_pull_no_auto_recovery(self, updater):
         """
@@ -269,10 +274,10 @@ class TestForceResetPath:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                git_status_ok,   # git status --porcelain
-                git_rev_parse,   # git rev-parse --abbrev-ref HEAD
-                git_fetch,       # git fetch origin
-                git_reset,       # git reset --hard origin/main
+                git_status_ok,  # git status --porcelain
+                git_rev_parse,  # git rev-parse --abbrev-ref HEAD
+                git_fetch,  # git fetch origin
+                git_reset,  # git reset --hard origin/main
             ]
             updater.update(force_reset=True)
 
@@ -280,7 +285,10 @@ class TestForceResetPath:
         # Verify no "git pull" in any call
         for c in calls:
             cmd = c[0][0]
-            assert cmd[:2] != ["git", "pull"], f"git pull was unexpectedly called: {cmd}"
+            assert cmd[:2] != [
+                "git",
+                "pull",
+            ], f"git pull was unexpectedly called: {cmd}"
 
     def test_force_reset_runs_fetch_then_reset(self, updater):
         """
@@ -455,7 +463,9 @@ class TestRecoveryFailureHandling:
                 updater.update()
 
         error_msg = str(exc_info.value).lower()
-        assert "fetch" in error_msg or "auto-recovery" in error_msg or "git" in error_msg
+        assert (
+            "fetch" in error_msg or "auto-recovery" in error_msg or "git" in error_msg
+        )
 
     def test_reset_failure_during_auto_recovery_raises_error(self, updater):
         """
@@ -480,7 +490,9 @@ class TestRecoveryFailureHandling:
                 updater.update()
 
         error_msg = str(exc_info.value).lower()
-        assert "reset" in error_msg or "auto-recovery" in error_msg or "git" in error_msg
+        assert (
+            "reset" in error_msg or "auto-recovery" in error_msg or "git" in error_msg
+        )
 
     def test_fetch_failure_during_force_reset_raises_error(self, updater):
         """

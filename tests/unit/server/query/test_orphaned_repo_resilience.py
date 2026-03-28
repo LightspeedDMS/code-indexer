@@ -6,9 +6,9 @@ def test_search_catches_value_error_from_backend():
     from code_indexer.server.services import search_service
 
     source = inspect.getsource(search_service)
-    assert "ValueError" in source, (
-        "search_service should catch ValueError for missing vector_store"
-    )
+    assert (
+        "ValueError" in source
+    ), "search_service should catch ValueError for missing vector_store"
 
 
 def test_search_logs_warning_not_error_for_missing_index():
@@ -42,9 +42,9 @@ def test_search_logs_warning_not_error_for_missing_index():
             if "logger.error" in stripped:
                 found_error_before_warning = True
 
-    assert found_warning, (
-        "ValueError handler in search_service should call logger.warning"
-    )
-    assert not found_error_before_warning, (
-        "ValueError handler in search_service must NOT call logger.error"
-    )
+    assert (
+        found_warning
+    ), "ValueError handler in search_service should call logger.warning"
+    assert (
+        not found_error_before_warning
+    ), "ValueError handler in search_service must NOT call logger.error"

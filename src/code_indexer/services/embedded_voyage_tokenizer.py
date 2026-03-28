@@ -54,9 +54,7 @@ class VoyageTokenizer:
             os.environ.get("HF_HOME", "~/.cache/huggingface")
         ).expanduser()
 
-        snapshots_dir = (
-            cache_root / "hub" / f"models--voyageai--{model}" / "snapshots"
-        )
+        snapshots_dir = cache_root / "hub" / f"models--voyageai--{model}" / "snapshots"
 
         if not snapshots_dir.is_dir():
             return None

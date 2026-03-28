@@ -22,6 +22,7 @@ import yaml
 @dataclass
 class MigrationStats:
     """Statistics from the migration run."""
+
     total: int = 0
     updated: int = 0
     skipped: int = 0
@@ -33,10 +34,10 @@ class MigrationStats:
 def get_old_tool_registry() -> Dict:
     """Extract TOOL_REGISTRY from git HEAD version of tools.py."""
     result = subprocess.run(
-        ['git', 'show', 'HEAD:src/code_indexer/server/mcp/tools.py'],
+        ["git", "show", "HEAD:src/code_indexer/server/mcp/tools.py"],
         capture_output=True,
         text=True,
-        cwd=Path(__file__).parent.parent
+        cwd=Path(__file__).parent.parent,
     )
 
     if result.returncode != 0:
@@ -46,14 +47,14 @@ def get_old_tool_registry() -> Dict:
 
     # Modify the import statement to avoid dependency on code_indexer
     modified_content = old_content.replace(
-        'from code_indexer.server.auth.user_manager import User',
-        'User = type("User", (), {"has_permission": lambda self, p: True})'
+        "from code_indexer.server.auth.user_manager import User",
+        'User = type("User", (), {"has_permission": lambda self, p: True})',
     )
 
-    exec_globals: Dict = {'__builtins__': __builtins__}
+    exec_globals: Dict = {"__builtins__": __builtins__}
     exec(modified_content, exec_globals)
 
-    return exec_globals.get('TOOL_REGISTRY', {})
+    return exec_globals.get("TOOL_REGISTRY", {})
 
 
 def find_md_file(tool_name: str, tool_docs_dir: Path) -> Optional[Path]:
@@ -89,8 +90,14 @@ def parse_md_file(md_file: Path) -> Tuple[Dict, str]:
 def format_frontmatter(frontmatter: dict) -> str:
     """Format frontmatter dict as YAML with proper ordering."""
     field_order = [
-        "name", "category", "required_permission", "tl_dr",
-        "quick_reference", "parameters", "inputSchema", "outputSchema",
+        "name",
+        "category",
+        "required_permission",
+        "tl_dr",
+        "quick_reference",
+        "parameters",
+        "inputSchema",
+        "outputSchema",
     ]
 
     ordered = {}
@@ -103,7 +110,11 @@ def format_frontmatter(frontmatter: dict) -> str:
             ordered[key] = frontmatter[key]
 
     return yaml.dump(
-        ordered, default_flow_style=False, allow_unicode=True, sort_keys=False, width=120
+        ordered,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+        width=120,
     )
 
 
@@ -142,10 +153,7 @@ def migrate_output_schema(
 
 
 def run_migration(
-    tool_registry: Dict,
-    tool_docs_dir: Path,
-    tools_to_migrate: List[str],
-    dry_run: bool
+    tool_registry: Dict, tool_docs_dir: Path, tools_to_migrate: List[str], dry_run: bool
 ) -> MigrationStats:
     """Run the migration for all specified tools."""
     stats = MigrationStats(total=len(tool_registry))
@@ -157,7 +165,9 @@ def run_migration(
             continue
 
         tool_def = tool_registry[tool_name]
-        success, message = migrate_output_schema(tool_name, tool_def, tool_docs_dir, dry_run)
+        success, message = migrate_output_schema(
+            tool_name, tool_def, tool_docs_dir, dry_run
+        )
 
         if success:
             if "already present and matches" in message:
@@ -199,12 +209,16 @@ def main():
     parser = argparse.ArgumentParser(
         description="Migrate outputSchema from git HEAD tools.py to markdown files"
     )
-    parser.add_argument("--dry-run", action="store_true", help="Show changes without writing")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show changes without writing"
+    )
     parser.add_argument("--tool", type=str, help="Migrate only a specific tool")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent
-    tool_docs_dir = project_root / "src" / "code_indexer" / "server" / "mcp" / "tool_docs"
+    tool_docs_dir = (
+        project_root / "src" / "code_indexer" / "server" / "mcp" / "tool_docs"
+    )
 
     if not tool_docs_dir.exists():
         print(f"ERROR: tool_docs directory not found: {tool_docs_dir}")

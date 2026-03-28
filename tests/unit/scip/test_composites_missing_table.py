@@ -100,7 +100,9 @@ class TestFindTargetDefinitionMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(logging.DEBUG, logger="code_indexer.scip.query.composites"):
+        with caplog.at_level(
+            logging.DEBUG, logger="code_indexer.scip.query.composites"
+        ):
             result = _find_target_definition("SomeSymbol", tmp_path)
 
         assert result is None
@@ -108,18 +110,18 @@ class TestFindTargetDefinitionMissingCallGraph:
         error_messages = [
             r.message for r in caplog.records if r.levelno >= logging.ERROR
         ]
-        assert not error_messages, (
-            f"Expected no ERROR-level log messages, but got: {error_messages}"
-        )
+        assert (
+            not error_messages
+        ), f"Expected no ERROR-level log messages, but got: {error_messages}"
 
         debug_messages = [
             r.message
             for r in caplog.records
             if r.levelno == logging.DEBUG and "incomplete schema" in r.message
         ]
-        assert len(debug_messages) >= 1, (
-            "Expected at least one DEBUG-level 'incomplete schema' message"
-        )
+        assert (
+            len(debug_messages) >= 1
+        ), "Expected at least one DEBUG-level 'incomplete schema' message"
 
     def test_no_exception_raised_for_missing_call_graph(self, tmp_path):
         """_find_target_definition must not raise when call_graph is missing."""
@@ -142,7 +144,9 @@ class TestBfsTraverseDependentsMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(logging.DEBUG, logger="code_indexer.scip.query.composites"):
+        with caplog.at_level(
+            logging.DEBUG, logger="code_indexer.scip.query.composites"
+        ):
             result = _bfs_traverse_dependents(
                 symbol="SomeSymbol",
                 scip_dir=tmp_path,
@@ -159,18 +163,18 @@ class TestBfsTraverseDependentsMissingCallGraph:
         error_messages = [
             r.message for r in caplog.records if r.levelno >= logging.ERROR
         ]
-        assert not error_messages, (
-            f"Expected no ERROR-level log messages, but got: {error_messages}"
-        )
+        assert (
+            not error_messages
+        ), f"Expected no ERROR-level log messages, but got: {error_messages}"
 
         debug_messages = [
             r.message
             for r in caplog.records
             if r.levelno == logging.DEBUG and "incomplete schema" in r.message
         ]
-        assert len(debug_messages) >= 1, (
-            "Expected at least one DEBUG-level 'incomplete schema' message"
-        )
+        assert (
+            len(debug_messages) >= 1
+        ), "Expected at least one DEBUG-level 'incomplete schema' message"
 
     def test_no_exception_raised_for_missing_call_graph(self, tmp_path):
         """_bfs_traverse_dependents must not raise when call_graph is missing."""
@@ -201,7 +205,9 @@ class TestTraceCallChainMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(logging.DEBUG, logger="code_indexer.scip.query.composites"):
+        with caplog.at_level(
+            logging.DEBUG, logger="code_indexer.scip.query.composites"
+        ):
             result = trace_call_chain(
                 from_symbol="from_sym",
                 to_symbol="to_sym",
@@ -242,14 +248,18 @@ class TestGetSmartContextMissingCallGraph:
         db_path = tmp_path / "test.scip.db"
         _create_minimal_scip_db(db_path)
 
-        with caplog.at_level(logging.DEBUG, logger="code_indexer.scip.query.composites"):
+        with caplog.at_level(
+            logging.DEBUG, logger="code_indexer.scip.query.composites"
+        ):
             result = get_smart_context("SomeSymbol", tmp_path)
 
         # Should return a result (not raise), with empty data
         assert result is not None
 
         # No ERROR-level messages
-        error_messages = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+        error_messages = [
+            r.message for r in caplog.records if r.levelno >= logging.ERROR
+        ]
         assert not error_messages
 
 
@@ -265,7 +275,9 @@ class TestValidScipDbStillWorks:
         self, comprehensive_fixture_dir
     ):
         """_find_target_definition returns None for an unknown symbol (no error)."""
-        result = _find_target_definition("__NonExistentSymbol__", comprehensive_fixture_dir)
+        result = _find_target_definition(
+            "__NonExistentSymbol__", comprehensive_fixture_dir
+        )
         assert result is None
 
     def test_bfs_traverse_dependents_returns_empty_for_unknown_symbol(
@@ -297,7 +309,9 @@ class TestValidScipDbStillWorks:
 
     def test_no_errors_on_real_fixture(self, comprehensive_fixture_dir, caplog):
         """No ERROR-level logs when querying the real full-schema fixture database."""
-        with caplog.at_level(logging.DEBUG, logger="code_indexer.scip.query.composites"):
+        with caplog.at_level(
+            logging.DEBUG, logger="code_indexer.scip.query.composites"
+        ):
             _find_target_definition("__NonExistentSymbol__", comprehensive_fixture_dir)
             _bfs_traverse_dependents(
                 "__NonExistentSymbol__",
@@ -317,6 +331,6 @@ class TestValidScipDbStillWorks:
         error_messages = [
             r.message for r in caplog.records if r.levelno >= logging.ERROR
         ]
-        assert not error_messages, (
-            f"Expected no ERROR-level logs with real fixture, but got: {error_messages}"
-        )
+        assert (
+            not error_messages
+        ), f"Expected no ERROR-level logs with real fixture, but got: {error_messages}"

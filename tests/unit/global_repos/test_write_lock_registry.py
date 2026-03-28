@@ -87,7 +87,9 @@ class TestWriteLockRegistry:
         """is_write_locked() returns False when no one holds the lock."""
         result = scheduler.is_write_locked("cidx-meta")
 
-        assert result is False, "is_write_locked() must return False when lock is not held."
+        assert (
+            result is False
+        ), "is_write_locked() must return False when lock is not held."
 
     def test_is_write_locked_returns_true_when_held(self, scheduler):
         """is_write_locked() returns True when the lock is held."""
@@ -95,7 +97,9 @@ class TestWriteLockRegistry:
 
         result = scheduler.is_write_locked("cidx-meta")
 
-        assert result is True, "is_write_locked() must return True when lock is currently held."
+        assert (
+            result is True
+        ), "is_write_locked() must return True when lock is currently held."
 
         scheduler.release_write_lock("cidx-meta")
 
@@ -106,7 +110,9 @@ class TestWriteLockRegistry:
 
         result = scheduler.is_write_locked("cidx-meta")
 
-        assert result is False, "is_write_locked() must return False after release_write_lock()."
+        assert (
+            result is False
+        ), "is_write_locked() must return False after release_write_lock()."
 
     def test_write_lock_context_manager_acquires_and_releases(self, scheduler):
         """write_lock() context manager acquires on entry and releases on exit."""
@@ -117,12 +123,12 @@ class TestWriteLockRegistry:
 
         lock_held_after = scheduler.is_write_locked("cidx-meta")
 
-        assert lock_held_inside is True, (
-            "write_lock() context manager must hold the lock inside the 'with' block."
-        )
-        assert lock_held_after is False, (
-            "write_lock() context manager must release the lock on exit."
-        )
+        assert (
+            lock_held_inside is True
+        ), "write_lock() context manager must hold the lock inside the 'with' block."
+        assert (
+            lock_held_after is False
+        ), "write_lock() context manager must release the lock on exit."
 
     def test_write_lock_context_manager_releases_on_exception(self, scheduler):
         """write_lock() context manager releases the lock even when body raises exception."""
@@ -173,11 +179,11 @@ class TestWriteLockRegistry:
         successful = [r for r in results if r is True]
         failed = [r for r in results if r is False]
 
-        assert len(successful) == 1, (
-            f"Exactly 1 thread must acquire the lock. Got {len(successful)} successes."
-        )
-        assert len(failed) == 9, (
-            f"Exactly 9 threads must fail to acquire. Got {len(failed)} failures."
-        )
+        assert (
+            len(successful) == 1
+        ), f"Exactly 1 thread must acquire the lock. Got {len(successful)} successes."
+        assert (
+            len(failed) == 9
+        ), f"Exactly 9 threads must fail to acquire. Got {len(failed)} failures."
 
         scheduler.release_write_lock("concurrent-repo")

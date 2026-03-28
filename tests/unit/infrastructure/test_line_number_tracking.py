@@ -60,7 +60,7 @@ def function_three():
     def test_chunk_text_accurate_line_boundaries(self):
         """Test that line numbers accurately reflect text boundaries."""
         text = """line 1
-line 2  
+line 2
 line 3
 line 4
 line 5"""
@@ -161,11 +161,11 @@ import sys
 
 def main():
     print("Starting application")
-    
+
     # Process files
     for file in os.listdir("."):
         print(f"Processing {file}")
-        
+
     print("Done")
     return 0
 
@@ -227,9 +227,7 @@ if __name__ == "__main__":
                     for line in expected_lines
                     if line.strip() and len(line.strip()) > 5
                 ]
-                assert (
-                    False
-                ), f"No substantial content from lines {line_start}-{line_end} found in chunk. Expected one of: {substantial_lines[:3]}"
+                assert False, f"No substantial content from lines {line_start}-{line_end} found in chunk. Expected one of: {substantial_lines[:3]}"
 
 
 class TestLineNumbersInProcessorMetadata:
@@ -300,8 +298,8 @@ class TestMultiLanguageLineNumberAccuracy:
         assert (
             chunk_dict["line_end"] >= chunk_dict["line_start"]
         ), f"{language}: line_end must be >= line_start"
-        assert chunk_dict["line_end"] <= len(
-            original_lines
+        assert (
+            chunk_dict["line_end"] <= len(original_lines)
         ), f"{language}: line_end {chunk_dict['line_end']} exceeds total lines {len(original_lines)}"
 
         # Extract the expected content based on reported line numbers
@@ -329,9 +327,7 @@ class TestMultiLanguageLineNumberAccuracy:
             line for line in expected_lines if line.strip() and len(line.strip()) > 5
         ]
         if substantial_expected and not found_expected_content:
-            assert (
-                False
-            ), f"{language}: No substantial content from lines {chunk_dict['line_start']}-{chunk_dict['line_end']} found in chunk"
+            assert False, f"{language}: No substantial content from lines {chunk_dict['line_start']}-{chunk_dict['line_end']} found in chunk"
 
     def test_java_line_number_accuracy(self):
         """Test line number accuracy for Java code."""
@@ -343,28 +339,28 @@ import java.util.ArrayList;
 public class JavaExample {
     private String name;
     private int value;
-    
+
     public JavaExample(String name, int value) {
         this.name = name;
         this.value = value;
     }
-    
+
     public String getName() {
         return name;
     }
-    
+
     public void setName(String name) {
         this.name = name;
     }
-    
+
     public int getValue() {
         return value;
     }
-    
+
     public void setValue(int value) {
         this.value = value;
     }
-    
+
     public List<String> getList() {
         List<String> result = new ArrayList<>();
         result.add("item1");
@@ -389,24 +385,24 @@ public class JavaExample {
 
 class UserManager {
     private users: User[] = [];
-    
+
     constructor() {
         this.loadUsers();
     }
-    
+
     public addUser(user: User): void {
         this.users.push(user);
         this.saveUsers();
     }
-    
+
     public getUserById(id: number): User | undefined {
         return this.users.find(user => user.id === id);
     }
-    
+
     public getAllUsers(): User[] {
         return [...this.users];
     }
-    
+
     private loadUsers(): void {
         // Simulate loading from storage
         const storedData = localStorage.getItem('users');
@@ -414,7 +410,7 @@ class UserManager {
             this.users = JSON.parse(storedData);
         }
     }
-    
+
     private saveUsers(): void {
         // Simulate saving to storage
         localStorage.setItem('users', JSON.stringify(this.users));
@@ -476,7 +472,7 @@ func (s *UserService) GetAllUsers() []User {
 
 func (s *UserService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type", "application/json")
-    
+
     switch r.Method {
     case http.MethodGet:
         json.NewEncoder(w).Encode(s.GetAllUsers())
@@ -497,7 +493,7 @@ func (s *UserService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func main() {
     service := NewUserService()
     http.Handle("/users", service)
-    
+
     fmt.Println("Server starting on :8080")
     log.Fatal(http.ListenAndServe(":8080", nil))
 }"""
@@ -523,12 +519,12 @@ logger = logging.getLogger(__name__)
 
 class DataProcessor:
     """Processes data with various transformations."""
-    
+
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.data: List[Dict[str, Any]] = []
         logger.info("DataProcessor initialized")
-    
+
     def load_data(self, source: str) -> None:
         """Load data from source."""
         try:
@@ -538,11 +534,11 @@ class DataProcessor:
         except FileNotFoundError:
             logger.error(f"Source file not found: {source}")
             self.data = []
-    
+
     def filter_data(self, predicate) -> List[Dict[str, Any]]:
         """Filter data using predicate function."""
         return [item for item in self.data if predicate(item)]
-    
+
     def transform_data(self, transformer) -> List[Dict[str, Any]]:
         """Transform data using transformer function."""
         result = []
@@ -553,7 +549,7 @@ class DataProcessor:
             except Exception as e:
                 logger.warning(f"Transform failed for item: {e}")
         return result
-    
+
     def save_data(self, destination: str, data: Optional[List[Dict[str, Any]]] = None) -> bool:
         """Save data to destination."""
         output_data = data if data is not None else self.data
@@ -570,7 +566,7 @@ def main():
     """Main entry point."""
     config = {"batch_size": 100, "timeout": 30}
     processor = DataProcessor(config)
-    
+
     # Example usage
     processor.load_data("input.json")
     filtered = processor.filter_data(lambda x: x.get("active", False))
@@ -594,9 +590,9 @@ if __name__ == "__main__":
 <head>
     <title>Mixed Content Test</title>
     <style>
-        .container { 
-            margin: 20px; 
-            padding: 10px; 
+        .container {
+            margin: 20px;
+            padding: 10px;
         }
     </style>
 </head>
@@ -608,7 +604,7 @@ if __name__ == "__main__":
             function greet(name) {
                 return `Hello, ${name}!`;
             }
-            
+
             document.addEventListener('DOMContentLoaded', function() {
                 const greeting = greet('World');
                 console.log(greeting);
@@ -643,21 +639,21 @@ if __name__ == "__main__":
 
 def function_with_empty_lines():
     """Function with various empty line patterns."""
-    
+
     x = 1
-    
-    
+
+
     y = 2
-    
+
     return x + y
 
 
 class EmptyLineClass:
-    
+
     def method(self):
-        
+
         pass
-        
+
 
 '''
 

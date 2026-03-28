@@ -65,9 +65,7 @@ class TestDaemonTemporalIndexing:
                                 mock_config_instance.get_config.return_value = (
                                     mock_config
                                 )
-                                mock_config_manager.create_with_backtrack.return_value = (
-                                    mock_config_instance
-                                )
+                                mock_config_manager.create_with_backtrack.return_value = mock_config_instance
 
                                 # Setup temporal indexer mock
                                 mock_temporal_instance = MagicMock()

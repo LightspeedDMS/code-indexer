@@ -791,9 +791,7 @@ class TestIndexingExceptionHandling:
                 # Setup mocks for reconcile path
                 mock_git_status.return_value = {"git_available": True}
                 mock_file_finder.find_files.return_value = [test_file]
-                mock_snapshot.return_value = (
-                    {}
-                )  # Empty snapshot = all files need indexing
+                mock_snapshot.return_value = {}  # Empty snapshot = all files need indexing
 
                 # Mock branch changes to raise exception
                 mock_branch_changes.side_effect = RuntimeError(
@@ -870,9 +868,7 @@ class TestIndexingExceptionHandling:
                 # Setup mocks for reconcile path
                 mock_git_status.return_value = {"git_available": True}
                 mock_file_finder.find_files.return_value = [test_file]
-                mock_snapshot.return_value = (
-                    {}
-                )  # Empty snapshot = all files need indexing
+                mock_snapshot.return_value = {}  # Empty snapshot = all files need indexing
 
                 # Mock successful branch changes
                 from code_indexer.services.high_throughput_processor import (

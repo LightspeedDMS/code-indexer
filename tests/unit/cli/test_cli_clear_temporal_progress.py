@@ -89,9 +89,7 @@ class TestCLIClearTemporalProgress(unittest.TestCase):
                     mock_config = MagicMock()
                     mock_config.codebase_dir = self.project_dir
                     mock_config.embedding_provider = "voyage-ai"
-                    MockConfig.create_with_backtrack.return_value.get_config.return_value = (
-                        mock_config
-                    )
+                    MockConfig.create_with_backtrack.return_value.get_config.return_value = mock_config
 
                     mock_vector_store = MagicMock()
                     MockVectorStore.return_value = mock_vector_store

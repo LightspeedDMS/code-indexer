@@ -424,8 +424,11 @@ class TestCleanupManager:
         assert index_path.exists()
 
         # Warning should have been logged
-        assert any("fd" in r.message.lower() or "file descriptor" in r.message.lower()
-                   for r in caplog.records if r.levelno >= logging.WARNING)
+        assert any(
+            "fd" in r.message.lower() or "file descriptor" in r.message.lower()
+            for r in caplog.records
+            if r.levelno >= logging.WARNING
+        )
 
     def test_robust_deletion_handles_oserror_gracefully(self, tmp_path):
         """
@@ -448,8 +451,10 @@ class TestCleanupManager:
         cleanup_mgr.schedule_cleanup(str(index_path))
 
         # Make rmtree raise OSError (errno=None, not EMFILE)
-        with patch("code_indexer.global_repos.cleanup_manager.shutil.rmtree",
-                   side_effect=OSError("Too many open files")):
+        with patch(
+            "code_indexer.global_repos.cleanup_manager.shutil.rmtree",
+            side_effect=OSError("Too many open files"),
+        ):
             # Should not raise
             cleanup_mgr._process_cleanup_queue()
 
@@ -484,8 +489,10 @@ class TestCleanupManager:
         cleanup_mgr.schedule_cleanup(str(index_path))
 
         # Make shutil.rmtree raise OSError with errno=EMFILE to trigger bottom-up fallback
-        with patch("code_indexer.global_repos.cleanup_manager.shutil.rmtree",
-                   side_effect=OSError(errno.EMFILE, "Too many open files")):
+        with patch(
+            "code_indexer.global_repos.cleanup_manager.shutil.rmtree",
+            side_effect=OSError(errno.EMFILE, "Too many open files"),
+        ):
             # Should not raise - bottom-up fallback handles the actual deletion
             cleanup_mgr._process_cleanup_queue()
 

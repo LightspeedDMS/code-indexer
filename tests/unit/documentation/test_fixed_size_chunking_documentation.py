@@ -222,9 +222,7 @@ class TestFixedSizeChunkingDocumentation:
         has_migration_guidance = any(
             keyword in content for keyword in migration_keywords
         )
-        assert (
-            has_migration_guidance
-        ), "Documentation must provide migration guidance for users upgrading from semantic chunking"
+        assert has_migration_guidance, "Documentation must provide migration guidance for users upgrading from semantic chunking"
 
     def test_chunk_size_examples_accurate(self, readme_path):
         """README.md examples must show accurate chunk sizes (1000 chars)."""
@@ -344,9 +342,7 @@ class TestFixedSizeChunkingDocumentation:
                 # Skip binary or inaccessible files
                 continue
 
-        assert (
-            not violations
-        ), f"Found semantic chunking references in documentation: {'; '.join(violations)}"
+        assert not violations, f"Found semantic chunking references in documentation: {'; '.join(violations)}"
 
     def test_configuration_examples_reflect_current_options(self, project_root):
         """Configuration examples in documentation must reflect current options."""

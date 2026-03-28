@@ -52,9 +52,9 @@ class ProgressMetricsCalculator:
 
     def __init__(self) -> None:
         """Initialize metrics calculator."""
-        self.progress_points: List[Tuple[float, int, int, int]] = (
-            []
-        )  # (timestamp, files, bytes, threads)
+        self.progress_points: List[
+            Tuple[float, int, int, int]
+        ] = []  # (timestamp, files, bytes, threads)
 
     def record_progress_point(
         self,

@@ -20,11 +20,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate a Markdown performance report from raw_metrics.json",
     )
-    parser.add_argument("--metrics-file", required=True, help="Path to raw_metrics.json")
-    parser.add_argument("--output-dir", required=True, help="Directory to write PERF_REPORT_*.md")
-    parser.add_argument("--ssh-host", default=None, help="SSH host for hardware profile")
-    parser.add_argument("--ssh-user", default=None, help="SSH user for hardware profile")
-    parser.add_argument("--ssh-password", default=None, help="SSH password for hardware profile")
+    parser.add_argument(
+        "--metrics-file", required=True, help="Path to raw_metrics.json"
+    )
+    parser.add_argument(
+        "--output-dir", required=True, help="Directory to write PERF_REPORT_*.md"
+    )
+    parser.add_argument(
+        "--ssh-host", default=None, help="SSH host for hardware profile"
+    )
+    parser.add_argument(
+        "--ssh-user", default=None, help="SSH user for hardware profile"
+    )
+    parser.add_argument(
+        "--ssh-password", default=None, help="SSH password for hardware profile"
+    )
     args = parser.parse_args()
 
     report_path = generate_report(

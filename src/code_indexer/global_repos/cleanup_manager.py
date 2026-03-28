@@ -111,7 +111,9 @@ class CleanupManager:
         with self._stats_lock:
             count = self._failure_counts.get(index_path, 0) + 1
             self._failure_counts[index_path] = count
-            delay = min(self.BASE_BACKOFF_DELAY * (2 ** (count - 1)), self.MAX_BACKOFF_DELAY)
+            delay = min(
+                self.BASE_BACKOFF_DELAY * (2 ** (count - 1)), self.MAX_BACKOFF_DELAY
+            )
             self._next_retry_times[index_path] = time.monotonic() + delay
 
     def _get_failure_count(self, index_path: str) -> int:
@@ -131,7 +133,9 @@ class CleanupManager:
             count = self._failure_counts.get(index_path, 0)
         if count == 0:
             return 0.0
-        return float(min(self.BASE_BACKOFF_DELAY * (2 ** (count - 1)), self.MAX_BACKOFF_DELAY))
+        return float(
+            min(self.BASE_BACKOFF_DELAY * (2 ** (count - 1)), self.MAX_BACKOFF_DELAY)
+        )
 
     def _is_ready_for_retry(self, index_path: str) -> bool:
         """Return True if backoff period for path has elapsed."""
@@ -151,6 +155,7 @@ class CleanupManager:
                 return False
             try:
                 import resource
+
                 soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
             except Exception:
                 return False
@@ -175,6 +180,7 @@ class CleanupManager:
         Raises:
             OSError: If deletion ultimately fails
         """
+
         def _onerror(func, failed_path, exc_info):  # type: ignore[no-untyped-def]
             exc = exc_info[1]
             if isinstance(exc, OSError) and exc.errno == errno.EMFILE:
@@ -194,7 +200,9 @@ class CleanupManager:
         except OSError as e:
             if e.errno != errno.EMFILE:
                 raise
-            logger.warning(f"EMFILE during rmtree for {path}, switching to bottom-up deletion")
+            logger.warning(
+                f"EMFILE during rmtree for {path}, switching to bottom-up deletion"
+            )
 
         # Bottom-up fallback: files first, then empty dirs
         for dirpath, dirnames, filenames in os.walk(str(path), topdown=False):
@@ -216,7 +224,9 @@ class CleanupManager:
             pass
 
         if path.exists():
-            raise OSError(errno.ENOTEMPTY, "Partial deletion - directory still exists", str(path))
+            raise OSError(
+                errno.ENOTEMPTY, "Partial deletion - directory still exists", str(path)
+            )
 
     def _delete_index(self, index_path: str) -> None:
         """Delete an index directory using robust deletion with FD management."""
@@ -294,7 +304,10 @@ class CleanupManager:
                 try:
                     tracked_job_id = f"index-cleanup-{uuid.uuid4().hex[:8]}"
                     self._job_tracker.register_job(
-                        tracked_job_id, "index_cleanup", username="system", repo_alias="server"
+                        tracked_job_id,
+                        "index_cleanup",
+                        username="system",
+                        repo_alias="server",
                     )
                     self._job_tracker.update_status(tracked_job_id, status="running")
                 except Exception as e:

@@ -92,9 +92,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # File processing rate tracking for files/s metric
         self._file_rate_lock = threading.Lock()
         self._file_processing_start_time = None
-        self._file_completion_history = (
-            []
-        )  # List of (timestamp, files_completed) tuples
+        self._file_completion_history = []  # List of (timestamp, files_completed) tuples
         self._rolling_window_seconds = (
             30.0  # Rolling window for smoothed files/s calculation
         )
@@ -105,9 +103,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         self._total_source_bytes_processed = (
             0  # Thread-safe counter for cumulative source bytes
         )
-        self._source_bytes_history = (
-            []
-        )  # List of (timestamp, total_bytes) tuples for smoothed KB/s
+        self._source_bytes_history = []  # List of (timestamp, total_bytes) tuples for smoothed KB/s
 
     def request_cancellation(self) -> None:
         """Request cancellation of processing."""
@@ -463,9 +459,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
                 # Create file queue and results storage
                 file_queue: Queue = Queue()
-                hash_results: Dict[Path, tuple] = (
-                    {}
-                )  # {file_path: (metadata, file_size)}
+                hash_results: Dict[
+                    Path, tuple
+                ] = {}  # {file_path: (metadata, file_size)}
                 hash_errors: List[str] = []  # List to capture any errors
 
                 # Populate queue with all files
@@ -1045,6 +1041,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
             # Multimodal embeddings are stored in voyage-multimodal-3 collection
             # Without this, multimodal HNSW index is never built and queries fail
             from ..config import VOYAGE_MULTIMODAL_MODEL as _multimodal_model
+
             multimodal_collection = _multimodal_model
             if self.vector_store_client.collection_exists(multimodal_collection):
                 multimodal_result = self.vector_store_client.end_indexing(
@@ -1221,9 +1218,7 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
 
             return True
 
-    def _fetch_all_content_points(
-        self, collection_name: str
-    ) -> List[Dict[str, Any]]:
+    def _fetch_all_content_points(self, collection_name: str) -> List[Dict[str, Any]]:
         """Paginated fetch of ALL content points from the vector store.
 
         Fix D (Story #339): Replaces the single limit=10000 call in
@@ -1581,7 +1576,9 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                             f"for branch '{branch}'"
                         )
                     except Exception as e:
-                        logger.warning(f"FTS commit failed during branch isolation: {e}")
+                        logger.warning(
+                            f"FTS commit failed during branch isolation: {e}"
+                        )
 
         else:
             logger.info(f"Branch isolation: no files to hide for branch '{branch}'")

@@ -201,7 +201,9 @@ class DependencyMapAnalyzer:
         prompt += '"evidence": "Brief justification referencing actual files/patterns observed"}\n'
         prompt += "]\n\n"
         prompt += "### File Output Instructions\n\n"
-        prompt += "**STEP 0 — MANDATORY CANARY TEST (do this FIRST, before any analysis):**\n"
+        prompt += (
+            "**STEP 0 — MANDATORY CANARY TEST (do this FIRST, before any analysis):**\n"
+        )
         prompt += "Before doing ANY analysis work, test that you can write files by running:\n"
         prompt += "```\n"
         prompt += f"echo 'canary' > {pass1_file_abs}.canary && rm {pass1_file_abs}.canary && echo 'CANARY_OK'\n"
@@ -304,7 +306,9 @@ class DependencyMapAnalyzer:
         prompt += "source code), assign it to a standalone domain as a LAST RESORT. Name the domain after\n"
         prompt += "its functional purpose as a technical area (e.g., 'code-search-tooling' rather than\n"
         prompt += "'code-indexer'), even if the repository alias sounds descriptive. A domain always\n"
-        prompt += "represents a functional area, even when it contains only one repository.\n"
+        prompt += (
+            "represents a functional area, even when it contains only one repository.\n"
+        )
         prompt += "Do NOT leave repositories unassigned.\n\n"
 
         prompt += "### CRITICAL: Valid Repository Aliases\n\n"
@@ -320,7 +324,13 @@ class DependencyMapAnalyzer:
         timeout = (
             self.pass_timeout
         )  # Pass 1 uses full timeout (heaviest phase: explores all repos)
-        result = self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None, dangerously_skip_permissions=True)
+        result = self._invoke_claude_cli(
+            prompt,
+            timeout,
+            max_turns,
+            allowed_tools=None,
+            dangerously_skip_permissions=True,
+        )
 
         # ── Canary failure fast-path ──
         if "CANARY_FAIL" in result:
@@ -387,7 +397,11 @@ class DependencyMapAnalyzer:
                 + prompt
             )
             result = self._invoke_claude_cli(
-                retry_prompt, timeout, max_turns, allowed_tools=None, dangerously_skip_permissions=True
+                retry_prompt,
+                timeout,
+                max_turns,
+                allowed_tools=None,
+                dangerously_skip_permissions=True,
             )
 
             if pass1_file.exists():
@@ -2569,7 +2583,9 @@ Rules:
         prompt += "\n"
 
         prompt += "## Refinement Instructions\n\n"
-        prompt += "Review the existing document above against the actual source code and:\n\n"
+        prompt += (
+            "Review the existing document above against the actual source code and:\n\n"
+        )
         prompt += "1. **Verify** all stated dependencies against source code evidence\n"
         prompt += "2. **Correct** any inaccurate or outdated information\n"
         prompt += "3. **Preserve** the document structure and all sections\n"
@@ -2580,7 +2596,9 @@ Rules:
         prompt += "Do NOT include any of the following in your output:\n"
         prompt += "- YAML frontmatter blocks (the system adds these automatically)\n"
         prompt += "- Speculative sections like 'Recommendations', 'Potential Integration Opportunities', or 'Future Considerations'\n"
-        prompt += "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        prompt += (
+            "- Advisory content about what SHOULD be done or COULD be integrated\n"
+        )
         prompt += "- Any content not directly supported by source code evidence\n\n"
         prompt += "Document ONLY verified, factual dependencies and relationships.\n\n"
 

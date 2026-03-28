@@ -2,13 +2,14 @@
 
 import logging
 import threading
+
 try:
     from pysqlite3 import dbapi2 as sqlite3
 except ImportError:
     import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
-from typing import Any, List, Optional, Set, Dict
+from typing import Any, List, Optional, Set, Dict, cast
 
 from .primitives import QueryResult, SCIPQueryEngine
 from .backends import CallChain as BackendCallChain
@@ -691,14 +692,12 @@ def get_smart_context(
         logger.warning(
             f"get_smart_context exceeded {timeout_seconds}-second timeout for symbol '{symbol}'"
         )
-        raise QueryTimeoutError(
-            f"Query exceeded {timeout_seconds}-second timeout"
-        )
+        raise QueryTimeoutError(f"Query exceeded {timeout_seconds}-second timeout")
 
     if exc_holder[0] is not None:
         raise exc_holder[0]
 
-    return result_holder[0]  # type: ignore[return-value]
+    return cast(SmartContextResult, result_holder[0])
 
 
 def _get_smart_context_impl(
@@ -720,9 +719,9 @@ def _get_smart_context_impl(
     scip_files = list(scip_dir.glob("**/*.scip.db"))
 
     # Collect all related symbols with relationships
-    context_data: Dict[Path, List[tuple]] = (
-        {}
-    )  # file_path -> [(symbol, relationship, location, score)]
+    context_data: Dict[
+        Path, List[tuple]
+    ] = {}  # file_path -> [(symbol, relationship, location, score)]
 
     # 1. Definition (highest priority - score 1.0)
     try:

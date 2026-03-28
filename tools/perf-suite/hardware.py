@@ -91,16 +91,23 @@ def _run_ssh_command(
     """
     # Build SSH options for non-interactive use
     ssh_opts = [
-        "-o", "StrictHostKeyChecking=no",
-        "-o", f"ConnectTimeout={_SSH_TIMEOUT_SECONDS}",
-        "-o", "BatchMode=yes" if not password else "BatchMode=no",
-        "-o", "PasswordAuthentication=yes" if password else "PasswordAuthentication=no",
-        "-o", "PubkeyAuthentication=no" if password else "PubkeyAuthentication=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        f"ConnectTimeout={_SSH_TIMEOUT_SECONDS}",
+        "-o",
+        "BatchMode=yes" if not password else "BatchMode=no",
+        "-o",
+        "PasswordAuthentication=yes" if password else "PasswordAuthentication=no",
+        "-o",
+        "PubkeyAuthentication=no" if password else "PubkeyAuthentication=yes",
     ]
 
     if password:
         # Use sshpass for password-based SSH
-        cmd = ["sshpass", "-p", password, "ssh"] + ssh_opts + [f"{user}@{host}", command]
+        cmd = (
+            ["sshpass", "-p", password, "ssh"] + ssh_opts + [f"{user}@{host}", command]
+        )
     else:
         cmd = ["ssh"] + ssh_opts + [f"{user}@{host}", command]
 
@@ -112,7 +119,12 @@ def _run_ssh_command(
             timeout=_SSH_TIMEOUT_SECONDS,
         )
         if result.returncode != 0:
-            logger.debug("SSH command returned non-zero for %s@%s (rc=%d)", user, host, result.returncode)
+            logger.debug(
+                "SSH command returned non-zero for %s@%s (rc=%d)",
+                user,
+                host,
+                result.returncode,
+            )
             return None
         return result.stdout
     except subprocess.TimeoutExpired as e:

@@ -26,7 +26,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hardware import capture_hardware_profile
-from report_charts import render_ascii_chart, render_cross_repo_table, render_metrics_table
+from report_charts import (
+    render_ascii_chart,
+    render_cross_repo_table,
+    render_metrics_table,
+)
 from report_sections import (
     render_executive_summary,
     render_hardware_section,
@@ -42,7 +46,9 @@ _PRIORITY_LABELS = {
 }
 
 
-def _build_reproduction_section(metrics_file: str, cli_args: Optional[dict[str, str]]) -> str:
+def _build_reproduction_section(
+    metrics_file: str, cli_args: Optional[dict[str, str]]
+) -> str:
     """Build the 'How to Reproduce' section with a sanitized CLI command."""
     from sanitizer import sanitize_reproduction_command
 
@@ -86,7 +92,11 @@ def _build_test_repositories_section(scenarios: dict[str, Any]) -> str:
         if alias not in seen:
             seen[alias] = endpoint
 
-    lines = ["## Test Repositories\n", "| Repository Alias | Endpoint |", "| --- | --- |"]
+    lines = [
+        "## Test Repositories\n",
+        "| Repository Alias | Endpoint |",
+        "| --- | --- |",
+    ]
     for alias in sorted(seen.keys()):
         lines.append(f"| {alias} | {seen[alias]} |")
     return "\n".join(lines) + "\n"

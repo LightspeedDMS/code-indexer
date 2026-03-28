@@ -122,7 +122,9 @@ class SCIPGenerator:
                     try:
                         # Walk up removing empty dirs, but not scip_dir itself
                         parent = project_dir
-                        while parent != self.scip_dir and parent != self.scip_dir.parent:
+                        while (
+                            parent != self.scip_dir and parent != self.scip_dir.parent
+                        ):
                             if parent.exists() and not any(parent.iterdir()):
                                 parent.rmdir()
                                 logger.debug(f"Removed empty SCIP directory: {parent}")
@@ -135,7 +137,9 @@ class SCIPGenerator:
                         )
 
                 except Exception as e:
-                    logger.warning(f"Failed to remove orphan SCIP database {db_file}: {e}")
+                    logger.warning(
+                        f"Failed to remove orphan SCIP database {db_file}: {e}"
+                    )
 
         if orphan_count > 0:
             logger.info(f"SCIP orphan cleanup: removed {orphan_count} orphan databases")

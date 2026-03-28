@@ -45,7 +45,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 from collections import Counter
 
 
@@ -53,10 +53,7 @@ def check_cidx_available() -> bool:
     """Check if cidx CLI is available."""
     try:
         result = subprocess.run(
-            ["cidx", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10
+            ["cidx", "--version"], capture_output=True, text=True, timeout=10
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -110,9 +107,7 @@ DEFAULT_QUERIES = [
 
 
 def execute_single_query(
-    query: str,
-    repo_path: str,
-    limit: int = DEFAULT_LIMIT_PER_QUERY
+    query: str, repo_path: str, limit: int = DEFAULT_LIMIT_PER_QUERY
 ) -> List[float]:
     """
     Execute a single semantic query using cidx CLI and extract scores.
@@ -129,10 +124,14 @@ def execute_single_query(
         # Build cidx query command
         # Use --quiet for machine-parseable output
         cmd = [
-            "cidx", "query", query,
-            "--limit", str(limit),
-            "--accuracy", "high",
-            "--quiet"
+            "cidx",
+            "query",
+            query,
+            "--limit",
+            str(limit),
+            "--accuracy",
+            "high",
+            "--quiet",
         ]
 
         # Execute from repository directory
@@ -141,7 +140,7 @@ def execute_single_query(
             cwd=repo_path,
             capture_output=True,
             text=True,
-            timeout=60  # 60 second timeout per query
+            timeout=60,  # 60 second timeout per query
         )
 
         if result.returncode != 0:
@@ -174,9 +173,7 @@ def execute_single_query(
 
 
 def execute_queries(
-    repo_path: str,
-    queries: List[str],
-    limit: int = DEFAULT_LIMIT_PER_QUERY
+    repo_path: str, queries: List[str], limit: int = DEFAULT_LIMIT_PER_QUERY
 ) -> List[float]:
     """
     Execute semantic queries against a repository and collect all relevance scores.
@@ -200,7 +197,9 @@ def execute_queries(
         all_scores.extend(query_scores)
 
         truncated_query = query[:40] + "..." if len(query) > 40 else query
-        print(f"  [{i:2d}/{len(queries)}] '{truncated_query}' -> {len(query_scores)} results")
+        print(
+            f"  [{i:2d}/{len(queries)}] '{truncated_query}' -> {len(query_scores)} results"
+        )
 
     print("-" * 70)
     print(f"Total scores collected: {len(all_scores)}\n")
@@ -241,10 +240,7 @@ def analyze_scores(scores: List[float]) -> Dict:
     retention = {}
     for t in thresholds:
         retained = sum(1 for s in scores if s >= t)
-        retention[t] = {
-            "count": retained,
-            "percentage": retained / n * 100
-        }
+        retention[t] = {"count": retained, "percentage": retained / n * 100}
 
     # Determine recommendation based on retention analysis
     recommended_threshold = _determine_recommended_threshold(retention)
@@ -263,8 +259,8 @@ def analyze_scores(scores: List[float]) -> Dict:
         "recommendation": {
             "min_score": recommended_threshold,
             "rationale": f"Retains {retention[recommended_threshold]['percentage']:.1f}% of results, balancing precision and recall",
-            "retained_count": retention[recommended_threshold]["count"]
-        }
+            "retained_count": retention[recommended_threshold]["count"],
+        },
     }
 
 
@@ -331,7 +327,9 @@ def print_retention(analysis: Dict):
         r = retention[threshold]
         bar_length = int(r["percentage"] / BAR_SCALE_FACTOR)
         bar = "█" * bar_length
-        print(f"  min_score={threshold}:  {r['percentage']:5.1f}%  ({r['count']:5d} results)  {bar}")
+        print(
+            f"  min_score={threshold}:  {r['percentage']:5.1f}%  ({r['count']:5d} results)  {bar}"
+        )
 
 
 def print_recommendation(analysis: Dict):
@@ -341,7 +339,9 @@ def print_recommendation(analysis: Dict):
     rec = analysis["recommendation"]
     print(f"  Recommended min_score:   {rec['min_score']}")
     print(f"  Rationale:               {rec['rationale']}")
-    print(f"  Results retained:        {rec['retained_count']} of {analysis['total_scores']}")
+    print(
+        f"  Results retained:        {rec['retained_count']} of {analysis['total_scores']}"
+    )
 
     print("\nTRADE-OFF GUIDANCE")
     print("-" * 70)
@@ -387,14 +387,27 @@ Examples:
 
   # Save results to JSON
   python3 scripts/analysis/score_threshold_research.py --repo /path/to/repo --output results.json
-        """
+        """,
     )
 
-    parser.add_argument("--repo", help="Path to repository directory (must contain .code-indexer/)")
-    parser.add_argument("--repos", help="Comma-separated paths to repository directories")
-    parser.add_argument("--queries", type=Path, help="Path to file containing queries (one per line)")
-    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT_PER_QUERY, help="Maximum results per query")
-    parser.add_argument("--output", type=Path, help="Output file for JSON results (optional)")
+    parser.add_argument(
+        "--repo", help="Path to repository directory (must contain .code-indexer/)"
+    )
+    parser.add_argument(
+        "--repos", help="Comma-separated paths to repository directories"
+    )
+    parser.add_argument(
+        "--queries", type=Path, help="Path to file containing queries (one per line)"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=DEFAULT_LIMIT_PER_QUERY,
+        help="Maximum results per query",
+    )
+    parser.add_argument(
+        "--output", type=Path, help="Output file for JSON results (optional)"
+    )
 
     return parser.parse_args()
 
@@ -474,4 +487,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -110,12 +110,16 @@ class TestCleanupGuard:
         }
 
         with (
-            patch.object(scheduler.alias_manager, "read_alias", return_value=master_path),
+            patch.object(
+                scheduler.alias_manager, "read_alias", return_value=master_path
+            ),
             patch.object(scheduler.alias_manager, "swap_alias"),
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
             ) as mock_git_updater_cls,
@@ -130,9 +134,9 @@ class TestCleanupGuard:
         # Master path must NOT be scheduled for cleanup
         for call_args in mock_cleanup_manager.schedule_cleanup.call_args_list:
             path_arg = call_args[0][0]
-            assert path_arg != master_path, (
-                f"Master golden repo was scheduled for cleanup: {path_arg}"
-            )
+            assert (
+                path_arg != master_path
+            ), f"Master golden repo was scheduled for cleanup: {path_arg}"
 
     def test_cleanup_not_called_at_all_when_master_is_current_target(
         self, scheduler, golden_repos_dir, mock_cleanup_manager, mock_registry
@@ -153,12 +157,16 @@ class TestCleanupGuard:
         }
 
         with (
-            patch.object(scheduler.alias_manager, "read_alias", return_value=master_path),
+            patch.object(
+                scheduler.alias_manager, "read_alias", return_value=master_path
+            ),
             patch.object(scheduler.alias_manager, "swap_alias"),
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
             ) as mock_git_updater_cls,
@@ -220,4 +228,6 @@ class TestCleanupGuard:
             scheduler._execute_refresh(alias_name)
 
         # Versioned path MUST be scheduled for cleanup
-        mock_cleanup_manager.schedule_cleanup.assert_called_once_with(old_versioned_path)
+        mock_cleanup_manager.schedule_cleanup.assert_called_once_with(
+            old_versioned_path
+        )

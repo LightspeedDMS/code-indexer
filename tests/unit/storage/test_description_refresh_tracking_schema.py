@@ -78,7 +78,9 @@ class TestDescriptionRefreshTrackingSchema:
             conn.close()
 
             # Find repo_alias column
-            repo_alias_col = next((col for col in columns if col[1] == "repo_alias"), None)
+            repo_alias_col = next(
+                (col for col in columns if col[1] == "repo_alias"), None
+            )
             assert repo_alias_col is not None
             # Column index 5 is the pk flag (1 if primary key, 0 otherwise)
             assert repo_alias_col[5] == 1
@@ -94,14 +96,14 @@ class TestDescriptionRefreshTrackingSchema:
             # Insert row with only repo_alias (required field)
             conn.execute(
                 "INSERT INTO description_refresh_tracking (repo_alias) VALUES (?)",
-                ("test-repo",)
+                ("test-repo",),
             )
             conn.commit()
 
             # Verify status defaults to 'pending'
             cursor = conn.execute(
                 "SELECT status FROM description_refresh_tracking WHERE repo_alias = ?",
-                ("test-repo",)
+                ("test-repo",),
             )
             row = cursor.fetchone()
             assert row is not None

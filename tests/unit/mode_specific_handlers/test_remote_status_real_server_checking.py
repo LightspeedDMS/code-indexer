@@ -101,9 +101,7 @@ class TestRemoteStatusRealServerChecking:
         # Patch httpx to detect if HTTP calls are made
         with patch("httpx.Client") as mock_client:
             # Set up the mock to allow the calls but track them
-            mock_client.return_value.__enter__.return_value.get.return_value.status_code = (
-                200
-            )
+            mock_client.return_value.__enter__.return_value.get.return_value.status_code = 200
 
             asyncio.run(display_remote_status(project_root))
 

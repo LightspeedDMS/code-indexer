@@ -16,7 +16,10 @@ from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.services.repo_category_service import RepoCategoryService
 from code_indexer.server.routers.repo_categories import get_category_service
 from code_indexer.server.auth.user_manager import UserManager, UserRole
-from code_indexer.server.auth.dependencies import get_current_user, get_current_admin_user
+from code_indexer.server.auth.dependencies import (
+    get_current_user,
+    get_current_admin_user,
+)
 
 
 @pytest.fixture
@@ -80,6 +83,7 @@ def client():
 @pytest.fixture
 def admin_auth(mock_admin_user):
     """Override auth to return admin user."""
+
     def mock_get_admin():
         return mock_admin_user
 
@@ -92,15 +96,16 @@ def admin_auth(mock_admin_user):
 @pytest.fixture
 def normal_user_auth(mock_normal_user):
     """Override auth to return normal user (but not admin)."""
+
     def mock_get_user():
         return mock_normal_user
 
     def mock_get_admin():
         # Normal users should get 403 when trying to access admin endpoints
         from fastapi import HTTPException, status
+
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin role required"
+            status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required"
         )
 
     app.dependency_overrides[get_current_user] = mock_get_user
@@ -205,9 +210,7 @@ class TestCreateCategory:
 class TestUpdateCategory:
     """Test PUT /api/v1/repo-categories/{id} endpoint."""
 
-    def test_update_category_succeeds(
-        self, client, admin_auth, category_service
-    ):
+    def test_update_category_succeeds(self, client, admin_auth, category_service):
         """Test updating category name and pattern (AC6)."""
         # Create category
         cat_id = category_service.create_category("Backend", "^api-.*")
@@ -232,7 +235,9 @@ class TestUpdateCategory:
 
         assert response.status_code == 404
 
-    def test_update_requires_admin_role(self, client, normal_user_auth, category_service):
+    def test_update_requires_admin_role(
+        self, client, normal_user_auth, category_service
+    ):
         """Test that non-admin users cannot update categories."""
         cat_id = category_service.create_category("Backend", "^api-.*")
 
@@ -261,7 +266,9 @@ class TestDeleteCategory:
 
         assert response.status_code == 404
 
-    def test_delete_requires_admin_role(self, client, normal_user_auth, category_service):
+    def test_delete_requires_admin_role(
+        self, client, normal_user_auth, category_service
+    ):
         """Test that non-admin users cannot delete categories."""
         cat_id = category_service.create_category("Backend", "^api-.*")
 

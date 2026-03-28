@@ -79,7 +79,10 @@ class TestReindexRemovedFromMetaDescriptionHook:
                 "code_indexer.global_repos.meta_description_hook.get_claude_cli_manager",
                 return_value=mock_cli_manager,
             ):
-                from code_indexer.global_repos.meta_description_hook import on_repo_added
+                from code_indexer.global_repos.meta_description_hook import (
+                    on_repo_added,
+                )
+
                 on_repo_added(
                     repo_name=repo_name,
                     repo_url=repo_url,
@@ -117,6 +120,7 @@ class TestReindexRemovedFromMetaDescriptionHook:
 
         with patch("subprocess.run", side_effect=mock_subprocess_run):
             from code_indexer.global_repos.meta_description_hook import on_repo_removed
+
             on_repo_removed(
                 repo_name=repo_name,
                 golden_repos_dir=str(tmp_path),
@@ -151,7 +155,10 @@ class TestReindexRemovedFromMetaDescriptionHook:
             return result
 
         with patch("subprocess.run", side_effect=mock_subprocess_run):
-            from code_indexer.global_repos.meta_description_hook import _create_readme_fallback
+            from code_indexer.global_repos.meta_description_hook import (
+                _create_readme_fallback,
+            )
+
             _create_readme_fallback(
                 repo_path=repo_path,
                 alias="test-repo",

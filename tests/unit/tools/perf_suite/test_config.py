@@ -13,7 +13,9 @@ import sys
 import os
 
 # Add the perf-suite directory to path so we can import from it
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite")
+)
 
 
 VALID_SCENARIO = {
@@ -117,8 +119,18 @@ class TestScenarioValidation:
     def test_missing_required_field_raises(self, tmp_path):
         from config import load_scenarios_from_file
 
-        for required_field in ("name", "endpoint", "protocol", "method", "parameters", "repo_alias", "priority"):
-            bad_scenario = {k: v for k, v in VALID_SCENARIO.items() if k != required_field}
+        for required_field in (
+            "name",
+            "endpoint",
+            "protocol",
+            "method",
+            "parameters",
+            "repo_alias",
+            "priority",
+        ):
+            bad_scenario = {
+                k: v for k, v in VALID_SCENARIO.items() if k != required_field
+            }
             scenario_file = tmp_path / f"missing_{required_field}.json"
             scenario_file.write_text(json.dumps([bad_scenario]))
 

@@ -161,7 +161,7 @@ class RegexSearchService:
         - {"bytes": "..."} for binary/non-UTF8 (base64-encoded)
         """
         if "text" in lines_data:
-            return lines_data["text"].rstrip("\n")
+            return str(lines_data["text"]).rstrip("\n")
         elif "bytes" in lines_data:
             import base64
 
@@ -213,7 +213,9 @@ class RegexSearchService:
                                 file_path=rel_path,
                                 line_number=match_data["line_number"],
                                 column=column,
-                                line_content=self._extract_line_text(match_data["lines"]),
+                                line_content=self._extract_line_text(
+                                    match_data["lines"]
+                                ),
                                 context_before=context_before.copy(),
                                 context_after=[],
                             )

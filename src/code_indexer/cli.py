@@ -278,7 +278,7 @@ def _create_default_override_file(project_dir: Path, force: bool = False) -> boo
 # Additional file extensions to index (beyond config defaults)
 add_extensions: []
 
-# File extensions to exclude (overrides config whitelist)  
+# File extensions to exclude (overrides config whitelist)
 remove_extensions: []
 
 # Additional directories to exclude from indexing
@@ -1114,7 +1114,7 @@ def _execute_semantic_search(
         collection_name = vector_store_client.resolve_collection_name(
             config, embedding_provider
         )
-        vector_store_client._current_collection_name = collection_name
+        vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
 
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
@@ -5653,7 +5653,7 @@ def query(
         collection_name = vector_store_client.resolve_collection_name(
             config, embedding_provider
         )
-        vector_store_client._current_collection_name = collection_name
+        vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
 
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
@@ -9075,9 +9075,11 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
         # Interactive credential collection if not provided
         if not username:
             username = click.prompt("Username", type=str)
+        username = username or ""
 
         if not password:
             password = getpass.getpass("Password: ")
+        password = password or ""
 
         # Validate inputs
         if not username.strip():
@@ -9169,9 +9171,11 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
         # Interactive credential collection if not provided
         if not username:
             username = click.prompt("Username", type=str)
+        username = username or ""
 
         if not password:
             password = getpass.getpass("Password: ")
+        password = password or ""
 
         # Validate inputs
         if not username.strip():
@@ -9328,14 +9332,14 @@ def auth_change_password(ctx):
         for attempt in range(max_attempts):
             try:
                 # Get current password
-                current_password = getpass.getpass("Current Password: ")
+                current_password = getpass.getpass("Current Password: ") or ""
                 if not current_password.strip():
                     console.print("❌ Current password cannot be empty", style="red")
                     continue
 
                 # Get new password with validation loop
                 while True:
-                    new_password = getpass.getpass("New Password: ")
+                    new_password = getpass.getpass("New Password: ") or ""
                     if not new_password.strip():
                         console.print("❌ New password cannot be empty", style="red")
                         continue
@@ -9440,6 +9444,7 @@ def auth_reset_password(ctx, username: Optional[str]):
         # Get username if not provided
         if not username:
             username = click.prompt("Username", type=str)
+        username = username or ""
 
         # Validate username
         if not username.strip():
@@ -10539,7 +10544,9 @@ def _get_auto_update_last_result():
     result_style = (
         "green"
         if last_result == "success"
-        else "red" if last_result == "failed" else "dim"
+        else "red"
+        if last_result == "failed"
+        else "dim"
     )
     return {"result": last_result, "style": result_style}
 
@@ -12109,7 +12116,9 @@ def repos_sync_status(ctx, user_alias: Optional[str], detailed: bool):
             status_style = (
                 "green"
                 if status["sync_status"] == "synced"
-                else "yellow" if status["sync_status"] == "needs_sync" else "red"
+                else "yellow"
+                if status["sync_status"] == "needs_sync"
+                else "red"
             )
             table.add_row(
                 "Status", f"[{status_style}]{status['sync_status']}[/{status_style}]"

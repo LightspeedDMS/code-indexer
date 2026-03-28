@@ -3,6 +3,7 @@
 Tests the complete chain from event to cache invalidation using
 real WikiCache and WikiCacheInvalidator (no mocking of these components).
 """
+
 import os
 import tempfile
 from pathlib import Path
@@ -44,7 +45,9 @@ def repo_dir_with_md():
 class TestInvalidationChainEndToEnd:
     """Integration: full chain from event to cache cleared."""
 
-    def test_md_file_change_clears_sidebar_cache(self, fresh_invalidator, repo_dir_with_md):
+    def test_md_file_change_clears_sidebar_cache(
+        self, fresh_invalidator, repo_dir_with_md
+    ):
         """Complete chain: md file change -> invalidator -> wiki_cache cleared (AC1)."""
         invalidator, cache = fresh_invalidator
         sidebar_data = [{"title": "Home", "path": ""}]
@@ -59,7 +62,9 @@ class TestInvalidationChainEndToEnd:
         # Cache must be cleared
         assert cache.get_sidebar("my-repo", repo_dir_with_md) is None
 
-    def test_non_md_file_change_does_not_clear_cache(self, fresh_invalidator, repo_dir_with_md):
+    def test_non_md_file_change_does_not_clear_cache(
+        self, fresh_invalidator, repo_dir_with_md
+    ):
         """Non-md file change must not affect wiki cache (AC5)."""
         invalidator, cache = fresh_invalidator
         sidebar_data = [{"title": "Home", "path": ""}]
@@ -70,7 +75,9 @@ class TestInvalidationChainEndToEnd:
         # Cache must still be intact
         assert cache.get_sidebar("my-repo", repo_dir_with_md) == sidebar_data
 
-    def test_git_operation_clears_sidebar_cache(self, fresh_invalidator, repo_dir_with_md):
+    def test_git_operation_clears_sidebar_cache(
+        self, fresh_invalidator, repo_dir_with_md
+    ):
         """Git operation -> invalidator -> wiki_cache cleared (AC2)."""
         invalidator, cache = fresh_invalidator
         sidebar_data = [{"title": "Home", "path": ""}]
@@ -99,7 +106,9 @@ class TestInvalidationChainEndToEnd:
         # other-repo cache intact
         assert cache.get_sidebar("other-repo", repo_dir_with_md) is not None
 
-    def test_article_cache_also_cleared_on_invalidation(self, fresh_invalidator, repo_dir_with_md):
+    def test_article_cache_also_cleared_on_invalidation(
+        self, fresh_invalidator, repo_dir_with_md
+    ):
         """invalidate_repo clears both sidebar AND article cache."""
         invalidator, cache = fresh_invalidator
         # Put sidebar
@@ -115,7 +124,9 @@ class TestInvalidationChainEndToEnd:
         assert cache.get_sidebar("my-repo", repo_dir_with_md) is None
         assert cache.get_article("my-repo", "", home_md) is None
 
-    def test_invalidation_does_not_affect_other_repos(self, fresh_invalidator, repo_dir_with_md):
+    def test_invalidation_does_not_affect_other_repos(
+        self, fresh_invalidator, repo_dir_with_md
+    ):
         """Invalidating one repo must not affect other repos' caches."""
         invalidator, cache = fresh_invalidator
         cache.put_sidebar("repo-a", [{"title": "A"}], repo_dir_with_md)

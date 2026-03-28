@@ -50,9 +50,7 @@ class TestCalculateJitter:
         for _ in range(200):
             jitter = scheduler._calculate_jitter(refresh_interval)
             max_jitter = refresh_interval * scheduler.JITTER_PERCENTAGE
-            assert jitter <= max_jitter, (
-                f"Jitter {jitter} exceeded max {max_jitter}"
-            )
+            assert jitter <= max_jitter, f"Jitter {jitter} exceeded max {max_jitter}"
 
     def test_jitter_within_negative_bounds(self, tmp_path):
         """_calculate_jitter() never goes below -JITTER_PERCENTAGE * interval."""
@@ -62,9 +60,7 @@ class TestCalculateJitter:
         for _ in range(200):
             jitter = scheduler._calculate_jitter(refresh_interval)
             min_jitter = -(refresh_interval * scheduler.JITTER_PERCENTAGE)
-            assert jitter >= min_jitter, (
-                f"Jitter {jitter} below minimum {min_jitter}"
-            )
+            assert jitter >= min_jitter, f"Jitter {jitter} below minimum {min_jitter}"
 
     def test_jitter_produces_both_positive_and_negative_values(self, tmp_path):
         """
@@ -82,8 +78,8 @@ class TestCalculateJitter:
         """Max jitter magnitude scales proportionally with the refresh interval."""
         scheduler = _make_scheduler(tmp_path)
 
-        short_interval = 300    # 5 min -> max jitter 30s
-        long_interval = 7200    # 2 hours -> max jitter 720s
+        short_interval = 300  # 5 min -> max jitter 30s
+        long_interval = 7200  # 2 hours -> max jitter 720s
 
         short_max = short_interval * scheduler.JITTER_PERCENTAGE
         long_max = long_interval * scheduler.JITTER_PERCENTAGE

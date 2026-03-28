@@ -436,9 +436,7 @@ class TestFileChunkingManagerAcceptanceCriteria:
         failing_vector_manager.embedding_provider.get_current_model.return_value = (
             "voyage-large-2-instruct"
         )
-        failing_vector_manager.embedding_provider._get_model_token_limit.return_value = (
-            120000
-        )
+        failing_vector_manager.embedding_provider._get_model_token_limit.return_value = 120000
 
         # Create a mock future that returns a result with error
         failing_future: Future[Any] = Future()

@@ -32,7 +32,9 @@ class TestGenerateIndexMd:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}]
+        domain_list = [
+            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}
+        ]
         repo_list = [{"alias": "auth-svc", "description_summary": "Auth service"}]
 
         analyzer._generate_index_md(staging_dir, domain_list, repo_list)
@@ -45,7 +47,9 @@ class TestGenerateIndexMd:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}]
+        domain_list = [
+            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}
+        ]
         repo_list = [{"alias": "auth-svc", "description_summary": "Auth service"}]
 
         analyzer._generate_index_md(staging_dir, domain_list, repo_list)
@@ -59,7 +63,9 @@ class TestGenerateIndexMd:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}]
+        domain_list = [
+            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}
+        ]
         repo_list = [{"alias": "auth-svc", "description_summary": "Auth service"}]
 
         analyzer._generate_index_md(staging_dir, domain_list, repo_list)
@@ -74,8 +80,16 @@ class TestGenerateIndexMd:
         staging_dir.mkdir()
 
         domain_list = [
-            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc", "api-gw"]},
-            {"name": "billing", "description": "Billing", "participating_repos": ["bill-svc"]},
+            {
+                "name": "auth",
+                "description": "Auth",
+                "participating_repos": ["auth-svc", "api-gw"],
+            },
+            {
+                "name": "billing",
+                "description": "Billing",
+                "participating_repos": ["bill-svc"],
+            },
         ]
         repo_list = [
             {"alias": "auth-svc", "description_summary": "Auth"},
@@ -96,7 +110,9 @@ class TestGenerateIndexMd:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}]
+        domain_list = [
+            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}
+        ]
         repo_list = [{"alias": "auth-svc", "description_summary": "Auth service"}]
 
         analyzer._generate_index_md(staging_dir, domain_list, repo_list)
@@ -121,10 +137,20 @@ class TestReconcileDomainsJson:
         staging_dir.mkdir()
 
         domain_list = [
-            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]},
-            {"name": "ghost", "description": "Ghost", "participating_repos": ["ghost-svc"]},
+            {
+                "name": "auth",
+                "description": "Auth",
+                "participating_repos": ["auth-svc"],
+            },
+            {
+                "name": "ghost",
+                "description": "Ghost",
+                "participating_repos": ["ghost-svc"],
+            },
         ]
-        (staging_dir / "auth.md").write_text("# Domain Analysis: auth\n\n## Overview\nValid.\n")
+        (staging_dir / "auth.md").write_text(
+            "# Domain Analysis: auth\n\n## Overview\nValid.\n"
+        )
 
         result = analyzer._reconcile_domains_json(staging_dir, domain_list)
         names = [d["name"] for d in result]
@@ -137,8 +163,12 @@ class TestReconcileDomainsJson:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}]
-        (staging_dir / "auth.md").write_text("# Domain Analysis: auth\n\n## Overview\nValid.\n")
+        domain_list = [
+            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]}
+        ]
+        (staging_dir / "auth.md").write_text(
+            "# Domain Analysis: auth\n\n## Overview\nValid.\n"
+        )
 
         result = analyzer._reconcile_domains_json(staging_dir, domain_list)
         assert len(result) == 1
@@ -151,8 +181,16 @@ class TestReconcileDomainsJson:
         staging_dir.mkdir()
 
         domain_list = [
-            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]},
-            {"name": "ghost", "description": "Ghost", "participating_repos": ["ghost-svc"]},
+            {
+                "name": "auth",
+                "description": "Auth",
+                "participating_repos": ["auth-svc"],
+            },
+            {
+                "name": "ghost",
+                "description": "Ghost",
+                "participating_repos": ["ghost-svc"],
+            },
         ]
         (staging_dir / "_domains.json").write_text(json.dumps(domain_list))
         (staging_dir / "auth.md").write_text("# Domain Analysis: auth\n\nContent.\n")
@@ -180,12 +218,21 @@ class TestPass1DomainStability:
         final_dir = tmp_path / "cidx-meta" / "dependency-map"
         final_dir.mkdir(parents=True)
         previous_domains = [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["auth-svc"]},
+            {
+                "name": "auth",
+                "description": "Auth domain",
+                "participating_repos": ["auth-svc"],
+            },
         ]
         (final_dir / "_domains.json").write_text(json.dumps(previous_domains))
 
         repo_list = [
-            {"alias": "auth-svc", "clone_path": "/fake/auth", "file_count": 10, "total_bytes": 1000},
+            {
+                "alias": "auth-svc",
+                "clone_path": "/fake/auth",
+                "file_count": 10,
+                "total_bytes": 1000,
+            },
         ]
         repo_descriptions = {"auth-svc": "Auth service description"}
 
@@ -203,7 +250,12 @@ class TestPass1DomainStability:
         analyzer = _make_analyzer(tmp_path)
 
         repo_list = [
-            {"alias": "auth-svc", "clone_path": "/fake/auth", "file_count": 10, "total_bytes": 1000},
+            {
+                "alias": "auth-svc",
+                "clone_path": "/fake/auth",
+                "file_count": 10,
+                "total_bytes": 1000,
+            },
         ]
         repo_descriptions = {"auth-svc": "Auth service description"}
 
@@ -222,12 +274,21 @@ class TestPass1DomainStability:
         final_dir = tmp_path / "cidx-meta" / "dependency-map"
         final_dir.mkdir(parents=True)
         previous_domains = [
-            {"name": "auth", "description": "Auth", "participating_repos": ["auth-svc"]},
+            {
+                "name": "auth",
+                "description": "Auth",
+                "participating_repos": ["auth-svc"],
+            },
         ]
         (final_dir / "_domains.json").write_text(json.dumps(previous_domains))
 
         repo_list = [
-            {"alias": "auth-svc", "clone_path": "/fake/auth", "file_count": 10, "total_bytes": 1000},
+            {
+                "alias": "auth-svc",
+                "clone_path": "/fake/auth",
+                "file_count": 10,
+                "total_bytes": 1000,
+            },
         ]
         repo_descriptions = {"auth-svc": "Auth service description"}
 
@@ -251,7 +312,14 @@ class TestPass1DomainConceptClarity:
     def test_build_pass1_prompt_contains_domain_definition_section(self, tmp_path):
         """Pass 1 prompt includes 'What Is a Domain?' section header."""
         analyzer = _make_analyzer(tmp_path)
-        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_list = [
+            {
+                "alias": "svc-a",
+                "clone_path": "/fake/a",
+                "file_count": 10,
+                "total_bytes": 1000,
+            }
+        ]
         repo_descriptions = {"svc-a": "Service A description"}
         prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
         assert "## What Is a Domain?" in prompt
@@ -259,7 +327,14 @@ class TestPass1DomainConceptClarity:
     def test_build_pass1_prompt_states_domain_is_not_repository(self, tmp_path):
         """Pass 1 prompt explicitly states a domain is NOT a repository."""
         analyzer = _make_analyzer(tmp_path)
-        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_list = [
+            {
+                "alias": "svc-a",
+                "clone_path": "/fake/a",
+                "file_count": 10,
+                "total_bytes": 1000,
+            }
+        ]
         repo_descriptions = {"svc-a": "Service A description"}
         prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
         assert "domain is NOT a repository" in prompt
@@ -267,15 +342,32 @@ class TestPass1DomainConceptClarity:
     def test_build_pass1_prompt_states_grouping_purpose(self, tmp_path):
         """Pass 1 prompt explains the purpose of grouping repos into domains."""
         analyzer = _make_analyzer(tmp_path)
-        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_list = [
+            {
+                "alias": "svc-a",
+                "clone_path": "/fake/a",
+                "file_count": 10,
+                "total_bytes": 1000,
+            }
+        ]
         repo_descriptions = {"svc-a": "Service A description"}
         prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
-        assert "group repositories into" in prompt.lower() or "group repositories" in prompt.lower()
+        assert (
+            "group repositories into" in prompt.lower()
+            or "group repositories" in prompt.lower()
+        )
 
     def test_build_pass1_prompt_domain_definition_before_instructions(self, tmp_path):
         """Pass 1 prompt has domain definition before instructions section."""
         analyzer = _make_analyzer(tmp_path)
-        repo_list = [{"alias": "svc-a", "clone_path": "/fake/a", "file_count": 10, "total_bytes": 1000}]
+        repo_list = [
+            {
+                "alias": "svc-a",
+                "clone_path": "/fake/a",
+                "file_count": 10,
+                "total_bytes": 1000,
+            }
+        ]
         repo_descriptions = {"svc-a": "Service A description"}
         prompt = analyzer.build_pass1_prompt(repo_descriptions, repo_list)
         assert "## What Is a Domain?" in prompt, "Expected 'What Is a Domain?' section"

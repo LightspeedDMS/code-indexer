@@ -273,7 +273,10 @@ class GitPullUpdater(UpdateStrategy):
             if result.returncode != 0:
                 stderr = result.stderr
                 # AC1: Divergent branch detection — intercept and auto-recover
-                if "divergent branches" in stderr or "Need to specify how to reconcile" in stderr:
+                if (
+                    "divergent branches" in stderr
+                    or "Need to specify how to reconcile" in stderr
+                ):
                     logger.warning(
                         f"Divergent branch detected for {self.repo_path}, "
                         "attempting auto-recovery via fetch + reset --hard"
@@ -286,9 +289,7 @@ class GitPullUpdater(UpdateStrategy):
                     return
 
                 # AC2: Non-divergence errors are not intercepted
-                raise RuntimeError(
-                    f"Git pull failed for {self.repo_path}: {stderr}"
-                )
+                raise RuntimeError(f"Git pull failed for {self.repo_path}: {stderr}")
 
             logger.info(f"Git pull successful: {result.stdout.strip()}")
 

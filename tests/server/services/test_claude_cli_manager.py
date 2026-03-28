@@ -383,5 +383,3 @@ class TestConcurrencyControl:
         assert max_concurrent <= 2
 
         manager.shutdown()
-
-

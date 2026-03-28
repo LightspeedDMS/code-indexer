@@ -94,6 +94,7 @@ class TestMetaDescriptionHookConfigIntegration:
         # The manager's max_workers should be the configured value
         assert mock_cli_manager._max_workers == 7
 
+
 class TestClaudeIntegrationConfigDefault:
     """Test ClaudeIntegrationConfig default value for max_concurrent_claude_cli."""
 

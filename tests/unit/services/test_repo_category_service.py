@@ -57,7 +57,10 @@ class TestCreateWithValidation:
         with pytest.raises(ValueError) as exc_info:
             service.create_category("Backend", "[unclosed")
 
-        assert "regex" in str(exc_info.value).lower() or "pattern" in str(exc_info.value).lower()
+        assert (
+            "regex" in str(exc_info.value).lower()
+            or "pattern" in str(exc_info.value).lower()
+        )
 
     def test_create_with_pattern_exceeding_500_chars_raises_value_error(self, service):
         """Test that create with pattern > 500 chars raises ValueError (AC7)."""
@@ -94,7 +97,10 @@ class TestUpdateWithValidation:
         with pytest.raises(ValueError) as exc_info:
             service.update_category(category_id, "Backend", "(unclosed")
 
-        assert "regex" in str(exc_info.value).lower() or "pattern" in str(exc_info.value).lower()
+        assert (
+            "regex" in str(exc_info.value).lower()
+            or "pattern" in str(exc_info.value).lower()
+        )
 
     def test_update_with_pattern_exceeding_500_chars_raises_value_error(self, service):
         """Test that update with pattern > 500 chars raises ValueError (AC7)."""

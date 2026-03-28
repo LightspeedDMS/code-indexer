@@ -84,9 +84,7 @@ class TestOnerrorCallbackBug343:
         try:
             onerror(os.open, "/some/path", exc_info)
         except TypeError as e:
-            pytest.fail(
-                f"_onerror propagated TypeError (Bug #343 not fixed): {e}"
-            )
+            pytest.fail(f"_onerror propagated TypeError (Bug #343 not fixed): {e}")
         except OSError:
             # An OSError from the retry itself is acceptable — not the bug
             pass
@@ -113,9 +111,9 @@ class TestOnerrorCallbackBug343:
         # Should NOT raise; the callable is invoked and succeeds silently
         onerror(fake_unlink, "/some/file.txt", exc_info)
 
-        assert call_log == ["/some/file.txt"], (
-            "Expected _onerror to retry the callable with the failed path"
-        )
+        assert call_log == [
+            "/some/file.txt"
+        ], "Expected _onerror to retry the callable with the failed path"
 
     def test_onerror_raises_on_non_emfile_oserror(self, tmp_path):
         """

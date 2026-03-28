@@ -26,14 +26,16 @@ class LoggerCallTransformer(ast.NodeTransformer):
         self.error_codes = error_codes
         self.error_code_index = 0
         self.file_path = file_path
-        self.transformations: List[Tuple[int, int, str, str]] = []  # (start_line, end_line, error_code, log_level)
+        self.transformations: List[
+            Tuple[int, int, str, str]
+        ] = []  # (start_line, end_line, error_code, log_level)
         self.has_format_error_log_import = False
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> ast.ImportFrom:
         """Check if format_error_log is already imported."""
-        if node.module and 'error_handler' in node.module:
+        if node.module and "error_handler" in node.module:
             for alias in node.names:
-                if alias.name == 'format_error_log':
+                if alias.name == "format_error_log":
                     self.has_format_error_log_import = True
         return node
 
@@ -42,7 +44,11 @@ class LoggerCallTransformer(ast.NodeTransformer):
         # Check if this is a logger call
         if isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
-                if node.func.value.id == 'logger' and node.func.attr in ['warning', 'error', 'critical']:
+                if node.func.value.id == "logger" and node.func.attr in [
+                    "warning",
+                    "error",
+                    "critical",
+                ]:
                     # Check if already using format_error_log (skip if so)
                     if self._uses_format_error_log(node):
                         return node
@@ -56,7 +62,9 @@ class LoggerCallTransformer(ast.NodeTransformer):
                     self.error_code_index += 1
 
                     # Store transformation
-                    self.transformations.append((node.lineno, node.end_lineno, error_code, node.func.attr))
+                    self.transformations.append(
+                        (node.lineno, node.end_lineno, error_code, node.func.attr)
+                    )
 
         self.generic_visit(node)
         return node
@@ -66,7 +74,7 @@ class LoggerCallTransformer(ast.NodeTransformer):
         # Check if any argument is a call to format_error_log
         for arg in node.args:
             if isinstance(arg, ast.Call):
-                if isinstance(arg.func, ast.Name) and arg.func.id == 'format_error_log':
+                if isinstance(arg.func, ast.Name) and arg.func.id == "format_error_log":
                     return True
         return False
 
@@ -76,7 +84,9 @@ def get_available_error_codes() -> List[str]:
     # Find project root (where src/ directory exists)
     script_dir = Path(__file__).parent
     project_root = script_dir.parent.parent
-    error_codes_path = project_root / 'src' / 'code_indexer' / 'server' / 'error_codes.py'
+    error_codes_path = (
+        project_root / "src" / "code_indexer" / "server" / "error_codes.py"
+    )
 
     if not error_codes_path.exists():
         print(f"ERROR: Cannot find error_codes.py at {error_codes_path}")
@@ -92,7 +102,9 @@ def get_available_error_codes() -> List[str]:
     return matches
 
 
-def analyze_file(file_path: Path, error_codes: List[str]) -> Tuple[bool, List[Tuple[int, int, str, str]], bool]:
+def analyze_file(
+    file_path: Path, error_codes: List[str]
+) -> Tuple[bool, List[Tuple[int, int, str, str]], bool]:
     """
     Analyze a file and identify logger calls to transform.
 
@@ -109,7 +121,7 @@ def analyze_file(file_path: Path, error_codes: List[str]) -> Tuple[bool, List[Tu
         return (
             len(transformer.transformations) > 0,
             transformer.transformations,
-            transformer.has_format_error_log_import
+            transformer.has_format_error_log_import,
         )
     except SyntaxError as e:
         print(f"SYNTAX ERROR in {file_path}: {e}")
@@ -137,7 +149,7 @@ def find_matching_paren(text: str, start_pos: int) -> int:
             escape_next = False
             continue
 
-        if char == '\\':
+        if char == "\\":
             escape_next = True
             continue
 
@@ -151,9 +163,9 @@ def find_matching_paren(text: str, start_pos: int) -> int:
 
         # Only count parens outside of strings
         if not in_string:
-            if char == '(':
+            if char == "(":
                 paren_depth += 1
-            elif char == ')':
+            elif char == ")":
                 paren_depth -= 1
                 if paren_depth == 0:
                     return i - start_pos
@@ -172,7 +184,7 @@ def extract_logger_call_content(original_call: str) -> str:
         Message content (everything inside the parentheses)
     """
     # Find the opening parenthesis
-    match = re.search(r'logger\.\w+\s*\(', original_call)
+    match = re.search(r"logger\.\w+\s*\(", original_call)
     if not match:
         return ""
 
@@ -187,7 +199,9 @@ def extract_logger_call_content(original_call: str) -> str:
     return rest_of_call[:message_end].strip()
 
 
-def build_new_logger_call(indent_str: str, log_level: str, error_code: str, message_content: str) -> str:
+def build_new_logger_call(
+    indent_str: str, log_level: str, error_code: str, message_content: str
+) -> str:
     """
     Build the new logger call with format_error_log.
 
@@ -200,14 +214,16 @@ def build_new_logger_call(indent_str: str, log_level: str, error_code: str, mess
     Returns:
         New logger call text
     """
-    new_call = f'{indent_str}logger.{log_level}(format_error_log(\n'
+    new_call = f"{indent_str}logger.{log_level}(format_error_log(\n"
     new_call += f'{indent_str}    "{error_code}",\n'
-    new_call += f'{indent_str}    {message_content}\n'
-    new_call += f'{indent_str}))\n'
+    new_call += f"{indent_str}    {message_content}\n"
+    new_call += f"{indent_str}))\n"
     return new_call
 
 
-def transform_file_content(content: str, transformations: List[Tuple[int, int, str, str]], has_import: bool) -> str:
+def transform_file_content(
+    content: str, transformations: List[Tuple[int, int, str, str]], has_import: bool
+) -> str:
     """
     Transform file content by replacing logger calls with format_error_log pattern.
     """
@@ -222,7 +238,7 @@ def transform_file_content(content: str, transformations: List[Tuple[int, int, s
         end_idx = end_line
 
         original_lines = lines[start_idx:end_idx]
-        original_call = ''.join(original_lines)
+        original_call = "".join(original_lines)
 
         # Extract the message content
         message_content = extract_logger_call_content(original_call)
@@ -231,10 +247,12 @@ def transform_file_content(content: str, transformations: List[Tuple[int, int, s
 
         # Get indentation from original line
         indent = len(original_lines[0]) - len(original_lines[0].lstrip())
-        indent_str = ' ' * indent
+        indent_str = " " * indent
 
         # Build new call
-        new_call = build_new_logger_call(indent_str, log_level, error_code, message_content)
+        new_call = build_new_logger_call(
+            indent_str, log_level, error_code, message_content
+        )
 
         # Replace lines
         lines[start_idx:end_idx] = [new_call]
@@ -244,17 +262,21 @@ def transform_file_content(content: str, transformations: List[Tuple[int, int, s
         # Find the last import statement
         import_insert_line = 0
         for i, line in enumerate(lines):
-            if line.strip().startswith('import ') or line.strip().startswith('from '):
+            if line.strip().startswith("import ") or line.strip().startswith("from "):
                 import_insert_line = i + 1
 
         # Insert import after last import
-        import_line = 'from code_indexer.server.logging.error_handler import format_error_log\n'
+        import_line = (
+            "from code_indexer.server.logging.error_handler import format_error_log\n"
+        )
         lines.insert(import_insert_line, import_line)
 
-    return ''.join(lines)
+    return "".join(lines)
 
 
-def migrate_files(target_dir: Path, error_codes: List[str], dry_run: bool = False) -> Dict[str, int]:
+def migrate_files(
+    target_dir: Path, error_codes: List[str], dry_run: bool = False
+) -> Dict[str, int]:
     """
     Migrate all Python files in target directory.
 
@@ -262,36 +284,40 @@ def migrate_files(target_dir: Path, error_codes: List[str], dry_run: bool = Fals
         Dictionary with migration statistics
     """
     stats = {
-        'files_analyzed': 0,
-        'files_transformed': 0,
-        'statements_migrated': 0,
-        'error_codes_used': 0
+        "files_analyzed": 0,
+        "files_transformed": 0,
+        "statements_migrated": 0,
+        "error_codes_used": 0,
     }
 
     error_code_offset = 0
 
-    for file_path in sorted(target_dir.rglob('*.py')):
-        if '__pycache__' in str(file_path):
+    for file_path in sorted(target_dir.rglob("*.py")):
+        if "__pycache__" in str(file_path):
             continue
 
-        stats['files_analyzed'] += 1
+        stats["files_analyzed"] += 1
 
         # Get available error codes for this file
         available_codes = error_codes[error_code_offset:]
 
-        needs_transform, transformations, has_import = analyze_file(file_path, available_codes)
+        needs_transform, transformations, has_import = analyze_file(
+            file_path, available_codes
+        )
 
         if needs_transform:
-            stats['files_transformed'] += 1
-            stats['statements_migrated'] += len(transformations)
-            stats['error_codes_used'] += len(transformations)
+            stats["files_transformed"] += 1
+            stats["statements_migrated"] += len(transformations)
+            stats["error_codes_used"] += len(transformations)
             error_code_offset += len(transformations)
 
             print(f"Transforming {file_path}: {len(transformations)} statements")
 
             if not dry_run:
                 content = file_path.read_text()
-                new_content = transform_file_content(content, transformations, has_import)
+                new_content = transform_file_content(
+                    content, transformations, has_import
+                )
                 file_path.write_text(new_content)
 
     return stats
@@ -301,9 +327,15 @@ def main():
     """Main migration entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Migrate logger calls to format_error_log')
-    parser.add_argument('--dry-run', action='store_true', help='Analyze only, do not modify files')
-    parser.add_argument('--target', default='src/code_indexer/server', help='Target directory')
+    parser = argparse.ArgumentParser(
+        description="Migrate logger calls to format_error_log"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Analyze only, do not modify files"
+    )
+    parser.add_argument(
+        "--target", default="src/code_indexer/server", help="Target directory"
+    )
 
     args = parser.parse_args()
 
@@ -315,7 +347,9 @@ def main():
     error_codes = get_available_error_codes()
 
     if len(error_codes) < REQUIRED_ERROR_CODES:
-        print(f"ERROR: Not enough error codes! Need {REQUIRED_ERROR_CODES}, have {len(error_codes)}")
+        print(
+            f"ERROR: Not enough error codes! Need {REQUIRED_ERROR_CODES}, have {len(error_codes)}"
+        )
         sys.exit(1)
 
     # Migrate files
@@ -343,5 +377,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

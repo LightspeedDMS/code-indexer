@@ -29,11 +29,16 @@ def parse_concurrency_levels(levels_str: Optional[str]) -> list[int]:
         print(f"ERROR: Invalid --concurrency-levels value: {exc}", file=sys.stderr)
         sys.exit(1)
     if not levels:
-        print("ERROR: --concurrency-levels must contain at least one value.", file=sys.stderr)
+        print(
+            "ERROR: --concurrency-levels must contain at least one value.",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    invalid = [l for l in levels if l < 1]
+    invalid = [level for level in levels if level < 1]
     if invalid:
-        print(f"ERROR: Concurrency levels must be >= 1, got: {invalid}", file=sys.stderr)
+        print(
+            f"ERROR: Concurrency levels must be >= 1, got: {invalid}", file=sys.stderr
+        )
         sys.exit(1)
     return sorted(levels)
 
@@ -83,10 +88,15 @@ async def run_preflight_check(
         sys.exit(1)
 
     if missing:
-        print("ERROR: The following repository aliases are not found on the server:", file=sys.stderr)
+        print(
+            "ERROR: The following repository aliases are not found on the server:",
+            file=sys.stderr,
+        )
         for alias in sorted(missing):
             print(f"  - {alias}", file=sys.stderr)
-        print("\nRegister missing repos before running the perf suite.", file=sys.stderr)
+        print(
+            "\nRegister missing repos before running the perf suite.", file=sys.stderr
+        )
         sys.exit(1)
 
     print("Pre-flight check passed.")

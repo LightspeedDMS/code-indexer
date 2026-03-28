@@ -26,7 +26,7 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,9 @@ class WriteLockManager:
 
         # Intra-process guards: one threading.Lock per alias
         # defaultdict so locks are created on first use without explicit initialisation
-        self._intra_process_guards: Dict[str, threading.Lock] = defaultdict(threading.Lock)
+        self._intra_process_guards: Dict[str, threading.Lock] = defaultdict(
+            threading.Lock
+        )
         self._guards_lock = threading.Lock()  # protects _intra_process_guards dict
 
     # ------------------------------------------------------------------
@@ -172,9 +174,7 @@ class WriteLockManager:
             logger.warning(f"Could not delete lock file for {alias!r}: {e}")
             return False
 
-        logger.debug(
-            f"Write lock released: alias={alias!r} owner={owner_name!r}"
-        )
+        logger.debug(f"Write lock released: alias={alias!r} owner={owner_name!r}")
         return True
 
     def is_locked(self, alias: str) -> bool:
@@ -231,7 +231,7 @@ class WriteLockManager:
                 pass
             return None
 
-        return content
+        return cast(Optional[dict[Any, Any]], content)
 
     # ------------------------------------------------------------------
     # Internal helpers

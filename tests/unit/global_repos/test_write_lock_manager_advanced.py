@@ -98,12 +98,12 @@ class TestThreadSafety:
         successes = [r for r in results if r is True]
         failures = [r for r in results if r is False]
 
-        assert len(successes) == 1, (
-            f"Exactly 1 thread must succeed. Got {len(successes)} successes."
-        )
-        assert len(failures) == NUM_THREADS - 1, (
-            f"Exactly {NUM_THREADS - 1} threads must fail. Got {len(failures)} failures."
-        )
+        assert (
+            len(successes) == 1
+        ), f"Exactly 1 thread must succeed. Got {len(successes)} successes."
+        assert (
+            len(failures) == NUM_THREADS - 1
+        ), f"Exactly {NUM_THREADS - 1} threads must fail. Got {len(failures)} failures."
 
         # Clean up: release whichever lock was acquired
         lock_file = manager._lock_file("concurrent-repo")
@@ -127,8 +127,7 @@ class TestThreadSafety:
                 results.append(result)
 
         threads = [
-            threading.Thread(target=try_acquire, args=(i,))
-            for i in range(NUM_THREADS)
+            threading.Thread(target=try_acquire, args=(i,)) for i in range(NUM_THREADS)
         ]
         for t in threads:
             t.start()
@@ -164,9 +163,9 @@ class TestRefreshSchedulerDelegation:
         assert result is True, "acquire_write_lock() must return True"
 
         lock_file = lock_dir / ".locks" / "cidx-meta.lock"
-        assert lock_file.exists(), (
-            f"Lock file must be created at {lock_file} when using WriteLockManager"
-        )
+        assert (
+            lock_file.exists()
+        ), f"Lock file must be created at {lock_file} when using WriteLockManager"
 
         scheduler.release_write_lock("cidx-meta")
 
@@ -195,7 +194,9 @@ class TestRefreshSchedulerDelegation:
         with scheduler.write_lock("cidx-meta"):
             assert lock_file.exists(), "Lock file must exist inside context manager"
 
-        assert not lock_file.exists(), "Lock file must be deleted on context manager exit"
+        assert (
+            not lock_file.exists()
+        ), "Lock file must be deleted on context manager exit"
 
     def test_scheduler_exposes_write_lock_manager_attribute(self, scheduler):
         """
@@ -204,12 +205,12 @@ class TestRefreshSchedulerDelegation:
         """
         from code_indexer.global_repos.write_lock_manager import WriteLockManager
 
-        assert hasattr(scheduler, "write_lock_manager"), (
-            "RefreshScheduler must have a write_lock_manager attribute"
-        )
-        assert isinstance(scheduler.write_lock_manager, WriteLockManager), (
-            "write_lock_manager must be a WriteLockManager instance"
-        )
+        assert hasattr(
+            scheduler, "write_lock_manager"
+        ), "RefreshScheduler must have a write_lock_manager attribute"
+        assert isinstance(
+            scheduler.write_lock_manager, WriteLockManager
+        ), "write_lock_manager must be a WriteLockManager instance"
 
     def test_scheduler_acquire_uses_owner_name(self, scheduler, lock_dir):
         """
@@ -245,7 +246,9 @@ class TestRefreshSchedulerDelegation:
 
         scheduler.release_write_lock("cidx-meta", owner_name="dependency_map_service")
 
-    def test_scheduler_write_lock_context_manager_accepts_owner_name(self, scheduler, lock_dir):
+    def test_scheduler_write_lock_context_manager_accepts_owner_name(
+        self, scheduler, lock_dir
+    ):
         """
         write_lock(alias, owner_name=...) context manager passes owner to WriteLockManager.
         """
@@ -258,4 +261,6 @@ class TestRefreshSchedulerDelegation:
                 f"Got: {content.get('owner')!r}"
             )
 
-        assert not lock_file.exists(), "Lock file must be deleted on context manager exit"
+        assert (
+            not lock_file.exists()
+        ), "Lock file must be deleted on context manager exit"

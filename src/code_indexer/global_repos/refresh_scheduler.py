@@ -1301,9 +1301,7 @@ class RefreshScheduler:
                     )
                 diff_context = temporal_options.get("diff_context")
                 if diff_context is not None:
-                    temporal_command.extend(
-                        ["--diff-context", str(diff_context)]
-                    )
+                    temporal_command.extend(["--diff-context", str(diff_context)])
                 if temporal_options.get("all_branches"):
                     temporal_command.append("--all-branches")
 
@@ -1313,7 +1311,9 @@ class RefreshScheduler:
         # Story #482 PATH C: Build ProgressPhaseAllocator for phase-aware progress.
         # Phases: "semantic" (covers cidx index --fts), "temporal" (if enabled),
         # "scip" (if enabled, coarse markers only).
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
         from code_indexer.services.progress_subprocess_runner import (
             gather_repo_metrics,
             run_with_popen_progress,

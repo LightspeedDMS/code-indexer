@@ -74,7 +74,9 @@ class TestOnRepoAdded:
 
         # Verify: cidx index is NOT called by on_repo_added (C6: RefreshScheduler handles indexing)
         cidx_index_calls = [
-            call for call in mock_run.call_args_list if call[0][0] == ["cidx", "index", "--detect-deletions"]
+            call
+            for call in mock_run.call_args_list
+            if call[0][0] == ["cidx", "index", "--detect-deletions"]
         ]
         assert len(cidx_index_calls) == 0, (
             "on_repo_added() must NOT call 'cidx index' after C6 removal. "

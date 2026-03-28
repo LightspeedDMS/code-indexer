@@ -286,7 +286,9 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
         # First call raises exception, second succeeds
         call_count = [0]
 
-        def index_source_with_exception(alias_name, source_path, progress_callback=None):
+        def index_source_with_exception(
+            alias_name, source_path, progress_callback=None
+        ):
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("Index creation failed")
@@ -302,7 +304,9 @@ def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
 
         # Second refresh should succeed (lock was released)
         with (
-            patch.object(scheduler, "_create_snapshot", return_value="/path/to/new/index"),
+            patch.object(
+                scheduler, "_create_snapshot", return_value="/path/to/new/index"
+            ),
             patch.object(scheduler.alias_manager, "swap_alias"),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch.object(scheduler.registry, "update_refresh_timestamp"),

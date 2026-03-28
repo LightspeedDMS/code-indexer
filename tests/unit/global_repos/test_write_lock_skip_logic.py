@@ -67,7 +67,9 @@ def scheduler(golden_repos_dir, config_mgr, query_tracker, cleanup_manager, regi
     )
 
 
-def _setup_local_repo(golden_repos_dir, alias_manager, registry, alias_name="cidx-meta-global"):
+def _setup_local_repo(
+    golden_repos_dir, alias_manager, registry, alias_name="cidx-meta-global"
+):
     """Helper: create local repo dir, alias, and registry entry.
 
     Creates .code-indexer/ to mark the repo as initialized (Bug #268 fix:
@@ -91,7 +93,9 @@ def _setup_local_repo(golden_repos_dir, alias_manager, registry, alias_name="cid
     return local_repo_dir
 
 
-def _setup_git_repo(golden_repos_dir, alias_manager, registry, alias_name="test-repo-global"):
+def _setup_git_repo(
+    golden_repos_dir, alias_manager, registry, alias_name="test-repo-global"
+):
     """Helper: create git repo dir, alias, and registry entry."""
     repo_name = alias_name.replace("-global", "")
     remote_repo_dir = golden_repos_dir / repo_name
@@ -123,19 +127,20 @@ class TestRefreshSchedulerWriteLockSkip:
         scheduler.acquire_write_lock("cidx-meta")
 
         try:
-            with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-                 patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-                 patch.object(scheduler, "_create_new_index") as mock_create_index:
-
+            with (
+                patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+                patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+                patch.object(scheduler, "_create_new_index") as mock_create_index,
+            ):
                 result = scheduler._execute_refresh("cidx-meta-global")
 
                 mock_create_index.assert_not_called()
 
                 assert result["success"] is True, "Result must be success=True"
                 message = result.get("message", "")
-                assert "skip" in message.lower() or "lock" in message.lower(), (
-                    f"Result message must indicate skip due to write lock. Got: '{message}'"
-                )
+                assert (
+                    "skip" in message.lower() or "lock" in message.lower()
+                ), f"Result message must indicate skip due to write lock. Got: '{message}'"
         finally:
             scheduler.release_write_lock("cidx-meta")
 
@@ -149,18 +154,21 @@ class TestRefreshSchedulerWriteLockSkip:
         """
         _setup_local_repo(golden_repos_dir, alias_manager, registry)
 
-        with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-             patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch.object(scheduler, "_has_local_changes", return_value=False) as mock_mtime:
-
+        with (
+            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+            patch.object(
+                scheduler, "_has_local_changes", return_value=False
+            ) as mock_mtime,
+        ):
             result = scheduler._execute_refresh("cidx-meta-global")
 
             mock_mtime.assert_called_once()
 
             assert result["success"] is True
-            assert "no changes" in result.get("message", "").lower(), (
-                "When no write lock and no changes, result must indicate 'No changes detected'"
-            )
+            assert (
+                "no changes" in result.get("message", "").lower()
+            ), "When no write lock and no changes, result must indicate 'No changes detected'"
 
     def test_execute_refresh_checks_write_lock_for_git_repos_and_proceeds_when_unlocked(
         self, scheduler, golden_repos_dir, alias_manager, registry
@@ -175,11 +183,16 @@ class TestRefreshSchedulerWriteLockSkip:
         """
         _setup_git_repo(golden_repos_dir, alias_manager, registry)
 
-        with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-             patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch.object(scheduler, "is_write_locked", return_value=False) as mock_is_locked, \
-             patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_cls:
-
+        with (
+            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+            patch.object(
+                scheduler, "is_write_locked", return_value=False
+            ) as mock_is_locked,
+            patch(
+                "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+            ) as mock_cls,
+        ):
             mock_updater = MagicMock()
             mock_updater.has_changes.return_value = False
             mock_cls.return_value = mock_updater
@@ -226,7 +239,9 @@ class TestRefreshSchedulerTrigger:
         with patch.object(sched, "_submit_refresh_job") as mock_submit:
             sched.trigger_refresh_for_repo("cidx-meta-global")
 
-            mock_submit.assert_called_once_with("cidx-meta-global", submitter_username="system", force_reset=False)
+            mock_submit.assert_called_once_with(
+                "cidx-meta-global", submitter_username="system", force_reset=False
+            )
 
     def test_trigger_refresh_falls_back_to_direct_execution(
         self,
@@ -291,30 +306,34 @@ class TestConcurrentWriterAndRefreshScheduler:
         assert acquired is True
 
         # Step 2: Refresh while lock is held — must skip
-        with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-             patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch.object(scheduler, "_create_new_index") as mock_create:
-
+        with (
+            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+            patch.object(scheduler, "_create_new_index") as mock_create,
+        ):
             result = scheduler._execute_refresh("cidx-meta-global")
 
             assert result["success"] is True
-            assert not mock_create.called, "CoW clone must NOT be called while write lock is held"
+            assert (
+                not mock_create.called
+            ), "CoW clone must NOT be called while write lock is held"
             message = result.get("message", "")
-            assert "skip" in message.lower() or "lock" in message.lower(), (
-                f"Refresh must indicate it was skipped. Got: '{message}'"
-            )
+            assert (
+                "skip" in message.lower() or "lock" in message.lower()
+            ), f"Refresh must indicate it was skipped. Got: '{message}'"
 
         # Step 3: Release lock (writer done)
         scheduler.release_write_lock("cidx-meta")
 
         # Step 4: Refresh after lock release — must proceed to mtime check
-        with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-             patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch.object(scheduler, "_has_local_changes", return_value=False):
-
+        with (
+            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+            patch.object(scheduler, "_has_local_changes", return_value=False),
+        ):
             result2 = scheduler._execute_refresh("cidx-meta-global")
 
             assert result2["success"] is True
-            assert "no changes" in result2.get("message", "").lower(), (
-                "After lock release, refresh must proceed to mtime detection"
-            )
+            assert (
+                "no changes" in result2.get("message", "").lower()
+            ), "After lock release, refresh must proceed to mtime detection"

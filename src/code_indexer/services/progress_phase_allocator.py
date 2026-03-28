@@ -122,7 +122,9 @@ class ProgressPhaseAllocator:
 
         if "temporal" in index_types:
             effective_commits = (
-                min(commit_count, max_commits) if max_commits is not None else commit_count
+                min(commit_count, max_commits)
+                if max_commits is not None
+                else commit_count
             )
             cost_map["temporal"] = float(effective_commits) * COST_PER_COMMIT
 
@@ -189,7 +191,9 @@ class ProgressPhaseAllocator:
         if local_total == 0:
             return float(phase.range_start)
         local_fraction = float(local_current) / float(local_total)
-        return phase.range_start + local_fraction * (phase.range_end - phase.range_start)
+        return phase.range_start + local_fraction * (
+            phase.range_end - phase.range_start
+        )
 
     def phase_start(self, phase_name: str) -> float:
         """

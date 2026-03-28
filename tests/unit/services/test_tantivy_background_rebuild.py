@@ -174,9 +174,9 @@ class TestFTSBackgroundRebuild:
         # Wait for rebuild - use 10s to handle pytest overhead (2s was insufficient)
         rebuild_thread.join(timeout=10.0)
 
-        assert not rebuild_thread.is_alive(), (
-            "Rebuild thread must complete within 10 seconds"
-        )
+        assert (
+            not rebuild_thread.is_alive()
+        ), "Rebuild thread must complete within 10 seconds"
 
         # Verify .tmp file was created and swapped (should not exist after swap)
         temp_fts_dir = collection_path / "tantivy_fts.tmp"

@@ -34,14 +34,19 @@ from typing import Dict, List, Optional, Set, Tuple
 
 # Default functions that should stay async (context managers, SSE, middleware)
 DEFAULT_EXCLUDE_FUNCS = {
-    '__aenter__', '__aexit__', 'dispatch',
-    'sse_event_generator', 'mcp_sse_endpoint', 'mcp_public_sse_endpoint',
+    "__aenter__",
+    "__aexit__",
+    "dispatch",
+    "sse_event_generator",
+    "mcp_sse_endpoint",
+    "mcp_public_sse_endpoint",
 }
 
 
 @dataclass
 class AsyncFunctionInfo:
     """Information about an async function."""
+
     name: str
     lineno: int
     end_lineno: int
@@ -140,7 +145,7 @@ class CallerFinder(ast.NodeVisitor):
 def scan_file(filepath: str) -> List[AsyncFunctionInfo]:
     """Scan a file for async functions."""
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
         tree = ast.parse(content, filename=filepath)
         finder = AsyncFunctionFinder(filepath)
@@ -163,7 +168,7 @@ def scan_directory(
         dirs[:] = [d for d in dirs if d != "__pycache__"]
 
         for filename in files:
-            if not filename.endswith('.py'):
+            if not filename.endswith(".py"):
                 continue
 
             skip = any(p in filename or p in root for p in exclude_patterns)
@@ -182,16 +187,16 @@ def convert_function_in_file(
     dry_run: bool = False,
 ) -> Tuple[bool, str]:
     """Convert a single async function to sync in a file."""
-    with open(filepath, 'r', encoding='utf-8') as f:
+    with open(filepath, "r", encoding="utf-8") as f:
         lines = f.read().splitlines(keepends=True)
 
-    pattern = rf'^(\s*)async\s+def\s+{re.escape(function_name)}\s*\('
+    pattern = rf"^(\s*)async\s+def\s+{re.escape(function_name)}\s*\("
     modified = False
     new_lines = []
 
     for line in lines:
         if re.match(pattern, line):
-            new_line = re.sub(r'^(\s*)async\s+def\s+', r'\1def ', line)
+            new_line = re.sub(r"^(\s*)async\s+def\s+", r"\1def ", line)
             new_lines.append(new_line)
             modified = True
         else:
@@ -201,8 +206,8 @@ def convert_function_in_file(
         return False, f"Function {function_name} not found in {filepath}"
 
     if not dry_run:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(''.join(new_lines))
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("".join(new_lines))
 
     action = "Would convert" if dry_run else "Converted"
     return True, f"{action} {function_name} in {filepath}"
@@ -221,7 +226,7 @@ def remove_await_from_callers(
             dirs[:] = [d for d in dirs if d != "__pycache__"]
 
             for filename in files:
-                if not filename.endswith('.py'):
+                if not filename.endswith(".py"):
                     continue
 
                 filepath = os.path.join(root, filename)
@@ -240,7 +245,7 @@ def _process_caller_file(
     modifications = []
 
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, "r", encoding="utf-8") as f:
             content = f.read()
 
         tree = ast.parse(content, filename=filepath)
@@ -258,9 +263,9 @@ def _process_caller_file(
             if idx < len(lines):
                 line = lines[idx]
                 new_line = re.sub(
-                    rf'\bawait\s+(\w+\.)*{re.escape(func_name)}\s*\(',
-                    rf'\1{func_name}(',
-                    line
+                    rf"\bawait\s+(\w+\.)*{re.escape(func_name)}\s*\(",
+                    rf"\1{func_name}(",
+                    line,
                 )
                 if new_line != line:
                     lines[idx] = new_line
@@ -271,8 +276,8 @@ def _process_caller_file(
                     )
 
         if modified and not dry_run:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(''.join(lines))
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("".join(lines))
 
     except (SyntaxError, UnicodeDecodeError) as e:
         print(f"Warning: Could not process {filepath}: {e}", file=sys.stderr)
@@ -301,13 +306,14 @@ def handle_scan_command(args) -> None:
 def _output_scan_json(functions: List[AsyncFunctionInfo]) -> None:
     """Output scan results as JSON."""
     import json
+
     data = [
         {
-            'name': f.name,
-            'file': f.relative_path,
-            'line': f.lineno,
-            'has_await': f.has_await,
-            'decorators': f.decorators,
+            "name": f.name,
+            "file": f.relative_path,
+            "line": f.lineno,
+            "has_await": f.has_await,
+            "decorators": f.decorators,
         }
         for f in functions
     ]
@@ -316,7 +322,7 @@ def _output_scan_json(functions: List[AsyncFunctionInfo]) -> None:
 
 def _output_scan_text(functions: List[AsyncFunctionInfo], show_all: bool) -> None:
     """Output scan results as text."""
-    label = 'total' if show_all else 'without await'
+    label = "total" if show_all else "without await"
     print(f"Found {len(functions)} async functions {label}:\n")
 
     by_file: Dict[str, List[AsyncFunctionInfo]] = {}
@@ -336,7 +342,7 @@ def handle_convert_command(args) -> None:
     """Handle the convert command."""
     path = Path(args.path)
     exclude_funcs = _build_exclude_set(args.exclude_funcs)
-    exclude_files = args.exclude_files.split(',') if args.exclude_files else []
+    exclude_files = args.exclude_files.split(",") if args.exclude_files else []
 
     target_functions, by_file = _get_conversion_targets(
         path, args, exclude_funcs, exclude_files
@@ -359,7 +365,7 @@ def handle_convert_command(args) -> None:
 
 def _build_exclude_set(exclude_arg: Optional[str]) -> Set[str]:
     """Build the set of functions to exclude from conversion."""
-    exclude_funcs = set(exclude_arg.split(',')) if exclude_arg else set()
+    exclude_funcs = set(exclude_arg.split(",")) if exclude_arg else set()
     exclude_funcs.update(DEFAULT_EXCLUDE_FUNCS)
     return exclude_funcs
 
@@ -374,7 +380,7 @@ def _get_conversion_targets(
     by_file: Dict[str, List[AsyncFunctionInfo]] = {}
 
     if args.functions:
-        return set(args.functions.split(',')), by_file
+        return set(args.functions.split(",")), by_file
 
     if not args.all:
         print("Error: Must specify --functions or --all", file=sys.stderr)
@@ -386,8 +392,7 @@ def _get_conversion_targets(
         functions = scan_directory(str(path), exclude_patterns=exclude_files)
 
     functions = [
-        f for f in functions
-        if not f.has_await and f.name not in exclude_funcs
+        f for f in functions if not f.has_await and f.name not in exclude_funcs
     ]
 
     for f in functions:
@@ -425,18 +430,20 @@ def _perform_conversions(
 
 def _fix_caller_await(args, target_functions: Set[str], path: Path) -> None:
     """Fix await calls in caller files including tests."""
-    print(f"\nFixing callers (including tests)...")
+    print("\nFixing callers (including tests)...")
 
     if args.caller_paths:
-        search_paths = [p.strip() for p in args.caller_paths.split(',')]
+        search_paths = [p.strip() for p in args.caller_paths.split(",")]
     else:
         search_paths = [str(path) if path.is_dir() else str(path.parent)]
         # Auto-include tests directory if it exists
-        tests_dir = Path('tests')
+        tests_dir = Path("tests")
         if tests_dir.exists() and str(tests_dir) not in search_paths:
             search_paths.append(str(tests_dir))
 
-    modifications = remove_await_from_callers(search_paths, target_functions, args.dry_run)
+    modifications = remove_await_from_callers(
+        search_paths, target_functions, args.dry_run
+    )
     for mod in modifications:
         print(f"  {mod}")
     print(f"\nCaller fixes: {len(modifications)}")
@@ -446,25 +453,43 @@ def main():
     parser = argparse.ArgumentParser(
         description="Convert async functions to sync when they don't use await",
     )
-    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # Scan command
-    scan_parser = subparsers.add_parser('scan', help='Scan for async functions')
-    scan_parser.add_argument('path', help='File or directory to scan')
-    scan_parser.add_argument('--exclude', nargs='*', default=[], help='Patterns to exclude')
-    scan_parser.add_argument('--show-all', action='store_true', help='Show all async functions')
-    scan_parser.add_argument('--json', action='store_true', help='Output as JSON')
+    scan_parser = subparsers.add_parser("scan", help="Scan for async functions")
+    scan_parser.add_argument("path", help="File or directory to scan")
+    scan_parser.add_argument(
+        "--exclude", nargs="*", default=[], help="Patterns to exclude"
+    )
+    scan_parser.add_argument(
+        "--show-all", action="store_true", help="Show all async functions"
+    )
+    scan_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # Convert command
-    conv_parser = subparsers.add_parser('convert', help='Convert async functions to sync')
-    conv_parser.add_argument('path', help='File or directory to convert')
-    conv_parser.add_argument('--functions', help='Comma-separated function names')
-    conv_parser.add_argument('--all', action='store_true', help='Convert all without await')
-    conv_parser.add_argument('--dry-run', action='store_true', help='Preview changes only')
-    conv_parser.add_argument('--fix-callers', action='store_true', help='Fix await in callers')
-    conv_parser.add_argument('--caller-paths', help='Paths to search for callers (comma-sep)')
-    conv_parser.add_argument('--exclude-funcs', help='Function names to exclude (comma-sep)')
-    conv_parser.add_argument('--exclude-files', help='File patterns to exclude (comma-sep)')
+    conv_parser = subparsers.add_parser(
+        "convert", help="Convert async functions to sync"
+    )
+    conv_parser.add_argument("path", help="File or directory to convert")
+    conv_parser.add_argument("--functions", help="Comma-separated function names")
+    conv_parser.add_argument(
+        "--all", action="store_true", help="Convert all without await"
+    )
+    conv_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview changes only"
+    )
+    conv_parser.add_argument(
+        "--fix-callers", action="store_true", help="Fix await in callers"
+    )
+    conv_parser.add_argument(
+        "--caller-paths", help="Paths to search for callers (comma-sep)"
+    )
+    conv_parser.add_argument(
+        "--exclude-funcs", help="Function names to exclude (comma-sep)"
+    )
+    conv_parser.add_argument(
+        "--exclude-files", help="File patterns to exclude (comma-sep)"
+    )
 
     args = parser.parse_args()
 
@@ -472,11 +497,11 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    if args.command == 'scan':
+    if args.command == "scan":
         handle_scan_command(args)
-    elif args.command == 'convert':
+    elif args.command == "convert":
         handle_convert_command(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

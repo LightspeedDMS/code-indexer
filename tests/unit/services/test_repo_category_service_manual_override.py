@@ -88,7 +88,9 @@ def test_update_repo_category_clears_category_with_none(category_service, repo_b
     assert repo["category_auto_assigned"] is False
 
 
-def test_update_repo_category_preserves_auto_assigned_true(category_service, repo_backend):
+def test_update_repo_category_preserves_auto_assigned_true(
+    category_service, repo_backend
+):
     """Test update_repo_category can set auto_assigned=True for auto-assignment."""
     # Arrange: Create a category and a repo
     category_id = category_service.create_category("Backend", "^api-.*")
@@ -102,7 +104,9 @@ def test_update_repo_category_preserves_auto_assigned_true(category_service, rep
     )
 
     # Act: Update with auto_assigned=True (simulating auto-assignment)
-    category_service.update_repo_category("api-gateway", category_id, auto_assigned=True)
+    category_service.update_repo_category(
+        "api-gateway", category_id, auto_assigned=True
+    )
 
     # Assert: Verify auto_assigned is True
     repo = repo_backend.get_repo("api-gateway")
@@ -111,7 +115,9 @@ def test_update_repo_category_preserves_auto_assigned_true(category_service, rep
     assert repo["category_auto_assigned"] is True
 
 
-def test_update_repo_category_updates_existing_assignment(category_service, repo_backend):
+def test_update_repo_category_updates_existing_assignment(
+    category_service, repo_backend
+):
     """Test update_repo_category can change category from one to another."""
     # Arrange: Create two categories and a repo
     backend_id = category_service.create_category("Backend", "^api-.*")
@@ -145,10 +151,14 @@ def test_update_repo_category_nonexistent_repo_raises_error(category_service):
 
     # Act & Assert: Should raise error for non-existent repo
     with pytest.raises(Exception):  # Backend will raise specific error
-        category_service.update_repo_category("nonexistent-repo", category_id, auto_assigned=False)
+        category_service.update_repo_category(
+            "nonexistent-repo", category_id, auto_assigned=False
+        )
 
 
-def test_update_repo_category_invalid_category_id_raises_error(category_service, repo_backend):
+def test_update_repo_category_invalid_category_id_raises_error(
+    category_service, repo_backend
+):
     """Test update_repo_category with invalid category_id raises error."""
     # Arrange: Create a repo but no category with id 999
     repo_backend.add_repo(

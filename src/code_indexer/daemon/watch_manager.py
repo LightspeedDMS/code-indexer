@@ -311,13 +311,17 @@ class DaemonWatchManager:
 
             debounce_seconds = kwargs.get("debounce_seconds", 2.0)
 
-            from code_indexer.services.git_aware_watch_handler import GitAwareWatchHandler
+            from code_indexer.services.git_aware_watch_handler import (
+                GitAwareWatchHandler,
+            )
             from code_indexer.services.git_topology_service import GitTopologyService
             from code_indexer.services.watch_metadata import WatchMetadata
 
             git_topology_service = GitTopologyService(config.codebase_dir)
 
-            watch_metadata_path = config_manager.config_path.parent / "watch_metadata.json"
+            watch_metadata_path = (
+                config_manager.config_path.parent / "watch_metadata.json"
+            )
             watch_metadata = WatchMetadata.load_from_disk(watch_metadata_path)
 
             watch_handler = GitAwareWatchHandler(

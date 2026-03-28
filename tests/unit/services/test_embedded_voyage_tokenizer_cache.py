@@ -141,9 +141,7 @@ class TestResolveHfCachePath:
 
     def test_resolve_hf_cache_path_returns_none_when_no_tokenizer_json(self, tmp_path):
         """Returns None when snapshot dir exists but contains no tokenizer.json."""
-        _make_hf_snapshot(
-            tmp_path, model="voyage-3", include_tokenizer_json=False
-        )
+        _make_hf_snapshot(tmp_path, model="voyage-3", include_tokenizer_json=False)
 
         hf_home = str(tmp_path / ".cache" / "huggingface")
         with patch.dict(os.environ, {"HF_HOME": hf_home}):
@@ -264,7 +262,10 @@ class TestGetTokenizerCacheFirst:
             "_resolve_hf_cache_path",
             return_value=tokenizer_json,
         ) as mock_resolve:
-            with patch("builtins.__import__", side_effect=_make_import_patcher(MockTokenizerClass)):
+            with patch(
+                "builtins.__import__",
+                side_effect=_make_import_patcher(MockTokenizerClass),
+            ):
                 result = VoyageTokenizer._get_tokenizer("voyage-3")
 
             mock_resolve.assert_called_once_with("voyage-3")
@@ -285,12 +286,17 @@ class TestGetTokenizerCacheFirst:
             "_resolve_hf_cache_path",
             return_value=None,
         ) as mock_resolve:
-            with patch("builtins.__import__", side_effect=_make_import_patcher(MockTokenizerClass)):
+            with patch(
+                "builtins.__import__",
+                side_effect=_make_import_patcher(MockTokenizerClass),
+            ):
                 result = VoyageTokenizer._get_tokenizer("voyage-3")
 
             mock_resolve.assert_called_once_with("voyage-3")
             MockTokenizerClass.from_file.assert_not_called()
-            MockTokenizerClass.from_pretrained.assert_called_once_with("voyageai/voyage-3")
+            MockTokenizerClass.from_pretrained.assert_called_once_with(
+                "voyageai/voyage-3"
+            )
             assert result is mock_tok
 
     def test_get_tokenizer_falls_back_on_corrupted_cache(self, tmp_path):
@@ -310,12 +316,17 @@ class TestGetTokenizerCacheFirst:
             "_resolve_hf_cache_path",
             return_value=tokenizer_json,
         ):
-            with patch("builtins.__import__", side_effect=_make_import_patcher(MockTokenizerClass)):
+            with patch(
+                "builtins.__import__",
+                side_effect=_make_import_patcher(MockTokenizerClass),
+            ):
                 result = VoyageTokenizer._get_tokenizer("voyage-3")
 
             # Should have tried from_file, failed silently, then used from_pretrained
             MockTokenizerClass.from_file.assert_called_once()
-            MockTokenizerClass.from_pretrained.assert_called_once_with("voyageai/voyage-3")
+            MockTokenizerClass.from_pretrained.assert_called_once_with(
+                "voyageai/voyage-3"
+            )
             assert result is mock_tok
 
     def test_in_memory_cache_still_works(self):
@@ -330,7 +341,10 @@ class TestGetTokenizerCacheFirst:
         MockTokenizerClass.from_pretrained = MagicMock()
 
         with patch.object(VoyageTokenizer, "_resolve_hf_cache_path") as mock_resolve:
-            with patch("builtins.__import__", side_effect=_make_import_patcher(MockTokenizerClass)):
+            with patch(
+                "builtins.__import__",
+                side_effect=_make_import_patcher(MockTokenizerClass),
+            ):
                 result = VoyageTokenizer._get_tokenizer("voyage-3")
 
             # Cache hit: no I/O, no network, no resolve call needed
@@ -375,7 +389,10 @@ class TestGetTokenizerErrorHandling:
             "_resolve_hf_cache_path",
             return_value=None,
         ):
-            with patch("builtins.__import__", side_effect=_make_import_patcher(MockTokenizerClass)):
+            with patch(
+                "builtins.__import__",
+                side_effect=_make_import_patcher(MockTokenizerClass),
+            ):
                 with pytest.warns(UserWarning, match="Failed to load the tokenizer"):
                     with pytest.raises(Exception, match="Invalid model"):
                         VoyageTokenizer._get_tokenizer("not-a-real-model")
@@ -420,7 +437,9 @@ class TestIntegrationCacheVsNetwork:
 
         # Load via local cache path
         cache_path = VoyageTokenizer._resolve_hf_cache_path("voyage-3")
-        assert cache_path is not None, "Expected valid cache path for this integration test"
+        assert (
+            cache_path is not None
+        ), "Expected valid cache path for this integration test"
 
         tok_file = Tokenizer.from_file(str(cache_path))
         tok_file.no_truncation()

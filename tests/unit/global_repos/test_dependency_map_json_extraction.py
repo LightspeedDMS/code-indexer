@@ -45,11 +45,11 @@ class TestJsonExtraction:
 
     def test_json_with_markdown_code_fences(self, analyzer):
         """Test extraction of JSON wrapped in markdown code fences."""
-        output = '''```json
+        output = """```json
 [
   {"name": "auth", "description": "Authentication domain", "participating_repos": ["auth-service"]}
 ]
-```'''
+```"""
         result = analyzer._extract_json(output)
 
         assert isinstance(result, list)
@@ -58,12 +58,12 @@ class TestJsonExtraction:
 
     def test_json_with_natural_language_preamble(self, analyzer):
         """Test extraction of JSON with natural language preamble before JSON."""
-        output = '''Based on my analysis of the repositories, their dependencies, integration patterns, and shared technologies, I can now identify the domain clusters:
+        output = """Based on my analysis of the repositories, their dependencies, integration patterns, and shared technologies, I can now identify the domain clusters:
 
 [
   {"name": "core-infrastructure", "description": "Core services", "participating_repos": ["repo1", "repo2"]},
   {"name": "data-processing", "description": "Data pipeline", "participating_repos": ["repo3"]}
-]'''
+]"""
         result = analyzer._extract_json(output)
 
         assert isinstance(result, list)
@@ -73,13 +73,13 @@ class TestJsonExtraction:
 
     def test_json_with_preamble_and_code_fences(self, analyzer):
         """Test extraction of JSON with both preamble AND markdown code fences."""
-        output = '''After analyzing all repositories, here are the domain clusters:
+        output = """After analyzing all repositories, here are the domain clusters:
 
 ```json
 [
   {"name": "web-stack", "description": "Web application layer", "participating_repos": ["frontend", "backend"]}
 ]
-```'''
+```"""
         result = analyzer._extract_json(output)
 
         assert isinstance(result, list)
@@ -101,7 +101,7 @@ class TestJsonExtraction:
 
     def test_nested_json_objects(self, analyzer):
         """Test extraction of complex nested JSON structures."""
-        output = '''Here's the analysis:
+        output = """Here's the analysis:
 
 [
   {
@@ -116,22 +116,25 @@ class TestJsonExtraction:
       }
     }
   }
-]'''
+]"""
         result = analyzer._extract_json(output)
 
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0]["name"] == "api-layer"
         assert result[0]["metadata"]["complexity"] == "high"
-        assert result[0]["metadata"]["dependencies"]["internal"] == ["database", "cache"]
+        assert result[0]["metadata"]["dependencies"]["internal"] == [
+            "database",
+            "cache",
+        ]
 
     def test_json_with_trailing_text(self, analyzer):
         """Test extraction of JSON with trailing text after closing bracket."""
-        output = '''[
+        output = """[
   {"name": "domain1", "description": "desc1", "participating_repos": ["repo1"]}
 ]
 
-Some additional text after the JSON that should be ignored.'''
+Some additional text after the JSON that should be ignored."""
 
         result = analyzer._extract_json(output)
 

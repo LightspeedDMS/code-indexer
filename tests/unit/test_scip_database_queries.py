@@ -4052,8 +4052,6 @@ def test_trace_call_chain_v2_batched_uses_symbol_references():
             if len(path) == 2
         )
 
-        assert (
-            chain_found
-        ), f"Expected chain DaemonService#start() -> _is_text_file() not found in: {paths}"
+        assert chain_found, f"Expected chain DaemonService#start() -> _is_text_file() not found in: {paths}"
 
         conn.close()

@@ -58,9 +58,7 @@ class TestCLIOptionConflictFix:
                             )
                             mock_vector_store.ensure_payload_indexes.return_value = None
                             mock_vector_store.search.return_value = []
-                            mock_backend_instance.get_vector_store_client.return_value = (
-                                mock_vector_store
-                            )
+                            mock_backend_instance.get_vector_store_client.return_value = mock_vector_store
                             mock_backend.return_value = mock_backend_instance
 
                             mock_embed_instance = Mock()
@@ -81,9 +79,7 @@ class TestCLIOptionConflictFix:
                             mock_git.return_value = mock_git_instance
 
                             mock_query_instance = Mock()
-                            mock_query_instance.get_current_branch_context.return_value = (
-                                None
-                            )
+                            mock_query_instance.get_current_branch_context.return_value = None
                             mock_query_svc.return_value = mock_query_instance
 
                             # THIS IS THE CRITICAL TEST
@@ -151,9 +147,7 @@ class TestCLIOptionConflictFix:
                             )
                             mock_vector_store.ensure_payload_indexes.return_value = None
                             mock_vector_store.search.return_value = []
-                            mock_backend_instance.get_vector_store_client.return_value = (
-                                mock_vector_store
-                            )
+                            mock_backend_instance.get_vector_store_client.return_value = mock_vector_store
                             mock_backend.return_value = mock_backend_instance
 
                             mock_embed_instance = Mock()
@@ -174,9 +168,7 @@ class TestCLIOptionConflictFix:
                             mock_git.return_value = mock_git_instance
 
                             mock_query_instance = Mock()
-                            mock_query_instance.get_current_branch_context.return_value = (
-                                None
-                            )
+                            mock_query_instance.get_current_branch_context.return_value = None
                             mock_query_svc.return_value = mock_query_instance
 
                             # Test with both --path-filter and --exclude-path

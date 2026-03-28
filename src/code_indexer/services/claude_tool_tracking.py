@@ -670,7 +670,9 @@ class ClaudePlanSummary:
                 emoji = (
                     "🔍✨"
                     if op_type == "cidx_semantic_search"
-                    else "😞" if op_type == "grep_search" else "📄"
+                    else "😞"
+                    if op_type == "grep_search"
+                    else "📄"
                 )
                 stats_parts.append(f"  {emoji} {op_type}: {count}")
 

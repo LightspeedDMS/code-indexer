@@ -68,20 +68,20 @@ class TestAcquireCreatesLockFile:
         lock_file = lock_dir / ".locks" / "my-repo.lock"
         content = json.loads(lock_file.read_text())
 
-        assert content["owner"] == "test-owner", (
-            f"Lock file must record owner. Got: {content.get('owner')}"
-        )
-        assert content["pid"] == os.getpid(), (
-            f"Lock file must record current PID. Got: {content.get('pid')}"
-        )
-        assert content["ttl_seconds"] == 3600, (
-            f"Lock file must record ttl_seconds=3600. Got: {content.get('ttl_seconds')}"
-        )
+        assert (
+            content["owner"] == "test-owner"
+        ), f"Lock file must record owner. Got: {content.get('owner')}"
+        assert (
+            content["pid"] == os.getpid()
+        ), f"Lock file must record current PID. Got: {content.get('pid')}"
+        assert (
+            content["ttl_seconds"] == 3600
+        ), f"Lock file must record ttl_seconds=3600. Got: {content.get('ttl_seconds')}"
 
         acquired_at = datetime.fromisoformat(content["acquired_at"])
-        assert before <= acquired_at <= after, (
-            f"acquired_at ({acquired_at}) must be between before ({before}) and after ({after})"
-        )
+        assert (
+            before <= acquired_at <= after
+        ), f"acquired_at ({acquired_at}) must be between before ({before}) and after ({after})"
 
         manager.release("my-repo", "test-owner")
 
@@ -104,9 +104,9 @@ class TestAcquireCreatesLockFile:
         lock_file = lock_dir / ".locks" / "my-repo.lock"
         content = json.loads(lock_file.read_text())
 
-        assert content["ttl_seconds"] == 3600, (
-            f"Default TTL must be 3600. Got: {content.get('ttl_seconds')}"
-        )
+        assert (
+            content["ttl_seconds"] == 3600
+        ), f"Default TTL must be 3600. Got: {content.get('ttl_seconds')}"
 
         manager.release("my-repo", "test-owner")
 
@@ -126,9 +126,9 @@ class TestSecondAcquireFails:
 
         second = manager.acquire("my-repo", "owner-B")
 
-        assert second is False, (
-            "acquire() must return False when lock is already held by live PID"
-        )
+        assert (
+            second is False
+        ), "acquire() must return False when lock is already held by live PID"
 
         manager.release("my-repo", "owner-A")
 
@@ -173,12 +173,16 @@ class TestStaleLockDeadPID:
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "dead-process",
-            "pid": dead_pid,
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
-            "ttl_seconds": 3600,
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "dead-process",
+                    "pid": dead_pid,
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    "ttl_seconds": 3600,
+                }
+            )
+        )
 
         def mock_os_kill(pid, sig):
             if pid == dead_pid:
@@ -186,17 +190,20 @@ class TestStaleLockDeadPID:
             # Allow os.kill for other PIDs (e.g. current process)
             return None
 
-        with patch("code_indexer.global_repos.write_lock_manager.os.kill", side_effect=mock_os_kill):
+        with patch(
+            "code_indexer.global_repos.write_lock_manager.os.kill",
+            side_effect=mock_os_kill,
+        ):
             result = manager.acquire("my-repo", "new-owner")
 
-        assert result is True, (
-            "acquire() must evict stale lock from dead PID and succeed"
-        )
+        assert (
+            result is True
+        ), "acquire() must evict stale lock from dead PID and succeed"
 
         content = json.loads(lock_file.read_text())
-        assert content["owner"] == "new-owner", (
-            f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
-        )
+        assert (
+            content["owner"] == "new-owner"
+        ), f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
 
         manager.release("my-repo", "new-owner")
 
@@ -207,18 +214,22 @@ class TestStaleLockDeadPID:
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "live-process",
-            "pid": os.getpid(),  # current process — definitely alive
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
-            "ttl_seconds": 3600,
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "live-process",
+                    "pid": os.getpid(),  # current process — definitely alive
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    "ttl_seconds": 3600,
+                }
+            )
+        )
 
         result = manager.acquire("my-repo", "intruder")
 
-        assert result is False, (
-            "acquire() must return False when lock is held by a live PID"
-        )
+        assert (
+            result is False
+        ), "acquire() must return False when lock is held by a live PID"
 
         assert lock_file.exists(), "Lock file must not be deleted for live PID"
 
@@ -239,23 +250,25 @@ class TestStaleLockTTLExpired:
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "expired-process",
-            "pid": os.getpid(),  # live PID but TTL expired
-            "acquired_at": expired_time.isoformat(),
-            "ttl_seconds": 3600,  # 1-hour TTL — expired 1 hour ago
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "expired-process",
+                    "pid": os.getpid(),  # live PID but TTL expired
+                    "acquired_at": expired_time.isoformat(),
+                    "ttl_seconds": 3600,  # 1-hour TTL — expired 1 hour ago
+                }
+            )
+        )
 
         result = manager.acquire("my-repo", "new-owner")
 
-        assert result is True, (
-            "acquire() must evict TTL-expired lock and succeed"
-        )
+        assert result is True, "acquire() must evict TTL-expired lock and succeed"
 
         content = json.loads(lock_file.read_text())
-        assert content["owner"] == "new-owner", (
-            f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
-        )
+        assert (
+            content["owner"] == "new-owner"
+        ), f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
 
         manager.release("my-repo", "new-owner")
 
@@ -267,18 +280,20 @@ class TestStaleLockTTLExpired:
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "current-process",
-            "pid": os.getpid(),  # live PID
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
-            "ttl_seconds": 3600,  # non-expired
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "current-process",
+                    "pid": os.getpid(),  # live PID
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    "ttl_seconds": 3600,  # non-expired
+                }
+            )
+        )
 
         result = manager.acquire("my-repo", "intruder")
 
-        assert result is False, (
-            "acquire() must not evict a non-expired, live-PID lock"
-        )
+        assert result is False, "acquire() must not evict a non-expired, live-PID lock"
 
 
 # ---------------------------------------------------------------------------
@@ -295,9 +310,9 @@ class TestRelease:
 
         result = manager.release("my-repo", "wrong-owner")
 
-        assert result is False, (
-            "release() must return False when caller is not the lock owner"
-        )
+        assert (
+            result is False
+        ), "release() must return False when caller is not the lock owner"
 
         lock_file = lock_dir / ".locks" / "my-repo.lock"
         assert lock_file.exists(), "Lock file must NOT be deleted by wrong owner"
@@ -313,15 +328,17 @@ class TestRelease:
         assert result is True, "release() must return True when owner matches"
 
         lock_file = lock_dir / ".locks" / "my-repo.lock"
-        assert not lock_file.exists(), "Lock file must be deleted after successful release()"
+        assert (
+            not lock_file.exists()
+        ), "Lock file must be deleted after successful release()"
 
     def test_release_on_absent_file_returns_true(self, manager):
         """release() returns True (idempotent) when lock file does not exist."""
         result = manager.release("nonexistent-repo", "any-owner")
 
-        assert result is True, (
-            "release() must return True when lock file doesn't exist (idempotent)"
-        )
+        assert (
+            result is True
+        ), "release() must return True when lock file doesn't exist (idempotent)"
 
 
 # ---------------------------------------------------------------------------
@@ -363,43 +380,58 @@ class TestIsLocked:
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "dead-process",
-            "pid": dead_pid,
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
-            "ttl_seconds": 3600,
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "dead-process",
+                    "pid": dead_pid,
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    "ttl_seconds": 3600,
+                }
+            )
+        )
 
         def mock_os_kill(pid, sig):
             if pid == dead_pid:
                 raise OSError(errno.ESRCH, "No such process")
             return None
 
-        with patch("code_indexer.global_repos.write_lock_manager.os.kill", side_effect=mock_os_kill):
+        with patch(
+            "code_indexer.global_repos.write_lock_manager.os.kill",
+            side_effect=mock_os_kill,
+        ):
             result = manager.is_locked("my-repo")
 
         assert result is False, "is_locked() must return False for dead-PID lock"
         assert not lock_file.exists(), "is_locked() must delete stale lock file"
 
-    def test_is_locked_evicts_ttl_expired_lock_and_returns_false(self, manager, lock_dir):
+    def test_is_locked_evicts_ttl_expired_lock_and_returns_false(
+        self, manager, lock_dir
+    ):
         """is_locked() evicts a TTL-expired lock and returns False."""
         expired_time = datetime.now(timezone.utc) - timedelta(hours=2)
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "old-process",
-            "pid": os.getpid(),  # live PID but TTL expired
-            "acquired_at": expired_time.isoformat(),
-            "ttl_seconds": 3600,
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "old-process",
+                    "pid": os.getpid(),  # live PID but TTL expired
+                    "acquired_at": expired_time.isoformat(),
+                    "ttl_seconds": 3600,
+                }
+            )
+        )
 
         result = manager.is_locked("my-repo")
 
         assert result is False, "is_locked() must return False for TTL-expired lock"
         assert not lock_file.exists(), "is_locked() must delete TTL-expired lock file"
 
-    def test_is_locked_returns_false_for_corrupt_lock_no_pid_no_timestamp(self, manager, lock_dir):
+    def test_is_locked_returns_false_for_corrupt_lock_no_pid_no_timestamp(
+        self, manager, lock_dir
+    ):
         """
         is_locked() must treat a corrupt lock (no pid, no acquired_at) as stale and return False.
 
@@ -414,12 +446,10 @@ class TestIsLocked:
 
         result = manager.is_locked("my-repo")
 
-        assert result is False, (
-            "is_locked() must return False for corrupt lock with no pid and no acquired_at"
-        )
-        assert not lock_file.exists(), (
-            "is_locked() must delete the corrupt lock file"
-        )
+        assert (
+            result is False
+        ), "is_locked() must return False for corrupt lock with no pid and no acquired_at"
+        assert not lock_file.exists(), "is_locked() must delete the corrupt lock file"
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +464,9 @@ class TestGetLockInfo:
         """get_lock_info() returns None when lock file does not exist."""
         result = manager.get_lock_info("nonexistent-repo")
 
-        assert result is None, "get_lock_info() must return None when lock file is absent"
+        assert (
+            result is None
+        ), "get_lock_info() must return None when lock file is absent"
 
     def test_get_lock_info_returns_dict_when_locked(self, manager):
         """get_lock_info() returns a dict with lock metadata when lock is held."""
@@ -443,15 +475,15 @@ class TestGetLockInfo:
         info = manager.get_lock_info("my-repo")
 
         assert info is not None, "get_lock_info() must return dict when lock is held"
-        assert info["owner"] == "my-owner", (
-            f"get_lock_info() owner must be 'my-owner'. Got: {info.get('owner')}"
-        )
-        assert info["pid"] == os.getpid(), (
-            f"get_lock_info() pid must be current PID. Got: {info.get('pid')}"
-        )
-        assert info["ttl_seconds"] == 1800, (
-            f"get_lock_info() ttl_seconds must be 1800. Got: {info.get('ttl_seconds')}"
-        )
+        assert (
+            info["owner"] == "my-owner"
+        ), f"get_lock_info() owner must be 'my-owner'. Got: {info.get('owner')}"
+        assert (
+            info["pid"] == os.getpid()
+        ), f"get_lock_info() pid must be current PID. Got: {info.get('pid')}"
+        assert (
+            info["ttl_seconds"] == 1800
+        ), f"get_lock_info() ttl_seconds must be 1800. Got: {info.get('ttl_seconds')}"
         assert "acquired_at" in info, "get_lock_info() must include acquired_at"
 
         manager.release("my-repo", "my-owner")
@@ -471,19 +503,26 @@ class TestGetLockInfo:
         locks_dir = lock_dir / ".locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
         lock_file = locks_dir / "my-repo.lock"
-        lock_file.write_text(json.dumps({
-            "owner": "dead-process",
-            "pid": dead_pid,
-            "acquired_at": datetime.now(timezone.utc).isoformat(),
-            "ttl_seconds": 3600,
-        }))
+        lock_file.write_text(
+            json.dumps(
+                {
+                    "owner": "dead-process",
+                    "pid": dead_pid,
+                    "acquired_at": datetime.now(timezone.utc).isoformat(),
+                    "ttl_seconds": 3600,
+                }
+            )
+        )
 
         def mock_os_kill(pid, sig):
             if pid == dead_pid:
                 raise OSError(errno.ESRCH, "No such process")
             return None
 
-        with patch("code_indexer.global_repos.write_lock_manager.os.kill", side_effect=mock_os_kill):
+        with patch(
+            "code_indexer.global_repos.write_lock_manager.os.kill",
+            side_effect=mock_os_kill,
+        ):
             result = manager.get_lock_info("my-repo")
 
         assert result is None, "get_lock_info() must return None for dead-PID lock"

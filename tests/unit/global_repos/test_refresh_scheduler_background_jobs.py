@@ -177,7 +177,9 @@ class TestRefreshSchedulerBackgroundJobManagerIntegration:
             submitted_func()
 
             # Verify _execute_refresh was called with correct alias
-            mock_execute.assert_called_once_with("test-repo-global", force_reset=False, progress_callback=None)
+            mock_execute.assert_called_once_with(
+                "test-repo-global", force_reset=False, progress_callback=None
+            )
 
     def test_execute_refresh_raises_exception_on_timeout(
         self,

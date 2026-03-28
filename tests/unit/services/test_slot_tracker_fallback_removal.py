@@ -149,9 +149,12 @@ class TestDaemonCallbacksFilterSlotTracker:
         # CRITICAL CHECK: The callback must create filtered_kwargs WITHOUT slot_tracker
         # Look for pattern: filtered_kwargs = { ... } (excluding slot_tracker)
         # The function should NOT pass **cb_kwargs directly to client callback
-        assert "filtered_kwargs" in callback_section or (
-            "slot_tracker" not in callback_section
-            and "**cb_kwargs" not in callback_section
+        assert (
+            "filtered_kwargs" in callback_section
+            or (
+                "slot_tracker" not in callback_section
+                and "**cb_kwargs" not in callback_section
+            )
         ), f"Daemon correlated_callback must filter out slot_tracker. Section:\n{callback_section}"
 
     def test_correlated_callback_removes_slot_tracker(self):

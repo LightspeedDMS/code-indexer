@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 import pytest
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
-from code_indexer.server.storage.sqlite_backends import DescriptionRefreshTrackingBackend
+from code_indexer.server.storage.sqlite_backends import (
+    DescriptionRefreshTrackingBackend,
+)
 
 
 @pytest.fixture

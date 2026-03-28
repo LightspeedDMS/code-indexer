@@ -12,7 +12,10 @@ import time
 from pathlib import Path
 from typing import List
 
-from code_indexer.global_repos.refresh_scheduler import RefreshScheduler, _is_git_repo_url
+from code_indexer.global_repos.refresh_scheduler import (
+    RefreshScheduler,
+    _is_git_repo_url,
+)
 from code_indexer.global_repos.query_tracker import QueryTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
 from code_indexer.global_repos.alias_manager import AliasManager
@@ -73,7 +76,8 @@ def _run_gating_logic(
     """
     repos = registry.list_global_repos()
     git_repos = [
-        r for r in repos
+        r
+        for r in repos
         if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
     ]
 
@@ -170,7 +174,8 @@ class TestBackPropagation:
         before = time.time()
         repos = registry.list_global_repos()
         git_repos = [
-            r for r in repos
+            r
+            for r in repos
             if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
         ]
         for repo in git_repos:
@@ -218,7 +223,8 @@ class TestBackPropagation:
         for _ in range(3):
             repos = registry.list_global_repos()
             git_repos = [
-                r for r in repos
+                r
+                for r in repos
                 if r.get("alias_name") and _is_git_repo_url(r.get("repo_url", ""))
             ]
             for repo in git_repos:
@@ -230,15 +236,16 @@ class TestBackPropagation:
 
         final_repos = registry.list_global_repos()
         final_next_refreshes = [
-            float(r["next_refresh"]) for r in final_repos
+            float(r["next_refresh"])
+            for r in final_repos
             if r.get("next_refresh") is not None
         ]
 
         assert len(final_next_refreshes) == len(aliases)
         # After 3 cycles of random jitter, probability of all identical is ~0
-        assert len(set(final_next_refreshes)) > 1, (
-            "Expected timestamps to diverge after 3 jitter cycles"
-        )
+        assert (
+            len(set(final_next_refreshes)) > 1
+        ), "Expected timestamps to diverge after 3 jitter cycles"
 
     def test_back_propagated_value_within_jitter_bounds(self, tmp_path):
         """
@@ -256,9 +263,9 @@ class TestBackPropagation:
             lower = now + refresh_interval - max_jitter
             upper = now + refresh_interval + max_jitter
 
-            assert new_nr >= lower - 0.001, (
-                f"next_refresh {new_nr} below lower bound {lower}"
-            )
-            assert new_nr <= upper + 0.001, (
-                f"next_refresh {new_nr} above upper bound {upper}"
-            )
+            assert (
+                new_nr >= lower - 0.001
+            ), f"next_refresh {new_nr} below lower bound {lower}"
+            assert (
+                new_nr <= upper + 0.001
+            ), f"next_refresh {new_nr} above upper bound {upper}"

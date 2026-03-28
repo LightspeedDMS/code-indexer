@@ -269,6 +269,4 @@ result = client.embed(["test"])
 
         # If standalone doesn't show code, daemon shouldn't either
         if not standalone_has_code:
-            assert (
-                not daemon_has_code
-            ), "Daemon mode showing code content when standalone mode doesn't - UX PARITY VIOLATION"
+            assert not daemon_has_code, "Daemon mode showing code content when standalone mode doesn't - UX PARITY VIOLATION"

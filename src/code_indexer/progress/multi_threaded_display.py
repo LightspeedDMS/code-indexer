@@ -56,9 +56,9 @@ class MultiThreadedProgressManager:
         self.max_slots = max_slots
         self.slot_tracker: Optional[CleanSlotTracker] = None
         self._current_phase = "Indexing"  # Default phase
-        self._concurrent_files: List[Dict[str, Any]] = (
-            []
-        )  # Store concurrent files for display
+        self._concurrent_files: List[
+            Dict[str, Any]
+        ] = []  # Store concurrent files for display
 
         # Create Rich Progress component for visual progress bar
         self.progress = Progress(

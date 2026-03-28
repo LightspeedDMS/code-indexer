@@ -117,9 +117,7 @@ class TestLocalRepoNotSubmittedInScheduledCycle:
     _submit_refresh_job() in the scheduled _scheduler_loop().
     """
 
-    def test_local_repo_not_submitted_in_scheduler_loop(
-        self, scheduler, mock_registry
-    ):
+    def test_local_repo_not_submitted_in_scheduler_loop(self, scheduler, mock_registry):
         """
         _scheduler_loop() must NOT call _submit_refresh_job for local:// repos.
 
@@ -136,8 +134,9 @@ class TestLocalRepoNotSubmittedInScheduledCycle:
         submitted = []
 
         with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
+            scheduler,
+            "_submit_refresh_job",
+            side_effect=lambda a, **kw: submitted.append(a),
         ):
             _run_one_loop_pass(scheduler)
 
@@ -167,8 +166,9 @@ class TestLocalRepoNotSubmittedInScheduledCycle:
         submitted = []
 
         with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
+            scheduler,
+            "_submit_refresh_job",
+            side_effect=lambda a, **kw: submitted.append(a),
         ):
             _run_one_loop_pass(scheduler)
 
@@ -212,8 +212,9 @@ class TestBareFilesystemPathRepoNotSubmitted:
         submitted = []
 
         with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
+            scheduler,
+            "_submit_refresh_job",
+            side_effect=lambda a, **kw: submitted.append(a),
         ):
             _run_one_loop_pass(scheduler)
 
@@ -241,8 +242,9 @@ class TestBareFilesystemPathRepoNotSubmitted:
         submitted = []
 
         with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
+            scheduler,
+            "_submit_refresh_job",
+            side_effect=lambda a, **kw: submitted.append(a),
         ):
             _run_one_loop_pass(scheduler)
 
@@ -300,9 +302,12 @@ class TestLocalRepoExplicitTriggerStillWorks:
             mock_execute.return_value = {"success": True, "message": "Refresh complete"}
             sched.trigger_refresh_for_repo("cidx-meta-global")
 
-        mock_execute.assert_called_once_with("cidx-meta-global", force_reset=False), (
-            "EXPLICIT TRIGGER: trigger_refresh_for_repo() must call _execute_refresh "
-            "for local:// repos. Explicit triggers bypass the scheduled skip."
+        (
+            mock_execute.assert_called_once_with("cidx-meta-global", force_reset=False),
+            (
+                "EXPLICIT TRIGGER: trigger_refresh_for_repo() must call _execute_refresh "
+                "for local:// repos. Explicit triggers bypass the scheduled skip."
+            ),
         )
 
     def test_trigger_refresh_accepts_bare_alias_for_local_repo(

@@ -61,7 +61,9 @@ async def run_scenario(
     for i in range(scenario.warmup_count):
         await _execute_single_request(perf_client, http_client, scenario)
         if progress_callback:
-            progress_callback(scenario.name, -(scenario.warmup_count - i), scenario.measurement_count)
+            progress_callback(
+                scenario.name, -(scenario.warmup_count - i), scenario.measurement_count
+            )
 
     # Measurement phase: collect results
     measurement_results: list[RequestResult] = []
@@ -105,7 +107,9 @@ async def run_all_scenarios(
     Returns:
         List of MetricsResult in the same order as the input scenarios.
     """
-    perf_client = PerfClient(server_url=server_url, username=username, password=password)
+    perf_client = PerfClient(
+        server_url=server_url, username=username, password=password
+    )
     results: list[MetricsResult] = []
 
     async with httpx.AsyncClient(timeout=60.0) as http_client:

@@ -124,9 +124,9 @@ class TestCleanupRemovesStaleMarker:
 
         scheduler.cleanup_stale_write_mode_markers()
 
-        assert not marker.exists(), (
-            "Stale marker older than TTL must be deleted by cleanup"
-        )
+        assert (
+            not marker.exists()
+        ), "Stale marker older than TTL must be deleted by cleanup"
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +150,7 @@ class TestCleanupPreservesFreshMarker:
 
         scheduler.cleanup_stale_write_mode_markers()
 
-        assert marker.exists(), (
-            "Fresh marker within TTL must NOT be removed by cleanup"
-        )
+        assert marker.exists(), "Fresh marker within TTL must NOT be removed by cleanup"
 
         # Cleanup — remove marker manually so write lock doesn't remain
         marker.unlink(missing_ok=True)
@@ -166,7 +164,9 @@ class TestCleanupPreservesFreshMarker:
 class TestCleanupReleasesCorrespondingWriteLock:
     """AC2: RefreshScheduler is not permanently blocked by orphaned markers."""
 
-    def test_cleanup_releases_corresponding_write_lock(self, scheduler, golden_repos_dir):
+    def test_cleanup_releases_corresponding_write_lock(
+        self, scheduler, golden_repos_dir
+    ):
         """
         When a stale marker is removed, release_write_lock() must be called
         with owner_name='mcp_write_mode' for that alias.
@@ -176,13 +176,15 @@ class TestCleanupReleasesCorrespondingWriteLock:
         marker = _write_marker(write_mode_dir, "locked-repo", stale_time)
 
         # Simulate the lock being held (acquire it with mcp_write_mode owner)
-        acquired = scheduler.acquire_write_lock("locked-repo", owner_name="mcp_write_mode")
+        acquired = scheduler.acquire_write_lock(
+            "locked-repo", owner_name="mcp_write_mode"
+        )
         assert acquired, "Should be able to acquire write lock for test setup"
 
         # Verify lock IS held before cleanup
-        assert scheduler.is_write_locked("locked-repo"), (
-            "Write lock must be held before cleanup runs"
-        )
+        assert scheduler.is_write_locked(
+            "locked-repo"
+        ), "Write lock must be held before cleanup runs"
 
         scheduler.cleanup_stale_write_mode_markers()
 
@@ -190,9 +192,9 @@ class TestCleanupReleasesCorrespondingWriteLock:
         assert not marker.exists(), "Stale marker must be removed"
 
         # Lock must be released — scheduler can now acquire it
-        assert not scheduler.is_write_locked("locked-repo"), (
-            "Write lock must be released after stale marker cleanup"
-        )
+        assert not scheduler.is_write_locked(
+            "locked-repo"
+        ), "Write lock must be released after stale marker cleanup"
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +225,9 @@ class TestCleanupHandlesCorruptMarkerJson:
             )
 
         # Corrupt marker must be removed (treat as stale)
-        assert not corrupt_marker.exists(), (
-            "Corrupt JSON marker must be removed by cleanup"
-        )
+        assert (
+            not corrupt_marker.exists()
+        ), "Corrupt JSON marker must be removed by cleanup"
 
 
 # ---------------------------------------------------------------------------
@@ -242,9 +244,9 @@ class TestCleanupHandlesEmptyWriteModeDir:
         complete without raising any exception.
         """
         write_mode_dir = golden_repos_dir / ".write_mode"
-        assert not write_mode_dir.exists(), (
-            "Test precondition: .write_mode dir must not exist"
-        )
+        assert (
+            not write_mode_dir.exists()
+        ), "Test precondition: .write_mode dir must not exist"
 
         try:
             scheduler.cleanup_stale_write_mode_markers()
@@ -300,12 +302,12 @@ class TestCleanupOnStartupRemovesAllMarkers:
         # Force=True simulates startup: remove ALL markers unconditionally
         scheduler.cleanup_stale_write_mode_markers(force=True)
 
-        assert not stale_marker.exists(), (
-            "Stale marker must be removed on startup cleanup"
-        )
-        assert not fresh_marker.exists(), (
-            "Fresh marker must ALSO be removed on startup cleanup (force=True)"
-        )
+        assert (
+            not stale_marker.exists()
+        ), "Stale marker must be removed on startup cleanup"
+        assert (
+            not fresh_marker.exists()
+        ), "Fresh marker must ALSO be removed on startup cleanup (force=True)"
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +344,9 @@ class TestCleanupCalledDuringRefreshCycle:
             scheduler._running = True
             scheduler._stop_event.clear()
 
-            loop_thread = threading.Thread(target=scheduler._scheduler_loop, daemon=True)
+            loop_thread = threading.Thread(
+                target=scheduler._scheduler_loop, daemon=True
+            )
             loop_thread.start()
 
             # Give the loop one iteration to run
@@ -365,7 +369,9 @@ class TestCleanupCalledDuringRefreshCycle:
 class TestCleanupRemovesMarkerWithoutEnteredAt:
     """Markers missing entered_at cannot be validated — treat them as stale."""
 
-    def test_cleanup_removes_marker_without_entered_at(self, scheduler, golden_repos_dir):
+    def test_cleanup_removes_marker_without_entered_at(
+        self, scheduler, golden_repos_dir
+    ):
         """
         A marker file that is valid JSON but lacks the 'entered_at' field
         must be treated as stale and removed (cannot validate its age).
@@ -386,9 +392,9 @@ class TestCleanupRemovesMarkerWithoutEnteredAt:
 
         scheduler.cleanup_stale_write_mode_markers()
 
-        assert not no_timestamp_marker.exists(), (
-            "Marker without 'entered_at' must be treated as stale and removed"
-        )
+        assert (
+            not no_timestamp_marker.exists()
+        ), "Marker without 'entered_at' must be treated as stale and removed"
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +405,9 @@ class TestCleanupRemovesMarkerWithoutEnteredAt:
 class TestCleanupMixedMarkers:
     """L3: Multiple markers where some are stale and some are fresh."""
 
-    def test_cleanup_mixed_stale_fresh_corrupt_markers(self, scheduler, golden_repos_dir):
+    def test_cleanup_mixed_stale_fresh_corrupt_markers(
+        self, scheduler, golden_repos_dir
+    ):
         """
         When .write_mode/ contains a mix of stale, fresh, and corrupt markers,
         non-force cleanup must:
@@ -429,15 +437,15 @@ class TestCleanupMixedMarkers:
         # Non-force cleanup (periodic eviction)
         scheduler.cleanup_stale_write_mode_markers(force=False)
 
-        assert not stale_marker.exists(), (
-            "Stale marker (2h old) must be removed by non-force cleanup"
-        )
-        assert fresh_marker.exists(), (
-            "Fresh marker (5min old) must be preserved by non-force cleanup"
-        )
-        assert not corrupt_marker.exists(), (
-            "Corrupt JSON marker must be removed by non-force cleanup"
-        )
+        assert (
+            not stale_marker.exists()
+        ), "Stale marker (2h old) must be removed by non-force cleanup"
+        assert (
+            fresh_marker.exists()
+        ), "Fresh marker (5min old) must be preserved by non-force cleanup"
+        assert (
+            not corrupt_marker.exists()
+        ), "Corrupt JSON marker must be removed by non-force cleanup"
 
         # Cleanup: remove the surviving fresh marker so no write locks linger
         fresh_marker.unlink(missing_ok=True)

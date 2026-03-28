@@ -92,7 +92,9 @@ def detect_inflection(level_results: dict[int, MetricsResult]) -> InflectionResu
     baseline_metrics = level_results[baseline_level]
     baseline_p50 = baseline_metrics.p50_ms
     threshold = baseline_p50 * DEGRADATION_MULTIPLIER
-    baseline_unreliable = baseline_metrics.error_rate_pct > BASELINE_UNRELIABLE_ERROR_RATE_PCT
+    baseline_unreliable = (
+        baseline_metrics.error_rate_pct > BASELINE_UNRELIABLE_ERROR_RATE_PCT
+    )
 
     # Check levels above baseline (skip baseline itself)
     for level in sorted_levels[1:]:

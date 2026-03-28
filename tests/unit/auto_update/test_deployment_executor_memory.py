@@ -77,9 +77,9 @@ class TestEnsureMemoryOvercommit:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout="0\n"),   # sysctl -n read
-                make_proc(returncode=0, stdout=""),       # sudo tee write
-                make_proc(returncode=0, stdout=""),       # sudo sysctl -p apply
+                make_proc(returncode=0, stdout="0\n"),  # sysctl -n read
+                make_proc(returncode=0, stdout=""),  # sudo tee write
+                make_proc(returncode=0, stdout=""),  # sudo sysctl -p apply
             ]
 
             with caplog.at_level(logging.INFO):
@@ -120,7 +120,7 @@ class TestEnsureMemoryOvercommit:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout="0\n"),   # sysctl -n read
+                make_proc(returncode=0, stdout="0\n"),  # sysctl -n read
                 make_proc(returncode=1, stderr="Permission denied"),  # sudo tee fails
             ]
 
@@ -139,8 +139,8 @@ class TestEnsureMemoryOvercommit:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout="0\n"),   # sysctl -n read
-                make_proc(returncode=0, stdout=""),       # sudo tee write succeeds
+                make_proc(returncode=0, stdout="0\n"),  # sysctl -n read
+                make_proc(returncode=0, stdout=""),  # sudo tee write succeeds
                 make_proc(returncode=1, stderr="sysctl: error"),  # sysctl -p fails
             ]
 
@@ -183,9 +183,7 @@ class TestEnsureSwapFile:
         existing_swap_output = "/swapfile file 4G 1.2G -2\n"
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = make_proc(
-                returncode=0, stdout=existing_swap_output
-            )
+            mock_run.return_value = make_proc(returncode=0, stdout=existing_swap_output)
 
             with caplog.at_level(logging.DEBUG):
                 result = executor._ensure_swap_file()
@@ -208,13 +206,15 @@ class TestEnsureSwapFile:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),          # swapon --show (no swap)
-                make_proc(returncode=0, stdout=""),          # fallocate
-                make_proc(returncode=0, stdout=""),          # chmod 600
-                make_proc(returncode=0, stdout=""),          # mkswap
-                make_proc(returncode=0, stdout=""),          # swapon
-                make_proc(returncode=0, stdout="/etc/fstab content without swapfile"),  # cat /etc/fstab
-                make_proc(returncode=0, stdout=""),          # tee -a /etc/fstab
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(returncode=0, stdout=""),  # fallocate
+                make_proc(returncode=0, stdout=""),  # chmod 600
+                make_proc(returncode=0, stdout=""),  # mkswap
+                make_proc(returncode=0, stdout=""),  # swapon
+                make_proc(
+                    returncode=0, stdout="/etc/fstab content without swapfile"
+                ),  # cat /etc/fstab
+                make_proc(returncode=0, stdout=""),  # tee -a /etc/fstab
             ]
 
             with caplog.at_level(logging.INFO):
@@ -284,8 +284,10 @@ class TestEnsureSwapFile:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),           # swapon --show (no swap)
-                make_proc(returncode=1, stderr="fallocate: /swapfile: fallocate failed"),  # fallocate fails
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(
+                    returncode=1, stderr="fallocate: /swapfile: fallocate failed"
+                ),  # fallocate fails
             ]
 
             with caplog.at_level(logging.ERROR):
@@ -303,8 +305,8 @@ class TestEnsureSwapFile:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),   # swapon --show (no swap)
-                make_proc(returncode=0, stdout=""),   # fallocate succeeds
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(returncode=0, stdout=""),  # fallocate succeeds
                 make_proc(returncode=1, stderr="chmod: cannot access"),  # chmod fails
             ]
 
@@ -323,9 +325,9 @@ class TestEnsureSwapFile:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),   # swapon --show (no swap)
-                make_proc(returncode=0, stdout=""),   # fallocate succeeds
-                make_proc(returncode=0, stdout=""),   # chmod succeeds
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(returncode=0, stdout=""),  # fallocate succeeds
+                make_proc(returncode=0, stdout=""),  # chmod succeeds
                 make_proc(returncode=1, stderr="mkswap: error"),  # mkswap fails
             ]
 
@@ -344,11 +346,13 @@ class TestEnsureSwapFile:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),   # swapon --show (no swap)
-                make_proc(returncode=0, stdout=""),   # fallocate succeeds
-                make_proc(returncode=0, stdout=""),   # chmod succeeds
-                make_proc(returncode=0, stdout=""),   # mkswap succeeds
-                make_proc(returncode=1, stderr="swapon: /swapfile: read swap header failed"),  # swapon fails
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(returncode=0, stdout=""),  # fallocate succeeds
+                make_proc(returncode=0, stdout=""),  # chmod succeeds
+                make_proc(returncode=0, stdout=""),  # mkswap succeeds
+                make_proc(
+                    returncode=1, stderr="swapon: /swapfile: read swap header failed"
+                ),  # swapon fails
             ]
 
             with caplog.at_level(logging.ERROR):
@@ -365,18 +369,19 @@ class TestEnsureSwapFile:
         import logging
 
         fstab_with_swap = (
-            "UUID=abc123 / ext4 defaults 1 1\n"
-            "/swapfile none swap sw 0 0\n"
+            "UUID=abc123 / ext4 defaults 1 1\n" "/swapfile none swap sw 0 0\n"
         )
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),           # swapon --show (no swap)
-                make_proc(returncode=0, stdout=""),           # fallocate
-                make_proc(returncode=0, stdout=""),           # chmod 600
-                make_proc(returncode=0, stdout=""),           # mkswap
-                make_proc(returncode=0, stdout=""),           # swapon
-                make_proc(returncode=0, stdout=fstab_with_swap),  # cat /etc/fstab (already has entry)
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(returncode=0, stdout=""),  # fallocate
+                make_proc(returncode=0, stdout=""),  # chmod 600
+                make_proc(returncode=0, stdout=""),  # mkswap
+                make_proc(returncode=0, stdout=""),  # swapon
+                make_proc(
+                    returncode=0, stdout=fstab_with_swap
+                ),  # cat /etc/fstab (already has entry)
                 # NO tee -a call should happen
             ]
 
@@ -390,9 +395,9 @@ class TestEnsureSwapFile:
         # Verify tee -a was NOT called
         for c in mock_run.call_args_list:
             cmd = c[0][0]
-            assert not (cmd == ["sudo", "tee", "-a", "/etc/fstab"]), (
-                "tee -a /etc/fstab should NOT be called when /swapfile already in fstab"
-            )
+            assert not (
+                cmd == ["sudo", "tee", "-a", "/etc/fstab"]
+            ), "tee -a /etc/fstab should NOT be called when /swapfile already in fstab"
 
     def test_swap_fstab_append_failure_non_fatal(self, executor, caplog):
         """
@@ -404,13 +409,17 @@ class TestEnsureSwapFile:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                make_proc(returncode=0, stdout=""),           # swapon --show (no swap)
-                make_proc(returncode=0, stdout=""),           # fallocate
-                make_proc(returncode=0, stdout=""),           # chmod 600
-                make_proc(returncode=0, stdout=""),           # mkswap
-                make_proc(returncode=0, stdout=""),           # swapon
-                make_proc(returncode=0, stdout="other fstab content without swapfile"),  # cat /etc/fstab
-                make_proc(returncode=1, stderr="tee: /etc/fstab: Permission denied"),  # tee -a fails
+                make_proc(returncode=0, stdout=""),  # swapon --show (no swap)
+                make_proc(returncode=0, stdout=""),  # fallocate
+                make_proc(returncode=0, stdout=""),  # chmod 600
+                make_proc(returncode=0, stdout=""),  # mkswap
+                make_proc(returncode=0, stdout=""),  # swapon
+                make_proc(
+                    returncode=0, stdout="other fstab content without swapfile"
+                ),  # cat /etc/fstab
+                make_proc(
+                    returncode=1, stderr="tee: /etc/fstab: Permission denied"
+                ),  # tee -a fails
             ]
 
             with caplog.at_level(logging.WARNING):
@@ -431,7 +440,9 @@ class TestEnsureSwapFile:
         """
         import logging
 
-        with patch("subprocess.run", side_effect=RuntimeError("Unexpected system error")):
+        with patch(
+            "subprocess.run", side_effect=RuntimeError("Unexpected system error")
+        ):
             with caplog.at_level(logging.ERROR):
                 result = executor._ensure_swap_file()
 
@@ -489,10 +500,16 @@ class TestExecuteWiring:
             patch.object(executor, "_ensure_workers_config", return_value=True),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
-            patch.object(executor, "_ensure_auto_updater_uses_server_python", return_value=True),
+            patch.object(
+                executor, "_ensure_auto_updater_uses_server_python", return_value=True
+            ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", side_effect=mock_sudoers),
-            patch.object(executor, "_ensure_memory_overcommit", side_effect=mock_memory_overcommit),
+            patch.object(
+                executor,
+                "_ensure_memory_overcommit",
+                side_effect=mock_memory_overcommit,
+            ),
             patch.object(executor, "_ensure_swap_file", side_effect=mock_swap_file),
         ):
             result = executor.execute()
@@ -532,10 +549,16 @@ class TestExecuteWiring:
             patch.object(executor, "_ensure_workers_config", return_value=True),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
-            patch.object(executor, "_ensure_auto_updater_uses_server_python", return_value=True),
+            patch.object(
+                executor, "_ensure_auto_updater_uses_server_python", return_value=True
+            ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
-            patch.object(executor, "_ensure_memory_overcommit", side_effect=mock_memory_overcommit),
+            patch.object(
+                executor,
+                "_ensure_memory_overcommit",
+                side_effect=mock_memory_overcommit,
+            ),
             patch.object(executor, "_ensure_swap_file", side_effect=mock_swap_file),
         ):
             result = executor.execute()
@@ -578,7 +601,9 @@ class TestExecuteWiring:
             patch.object(executor, "_ensure_workers_config", return_value=True),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
-            patch.object(executor, "_ensure_auto_updater_uses_server_python", return_value=True),
+            patch.object(
+                executor, "_ensure_auto_updater_uses_server_python", return_value=True
+            ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=False),
@@ -587,8 +612,12 @@ class TestExecuteWiring:
             with caplog.at_level(logging.WARNING):
                 result = executor.execute()
 
-        assert result is True, "execute() must return True even when _ensure_memory_overcommit fails"
-        assert swap_was_called, "_ensure_swap_file must still be called after memory overcommit failure"
+        assert (
+            result is True
+        ), "execute() must return True even when _ensure_memory_overcommit fails"
+        assert (
+            swap_was_called
+        ), "_ensure_swap_file must still be called after memory overcommit failure"
         assert any("DEPLOY-GENERAL-099" in r.message for r in caplog.records)
 
     def test_execute_continues_on_swap_file_failure(self, tmp_path, caplog):
@@ -611,7 +640,9 @@ class TestExecuteWiring:
             patch.object(executor, "_ensure_workers_config", return_value=True),
             patch.object(executor, "_ensure_cidx_repo_root", return_value=True),
             patch.object(executor, "_ensure_git_safe_directory", return_value=True),
-            patch.object(executor, "_ensure_auto_updater_uses_server_python", return_value=True),
+            patch.object(
+                executor, "_ensure_auto_updater_uses_server_python", return_value=True
+            ),
             patch.object(executor, "ensure_ripgrep", return_value=True),
             patch.object(executor, "_ensure_sudoers_restart", return_value=True),
             patch.object(executor, "_ensure_memory_overcommit", return_value=True),
@@ -620,5 +651,7 @@ class TestExecuteWiring:
             with caplog.at_level(logging.WARNING):
                 result = executor.execute()
 
-        assert result is True, "execute() must return True even when _ensure_swap_file fails"
+        assert (
+            result is True
+        ), "execute() must return True even when _ensure_swap_file fails"
         assert any("DEPLOY-GENERAL-100" in r.message for r in caplog.records)

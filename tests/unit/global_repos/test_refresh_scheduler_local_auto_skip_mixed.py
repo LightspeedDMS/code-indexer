@@ -83,7 +83,6 @@ def _run_one_loop_pass(scheduler):
 # ---------------------------------------------------------------------------
 
 
-
 # ---------------------------------------------------------------------------
 # Scenario 5: Mixed repo list - only local repos are filtered out
 # ---------------------------------------------------------------------------
@@ -110,8 +109,9 @@ class TestMixedRepoListFiltersCorrectly:
         submitted = []
 
         with patch.object(
-            scheduler, "_submit_refresh_job",
-            side_effect=lambda a, **kw: submitted.append(a)
+            scheduler,
+            "_submit_refresh_job",
+            side_effect=lambda a, **kw: submitted.append(a),
         ):
             _run_one_loop_pass(scheduler)
 
@@ -163,8 +163,9 @@ class TestStartupReconciliationSkipsLocalRepos:
 
         restore_calls = []
         with patch.object(
-            sched, "_restore_master_from_versioned",
-            side_effect=lambda a, p: restore_calls.append(a) or False
+            sched,
+            "_restore_master_from_versioned",
+            side_effect=lambda a, p: restore_calls.append(a) or False,
         ):
             sched.reconcile_golden_repos()
 
@@ -198,8 +199,9 @@ class TestStartupReconciliationSkipsLocalRepos:
 
         restore_calls = []
         with patch.object(
-            sched, "_restore_master_from_versioned",
-            side_effect=lambda a, p: restore_calls.append(a) or False
+            sched,
+            "_restore_master_from_versioned",
+            side_effect=lambda a, p: restore_calls.append(a) or False,
         ):
             sched.reconcile_golden_repos()
 
@@ -233,8 +235,9 @@ class TestStartupReconciliationSkipsLocalRepos:
 
         restore_calls = []
         with patch.object(
-            sched, "_restore_master_from_versioned",
-            side_effect=lambda a, p: restore_calls.append(a) or False
+            sched,
+            "_restore_master_from_versioned",
+            side_effect=lambda a, p: restore_calls.append(a) or False,
         ):
             sched.reconcile_golden_repos()
 

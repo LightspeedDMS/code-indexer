@@ -52,7 +52,9 @@ def _make_dep_map_service(refresh_scheduler=None):
 
 def _make_langfuse_service(refresh_scheduler=None, tmp_path=None):
     """Create a LangfuseTraceSyncService with mocked dependencies."""
-    from code_indexer.server.services.langfuse_trace_sync_service import LangfuseTraceSyncService
+    from code_indexer.server.services.langfuse_trace_sync_service import (
+        LangfuseTraceSyncService,
+    )
 
     config = MagicMock()
     config.langfuse_config = None
@@ -162,7 +164,9 @@ class TestDependencyMapServiceWriteLock:
         service = _make_dep_map_service(refresh_scheduler=mock_scheduler)
 
         with patch.object(
-            service, "_setup_analysis", side_effect=RuntimeError("Simulated analysis failure")
+            service,
+            "_setup_analysis",
+            side_effect=RuntimeError("Simulated analysis failure"),
         ):
             with pytest.raises(RuntimeError):
                 service.run_full_analysis()
@@ -254,9 +258,9 @@ class TestDependencyMapServiceWriteLock:
                     assert "status" in result
             except Exception as e:
                 # Any exception must NOT be about _refresh_scheduler being None
-                assert "_refresh_scheduler" not in str(e), (
-                    f"Exception must not be about _refresh_scheduler: {e}"
-                )
+                assert "_refresh_scheduler" not in str(
+                    e
+                ), f"Exception must not be about _refresh_scheduler: {e}"
 
 
 # ============================================================================
@@ -275,7 +279,9 @@ class TestLangfuseTraceSyncServiceWriteLock:
     def test_accepts_refresh_scheduler_parameter(self, tmp_path):
         """LangfuseTraceSyncService.__init__() accepts optional refresh_scheduler parameter."""
         mock_scheduler = MagicMock()
-        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+        service = _make_langfuse_service(
+            refresh_scheduler=mock_scheduler, tmp_path=tmp_path
+        )
 
         assert service._refresh_scheduler is mock_scheduler
 
@@ -297,10 +303,15 @@ class TestLangfuseTraceSyncServiceWriteLock:
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = True
 
-        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+        service = _make_langfuse_service(
+            refresh_scheduler=mock_scheduler, tmp_path=tmp_path
+        )
 
         mock_api_client = MagicMock()
-        mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
+        mock_api_client.discover_project.return_value = {
+            "name": "my-project",
+            "id": "proj-123",
+        }
         mock_api_client.fetch_traces_page.return_value = []  # No traces — no lock needed
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
@@ -331,10 +342,15 @@ class TestLangfuseTraceSyncServiceWriteLock:
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = True
 
-        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+        service = _make_langfuse_service(
+            refresh_scheduler=mock_scheduler, tmp_path=tmp_path
+        )
 
         mock_api_client = MagicMock()
-        mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
+        mock_api_client.discover_project.return_value = {
+            "name": "my-project",
+            "id": "proj-123",
+        }
         mock_api_client.fetch_traces_page.return_value = []
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
@@ -365,10 +381,15 @@ class TestLangfuseTraceSyncServiceWriteLock:
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = True
 
-        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+        service = _make_langfuse_service(
+            refresh_scheduler=mock_scheduler, tmp_path=tmp_path
+        )
 
         mock_api_client = MagicMock()
-        mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
+        mock_api_client.discover_project.return_value = {
+            "name": "my-project",
+            "id": "proj-123",
+        }
         mock_api_client.fetch_traces_page.return_value = []
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
@@ -394,10 +415,14 @@ class TestLangfuseTraceSyncServiceWriteLock:
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = True
 
-        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+        service = _make_langfuse_service(
+            refresh_scheduler=mock_scheduler, tmp_path=tmp_path
+        )
 
         mock_api_client = MagicMock()
-        mock_api_client.discover_project.side_effect = RuntimeError("API connection failed")
+        mock_api_client.discover_project.side_effect = RuntimeError(
+            "API connection failed"
+        )
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
 
@@ -430,19 +455,28 @@ class TestLangfuseTraceSyncServiceWriteLock:
         mock_scheduler = MagicMock()
         mock_scheduler.acquire_write_lock.return_value = True
 
-        service = _make_langfuse_service(refresh_scheduler=mock_scheduler, tmp_path=tmp_path)
+        service = _make_langfuse_service(
+            refresh_scheduler=mock_scheduler, tmp_path=tmp_path
+        )
 
         mock_api_client = MagicMock()
-        mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
+        mock_api_client.discover_project.return_value = {
+            "name": "my-project",
+            "id": "proj-123",
+        }
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
 
-        with patch(
-            "code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient",
-            return_value=mock_api_client,
-        ), patch.object(
-            service, "_sync_project_inner",
-            side_effect=RuntimeError("Sync failed mid-write"),
+        with (
+            patch(
+                "code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient",
+                return_value=mock_api_client,
+            ),
+            patch.object(
+                service,
+                "_sync_project_inner",
+                side_effect=RuntimeError("Sync failed mid-write"),
+            ),
         ):
             with pytest.raises(RuntimeError, match="Sync failed mid-write"):
                 service.sync_project(
@@ -464,7 +498,10 @@ class TestLangfuseTraceSyncServiceWriteLock:
         service = _make_langfuse_service(refresh_scheduler=None, tmp_path=tmp_path)
 
         mock_api_client = MagicMock()
-        mock_api_client.discover_project.return_value = {"name": "my-project", "id": "proj-123"}
+        mock_api_client.discover_project.return_value = {
+            "name": "my-project",
+            "id": "proj-123",
+        }
         mock_api_client.fetch_traces_page.return_value = []
 
         creds = LangfusePullProject(public_key="pk-test", secret_key="sk-test")
@@ -482,6 +519,6 @@ class TestLangfuseTraceSyncServiceWriteLock:
                     max_concurrent_observations=1,
                 )
             except Exception as e:
-                assert "_refresh_scheduler" not in str(e), (
-                    f"Exception must not be about _refresh_scheduler: {e}"
-                )
+                assert "_refresh_scheduler" not in str(
+                    e
+                ), f"Exception must not be about _refresh_scheduler: {e}"

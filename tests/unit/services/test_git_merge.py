@@ -423,9 +423,7 @@ class TestCheckIfBinaryConflict:
         result = service._check_if_binary_conflict(tmp_path, "text.py")
         assert result is False
 
-    def test_text_file_without_conflict_markers_is_binary(
-        self, tmp_path: Path
-    ) -> None:
+    def test_text_file_without_conflict_markers_is_binary(self, tmp_path: Path) -> None:
         """Text file without conflict markers is treated as binary."""
         _create_test_repo(tmp_path)
         service = _get_service()

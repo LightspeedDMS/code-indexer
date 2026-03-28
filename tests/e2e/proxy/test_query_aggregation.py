@@ -131,9 +131,7 @@ def authenticate_request(username, password):
         """
         # Mock query outputs from 3 repositories
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.95 {}/auth.py:2-7
+            self.repos[0]: """0.95 {}/auth.py:2-7
   2: def authenticate(username, password):
   3:     \"\"\"Authenticate user with credentials.\"\"\"
   4:     if not username or not password:
@@ -147,18 +145,12 @@ def authenticate_request(username, password):
   4:     return authenticate(user.name, user.password)""".format(
                 self.repos[0], self.repos[0]
             ),
-            self.repos[
-                1
-            ]: """0.92 {}/user.py:8-11
+            self.repos[1]: """0.92 {}/user.py:8-11
   8:     def authenticate(self):
   9:         \"\"\"Mark user as authenticated.\"\"\"
   10:         self.authenticated = True
-  11:""".format(
-                self.repos[1]
-            ),
-            self.repos[
-                2
-            ]: """0.88 {}/api.py:2-6
+  11:""".format(self.repos[1]),
+            self.repos[2]: """0.88 {}/api.py:2-6
   2: def auth_endpoint(request):
   3:     \"\"\"Authentication API endpoint.\"\"\"
   4:     username = request.get('username')
@@ -169,9 +161,7 @@ def authenticate_request(username, password):
   8: def authenticate_request(username, password):
   9:     \"\"\"Process authentication request.\"\"\"
   10:     return {{'authenticated': True}}
-  11:""".format(
-                self.repos[2], self.repos[2]
-            ),
+  11:""".format(self.repos[2], self.repos[2]),
         }
 
         # Story 3.1-3.4: Aggregate results
@@ -216,33 +206,21 @@ def authenticate_request(username, password):
         """Test that --limit applies to total results, not per repository (Story 3.3)."""
         # Create mock outputs with 2 results per repo (6 total)
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.95 {}/auth.py:2-5
+            self.repos[0]: """0.95 {}/auth.py:2-5
   2: code1
 
 0.90 {}/auth.py:8-10
-  8: code2""".format(
-                self.repos[0], self.repos[0]
-            ),
-            self.repos[
-                1
-            ]: """0.92 {}/user.py:2-5
+  8: code2""".format(self.repos[0], self.repos[0]),
+            self.repos[1]: """0.92 {}/user.py:2-5
   2: code3
 
 0.88 {}/user.py:8-10
-  8: code4""".format(
-                self.repos[1], self.repos[1]
-            ),
-            self.repos[
-                2
-            ]: """0.85 {}/api.py:2-5
+  8: code4""".format(self.repos[1], self.repos[1]),
+            self.repos[2]: """0.85 {}/api.py:2-5
   2: code5
 
 0.80 {}/api.py:8-10
-  8: code6""".format(
-                self.repos[2], self.repos[2]
-            ),
+  8: code6""".format(self.repos[2], self.repos[2]),
         }
 
         # Apply limit of 3
@@ -269,21 +247,13 @@ def authenticate_request(username, password):
     def test_interleaved_results_not_grouped_by_repo(self):
         """Test that results are interleaved by score, not grouped by repository (Story 3.2)."""
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.95 {}/file1.py:1-5
+            self.repos[0]: """0.95 {}/file1.py:1-5
   1: high score repo1
 
 0.75 {}/file2.py:1-5
-  1: low score repo1""".format(
-                self.repos[0], self.repos[0]
-            ),
-            self.repos[
-                1
-            ]: """0.85 {}/file3.py:1-5
-  1: medium score repo2""".format(
-                self.repos[1]
-            ),
+  1: low score repo1""".format(self.repos[0], self.repos[0]),
+            self.repos[1]: """0.85 {}/file3.py:1-5
+  1: medium score repo2""".format(self.repos[1]),
         }
 
         aggregator = QueryResultAggregator()
@@ -311,19 +281,11 @@ def authenticate_request(username, password):
     def test_handle_empty_repository_results(self):
         """Test handling repositories with no query results (Story 3.1)."""
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.9 {}/file.py:1-5
-  1: code""".format(
-                self.repos[0]
-            ),
+            self.repos[0]: """0.9 {}/file.py:1-5
+  1: code""".format(self.repos[0]),
             self.repos[1]: "",  # Empty output
-            self.repos[
-                2
-            ]: """0.8 {}/file.py:1-5
-  1: code""".format(
-                self.repos[2]
-            ),
+            self.repos[2]: """0.8 {}/file.py:1-5
+  1: code""".format(self.repos[2]),
         }
 
         aggregator = QueryResultAggregator()
@@ -340,19 +302,11 @@ def authenticate_request(username, password):
     def test_handle_error_outputs(self):
         """Test skipping repositories with error outputs (Story 3.1)."""
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.9 {}/file.py:1-5
-  1: code""".format(
-                self.repos[0]
-            ),
+            self.repos[0]: """0.9 {}/file.py:1-5
+  1: code""".format(self.repos[0]),
             self.repos[1]: "Error: Failed to connect to service",
-            self.repos[
-                2
-            ]: """0.8 {}/file.py:1-5
-  1: code""".format(
-                self.repos[2]
-            ),
+            self.repos[2]: """0.8 {}/file.py:1-5
+  1: code""".format(self.repos[2]),
         }
 
         aggregator = QueryResultAggregator()
@@ -366,21 +320,13 @@ def authenticate_request(username, password):
     def test_no_limit_returns_all_results(self):
         """Test that limit=None returns all results (Story 3.3)."""
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.9 {}/a.py:1-5
+            self.repos[0]: """0.9 {}/a.py:1-5
   1: a
 
 0.8 {}/b.py:1-5
-  1: b""".format(
-                self.repos[0], self.repos[0]
-            ),
-            self.repos[
-                1
-            ]: """0.85 {}/c.py:1-5
-  1: c""".format(
-                self.repos[1]
-            ),
+  1: b""".format(self.repos[0], self.repos[0]),
+            self.repos[1]: """0.85 {}/c.py:1-5
+  1: c""".format(self.repos[1]),
         }
 
         aggregator = QueryResultAggregator()
@@ -395,16 +341,12 @@ def authenticate_request(username, password):
     def test_preserve_code_content_and_formatting(self):
         """Test that code content and formatting are preserved (Story 3.4)."""
         repo_outputs = {
-            self.repos[
-                0
-            ]: """0.9 {}/auth.py:1-5
+            self.repos[0]: """0.9 {}/auth.py:1-5
   1: class Authentication:
   2:     def __init__(self):
   3:         self.users = {{}}
   4:     def login(self, user):
-  5:         return user in self.users""".format(
-                self.repos[0]
-            )
+  5:         return user in self.users""".format(self.repos[0])
         }
 
         aggregator = QueryResultAggregator()

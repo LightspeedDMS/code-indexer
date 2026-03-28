@@ -460,10 +460,13 @@ class TestGoldenReposPartial:
         Then I am redirected to login
         """
         response = web_client.get("/admin/partials/golden-repos-list")
-        assert response.status_code in [
-            302,
-            303,
-        ], f"Golden repos partial should redirect unauthenticated, got {response.status_code}"
+        assert (
+            response.status_code
+            in [
+                302,
+                303,
+            ]
+        ), f"Golden repos partial should redirect unauthenticated, got {response.status_code}"
 
 
 # =============================================================================

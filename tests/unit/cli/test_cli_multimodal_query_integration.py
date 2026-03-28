@@ -106,7 +106,6 @@ class TestCLIMultimodalQueryIntegration:
                         "code_indexer.services.git_topology_service.GitTopologyService"
                     ) as MockGitTopology,
                 ):
-
                     # Setup mocks
                     mock_config_manager = Mock()
                     mock_config.codebase_dir = Path(
@@ -145,9 +144,7 @@ class TestCLIMultimodalQueryIntegration:
                     mock_query_service.get_current_branch_context.return_value = {
                         "project_id": "test_project"
                     }
-                    mock_query_service.filter_results_by_current_branch.return_value = (
-                        []
-                    )
+                    mock_query_service.filter_results_by_current_branch.return_value = []
                     MockGenericQueryService.return_value = mock_query_service
 
                     # Mock MultiIndexQueryService
@@ -234,7 +231,6 @@ class TestCLIMultimodalQueryIntegration:
                         "code_indexer.services.git_topology_service.GitTopologyService"
                     ) as MockGitTopology,
                 ):
-
                     # Setup mocks
                     mock_config_manager = Mock()
                     mock_config.codebase_dir = Path(
@@ -273,9 +269,7 @@ class TestCLIMultimodalQueryIntegration:
                     mock_query_service.get_current_branch_context.return_value = {
                         "project_id": "test_project"
                     }
-                    mock_query_service.filter_results_by_current_branch.return_value = (
-                        []
-                    )
+                    mock_query_service.filter_results_by_current_branch.return_value = []
                     MockGenericQueryService.return_value = mock_query_service
 
                     # Mock MultiIndexQueryService - no multimodal index
@@ -365,7 +359,6 @@ class TestCLIMultimodalQueryIntegration:
                         "code_indexer.services.filter_conflict_detector.FilterConflictDetector"
                     ) as MockFilterConflictDetector,
                 ):
-
                     # Setup mocks (similar to previous tests)
                     mock_config_manager = Mock()
                     mock_config.codebase_dir = Path(
@@ -404,9 +397,7 @@ class TestCLIMultimodalQueryIntegration:
                     mock_query_service.get_current_branch_context.return_value = {
                         "project_id": "test_project"
                     }
-                    mock_query_service.filter_results_by_current_branch.return_value = (
-                        []
-                    )
+                    mock_query_service.filter_results_by_current_branch.return_value = []
                     MockGenericQueryService.return_value = mock_query_service
 
                     # Mock LanguageValidator and LanguageMapper to return actual values

@@ -14,12 +14,12 @@ class EnclosingSymbolResolver:
 
     def __init__(self):
         """Initialize resolver with empty caches."""
-        self._enclosing_range_map: Dict[tuple, int] = (
-            {}
-        )  # (doc_index, range) -> symbol_id
-        self._document_definitions: Dict[int, List[Dict[str, Any]]] = (
-            {}
-        )  # doc_index -> sorted definitions
+        self._enclosing_range_map: Dict[
+            tuple, int
+        ] = {}  # (doc_index, range) -> symbol_id
+        self._document_definitions: Dict[
+            int, List[Dict[str, Any]]
+        ] = {}  # doc_index -> sorted definitions
 
     def build_enclosing_range_map(
         self, occurrences: List[Dict[str, Any]], symbol_map: Dict[str, int]

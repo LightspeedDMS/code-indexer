@@ -371,6 +371,7 @@ class TestForgeClientFactory:
         with pytest.raises(ValueError) as exc_info:
             get_forge_client("bitbucket")
 
-        assert "bitbucket" in str(exc_info.value).lower() or "unsupported" in str(
-            exc_info.value
-        ).lower()
+        assert (
+            "bitbucket" in str(exc_info.value).lower()
+            or "unsupported" in str(exc_info.value).lower()
+        )

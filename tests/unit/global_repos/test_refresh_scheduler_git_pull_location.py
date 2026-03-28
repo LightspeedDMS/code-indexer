@@ -135,7 +135,9 @@ class TestGitPullLocation:
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -145,17 +147,17 @@ class TestGitPullLocation:
             scheduler._execute_refresh(alias_name)
 
         # GitPullUpdater must have been called with master path
-        assert len(captured_git_pull_paths) == 1, (
-            f"Expected 1 GitPullUpdater call, got {len(captured_git_pull_paths)}"
-        )
+        assert (
+            len(captured_git_pull_paths) == 1
+        ), f"Expected 1 GitPullUpdater call, got {len(captured_git_pull_paths)}"
         assert captured_git_pull_paths[0] == master_path, (
             f"GitPullUpdater called with '{captured_git_pull_paths[0]}' "
             f"instead of master path '{master_path}'"
         )
         # Must NOT be called with old versioned path
-        assert captured_git_pull_paths[0] != old_versioned_path, (
-            f"GitPullUpdater must not be called with versioned path: {old_versioned_path}"
-        )
+        assert (
+            captured_git_pull_paths[0] != old_versioned_path
+        ), f"GitPullUpdater must not be called with versioned path: {old_versioned_path}"
 
     def test_git_pull_uses_master_path_on_first_refresh(
         self, scheduler, golden_repos_dir, mock_registry
@@ -187,12 +189,16 @@ class TestGitPullLocation:
             return mock_updater
 
         with (
-            patch.object(scheduler.alias_manager, "read_alias", return_value=master_path),
+            patch.object(
+                scheduler.alias_manager, "read_alias", return_value=master_path
+            ),
             patch.object(scheduler.alias_manager, "swap_alias"),
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -255,13 +261,13 @@ class TestGitPullLocation:
 
             scheduler._execute_refresh(alias_name)
 
-        assert len(captured_snapshot_sources) == 1, (
-            f"Expected 1 _create_snapshot call, got {len(captured_snapshot_sources)}"
-        )
+        assert (
+            len(captured_snapshot_sources) == 1
+        ), f"Expected 1 _create_snapshot call, got {len(captured_snapshot_sources)}"
         assert captured_snapshot_sources[0] == master_path, (
             f"_create_snapshot called with '{captured_snapshot_sources[0]}' "
             f"instead of master path '{master_path}'"
         )
-        assert captured_snapshot_sources[0] != old_versioned_path, (
-            f"_create_snapshot must not receive old versioned path: {old_versioned_path}"
-        )
+        assert (
+            captured_snapshot_sources[0] != old_versioned_path
+        ), f"_create_snapshot must not receive old versioned path: {old_versioned_path}"

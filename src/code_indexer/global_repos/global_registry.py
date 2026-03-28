@@ -12,7 +12,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, cast
 
 
 logger = logging.getLogger(__name__)
@@ -252,10 +252,12 @@ class GlobalRegistry:
         """
         if self._use_sqlite and self._sqlite_backend is not None:
             # SQLite backend (Story #702)
-            return self._sqlite_backend.get_repo(alias_name)
+            return cast(
+                Optional[dict[str, Any]], self._sqlite_backend.get_repo(alias_name)
+            )
         else:
             # JSON file storage (backward compatible)
-            return self._registry_data.get(alias_name)
+            return cast(Optional[dict[str, Any]], self._registry_data.get(alias_name))
 
     def list_global_repos(self) -> List[Dict[str, Any]]:
         """
@@ -333,7 +335,9 @@ class GlobalRegistry:
                 self._registry_data[alias_name]["enable_scip"] = enable_scip
                 self._save_registry()
 
-    def update_next_refresh(self, alias_name: str, next_refresh: Optional[float]) -> None:
+    def update_next_refresh(
+        self, alias_name: str, next_refresh: Optional[float]
+    ) -> None:
         """
         Update the next_refresh timestamp for a global repo.
 

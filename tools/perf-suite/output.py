@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from metrics import EscalationResult, MetricsResult
 
@@ -137,7 +136,9 @@ def write_escalation_results(
 COL_ESCALATION_SCENARIO = 45
 COL_LEVEL = 6
 COL_ESCALATION_METRIC = 8
-ESCALATION_SEPARATOR_WIDTH = COL_ESCALATION_SCENARIO + COL_LEVEL + COL_ESCALATION_METRIC * 3 + 20
+ESCALATION_SEPARATOR_WIDTH = (
+    COL_ESCALATION_SCENARIO + COL_LEVEL + COL_ESCALATION_METRIC * 3 + 20
+)
 
 
 def print_escalation_summary(results: list[EscalationResult]) -> None:
@@ -163,9 +164,7 @@ def print_escalation_summary(results: list[EscalationResult]) -> None:
         sorted_levels = sorted(escalation.level_metrics.keys())
         for level in sorted_levels:
             m = escalation.level_metrics[level]
-            level_inflection = (
-                inflection_str if level == sorted_levels[-1] else ""
-            )
+            level_inflection = inflection_str if level == sorted_levels[-1] else ""
             print(
                 f"{name:<{COL_ESCALATION_SCENARIO}} {level:>{COL_LEVEL}} "
                 f"{m.p50_ms:>{COL_ESCALATION_METRIC - 1}.0f}ms "

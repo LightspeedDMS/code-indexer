@@ -27,7 +27,7 @@ def test_real_claude_response_formatting_issue():
         )
 
         # Use the exact Claude response content from the user's output
-        real_claude_response = """I'll analyze this codebase to understand what the project is about and identify the top 5 core algorithms. Let me start with semantic searches to 
+        real_claude_response = """I'll analyze this codebase to understand what the project is about and identify the top 5 core algorithms. Let me start with semantic searches to
 understand the project's purpose and key components.
 🔍✨ Semantic search: 'project purpose main functionality' --limit 10 (description=Search for project overview and main functionality)
 Let me read the README to understand the project purpose better.
@@ -35,7 +35,7 @@ Let me read the README to understand the project purpose better.
 Now let me search for core algorithms and key components in the codebase:
 🔍✨ Semantic search: 'core algorithms indexing chunking embedding' --limit 15 (description=Search for core algorithms in the codebase)
 Let me search for more specific algorithms and services:
-🔍✨ Semantic search: 'vector search semantic similarity embedding generation git topology' --limit 10 (description=Search for vector search and git 
+🔍✨ Semantic search: 'vector search semantic similarity embedding generation git topology' --limit 10 (description=Search for vector search and git
 algorithms)
 Let me read the key algorithm files to understand the core components:
 📖 Reading: /home/jsbattig/Dev/code-indexer/src/code_indexer/indexing/chunker.py
@@ -54,7 +54,7 @@ core algorithms.
 
 ### **What is This Project About?**
 
-**Code-Indexer** is an AI-powered semantic code search tool (/home/jsbattig/Dev/code-indexer/README.md) that transforms how developers search and understand codebases. Unlike traditional text-based search, it uses advanced AI embeddings to understand the 
+**Code-Indexer** is an AI-powered semantic code search tool (/home/jsbattig/Dev/code-indexer/README.md) that transforms how developers search and understand codebases. Unlike traditional text-based search, it uses advanced AI embeddings to understand the
 **meaning** and **context** of code, enabling semantic queries like "authentication logic" or "error handling patterns."
 
 **Key Project Purpose:**
@@ -70,7 +70,7 @@ core algorithms.
 **Location:** TextChunker class (/home/jsbattig/Dev/code-indexer/src/code_indexer/indexing/chunker.py)
 
 **What it does:**
-- **Language-Aware Splitting**: Uses regex patterns specific to each programming language (Python, JavaScript, C++, etc.) to break code at semantic 
+- **Language-Aware Splitting**: Uses regex patterns specific to each programming language (Python, JavaScript, C++, etc.) to break code at semantic
 boundaries
 - **Smart Fragment Prevention**: Filters out meaningless fragments like lone docstring delimiters or incomplete function definitions
 - **Overlap Management**: Implements configurable chunk overlap to preserve context across boundaries
@@ -81,7 +81,7 @@ boundaries
 # Language-specific splitters preserve semantic meaning
 "py": [
     r"\n\ndef *",  # Function definitions
-    r"\n\nclass *",  # Class definitions  
+    r"\n\nclass *",  # Class definitions
     r"\n\nasync def *",  # Async functions
 ]
 ```
@@ -101,9 +101,9 @@ def analyze_branch_change(self, old_branch: str, new_branch: str) -> BranchChang
     # Find merge base for efficient diff
     merge_base = self._get_merge_base(old_branch, new_branch)
     # Get only changed files using git diff
-    changed_files = self._get_changed_files(old_branch, new_branch)  
+    changed_files = self._get_changed_files(old_branch, new_branch)
     # Separate files needing full reindex vs metadata updates
-    unchanged_files = 
+    unchanged_files =
 ```
 
 ### **3. Vector Search with Model-Aware Filtering Algorithm**
@@ -163,7 +163,7 @@ def determine_indexing_strategy(self) -> IndexingStrategy:
     if not self.has_existing_index():
         return IndexingStrategy.FULL_INDEX
     if self.embedding_config_changed():
-        return IndexingStrategy.FULL_INDEX  
+        return IndexingStrategy.FULL_INDEX
     if self.has_interrupted_indexing():
         return IndexingStrategy.RESUME
     return IndexingStrategy.INCREMENTAL  # Smart default
@@ -174,12 +174,12 @@ def determine_indexing_strategy(self) -> IndexingStrategy:
 These five algorithms form a sophisticated pipeline:
 
 1. **Text Chunking** breaks code into semantically meaningful pieces
-2. **Git Topology Analysis** determines what needs reprocessing when branches change  
+2. **Git Topology Analysis** determines what needs reprocessing when branches change
 3. **Vector Search** enables fast semantic similarity matching
 4. **File Monitoring** keeps the index current in real-time
 5. **Progressive Metadata** ensures reliable operations and smart resumption
 
-The result is a system that can handle large codebases efficiently while providing lightning-fast semantic search that understands code context and 
+The result is a system that can handle large codebases efficiently while providing lightning-fast semantic search that understands code context and
 relationships, not just text matches."""
 
         # Capture console output with terminal formatting enabled
@@ -235,9 +235,7 @@ relationships, not just text matches."""
             algorithm_header_found = True
 
         assert analysis_header_found, "Should find the main project analysis header"
-        assert (
-            algorithm_header_found
-        ), f"Should find the algorithms header. Found lines with formatting: {[line for line in lines if 'Core Algorithms' in line or ('Top' in line and '5' in line)]}"
+        assert algorithm_header_found, f"Should find the algorithms header. Found lines with formatting: {[line for line in lines if 'Core Algorithms' in line or ('Top' in line and '5' in line)]}"
 
         # Check that bold text is properly formatted with ANSI codes
         bold_text_formatted = False
@@ -310,6 +308,4 @@ def example():
                     print(f"Found formatted header: {repr(line)}")
 
         # This should now PASS with our fix
-        assert (
-            header_formatted
-        ), f"Headers should now be formatted with ANSI codes. Output was: {repr(output[:200])}"
+        assert header_formatted, f"Headers should now be formatted with ANSI codes. Output was: {repr(output[:200])}"

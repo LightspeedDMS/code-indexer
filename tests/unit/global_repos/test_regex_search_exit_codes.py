@@ -310,9 +310,7 @@ class TestGrepExitCodeHandling:
     """Test grep exit code handling and logging levels (Bug #173)."""
 
     @pytest.mark.asyncio
-    async def test_exit_code_0_no_warning_logged(
-        self, grep_service, test_repo, caplog
-    ):
+    async def test_exit_code_0_no_warning_logged(self, grep_service, test_repo, caplog):
         """Test exit code 0 (matches found) does not log warning."""
         with patch(
             "code_indexer.server.services.subprocess_executor.SubprocessExecutor"

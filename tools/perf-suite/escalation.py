@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 import httpx
 
 from config import Scenario
-from metrics import EscalationResult, MetricsResult, RequestResult, aggregate_metrics, detect_inflection
+from metrics import (
+    EscalationResult,
+    MetricsResult,
+    RequestResult,
+    aggregate_metrics,
+    detect_inflection,
+)
 
 if TYPE_CHECKING:
     from client import PerfClient
@@ -59,6 +65,7 @@ async def run_concurrent_requests(
     """
     if execute_fn is None:
         from runner import _execute_single_request
+
         execute_fn = _execute_single_request
 
     semaphore = asyncio.Semaphore(concurrency)
@@ -106,7 +113,9 @@ async def run_scenario_escalation(
     for level in sorted(levels):
         # Warmup phase at this concurrency level (results discarded)
         if progress_callback:
-            progress_callback(scenario.name, -(scenario.warmup_count), scenario.measurement_count)
+            progress_callback(
+                scenario.name, -(scenario.warmup_count), scenario.measurement_count
+            )
         await run_concurrent_requests(
             perf_client=perf_client,
             http_client=http_client,
@@ -135,7 +144,9 @@ async def run_scenario_escalation(
         )
 
         if progress_callback:
-            progress_callback(scenario.name, scenario.measurement_count, scenario.measurement_count)
+            progress_callback(
+                scenario.name, scenario.measurement_count, scenario.measurement_count
+            )
 
     inflection = detect_inflection(level_metrics)
 

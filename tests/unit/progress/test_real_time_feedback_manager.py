@@ -89,9 +89,7 @@ class TestRealTimeFeedbackManager:
                 for call in mock_callback.call_args_list
             )
 
-            assert (
-                heartbeat_found
-            ), f"Heartbeat message not found in callback calls: {[call.kwargs.get('info', '') for call in mock_callback.call_args_list]}"
+            assert heartbeat_found, f"Heartbeat message not found in callback calls: {[call.kwargs.get('info', '') for call in mock_callback.call_args_list]}"
 
     def test_file_status_transitions_timing(self, feedback_manager, mock_callback):
         """

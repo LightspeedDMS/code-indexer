@@ -106,7 +106,9 @@ class RepoAnalyzer:
         if mode == "create":
             return self._get_create_prompt()
         else:
-            return self._get_refresh_prompt(last_analyzed, existing_description)
+            return self._get_refresh_prompt(
+                last_analyzed or "", existing_description or ""
+            )
 
     def _get_create_prompt(self) -> str:
         """
@@ -176,9 +178,7 @@ projects_detected: (Langfuse only - list of project names)
 - Output ONLY the YAML + markdown (no explanations, no code blocks)
 """
 
-    def _get_refresh_prompt(
-        self, last_analyzed: str, existing_description: str
-    ) -> str:
+    def _get_refresh_prompt(self, last_analyzed: str, existing_description: str) -> str:
         """
         Get universal refresh prompt for updating existing descriptions.
 
@@ -315,10 +315,16 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
                 capture_output=True,
                 text=True,
                 timeout=120,
-                env={k: v for k, v in os.environ.items() if k not in (
-                    ("CLAUDECODE", "ANTHROPIC_API_KEY") if "CLAUDECODE" in os.environ
-                    else ("CLAUDECODE",)
-                )},
+                env={
+                    k: v
+                    for k, v in os.environ.items()
+                    if k
+                    not in (
+                        ("CLAUDECODE", "ANTHROPIC_API_KEY")
+                        if "CLAUDECODE" in os.environ
+                        else ("CLAUDECODE",)
+                    )
+                },
             )
 
             if result.returncode != 0:

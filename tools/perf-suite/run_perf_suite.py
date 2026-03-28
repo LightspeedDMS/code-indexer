@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Comma-separated list of concurrency levels to test "
-            f"(default: {','.join(str(l) for l in DEFAULT_CONCURRENCY_LEVELS)})"
+            f"(default: {','.join(str(level) for level in DEFAULT_CONCURRENCY_LEVELS)})"
         ),
     )
     return parser.parse_args()

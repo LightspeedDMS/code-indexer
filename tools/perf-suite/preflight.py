@@ -29,7 +29,9 @@ def _parse_repo_aliases_from_response(body: dict) -> set[str]:
         try:
             repos_data = json.loads(item["text"])
             if isinstance(repos_data, dict):
-                repo_list = repos_data.get("repos") or repos_data.get("repositories") or []
+                repo_list = (
+                    repos_data.get("repos") or repos_data.get("repositories") or []
+                )
                 for repo in repo_list:
                     if "alias" in repo:
                         available.add(repo["alias"])
@@ -60,7 +62,9 @@ async def validate_repos_exist(
     Raises:
         RuntimeError: If authentication fails.
     """
-    perf_client = PerfClient(server_url=server_url, username=username, password=password)
+    perf_client = PerfClient(
+        server_url=server_url, username=username, password=password
+    )
 
     async with httpx.AsyncClient(timeout=30.0) as http_client:
         await perf_client.authenticate(http_client)
@@ -82,7 +86,9 @@ async def validate_repos_exist(
             token = perf_client._token_tracker.token  # type: ignore[union-attr]
             envelope = build_mcp_envelope("list_global_repos", {}, 999)
             headers = build_auth_headers(token)
-            response = await http_client.post(perf_client.mcp_url, json=envelope, headers=headers)
+            response = await http_client.post(
+                perf_client.mcp_url, json=envelope, headers=headers
+            )
             body = response.json()
             available = _parse_repo_aliases_from_response(body)
             return [alias for alias in repo_aliases if alias not in available]

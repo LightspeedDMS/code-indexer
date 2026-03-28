@@ -363,6 +363,7 @@ def verify_cleanup(alias: str) -> None:
 
     # Check SQLite database doesn't contain our alias
     import sqlite3
+
     db_path = Path(server_data_dir) / "data" / "cidx_server.db"
     if db_path.exists():
         conn = sqlite3.connect(str(db_path))

@@ -27,6 +27,7 @@ def get_tool_registry():
     sys.path.insert(0, str(src_path))
 
     from code_indexer.server.mcp.tools import TOOL_REGISTRY
+
     return TOOL_REGISTRY
 
 
@@ -161,7 +162,9 @@ def main():
 
     # Get paths
     project_root = Path(__file__).parent.parent
-    tool_docs_dir = project_root / "src" / "code_indexer" / "server" / "mcp" / "tool_docs"
+    tool_docs_dir = (
+        project_root / "src" / "code_indexer" / "server" / "mcp" / "tool_docs"
+    )
 
     if not tool_docs_dir.exists():
         print(f"ERROR: tool_docs directory not found: {tool_docs_dir}")

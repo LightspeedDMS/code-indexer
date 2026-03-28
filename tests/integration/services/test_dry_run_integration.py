@@ -183,9 +183,7 @@ def test_shared_container_normal_execution_differs_from_dry_run():
         found_execution = any(
             indicator in output_lower for indicator in execution_indicators
         )
-        assert (
-            found_execution
-        ), f"Expected execution-related messages in normal mode. Got: {result.output[:1000]}"
+        assert found_execution, f"Expected execution-related messages in normal mode. Got: {result.output[:1000]}"
 
 
 if __name__ == "__main__":

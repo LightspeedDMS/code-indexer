@@ -35,9 +35,9 @@ class TestRepairJobStatusTransition:
         """
         source = _get_repair_source()
 
-        assert "register_job(" in source, (
-            "_run_repair_with_feedback must call job_tracker.register_job()"
-        )
+        assert (
+            "register_job(" in source
+        ), "_run_repair_with_feedback must call job_tracker.register_job()"
         assert 'update_status(job_id, status="running")' in source, (
             "_run_repair_with_feedback must call job_tracker.update_status("
             'job_id, status="running") after register_job to transition '
@@ -75,6 +75,6 @@ class TestRepairJobStatusTransition:
             "finally block update_tracking must use "
             "'error_message=None if success else ...' pattern (Bug #381)"
         )
-        assert '"Repair failed"' in source, (
-            'finally block must set error_message="Repair failed" on failure (Bug #381)'
-        )
+        assert (
+            '"Repair failed"' in source
+        ), 'finally block must set error_message="Repair failed" on failure (Bug #381)'

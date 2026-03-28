@@ -17,14 +17,10 @@ import re
 from typing import List
 
 # IPv4 pattern: matches octets like 192.168.1.100
-_IP_PATTERN = re.compile(
-    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-)
+_IP_PATTERN = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 # HTTP/HTTPS URL containing an IP address (not a placeholder)
-_URL_WITH_IP_PATTERN = re.compile(
-    r"https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/\S*)?"
-)
+_URL_WITH_IP_PATTERN = re.compile(r"https?://(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?(?:/\S*)?")
 
 # Bearer token: "Bearer " followed by non-whitespace chars
 _BEARER_PATTERN = re.compile(
@@ -60,7 +56,10 @@ _SERVER_URL_ARG_PATTERN = re.compile(
 _SCAN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("IP address detected", _IP_PATTERN),
     ("Bearer token detected", _BEARER_PATTERN),
-    ("Password keyword detected", re.compile(r"\bpassword\s*[=:]\s*\S+", re.IGNORECASE)),
+    (
+        "Password keyword detected",
+        re.compile(r"\bpassword\s*[=:]\s*\S+", re.IGNORECASE),
+    ),
 ]
 
 
@@ -98,6 +97,7 @@ def sanitize_url_in_content(content: str) -> str:
     Returns:
         Content with IP-based URLs replaced.
     """
+
     def _replace_url(match: re.Match) -> str:  # type: ignore[type-arg]
         original = match.group(0)
         # Preserve the path portion if present

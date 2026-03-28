@@ -48,7 +48,9 @@ def render_metrics_table(scenario_name: str, scenario_data: dict[str, Any]) -> s
                 f"| **{tput:.1f}** | **{err:.1f}** |"
             )
         else:
-            rows.append(f"| {level} | {p50:.1f} | {p95:.1f} | {p99:.1f} | {tput:.1f} | {err:.1f} |")
+            rows.append(
+                f"| {level} | {p50:.1f} | {p95:.1f} | {p99:.1f} | {tput:.1f} | {err:.1f} |"
+            )
     return "\n".join(rows) + "\n"
 
 
@@ -82,7 +84,9 @@ def render_ascii_chart(scenario_name: str, scenario_data: dict[str, Any]) -> str
         p50 = p50_values[level]
         bar_len = int(round((p50 / max_p50) * _BAR_MAX_WIDTH))
         marker = "  <-- inflection" if level == inflection_level else ""
-        chart_lines.append(f"  {level:>{label_width}} | {'=' * bar_len} {p50:.1f} ms{marker}")
+        chart_lines.append(
+            f"  {level:>{label_width}} | {'=' * bar_len} {p50:.1f} ms{marker}"
+        )
 
     return "```\n" + "\n".join(chart_lines) + "\n```\n"
 
@@ -126,7 +130,9 @@ def render_cross_repo_table(endpoint: str, scenarios: dict[str, Any]) -> str:
         p50_at_high = levels.get(highest_key, {}).get("p50_ms", 0.0)
         tput_at_1 = levels.get(baseline_key, {}).get("throughput_rps", 0.0)
         inflection_level = (data.get("inflection") or {}).get("inflection_level")
-        inflection_str = str(inflection_level) if inflection_level is not None else "stable"
+        inflection_str = (
+            str(inflection_level) if inflection_level is not None else "stable"
+        )
 
         rows.append(
             f"| {repo_alias} | {p50_at_1:.1f} | {p50_at_high:.1f} "

@@ -49,6 +49,7 @@ class IndexingSubprocessError(Exception):
     would create circular dependencies.
     """
 
+
 # Timeout for quick git metadata commands (ls-files, rev-list --count)
 GIT_COMMAND_TIMEOUT_SECONDS = 30
 
@@ -78,7 +79,9 @@ def gather_repo_metrics(repo_path) -> tuple:
             timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
         if ls_result.returncode == 0:
-            file_count = len([line for line in ls_result.stdout.splitlines() if line.strip()])
+            file_count = len(
+                [line for line in ls_result.stdout.splitlines() if line.strip()]
+            )
         else:
             logger.warning(
                 "gather_repo_metrics: git ls-files failed in %s (exit %d): %s",
@@ -88,7 +91,9 @@ def gather_repo_metrics(repo_path) -> tuple:
             )
             file_count = 0
     except Exception as e:
-        logger.warning("gather_repo_metrics: failed to count tracked files in %s: %s", repo_str, e)
+        logger.warning(
+            "gather_repo_metrics: failed to count tracked files in %s: %s", repo_str, e
+        )
         file_count = 0
 
     # Count commits on current branch
@@ -110,7 +115,9 @@ def gather_repo_metrics(repo_path) -> tuple:
             )
             commit_count = 0
     except Exception as e:
-        logger.warning("gather_repo_metrics: failed to count commits in %s: %s", repo_str, e)
+        logger.warning(
+            "gather_repo_metrics: failed to count commits in %s: %s", repo_str, e
+        )
         commit_count = 0
 
     return file_count, commit_count

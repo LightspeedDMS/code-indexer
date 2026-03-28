@@ -103,9 +103,9 @@ def test_all_admin_commands_have_cleanup():
             )
 
     # All admin clients should have cleanup
-    assert (
-        len(missing_cleanup) == 0
-    ), "Missing cleanup for admin clients:\n" + "\n".join(missing_cleanup)
+    assert len(missing_cleanup) == 0, (
+        "Missing cleanup for admin clients:\n" + "\n".join(missing_cleanup)
+    )
 
 
 def test_repos_api_client_cleanup():
@@ -151,9 +151,9 @@ def test_repos_api_client_cleanup():
                     f"Line {client_line_num}: ReposAPIClient created but no close() found"
                 )
 
-        assert (
-            len(missing_cleanup) == 0
-        ), "Missing cleanup for repos clients:\n" + "\n".join(missing_cleanup)
+        assert len(missing_cleanup) == 0, (
+            "Missing cleanup for repos clients:\n" + "\n".join(missing_cleanup)
+        )
 
 
 def test_no_invalid_credential_manager_usage():

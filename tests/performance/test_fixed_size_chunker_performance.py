@@ -53,28 +53,28 @@ def calculate_fibonacci(n):
     """Calculate fibonacci number using dynamic programming."""
     if n <= 1:
         return n
-    
+
     dp = [0] * (n + 1)
     dp[1] = 1
-    
+
     for i in range(2, n + 1):
         dp[i] = dp[i-1] + dp[i-2]
-    
+
     return dp[n]
 
 class DataProcessor:
     """Process various types of data efficiently."""
-    
+
     def __init__(self, config):
         self.config = config
         self.results = []
-    
+
     def process_batch(self, items):
         for item in items:
             result = self.transform_item(item)
             self.results.append(result)
         return len(self.results)
-    
+
     def transform_item(self, item):
         # Complex transformation logic
         if isinstance(item, dict):
@@ -98,23 +98,23 @@ import java.util.stream.Collectors;
 public class DataProcessingService {
     private final Map<String, Object> cache = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
-    
+
     public List<ProcessedData> processDataBatch(List<RawData> rawData) {
         return rawData.parallelStream()
                      .map(this::processItem)
                      .filter(Objects::nonNull)
                      .collect(Collectors.toList());
     }
-    
+
     private ProcessedData processItem(RawData raw) {
         try {
             String key = generateKey(raw);
             Object cached = cache.get(key);
-            
+
             if (cached != null) {
                 return (ProcessedData) cached;
             }
-            
+
             ProcessedData result = performProcessing(raw);
             cache.put(key, result);
             return result;
@@ -123,12 +123,12 @@ public class DataProcessingService {
             return null;
         }
     }
-    
+
     private String generateKey(RawData raw) {
-        return String.format("%s_%s_%d", 
+        return String.format("%s_%s_%d",
             raw.getType(), raw.getCategory(), raw.getTimestamp());
     }
-    
+
     private ProcessedData performProcessing(RawData raw) {
         // Simulate complex processing
         return new ProcessedData(
@@ -334,8 +334,8 @@ public class DataProcessingService {
             # Verify consistency
             first_result = all_results[0]
             for i, result in enumerate(all_results[1:], 1):
-                assert len(result) == len(
-                    first_result
+                assert (
+                    len(result) == len(first_result)
                 ), f"Run {i} produced {len(result)} chunks, expected {len(first_result)}"
 
                 for j, (chunk1, chunk2) in enumerate(zip(first_result, result)):

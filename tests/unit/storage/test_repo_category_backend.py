@@ -52,7 +52,7 @@ class TestCreateCategory:
         try:
             cursor = conn.execute(
                 "SELECT name, pattern, priority FROM repo_categories WHERE id = ?",
-                (category_id,)
+                (category_id,),
             )
             row = cursor.fetchone()
             assert row is not None
@@ -70,7 +70,7 @@ class TestCreateCategory:
         try:
             cursor = conn.execute(
                 "SELECT created_at, updated_at FROM repo_categories WHERE id = ?",
-                (category_id,)
+                (category_id,),
             )
             row = cursor.fetchone()
             assert row[0] is not None, "created_at should be set"
@@ -156,8 +156,7 @@ class TestUpdateCategory:
         conn = sqlite3.connect(temp_db)
         try:
             cursor = conn.execute(
-                "SELECT name, pattern FROM repo_categories WHERE id = ?",
-                (category_id,)
+                "SELECT name, pattern FROM repo_categories WHERE id = ?", (category_id,)
             )
             row = cursor.fetchone()
             assert row[0] == "Backend Services"
@@ -173,8 +172,7 @@ class TestUpdateCategory:
         conn = sqlite3.connect(temp_db)
         try:
             cursor = conn.execute(
-                "SELECT updated_at FROM repo_categories WHERE id = ?",
-                (category_id,)
+                "SELECT updated_at FROM repo_categories WHERE id = ?", (category_id,)
             )
             initial_updated_at = cursor.fetchone()[0]
         finally:
@@ -187,8 +185,7 @@ class TestUpdateCategory:
         conn = sqlite3.connect(temp_db)
         try:
             cursor = conn.execute(
-                "SELECT updated_at FROM repo_categories WHERE id = ?",
-                (category_id,)
+                "SELECT updated_at FROM repo_categories WHERE id = ?", (category_id,)
             )
             new_updated_at = cursor.fetchone()[0]
             assert new_updated_at != initial_updated_at
@@ -209,15 +206,16 @@ class TestDeleteCategory:
         conn = sqlite3.connect(temp_db)
         try:
             cursor = conn.execute(
-                "SELECT COUNT(*) FROM repo_categories WHERE id = ?",
-                (category_id,)
+                "SELECT COUNT(*) FROM repo_categories WHERE id = ?", (category_id,)
             )
             count = cursor.fetchone()[0]
             assert count == 0
         finally:
             conn.close()
 
-    def test_delete_category_sets_golden_repos_category_id_to_null(self, backend, temp_db):
+    def test_delete_category_sets_golden_repos_category_id_to_null(
+        self, backend, temp_db
+    ):
         """Test that deleting category sets golden_repos_metadata.category_id to NULL (AC4)."""
         category_id = backend.create_category("Backend", "^backend-.*", 1)
 
@@ -229,7 +227,14 @@ class TestDeleteCategory:
                 """INSERT INTO golden_repos_metadata
                    (alias, repo_url, default_branch, clone_path, created_at, category_id)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                ("test-repo", "https://github.com/test/repo", "main", "/tmp/test", "2024-01-01T00:00:00Z", category_id)
+                (
+                    "test-repo",
+                    "https://github.com/test/repo",
+                    "main",
+                    "/tmp/test",
+                    "2024-01-01T00:00:00Z",
+                    category_id,
+                ),
             )
             conn.commit()
         finally:
@@ -243,7 +248,7 @@ class TestDeleteCategory:
         try:
             cursor = conn.execute(
                 "SELECT category_id FROM golden_repos_metadata WHERE alias = ?",
-                ("test-repo",)
+                ("test-repo",),
             )
             row = cursor.fetchone()
             assert row[0] is None, "category_id should be NULL after category deletion"
