@@ -40,7 +40,9 @@ security = HTTPBearer(auto_error=False)
 # authenticate: bypasses handle_tools_call() entirely via mcp-public special path.
 _SELF_TRACKING_TOOLS = frozenset({"search_code", "regex_search"})
 
-from code_indexer.server.services.api_metrics_service import api_metrics_service  # noqa: E402
+from code_indexer.server.services.api_metrics_service import (  # noqa: E402
+    api_metrics_service,
+)
 
 
 def validate_jsonrpc_request(
@@ -180,7 +182,9 @@ async def _invoke_handler(
             return await handler(arguments, user, session_state=session_state)
         else:
             loop = asyncio.get_running_loop()
-            bound = functools.partial(handler, arguments, user, session_state=session_state)
+            bound = functools.partial(
+                handler, arguments, user, session_state=session_state
+            )
             return await loop.run_in_executor(None, bound)
     else:
         if is_async:

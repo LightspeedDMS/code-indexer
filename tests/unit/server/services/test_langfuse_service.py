@@ -14,7 +14,10 @@ from code_indexer.server.services.langfuse_service import (  # noqa: E402
     get_langfuse_service,
     reset_langfuse_service,
 )
-from code_indexer.server.utils.config_manager import ServerConfig, LangfuseConfig  # noqa: E402
+from code_indexer.server.utils.config_manager import (  # noqa: E402
+    ServerConfig,
+    LangfuseConfig,
+)
 
 
 @pytest.fixture
