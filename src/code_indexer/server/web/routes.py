@@ -9110,7 +9110,7 @@ def self_monitoring_page(request: Request):
 
     Displays:
     - AC2: Status section (enabled/disabled, last scan, next scan)
-    - AC3: Configuration section (enable toggle, cadence, model, prompt editor)
+    - AC3: Configuration section (enable toggle, cadence, model)
     - AC4: Scan history from self_monitoring_scans table
     - AC5: Created issues from self_monitoring_issues table
 
@@ -9154,8 +9154,7 @@ async def save_self_monitoring_config(
     Save self-monitoring configuration (Story #74 AC6).
 
     Updates SelfMonitoringConfig from form data including enable/disable,
-    cadence, model, and prompt template. Sets prompt_user_modified flag
-    when prompt differs from default.
+    cadence, and model.
 
     Requires authenticated admin session and valid CSRF token.
     """
@@ -9202,6 +9201,8 @@ async def save_self_monitoring_config(
         cadence_minutes = 60
 
     model = form_data.get("model", "opus").strip()  # type: ignore[union-attr]
+    if model not in ("opus", "sonnet", "haiku"):
+        model = "opus"
 
     # Update configuration (enabled, cadence, and model only)
     config.self_monitoring_config.enabled = enabled  # type: ignore[union-attr]
