@@ -40,7 +40,10 @@ from ..models.auth import (
 
 from ..auth import dependencies
 from ..auth.user_manager import UserRole
+import math
+
 from ..auth.rate_limiter import refresh_token_rate_limiter
+from ..auth.token_bucket import rate_limiter
 from ..auth.audit_logger import password_audit_logger
 from ..auth.auth_error_handler import auth_error_handler, AuthErrorType
 
@@ -91,6 +94,16 @@ def register_auth_routes(
         client_ip = request.client.host if request.client else "unknown"
         user_agent = request.headers.get("user-agent")
 
+        # Story #555: Rate limit check BEFORE credential validation.
+        # Uses the same TokenBucketManager singleton as MCP authenticate.
+        allowed, retry_after = rate_limiter.consume(login_data.username)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts. Please try again later.",
+                headers={"Retry-After": str(math.ceil(retry_after))},
+            )
+
         def authenticate_with_security():
             # Authenticate user
             user = user_manager.authenticate_user(
@@ -122,6 +135,9 @@ def register_auth_routes(
         user = auth_error_handler.timing_prevention.constant_time_execute(
             authenticate_with_security
         )
+
+        # Story #555: Refund rate limit token on successful authentication.
+        rate_limiter.refund(login_data.username)
 
         # Create JWT token and refresh token
         user_data = {
