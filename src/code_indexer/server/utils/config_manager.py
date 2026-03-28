@@ -815,6 +815,17 @@ class ClusterConfig:
 
 
 @dataclass
+class MfaConfig:
+    """MFA settings (Story #558)."""
+
+    mfa_enabled: bool = False
+    require_mfa_for_non_sso_admins: bool = False
+    totp_window_tolerance: int = 1
+    recovery_code_count: int = 10
+    mfa_challenge_token_ttl_seconds: int = 90
+
+
+@dataclass
 class LoginSecurityConfig:
     """Login security settings (Story #557)."""
 
@@ -899,6 +910,7 @@ class ServerConfig:
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
     login_security_config: Optional[LoginSecurityConfig] = None  # Story #557
+    mfa_config: Optional[MfaConfig] = None  # Story #558
 
     # Epic #408 - Cluster mode configuration
     storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
@@ -981,6 +993,8 @@ class ServerConfig:
             self.data_retention_config = DataRetentionConfig()
         if self.login_security_config is None:
             self.login_security_config = LoginSecurityConfig()
+        if self.mfa_config is None:
+            self.mfa_config = MfaConfig()
 
 
 class ServerConfigManager:
