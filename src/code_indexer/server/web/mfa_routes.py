@@ -38,13 +38,15 @@ def _get_session_username(request: Request) -> Optional[str]:
     """Extract username from admin session."""
     from ..web.auth import get_session_manager
 
-    session_mgr = get_session_manager()
-    if session_mgr is None:
+    try:
+        session_mgr = get_session_manager()
+    except RuntimeError as e:
+        logger.debug("Session manager not initialized: %s", e)
         return None
-    data = session_mgr.get_session(request)
-    if data is None:
+    session = session_mgr.get_session(request)
+    if session is None or session.role != "admin":
         return None
-    return str(data.username)
+    return str(session.username)
 
 
 def _render_setup(qr_b64: str, manual_key: str, csrf: str, error: str = "") -> str:
