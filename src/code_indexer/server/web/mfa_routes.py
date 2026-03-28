@@ -49,11 +49,18 @@ def _get_session_username(request: Request) -> Optional[str]:
     return str(session.username)
 
 
-def _render_setup(qr_b64: str, manual_key: str, csrf: str, error: str = "") -> str:
+def _render_setup(
+    qr_b64: str, manual_key: str, csrf: str, target_user: str, error: str = ""
+) -> str:
     """Render MFA setup HTML inline."""
     err = (
         f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{error}</div>'
         if error
+        else ""
+    )
+    user_label = (
+        f"<p class='info' style='color:#00d4ff'>Setting up MFA for: <strong>{target_user}</strong></p>"
+        if target_user
         else ""
     )
     return (
@@ -70,6 +77,7 @@ def _render_setup(qr_b64: str, manual_key: str, csrf: str, error: str = "") -> s
         "a.back{color:#00d4ff;text-decoration:none;display:block;margin-top:20px;text-align:center}"
         "</style></head><body><div class='c'>"
         "<h1>Set Up Two-Factor Authentication</h1>"
+        f"{user_label}"
         f"{err}"
         "<p class='info'>Scan this QR code with your authenticator app</p>"
         f"<div style='text-align:center'><div class='qr'><img src='data:image/png;base64,{qr_b64}' alt='QR'></div></div>"
@@ -78,9 +86,10 @@ def _render_setup(qr_b64: str, manual_key: str, csrf: str, error: str = "") -> s
         "<p>Enter the 6-digit code from your app to verify:</p>"
         f"<form method='POST' action='{_VERIFY_ROUTE}'>"
         f"<input type='hidden' name='csrf_token' value='{csrf}'>"
+        f"<input type='hidden' name='target_user' value='{target_user}'>"
         "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' autofocus required>"
         "<button type='submit'>Verify and Activate MFA</button></form>"
-        f"<a href='{_ADMIN_ROUTE}' class='back'>Cancel</a>"
+        f"<a href='{_ADMIN_ROUTE}users' class='back'>Back to Users</a>"
         "</div></body></html>"
     )
 
@@ -106,46 +115,72 @@ def _render_recovery_codes(codes: List[str]) -> str:
 
 
 @mfa_router.get("/setup", response_class=HTMLResponse)
-def mfa_setup_page(request: Request):
-    """Show MFA setup page with QR code and verification form."""
-    username = _get_session_username(request)
-    if not username:
+def mfa_setup_page(
+    request: Request, user: Optional[str] = None, mode: Optional[str] = None
+):
+    """Show MFA setup page with QR code and verification form.
+
+    Args:
+        user: Target username (admin setting up MFA for another user).
+              Defaults to the logged-in user if not specified.
+        mode: If 'show', re-displays existing QR without regenerating secret.
+    """
+    admin_username = _get_session_username(request)
+    if not admin_username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    secret = _totp_service.generate_secret(username)
-    if secret is None:
-        return HTMLResponse("Failed to generate secret", status_code=500)
-    uri = _totp_service.get_provisioning_uri(username)
-    if uri is None:
-        return HTMLResponse("Failed to generate URI", status_code=500)
+    # Determine target user (self or another user)
+    target_user = user if user else admin_username
+
+    if mode == "show":
+        # Re-display existing QR (no regeneration)
+        uri = _totp_service.get_provisioning_uri(target_user)
+        if uri is None:
+            return HTMLResponse(f"No MFA configured for {target_user}", status_code=404)
+    else:
+        # New setup — generate fresh secret
+        secret = _totp_service.generate_secret(target_user)
+        if secret is None:
+            return HTMLResponse("Failed to generate secret", status_code=500)
+        uri = _totp_service.get_provisioning_uri(target_user)
+        if uri is None:
+            return HTMLResponse("Failed to generate URI", status_code=500)
+
     qr_bytes = _totp_service.generate_qr_code(uri)
     if qr_bytes is None:
         return HTMLResponse("Failed to generate QR code", status_code=500)
-    manual_key = _totp_service.get_manual_entry_key(username)
+    manual_key = _totp_service.get_manual_entry_key(target_user)
     if manual_key is None:
         return HTMLResponse("Failed to get manual entry key", status_code=500)
 
     qr_b64 = base64.b64encode(qr_bytes).decode()
     csrf = request.cookies.get("csrf_token", "")
-    return HTMLResponse(_render_setup(qr_b64, manual_key, csrf))
+    return HTMLResponse(_render_setup(qr_b64, manual_key, csrf, target_user))
 
 
 @mfa_router.post("/verify", response_class=HTMLResponse)
-def mfa_verify(request: Request, totp_code: str = Form(...)):
+def mfa_verify(
+    request: Request,
+    totp_code: str = Form(...),
+    target_user: Optional[str] = Form(None),
+):
     """Verify TOTP code and activate MFA. Shows recovery codes on success."""
-    username = _get_session_username(request)
-    if not username:
+    admin_username = _get_session_username(request)
+    if not admin_username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
+
+    # Use target_user if admin is setting up for another user
+    username = target_user if target_user else admin_username
 
     if _totp_service.activate_mfa(username, totp_code):
         codes = _totp_service.generate_recovery_codes(username)
         if codes is None:
             return HTMLResponse("Failed to generate recovery codes", status_code=500)
-        logger.info("MFA activated for user %s", username)
+        logger.info("MFA activated for user %s (by %s)", username, admin_username)
         return HTMLResponse(_render_recovery_codes(codes))
 
     # Invalid code — re-display setup with error
@@ -163,7 +198,11 @@ def mfa_verify(request: Request, totp_code: str = Form(...)):
     csrf = request.cookies.get("csrf_token", "")
     return HTMLResponse(
         _render_setup(
-            qr_b64, manual_key, csrf, "Invalid verification code. Please try again."
+            qr_b64,
+            manual_key,
+            csrf,
+            username,
+            "Invalid verification code. Please try again.",
         )
     )
 

@@ -776,6 +776,18 @@ def _get_users_list():
     return sorted(users, key=lambda u: u.username.lower())
 
 
+def _get_user_mfa_status(username: str) -> bool:
+    """Check if a user has MFA enabled (Story #559)."""
+    try:
+        from .mfa_routes import _totp_service
+
+        if _totp_service is not None:
+            return bool(_totp_service.is_mfa_enabled(username))
+    except ImportError:
+        pass
+    return False
+
+
 def _create_users_page_response(
     request: Request,
     session: SessionData,
@@ -805,6 +817,7 @@ def _create_users_page_response(
                         else "N/A"
                     ),
                     "email": u.email,
+                    "mfa_enabled": _get_user_mfa_status(u.username),
                 }
                 for u in users
             ],
@@ -1155,6 +1168,7 @@ def users_list_partial(request: Request):
                         else "N/A"
                     ),
                     "email": u.email,
+                    "mfa_enabled": _get_user_mfa_status(u.username),
                 }
                 for u in users
             ],
