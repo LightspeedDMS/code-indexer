@@ -131,14 +131,15 @@ echo "📊 Telemetry enabled: Results will be saved to $TELEMETRY_LOG"
 echo "⏱️  Duration report: $DURATIONS_LOG"
 
 # Run server-specific unit tests with telemetry
+# --timeout=60: kill any test that hangs longer than 60 seconds
+# No --cov: coverage adds massive overhead (2-3x slowdown on large suites)
 PYTHONPATH="$(pwd)/src:$(pwd)/tests" pytest \
     tests/unit/server/ \
     -m "not slow and not e2e and not real_api and not integration" \
     -v \
     --durations=20 \
     --tb=short \
-    --cov=code_indexer.server \
-    --cov-report=xml --cov-report=term-missing \
+    --timeout=60 \
     2>&1 | tee "$TELEMETRY_LOG"
 
 # Capture pytest exit code from pipe
