@@ -79,16 +79,20 @@ class DistributedJobClaimer:
                 └─ release_job()  ──>  pending (executing_node = NULL)
     """
 
-    def __init__(self, pool: Any, node_id: str) -> None:
+    def __init__(self, pool: Any, node_id: str, max_concurrent_jobs: int = 0) -> None:
         """
         Initialise the claimer.
 
         Args:
             pool:    A ConnectionPool instance (from connection_pool.py).
             node_id: Unique identifier for this cluster node (e.g. hostname).
+            max_concurrent_jobs: Cluster-wide max running jobs (Bug #541).
+                When > 0, claim_next_job() checks the total running count
+                across ALL nodes before claiming. 0 = no limit.
         """
         self._pool = pool
         self._node_id = node_id
+        self._max_concurrent_jobs = max_concurrent_jobs
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,6 +117,24 @@ class DistributedJobClaimer:
             rows plus ``executing_node`` and ``claimed_at``) if a job was
             claimed, or None if no pending jobs are available.
         """
+        # Bug #541: Cluster-wide concurrency check. Count running jobs across
+        # ALL nodes before claiming. If at or above limit, skip claim.
+        if self._max_concurrent_jobs > 0:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM background_jobs WHERE status = 'running'"
+                    )
+                    running_count = cur.fetchone()[0]
+            if running_count >= self._max_concurrent_jobs:
+                logger.debug(
+                    "Cluster-wide concurrency limit reached (%d/%d running), "
+                    "skipping claim",
+                    running_count,
+                    self._max_concurrent_jobs,
+                )
+                return None
+
         type_filter = "AND operation_type = %s" if job_type else ""
         # One positional param for SET executing_node = %s,
         # plus one optional param for the job_type filter.
