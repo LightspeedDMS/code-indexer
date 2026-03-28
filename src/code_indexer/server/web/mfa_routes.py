@@ -41,7 +41,7 @@ def _get_session_username(request: Request) -> Optional[str]:
     session_mgr = get_session_manager()
     if session_mgr is None:
         return None
-    session_id = request.cookies.get("session_id")
+    session_id = request.cookies.get("session")
     if not session_id:
         return None
     data = session_mgr.get_session(session_id)
