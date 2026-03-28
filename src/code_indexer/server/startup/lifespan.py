@@ -1485,6 +1485,15 @@ def make_lifespan(
                     _reconciliation.start()
                     _cluster_services.append(("reconciliation", _reconciliation))
 
+                    # Story #538: Enable PG advisory locks for password changes
+                    from code_indexer.server.auth.concurrency_protection import (
+                        password_change_concurrency_protection,
+                    )
+
+                    password_change_concurrency_protection.set_connection_pool(
+                        _cluster_pool
+                    )
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
