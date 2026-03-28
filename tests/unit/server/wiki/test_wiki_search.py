@@ -369,9 +369,9 @@ class TestArticleTemplateSearchBox:
             toc_pos = html.find('class="sidebar-group"')
             assert search_pos != -1, "wiki-search-box not found in HTML"
             assert toc_pos != -1, "sidebar-group not found in HTML"
-            assert (
-                search_pos < toc_pos
-            ), "Search box must appear before the first sidebar-group"
+            assert search_pos < toc_pos, (
+                "Search box must appear before the first sidebar-group"
+            )
 
     def test_sidebar_items_have_data_path(self):
         """All sidebar-item links have data-path attribute."""
@@ -390,9 +390,9 @@ class TestArticleTemplateSearchBox:
             )
             assert len(sidebar_items) > 0, "No sidebar items found in HTML"
             for item_tag in sidebar_items:
-                assert (
-                    'data-path="' in item_tag
-                ), f"sidebar-item missing data-path attribute: {item_tag}"
+                assert 'data-path="' in item_tag, (
+                    f"sidebar-item missing data-path attribute: {item_tag}"
+                )
 
 
 # ---------------------------------------------------------------------------

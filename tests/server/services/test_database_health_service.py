@@ -72,9 +72,9 @@ class TestDatabaseHealthService:
         service = DatabaseHealthService(server_dir=str(temp_server_dir))
         health_results = service.get_all_database_health()
 
-        assert (
-            len(health_results) == 7
-        ), f"Expected 7 databases, got {len(health_results)}"
+        assert len(health_results) == 7, (
+            f"Expected 7 databases, got {len(health_results)}"
+        )
 
         # Verify all expected databases are present
         # Story #3: Removed search_config.db and file_content_limits.db
@@ -88,9 +88,9 @@ class TestDatabaseHealthService:
             "payload_cache.db",
         }
         actual_files = {result.file_name for result in health_results}
-        assert (
-            actual_files == expected_files
-        ), f"Missing databases: {expected_files - actual_files}"
+        assert actual_files == expected_files, (
+            f"Missing databases: {expected_files - actual_files}"
+        )
 
     def test_health_service_provides_display_names(self, temp_server_dir: Path):
         """
@@ -434,9 +434,9 @@ class TestDiskMetricsEnhancement:
 
         # Verify percentages exist and sum to approximately 100
         total_percent = system_info.disk_free_percent + system_info.disk_used_percent
-        assert (
-            abs(total_percent - 100.0) < 0.1
-        ), f"Percentages should add to 100, got {total_percent}"
+        assert abs(total_percent - 100.0) < 0.1, (
+            f"Percentages should add to 100, got {total_percent}"
+        )
 
 
 # =============================================================================
@@ -455,9 +455,9 @@ class TestActivatedReposCountFix:
         sig = inspect.signature(DashboardService.get_stats_partial)
         param_names = list(sig.parameters.keys())
 
-        assert (
-            "user_role" in param_names
-        ), "get_stats_partial must accept user_role parameter to fix AC6"
+        assert "user_role" in param_names, (
+            "get_stats_partial must accept user_role parameter to fix AC6"
+        )
 
     def test_get_stats_partial_passes_user_role_to_repo_counts(self):
         """AC6: get_stats_partial should pass user_role to _get_repo_counts."""
@@ -466,6 +466,6 @@ class TestActivatedReposCountFix:
 
         source = inspect.getsource(DashboardService.get_stats_partial)
 
-        assert (
-            "_get_repo_counts" in source and "user_role" in source
-        ), "get_stats_partial must pass user_role to _get_repo_counts"
+        assert "_get_repo_counts" in source and "user_role" in source, (
+            "get_stats_partial must pass user_role to _get_repo_counts"
+        )

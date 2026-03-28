@@ -166,9 +166,9 @@ class TestJobStatusPartialEndpoint:
             "Critical",
         ]
         content = response.text
-        assert any(
-            state in content for state in health_states
-        ), f"No health state found in response. Content: {content[:500]}"
+        assert any(state in content for state in health_states), (
+            f"No health state found in response. Content: {content[:500]}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -538,9 +538,9 @@ class TestConfigServiceWiring:
 
             _get_dashboard_service()
 
-        assert (
-            "config_manager" in captured
-        ), "_get_dashboard_service() did not construct DependencyMapDashboardService"
+        assert "config_manager" in captured, (
+            "_get_dashboard_service() did not construct DependencyMapDashboardService"
+        )
         assert captured["config_manager"] is mock_config_service, (
             "config_manager argument must be config_service (ConfigService), "
             "not config_service.config_manager (ServerConfigManager). "
@@ -691,12 +691,12 @@ class TestGetKnownRepoNamesOrphanFiltering:
             golden_repos_aliases=["backend"],  # multimodal-mock intentionally absent
         )
         result = _call_get_known_repo_names(server_dir)
-        assert (
-            "multimodal-mock" not in result
-        ), f"Orphan 'multimodal-mock' should be excluded but was in result: {result}"
-        assert (
-            "backend" in result
-        ), f"Legitimate 'backend' should be included but was missing: {result}"
+        assert "multimodal-mock" not in result, (
+            f"Orphan 'multimodal-mock' should be excluded but was in result: {result}"
+        )
+        assert "backend" in result, (
+            f"Legitimate 'backend' should be included but was missing: {result}"
+        )
 
     def test_excludes_repos_only_in_golden_repos_metadata(self, tmp_path):
         """
@@ -710,9 +710,9 @@ class TestGetKnownRepoNamesOrphanFiltering:
             golden_repos_aliases=["backend", "not-activated-repo"],
         )
         result = _call_get_known_repo_names(server_dir)
-        assert (
-            "not-activated-repo" not in result
-        ), f"'not-activated-repo' should be excluded but was in result: {result}"
+        assert "not-activated-repo" not in result, (
+            f"'not-activated-repo' should be excluded but was in result: {result}"
+        )
         assert result == {"backend"}, f"Expected only 'backend', got: {result}"
 
     def test_returns_empty_set_when_no_overlap(self, tmp_path):
@@ -852,15 +852,15 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         call = captured_calls[0]
         # Must NOT be empty list -- must be the captured list from service
-        assert (
-            call["repo_list"] != []
-        ), "repo_list passed to run_pass_2_per_domain must not be empty []"
-        assert (
-            len(call["repo_list"]) == 1
-        ), f"Expected 1 repo in list, got {len(call['repo_list'])}"
-        assert (
-            call["repo_list"][0]["alias"] == "repo-x"
-        ), f"Expected repo-x, got {call['repo_list'][0]['alias']}"
+        assert call["repo_list"] != [], (
+            "repo_list passed to run_pass_2_per_domain must not be empty []"
+        )
+        assert len(call["repo_list"]) == 1, (
+            f"Expected 1 repo in list, got {len(call['repo_list'])}"
+        )
+        assert call["repo_list"][0]["alias"] == "repo-x", (
+            f"Expected repo-x, got {call['repo_list'][0]['alias']}"
+        )
 
     def test_analyzer_ignores_executor_empty_list_uses_captured(self, tmp_path):
         """
@@ -879,9 +879,9 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         assert len(captured_calls) == 1
         # repo_list in the call must NOT be [] (the bug value)
-        assert (
-            captured_calls[0]["repo_list"] != []
-        ), "Bug 1 regression: repo_list is still [] -- fix not applied"
+        assert captured_calls[0]["repo_list"] != [], (
+            "Bug 1 regression: repo_list is still [] -- fix not applied"
+        )
 
     def test_analyzer_uses_non_empty_repo_list_when_provided_by_caller(self, tmp_path):
         """
@@ -909,9 +909,9 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         assert len(captured_calls) == 1
         # The caller's list should be used (not the captured one)
-        assert (
-            captured_calls[0]["repo_list"] == caller_repo_list
-        ), "When executor provides non-empty repo_list, it should be used"
+        assert captured_calls[0]["repo_list"] == caller_repo_list, (
+            "When executor provides non-empty repo_list, it should be used"
+        )
 
 
 class TestBuildDomainAnalyzerPreviousDomainDir:
@@ -938,9 +938,9 @@ class TestBuildDomainAnalyzerPreviousDomainDir:
 
         assert len(captured_calls) == 1
         call = captured_calls[0]
-        assert (
-            call["previous_domain_dir"] is not None
-        ), "Bug 2 regression: previous_domain_dir is None -- fix not applied"
+        assert call["previous_domain_dir"] is not None, (
+            "Bug 2 regression: previous_domain_dir is None -- fix not applied"
+        )
         assert call["previous_domain_dir"] == output_dir, (
             f"previous_domain_dir should be {output_dir}, "
             f"got {call['previous_domain_dir']}"

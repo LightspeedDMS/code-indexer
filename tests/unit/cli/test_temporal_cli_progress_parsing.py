@@ -54,9 +54,9 @@ class TestTemporalProgressKbsecParsing:
             kb_per_second = 0.0
 
         # Verify parsing worked correctly
-        assert (
-            files_per_second == 12.5
-        ), f"Expected 12.5 commits/s, got {files_per_second}"
+        assert files_per_second == 12.5, (
+            f"Expected 12.5 commits/s, got {files_per_second}"
+        )
         assert kb_per_second == 256.3, f"Expected 256.3 KB/s, got {kb_per_second}"
 
         # Now check if CLI's actual code contains the hardcoded 0.0

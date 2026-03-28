@@ -460,9 +460,9 @@ def get_confirmation_token(client):
 
         data = response.json()
         assert "token" in data, f"No token in response: {data}"
-        assert (
-            data.get("requires_confirmation") is True
-        ), f"Expected requires_confirmation=True: {data}"
+        assert data.get("requires_confirmation") is True, (
+            f"Expected requires_confirmation=True: {data}"
+        )
 
         return data["token"]
 

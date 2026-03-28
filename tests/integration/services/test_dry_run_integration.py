@@ -61,9 +61,9 @@ def test_shared_container_dry_run_simple_integration():
                 timeout=30,
             )
             if "✅" not in status_result.stdout:
-                assert (
-                    False
-                ), f"Cannot start services for integration test: {start_result.stderr}"
+                assert False, (
+                    f"Cannot start services for integration test: {start_result.stderr}"
+                )
 
         runner = CliRunner()
 
@@ -78,9 +78,9 @@ def test_shared_container_dry_run_simple_integration():
             )
 
         # Dry-run should work since services are available
-        assert (
-            result.exit_code == 0
-        ), f"Dry-run should succeed with services available. Output: {result.output}"
+        assert result.exit_code == 0, (
+            f"Dry-run should succeed with services available. Output: {result.output}"
+        )
 
         output_lower = result.output.lower()
 
@@ -92,9 +92,9 @@ def test_shared_container_dry_run_simple_integration():
         ]
 
         found_good = any(indicator in output_lower for indicator in good_indicators)
-        assert (
-            found_good
-        ), f"Expected to find prompt-related messages in output. Got: {result.output}"
+        assert found_good, (
+            f"Expected to find prompt-related messages in output. Got: {result.output}"
+        )
 
         # Should NOT show execution results (since it's dry-run)
         bad_indicators = [
@@ -104,9 +104,9 @@ def test_shared_container_dry_run_simple_integration():
         ]
 
         for bad_indicator in bad_indicators:
-            assert (
-                bad_indicator not in output_lower
-            ), f"Found '{bad_indicator}' suggesting actual execution happened"
+            assert bad_indicator not in output_lower, (
+                f"Found '{bad_indicator}' suggesting actual execution happened"
+            )
 
         # Should show the actual prompt content
         assert "test question" in output_lower, "Should show our specific test question"
@@ -167,9 +167,9 @@ def test_shared_container_normal_execution_differs_from_dry_run():
         ]
 
         for dry_run_indicator in dry_run_indicators:
-            assert (
-                dry_run_indicator not in output_lower
-            ), f"Found dry-run message '{dry_run_indicator}' in normal execution"
+            assert dry_run_indicator not in output_lower, (
+                f"Found dry-run message '{dry_run_indicator}' in normal execution"
+            )
 
         # Should see either Claude results or service errors or Claude CLI errors (all indicate actual execution was attempted)
         execution_indicators = [
@@ -183,7 +183,9 @@ def test_shared_container_normal_execution_differs_from_dry_run():
         found_execution = any(
             indicator in output_lower for indicator in execution_indicators
         )
-        assert found_execution, f"Expected execution-related messages in normal mode. Got: {result.output[:1000]}"
+        assert found_execution, (
+            f"Expected execution-related messages in normal mode. Got: {result.output[:1000]}"
+        )
 
 
 if __name__ == "__main__":

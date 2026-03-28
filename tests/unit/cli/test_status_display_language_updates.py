@@ -238,12 +238,12 @@ def test_semantic_index_component_name(
     component_names = [call_args[0][0] for call_args in add_row_calls]
 
     # Verify "Semantic Index" exists but "Index" does not
-    assert (
-        "Semantic Index" in component_names
-    ), f"Should have 'Semantic Index' component, got: {component_names}"
-    assert (
-        "Index" not in component_names
-    ), f"Should NOT have 'Index' component (should be 'Semantic Index'), got: {component_names}"
+    assert "Semantic Index" in component_names, (
+        f"Should have 'Semantic Index' component, got: {component_names}"
+    )
+    assert "Index" not in component_names, (
+        f"Should NOT have 'Index' component (should be 'Semantic Index'), got: {component_names}"
+    )
 
 
 @patch("code_indexer.cli.Table")
@@ -318,9 +318,9 @@ def test_index_files_status_has_no_icon(
             index_files_row[2],
         )
         assert component == "Index Files"
-        assert (
-            "📊" not in status
-        ), f"Index Files status should not contain '📊' icon, got: '{status}'"
+        assert "📊" not in status, (
+            f"Index Files status should not contain '📊' icon, got: '{status}'"
+        )
         # Status should be empty string or text-only (no icons)
         assert status == "" or (
             "📊" not in status and "✅" not in status and "❌" not in status

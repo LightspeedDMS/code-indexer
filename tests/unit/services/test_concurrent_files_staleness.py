@@ -264,18 +264,18 @@ def test_display_receives_stale_concurrent_files():
 
     # BUG ASSERTION: This proves the bug exists
     # Slots 0, 1, 3, 4 are now FROZEN showing stale data
-    assert (
-        progress_manager._concurrent_files[0]["file_path"] == "lint.sh"
-    ), "Slot 0 FROZEN with stale data"
-    assert (
-        progress_manager._concurrent_files[1]["file_path"] == "checklist.md"
-    ), "Slot 1 FROZEN with stale data"
-    assert (
-        progress_manager._concurrent_files[3]["file_path"] == "feat.md"
-    ), "Slot 3 FROZEN with stale data"
-    assert (
-        progress_manager._concurrent_files[4]["file_path"] == "automation.sh"
-    ), "Slot 4 FROZEN with stale data"
+    assert progress_manager._concurrent_files[0]["file_path"] == "lint.sh", (
+        "Slot 0 FROZEN with stale data"
+    )
+    assert progress_manager._concurrent_files[1]["file_path"] == "checklist.md", (
+        "Slot 1 FROZEN with stale data"
+    )
+    assert progress_manager._concurrent_files[3]["file_path"] == "feat.md", (
+        "Slot 3 FROZEN with stale data"
+    )
+    assert progress_manager._concurrent_files[4]["file_path"] == "automation.sh", (
+        "Slot 4 FROZEN with stale data"
+    )
 
     # Only slots 2, 5, 6, 7 show fresh data
     assert progress_manager._concurrent_files[2]["file_path"] == "RELEASE_NOTES.md"

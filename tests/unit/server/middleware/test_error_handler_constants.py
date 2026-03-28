@@ -104,32 +104,32 @@ class TestMagicNumberCompliance:
         # Test default retry attempts
         if hasattr(error_handler, "DEFAULT_MAX_RETRY_ATTEMPTS"):
             attempts = error_handler.DEFAULT_MAX_RETRY_ATTEMPTS
-            assert isinstance(
-                attempts, int
-            ), "DEFAULT_MAX_RETRY_ATTEMPTS must be integer"
-            assert (
-                1 <= attempts <= 10
-            ), "DEFAULT_MAX_RETRY_ATTEMPTS must be between 1-10"
+            assert isinstance(attempts, int), (
+                "DEFAULT_MAX_RETRY_ATTEMPTS must be integer"
+            )
+            assert 1 <= attempts <= 10, (
+                "DEFAULT_MAX_RETRY_ATTEMPTS must be between 1-10"
+            )
 
         # Test base retry delay
         if hasattr(error_handler, "DEFAULT_BASE_RETRY_DELAY_SECONDS"):
             delay = error_handler.DEFAULT_BASE_RETRY_DELAY_SECONDS
-            assert isinstance(
-                delay, (int, float)
-            ), "DEFAULT_BASE_RETRY_DELAY_SECONDS must be numeric"
-            assert (
-                0.01 <= delay <= 5.0
-            ), "DEFAULT_BASE_RETRY_DELAY_SECONDS must be between 0.01-5.0"
+            assert isinstance(delay, (int, float)), (
+                "DEFAULT_BASE_RETRY_DELAY_SECONDS must be numeric"
+            )
+            assert 0.01 <= delay <= 5.0, (
+                "DEFAULT_BASE_RETRY_DELAY_SECONDS must be between 0.01-5.0"
+            )
 
         # Test max retry delay
         if hasattr(error_handler, "DEFAULT_MAX_RETRY_DELAY_SECONDS"):
             max_delay = error_handler.DEFAULT_MAX_RETRY_DELAY_SECONDS
-            assert isinstance(
-                max_delay, (int, float)
-            ), "DEFAULT_MAX_RETRY_DELAY_SECONDS must be numeric"
-            assert (
-                10 <= max_delay <= 300
-            ), "DEFAULT_MAX_RETRY_DELAY_SECONDS must be between 10-300"
+            assert isinstance(max_delay, (int, float)), (
+                "DEFAULT_MAX_RETRY_DELAY_SECONDS must be numeric"
+            )
+            assert 10 <= max_delay <= 300, (
+                "DEFAULT_MAX_RETRY_DELAY_SECONDS must be between 10-300"
+            )
 
         # Test retry bounds
         if hasattr(error_handler, "MINIMUM_RETRY_SECONDS"):
@@ -140,9 +140,9 @@ class TestMagicNumberCompliance:
         if hasattr(error_handler, "MAXIMUM_RETRY_SECONDS"):
             max_retry = error_handler.MAXIMUM_RETRY_SECONDS
             assert isinstance(max_retry, int), "MAXIMUM_RETRY_SECONDS must be integer"
-            assert (
-                30 <= max_retry <= 300
-            ), "MAXIMUM_RETRY_SECONDS must be between 30-300"
+            assert 30 <= max_retry <= 300, (
+                "MAXIMUM_RETRY_SECONDS must be between 30-300"
+            )
 
         if hasattr(error_handler, "RETRY_MULTIPLIER"):
             multiplier = error_handler.RETRY_MULTIPLIER
@@ -237,9 +237,9 @@ class TestConstantsUsageInProduction:
         if hasattr(error_handler, "DEFAULT_MAX_RETRY_ATTEMPTS"):
             expected_attempts = error_handler.DEFAULT_MAX_RETRY_ATTEMPTS
             actual_attempts = handler.config.retry_config.max_attempts
-            assert (
-                actual_attempts == expected_attempts
-            ), f"Handler should use DEFAULT_MAX_RETRY_ATTEMPTS constant ({expected_attempts}), got {actual_attempts}"
+            assert actual_attempts == expected_attempts, (
+                f"Handler should use DEFAULT_MAX_RETRY_ATTEMPTS constant ({expected_attempts}), got {actual_attempts}"
+            )
 
     def test_retry_calculation_uses_constants(self):
         """Test that retry calculation in handle_database_error uses constants."""
@@ -281,6 +281,6 @@ class TestConstantsUsageInProduction:
             min_retry = error_handler.MINIMUM_RETRY_SECONDS
             max_retry = error_handler.MAXIMUM_RETRY_SECONDS
 
-            assert (
-                min_retry <= retry_after <= max_retry
-            ), f"Retry after ({retry_after}) should be between {min_retry} and {max_retry}"
+            assert min_retry <= retry_after <= max_retry, (
+                f"Retry after ({retry_after}) should be between {min_retry} and {max_retry}"
+            )

@@ -196,9 +196,9 @@ class TestTruncationHelperPaginationCalculation:
                 content_type="file",
             )
 
-            assert (
-                result.truncated is True
-            ), f"Content size {content_size} should be truncated"
+            assert result.truncated is True, (
+                f"Content size {content_size} should be truncated"
+            )
             assert result.total_pages == expected_pages, (
                 f"Content size {content_size} should have {expected_pages} pages, "
                 f"got {result.total_pages}"

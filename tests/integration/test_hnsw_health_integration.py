@@ -170,9 +170,9 @@ class TestRealIndexHealthCheck:
 
         # Should be MUCH faster than first check
         assert elapsed_ms < 10, f"Cache hit took {elapsed_ms:.2f}ms, expected <10ms"
-        assert (
-            elapsed_ms < first_check_time / 10
-        ), f"Cache hit ({elapsed_ms:.2f}ms) should be >10x faster than first check ({first_check_time:.2f}ms)"
+        assert elapsed_ms < first_check_time / 10, (
+            f"Cache hit ({elapsed_ms:.2f}ms) should be >10x faster than first check ({first_check_time:.2f}ms)"
+        )
 
     def test_concurrent_health_checks_thread_safety(self, medium_valid_index):
         """

@@ -115,9 +115,9 @@ def test_storage_size_includes_all_files_not_just_binaries(
     binary_size_mb = binary_size / (1024 * 1024)
 
     # Verify we have a significant difference (vector data should be substantial)
-    assert (
-        actual_size_mb > binary_size_mb * 2
-    ), "Test setup error: Vector JSON data should be significant portion of storage"
+    assert actual_size_mb > binary_size_mb * 2, (
+        "Test setup error: Vector JSON data should be significant portion of storage"
+    )
 
     with patch("code_indexer.cli.Table") as mock_table_class:
         with patch(

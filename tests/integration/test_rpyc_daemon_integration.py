@@ -175,7 +175,7 @@ def format_response(status, message):
                 str(self.project_path), "authentication user login", limit=5
             )
             load_time = time.perf_counter() - start
-            print(f"First query (cache miss): {load_time*1000:.1f}ms")
+            print(f"First query (cache miss): {load_time * 1000:.1f}ms")
 
             # Second query - uses cache (cache hit)
             start = time.perf_counter()
@@ -183,13 +183,13 @@ def format_response(status, message):
                 str(self.project_path), "database connection", limit=5
             )
             cache_time = time.perf_counter() - start
-            print(f"Second query (cache hit): {cache_time*1000:.1f}ms")
+            print(f"Second query (cache hit): {cache_time * 1000:.1f}ms")
 
             # Performance assertion
             self.assertLess(
                 cache_time,
                 0.1,  # 100ms requirement
-                f"Cache hit took {cache_time*1000:.1f}ms, requirement is <100ms",
+                f"Cache hit took {cache_time * 1000:.1f}ms, requirement is <100ms",
             )
 
             # Cache should be much faster than initial load
@@ -207,12 +207,12 @@ def format_response(status, message):
                 times.append(time.perf_counter() - start)
 
             avg_time = sum(times) / len(times)
-            print(f"Average of 50 cache hits: {avg_time*1000:.1f}ms")
+            print(f"Average of 50 cache hits: {avg_time * 1000:.1f}ms")
 
             self.assertLess(
                 avg_time,
                 0.05,  # Target 50ms average
-                f"Average cache hit {avg_time*1000:.1f}ms exceeds 50ms target",
+                f"Average cache hit {avg_time * 1000:.1f}ms exceeds 50ms target",
             )
 
         finally:
@@ -306,19 +306,19 @@ def format_response(status, message):
             max_time = max(all_times)
 
             print(
-                f"Concurrent queries - Avg: {avg_time*1000:.1f}ms, Max: {max_time*1000:.1f}ms"
+                f"Concurrent queries - Avg: {avg_time * 1000:.1f}ms, Max: {max_time * 1000:.1f}ms"
             )
 
             self.assertLess(
                 avg_time,
                 0.1,  # 100ms average
-                f"Average concurrent query {avg_time*1000:.1f}ms exceeds 100ms",
+                f"Average concurrent query {avg_time * 1000:.1f}ms exceeds 100ms",
             )
 
             self.assertLess(
                 max_time,
                 0.2,  # 200ms max
-                f"Max concurrent query {max_time*1000:.1f}ms exceeds 200ms",
+                f"Max concurrent query {max_time * 1000:.1f}ms exceeds 200ms",
             )
 
         finally:
@@ -384,7 +384,7 @@ def format_response(status, message):
             conn.root.query(str(self.project_path), "test2", limit=5)
             reload_time = time.perf_counter() - start
 
-            print(f"Reload after eviction: {reload_time*1000:.1f}ms")
+            print(f"Reload after eviction: {reload_time * 1000:.1f}ms")
 
             # Status should show cache loaded again
             status = conn.root.get_status()
@@ -525,14 +525,14 @@ def new_function():
                 cache_time = time.perf_counter() - start
 
                 print(
-                    f"FTS - Load: {load_time*1000:.1f}ms, Cache: {cache_time*1000:.1f}ms"
+                    f"FTS - Load: {load_time * 1000:.1f}ms, Cache: {cache_time * 1000:.1f}ms"
                 )
 
                 # FTS cache should be very fast (<20ms)
                 self.assertLess(
                     cache_time,
                     0.02,  # 20ms for FTS
-                    f"FTS cache hit {cache_time*1000:.1f}ms exceeds 20ms",
+                    f"FTS cache hit {cache_time * 1000:.1f}ms exceeds 20ms",
                 )
 
         finally:

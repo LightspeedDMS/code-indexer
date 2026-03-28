@@ -146,9 +146,9 @@ class TestTemporalIndexerProgress:
 
         # Check that we're not getting hardcoded "1/5" values
         first_call = progress_calls[0]
-        assert (
-            first_call["total"] == 10
-        ), f"Expected total=10, got {first_call['total']}"
+        assert first_call["total"] == 10, (
+            f"Expected total=10, got {first_call['total']}"
+        )
         assert first_call["total"] != 5, "Still using hardcoded total of 5"
 
         # Check that progress increases
@@ -163,9 +163,9 @@ class TestTemporalIndexerProgress:
             assert "threads" in info, f"Missing 'threads' in info: {info}"
             # Story 1 AC requires emoji and hash-file format
             assert "📝" in info, f"Missing 📝 emoji in info: {info}"
-            assert (
-                " - " in info.split("📝")[-1] if "📝" in info else False
-            ), f"Missing 'hash - file' format after 📝: {info}"
+            assert " - " in info.split("📝")[-1] if "📝" in info else False, (
+                f"Missing 'hash - file' format after 📝: {info}"
+            )
 
             # Check format matches spec: "{current}/{total} commits ({pct}%) | {rate} commits/s | {threads} threads | 📝 {hash} - {file}"
             assert "/" in info, f"Missing current/total separator in info: {info}"
@@ -352,30 +352,30 @@ class TestTemporalIndexerProgress:
                 parts = info.split("📝")
                 if len(parts) > 1:
                     hash_file_part = parts[1].strip()
-                    assert (
-                        " - " in hash_file_part
-                    ), f"Missing 'hash - file' format: {info}"
+                    assert " - " in hash_file_part, (
+                        f"Missing 'hash - file' format: {info}"
+                    )
 
         # Verify progress counts are correct
         # First call is initialization with current=0, then 1,2,3,4,5 for each commit
         for i, call in enumerate(progress_calls):
             if i == 0:
                 # First call is initialization
-                assert (
-                    call["current"] == 0
-                ), f"First call should have current=0, got {call['current']}"
+                assert call["current"] == 0, (
+                    f"First call should have current=0, got {call['current']}"
+                )
             else:
                 # Subsequent calls should be 1,2,3,4,5
-                assert (
-                    call["current"] == i
-                ), f"Progress current should be {i}, got {call['current']}"
-            assert (
-                call["total"] == 5
-            ), f"Progress total should be 5, got {call['total']}"
+                assert call["current"] == i, (
+                    f"Progress current should be {i}, got {call['current']}"
+                )
+            assert call["total"] == 5, (
+                f"Progress total should be 5, got {call['total']}"
+            )
 
         # The shared state approach means we might see filenames with 100ms lag,
         # but they should be from actual diffs, not hardcoded "test.py"
         test_py_count = sum(1 for info in infos if "test.py" in info)
-        assert (
-            test_py_count == 0
-        ), f"Found {test_py_count} occurrences of hardcoded 'test.py' in progress info"
+        assert test_py_count == 0, (
+            f"Found {test_py_count} occurrences of hardcoded 'test.py' in progress info"
+        )

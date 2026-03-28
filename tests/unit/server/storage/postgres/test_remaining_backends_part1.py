@@ -143,9 +143,9 @@ class TestDescriptionRefreshTrackingPostgresBackend:
             "close",
         }
         for method in required:
-            assert hasattr(
-                DescriptionRefreshTrackingPostgresBackend, method
-            ), f"Missing method: {method}"
+            assert hasattr(DescriptionRefreshTrackingPostgresBackend, method), (
+                f"Missing method: {method}"
+            )
 
     def test_upsert_tracking_uses_percent_s(self) -> None:
         """upsert_tracking must use %s placeholders."""

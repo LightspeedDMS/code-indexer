@@ -321,9 +321,9 @@ class TestAdminCommandStructure:
             "change-password",
         ]
         for cmd in required_commands:
-            assert (
-                cmd in result.output
-            ), f"Command '{cmd}' not found in admin users group"
+            assert cmd in result.output, (
+                f"Command '{cmd}' not found in admin users group"
+            )
 
     @patch("code_indexer.disabled_commands.detect_current_mode")
     def test_all_three_jobs_commands_exist(self, mock_detect_mode, runner: CliRunner):
@@ -334,9 +334,9 @@ class TestAdminCommandStructure:
 
         required_commands = ["list", "stats", "cleanup"]
         for cmd in required_commands:
-            assert (
-                cmd in result.output
-            ), f"Command '{cmd}' not found in admin jobs group"
+            assert cmd in result.output, (
+                f"Command '{cmd}' not found in admin jobs group"
+            )
 
     @patch("code_indexer.disabled_commands.detect_current_mode")
     def test_admin_users_group_description(self, mock_detect_mode, runner: CliRunner):

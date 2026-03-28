@@ -37,6 +37,6 @@ class TestSemanticQueryManagerActualBugReproduction:
 
     def test_mock_elimination_success(self):
         """Confirm successful elimination of mock usage."""
-        assert (
-            True
-        ), "Mock-based tests successfully replaced with real implementation references"
+        assert True, (
+            "Mock-based tests successfully replaced with real implementation references"
+        )

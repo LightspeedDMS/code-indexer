@@ -83,9 +83,9 @@ class TestFTSBranchIsolationDeletesDocuments:
         )
 
         # delete_document should be called for file_c.py and file_d.py
-        assert (
-            mock_fts_manager.delete_document.call_count == 2
-        ), f"Expected 2 delete_document calls, got {mock_fts_manager.delete_document.call_count}"
+        assert mock_fts_manager.delete_document.call_count == 2, (
+            f"Expected 2 delete_document calls, got {mock_fts_manager.delete_document.call_count}"
+        )
         deleted_paths = {
             call_args[0][0]
             for call_args in mock_fts_manager.delete_document.call_args_list
@@ -117,9 +117,9 @@ class TestFTSBranchIsolationDeletesDocuments:
         )
 
         # commit should be called exactly once
-        assert (
-            mock_fts_manager.commit.call_count == 1
-        ), f"Expected commit() called once, got {mock_fts_manager.commit.call_count}"
+        assert mock_fts_manager.commit.call_count == 1, (
+            f"Expected commit() called once, got {mock_fts_manager.commit.call_count}"
+        )
 
         # And commit should be called AFTER the delete_document calls
         manager_calls = mock_fts_manager.mock_calls
@@ -128,9 +128,9 @@ class TestFTSBranchIsolationDeletesDocuments:
         ]
         commit_indices = [i for i, c in enumerate(manager_calls) if c[0] == "commit"]
         assert len(commit_indices) == 1, "Exactly one commit call expected"
-        assert all(
-            di < commit_indices[0] for di in delete_indices
-        ), "commit() should be called after all delete_document() calls"
+        assert all(di < commit_indices[0] for di in delete_indices), (
+            "commit() should be called after all delete_document() calls"
+        )
 
 
 class TestFTSBranchIsolationNoOpsWhenManagerNone:
@@ -259,9 +259,9 @@ class TestFTSBranchIsolationErrorHandling:
             call_args[0][0]
             for call_args in mock_fts_manager.delete_document.call_args_list
         }
-        assert (
-            len(delete_call_paths) >= 2
-        ), f"Expected at least 2 delete attempts, got {delete_call_paths}"
+        assert len(delete_call_paths) >= 2, (
+            f"Expected at least 2 delete attempts, got {delete_call_paths}"
+        )
 
     def test_commit_called_even_if_some_deletes_fail(self, tmp_path: Path):
         """commit() is still called even when some delete_document() calls fail."""
@@ -307,9 +307,9 @@ class TestFTSParameterSignature:
 
         processor = _make_processor(tmp_path)
         sig = inspect.signature(processor.hide_files_not_in_branch_thread_safe)
-        assert (
-            "fts_manager" in sig.parameters
-        ), "hide_files_not_in_branch_thread_safe() must accept fts_manager parameter"
+        assert "fts_manager" in sig.parameters, (
+            "hide_files_not_in_branch_thread_safe() must accept fts_manager parameter"
+        )
 
     def test_fts_manager_parameter_defaults_to_none(self, tmp_path: Path):
         """fts_manager parameter defaults to None in hide_files_not_in_branch_thread_safe()."""
@@ -319,6 +319,6 @@ class TestFTSParameterSignature:
         sig = inspect.signature(processor.hide_files_not_in_branch_thread_safe)
         param = sig.parameters.get("fts_manager")
         assert param is not None, "fts_manager parameter must exist"
-        assert (
-            param.default is None
-        ), f"fts_manager should default to None, got {param.default}"
+        assert param.default is None, (
+            f"fts_manager should default to None, got {param.default}"
+        )

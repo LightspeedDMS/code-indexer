@@ -195,6 +195,6 @@ class TestTemporalIndexerPointerPayloads:
 
         # Verify: added file payload has reconstruct_from_git marker
         added_payload = added_points[0]["payload"]
-        assert (
-            added_payload.get("reconstruct_from_git") is True
-        ), "Added file should have reconstruct_from_git=True"
+        assert added_payload.get("reconstruct_from_git") is True, (
+            "Added file should have reconstruct_from_git=True"
+        )

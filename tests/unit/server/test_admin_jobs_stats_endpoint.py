@@ -64,9 +64,9 @@ class TestAdminJobsStatsEndpoint:
             response = client.get("/api/admin/jobs/stats", headers=admin_headers)
 
             # Should not return 404
-            assert (
-                response.status_code != 404
-            ), f"Endpoint not found. Response: {response.text}"
+            assert response.status_code != 404, (
+                f"Endpoint not found. Response: {response.text}"
+            )
 
     @pytest.mark.xfail(
         reason="Auth mocking issue - first test works but this identical setup fails with 401"
@@ -160,6 +160,6 @@ class TestAdminJobsStatsEndpoint:
             data = response.json()
 
             # Verify total jobs count
-            assert (
-                data["total_jobs"] == 3
-            ), f"Expected 3 total jobs, got {data['total_jobs']}"
+            assert data["total_jobs"] == 3, (
+                f"Expected 3 total jobs, got {data['total_jobs']}"
+            )

@@ -103,9 +103,9 @@ class TestAssignInitialSpread:
         updated = registry.list_global_repos()
         next_refreshes = [float(r["next_refresh"]) for r in updated]
 
-        assert len(set(next_refreshes)) == len(
-            next_refreshes
-        ), "Expected all repos to have distinct next_refresh timestamps"
+        assert len(set(next_refreshes)) == len(next_refreshes), (
+            "Expected all repos to have distinct next_refresh timestamps"
+        )
 
     def test_all_initial_offsets_are_in_future(self, tmp_path):
         """All assigned next_refresh values are strictly in the future (> now)."""
@@ -120,9 +120,9 @@ class TestAssignInitialSpread:
 
         for repo in registry.list_global_repos():
             next_refresh = float(repo["next_refresh"])
-            assert (
-                next_refresh > now
-            ), f"Repo {repo['alias_name']} has next_refresh in the past"
+            assert next_refresh > now, (
+                f"Repo {repo['alias_name']} has next_refresh in the past"
+            )
 
     def test_empty_list_does_not_raise(self, tmp_path):
         """_assign_initial_spread() with empty list does not raise."""
@@ -150,12 +150,12 @@ class TestAssignInitialSpread:
 
         for repo in registry.list_global_repos():
             next_refresh = float(repo["next_refresh"])
-            assert (
-                next_refresh >= before + spacing - 1
-            ), f"next_refresh {next_refresh} too early (< before+spacing)"
-            assert (
-                next_refresh <= after + refresh_interval + 1
-            ), f"next_refresh {next_refresh} too far in future"
+            assert next_refresh >= before + spacing - 1, (
+                f"next_refresh {next_refresh} too early (< before+spacing)"
+            )
+            assert next_refresh <= after + refresh_interval + 1, (
+                f"next_refresh {next_refresh} too far in future"
+            )
 
     def test_initial_spread_persists_to_registry(self, tmp_path):
         """
@@ -165,16 +165,16 @@ class TestAssignInitialSpread:
         _register_git_repo(golden_repos_dir, registry, "my-repo")
 
         repos = registry.list_global_repos()
-        assert (
-            repos[0].get("next_refresh") is None
-        ), "Repo should start without next_refresh"
+        assert repos[0].get("next_refresh") is None, (
+            "Repo should start without next_refresh"
+        )
 
         scheduler._assign_initial_spread(repos, 3600)
 
         updated = registry.list_global_repos()
-        assert (
-            updated[0]["next_refresh"] is not None
-        ), "next_refresh should be set after _assign_initial_spread()"
+        assert updated[0]["next_refresh"] is not None, (
+            "next_refresh should be set after _assign_initial_spread()"
+        )
 
 
 class TestNewRepoInitialOffset:
@@ -238,9 +238,9 @@ class TestNewRepoInitialOffset:
                 continue
             scheduler._submit_refresh_job(alias_name)
 
-        assert (
-            "new-repo-global" not in submitted_aliases
-        ), "Newly spread repo should NOT be submitted in the same cycle"
+        assert "new-repo-global" not in submitted_aliases, (
+            "Newly spread repo should NOT be submitted in the same cycle"
+        )
 
     def test_local_repo_excluded_from_spread(self, tmp_path):
         """Local repos (non-git URLs) are excluded from initial spread."""

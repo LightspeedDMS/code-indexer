@@ -195,7 +195,9 @@ class TestWatchMultiplexing(unittest.TestCase):
         processes = {}
         for i, repo in enumerate(self.repos[:2]):
             proc = Mock()
-            proc.stdout = StringIO(f"Line 1 from repo{i+1}\nLine 2 from repo{i+1}\n")
+            proc.stdout = StringIO(
+                f"Line 1 from repo{i + 1}\nLine 2 from repo{i + 1}\n"
+            )
             processes[repo] = proc
 
         multiplexer = OutputMultiplexer(processes)

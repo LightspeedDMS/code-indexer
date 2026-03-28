@@ -71,17 +71,17 @@ class TestFileContentPaginationE2E:
         """Create test files with controlled line counts."""
         # Small file (100 lines) - under default limit
         small_file = self.repo_path / "small.py"
-        lines = [f"# Small file line {i+1}\n" for i in range(100)]
+        lines = [f"# Small file line {i + 1}\n" for i in range(100)]
         small_file.write_text("".join(lines))
 
         # Medium file (600 lines) - over default limit but under max
         medium_file = self.repo_path / "medium.py"
-        lines = [f"# Medium file line {i+1}\n" for i in range(600)]
+        lines = [f"# Medium file line {i + 1}\n" for i in range(600)]
         medium_file.write_text("".join(lines))
 
         # Large file (2000 lines) - well over default limit
         large_file = self.repo_path / "large.py"
-        lines = [f"# Large file line {i+1}\n" for i in range(2000)]
+        lines = [f"# Large file line {i + 1}\n" for i in range(2000)]
         large_file.write_text("".join(lines))
 
     def test_small_file_returns_all_content(self):
@@ -221,9 +221,9 @@ class TestFileContentPaginationE2E:
         )
 
         content_lines = result["content"].strip().split("\n")
-        assert (
-            len(content_lines) == 5000
-        ), f"Expected 5000 (capped at MAX_ALLOWED_LIMIT), got {len(content_lines)}"
+        assert len(content_lines) == 5000, (
+            f"Expected 5000 (capped at MAX_ALLOWED_LIMIT), got {len(content_lines)}"
+        )
 
         metadata = result["metadata"]
         assert metadata["returned_lines"] == 5000

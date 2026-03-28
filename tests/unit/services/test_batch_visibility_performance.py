@@ -485,9 +485,9 @@ class TestFetchAllContentPoints:
         processor._fetch_all_content_points("test_collection")
 
         call_kwargs = processor.vector_store_client.scroll_points.call_args[1]
-        assert (
-            call_kwargs.get("with_vectors") is False
-        ), "with_vectors must be False to avoid loading large vector arrays into memory"
+        assert call_kwargs.get("with_vectors") is False, (
+            "with_vectors must be False to avoid loading large vector arrays into memory"
+        )
 
     def test_calls_scroll_points_with_content_type_filter(self, tmp_path):
         """
@@ -512,7 +512,9 @@ class TestFetchAllContentPoints:
             and clause.get("match", {}).get("value") == "content"
             for clause in must_clauses
         )
-        assert found_type_filter, "filter_conditions must include type=content filter to exclude metadata points"
+        assert found_type_filter, (
+            "filter_conditions must include type=content filter to exclude metadata points"
+        )
 
     def test_calls_scroll_points_with_limit_5000(self, tmp_path):
         """

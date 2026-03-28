@@ -62,9 +62,9 @@ async def test_sync_handler_dispatched_via_run_in_executor():
     )
 
     assert result == {"ok": True}
-    assert (
-        len(handler_thread_id_container) == 1
-    ), "handler must have been called exactly once"
+    assert len(handler_thread_id_container) == 1, (
+        "handler must have been called exactly once"
+    )
     handler_thread_id = handler_thread_id_container[0]
     assert handler_thread_id != event_loop_thread_id, (
         "Sync handler must run on a worker thread, not the event loop thread. "
@@ -165,9 +165,9 @@ async def test_async_handler_awaited_directly():
     assert result == {"async": True}
     assert len(handler_thread_id_container) == 1
     # Async handler must stay on the event loop thread
-    assert (
-        handler_thread_id_container[0] == event_loop_thread_id
-    ), "Async handler should run on the event loop thread (awaited directly)."
+    assert handler_thread_id_container[0] == event_loop_thread_id, (
+        "Async handler should run on the event loop thread (awaited directly)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +198,9 @@ async def test_async_handler_with_session_state_awaited_directly():
 
     assert result is session_state
     assert len(handler_thread_id_container) == 1
-    assert (
-        handler_thread_id_container[0] == event_loop_thread_id
-    ), "Async handler should run on the event loop thread (awaited directly)."
+    assert handler_thread_id_container[0] == event_loop_thread_id, (
+        "Async handler should run on the event loop thread (awaited directly)."
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -403,9 +403,9 @@ class TestIndexDaemonAutoStartIntegration:
             # ASSERTIONS: Complete workflow executed correctly
             assert mock_cleanup.called, "Expected socket cleanup before restart"
             assert mock_start_daemon.called, "Expected daemon auto-start"
-            assert (
-                mock_connect.call_count == 2
-            ), "Expected 2 connection attempts (fail, then succeed)"
+            assert mock_connect.call_count == 2, (
+                "Expected 2 connection attempts (fail, then succeed)"
+            )
             assert result == 0, "Expected successful indexing after auto-start"
 
     def test_index_full_workflow_all_retries_fail_to_standalone(self):
@@ -453,6 +453,6 @@ class TestIndexDaemonAutoStartIntegration:
             # ASSERTIONS: Retry sequence, then fallback
             assert mock_start_daemon.call_count == 2, "Expected 2 daemon start attempts"
             assert mock_connect.call_count == 3, "Expected 3 connection attempts"
-            assert (
-                mock_standalone.called
-            ), "Expected fallback to standalone after retries exhausted"
+            assert mock_standalone.called, (
+                "Expected fallback to standalone after retries exhausted"
+            )

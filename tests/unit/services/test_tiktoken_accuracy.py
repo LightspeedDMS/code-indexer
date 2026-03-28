@@ -59,9 +59,9 @@ class TestTiktokenAccuracy:
         print(f"  Tokens per word: {word_ratio:.2f}")
 
         # XML should be much denser than plain text
-        assert (
-            word_ratio >= 1.5
-        ), f"XML should be >1.5 tokens per word, got {word_ratio}"
+        assert word_ratio >= 1.5, (
+            f"XML should be >1.5 tokens per word, got {word_ratio}"
+        )
         assert char_ratio <= 4.0, f"XML should be ≤4 chars per token, got {char_ratio}"
 
     def test_dense_html_tokenization(self, tokenizer):
@@ -98,9 +98,9 @@ class TestTiktokenAccuracy:
             1.8,
             4.5,
         )  # chars per token - updated to match real measurements
-        assert (
-            expected_range[0] <= chars_per_token <= expected_range[1]
-        ), f"Dense HTML chars per token should be {expected_range}, got {chars_per_token}"
+        assert expected_range[0] <= chars_per_token <= expected_range[1], (
+            f"Dense HTML chars per token should be {expected_range}, got {chars_per_token}"
+        )
 
     def test_chunk_size_scenarios(self, tokenizer):
         """Test token counts for different chunk sizes to validate batch limits."""
@@ -132,9 +132,9 @@ class TestTiktokenAccuracy:
             results.append((description, token_count))
 
             # Validate against expected range
-            assert (
-                expected_range[0] <= token_count <= expected_range[1]
-            ), f"{description} should have {expected_range} tokens, got {token_count}"
+            assert expected_range[0] <= token_count <= expected_range[1], (
+                f"{description} should have {expected_range} tokens, got {token_count}"
+            )
 
     def test_your_error_scenario_simulation(self, tokenizer):
         """Simulate the exact scenario from your 187K token error."""
@@ -166,7 +166,7 @@ class TestTiktokenAccuracy:
             chunks.append(chunk_content)
             total_tokens += chunk_tokens
 
-            print(f"Chunk {i+1}: {len(chunk_content)} chars → {chunk_tokens} tokens")
+            print(f"Chunk {i + 1}: {len(chunk_content)} chars → {chunk_tokens} tokens")
 
             # Stop when we approach your error scenario
             if total_tokens > 180_000:

@@ -51,7 +51,7 @@ class HNSWIndexManager:
 
         if space not in self.VALID_SPACES:
             raise ValueError(
-                f"Invalid space metric: {space}. " f"Must be one of {self.VALID_SPACES}"
+                f"Invalid space metric: {space}. Must be one of {self.VALID_SPACES}"
             )
 
         self.vector_dim = vector_dim

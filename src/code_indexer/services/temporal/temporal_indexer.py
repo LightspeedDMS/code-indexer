@@ -269,7 +269,7 @@ class TemporalIndexer:
             indexed_count = len(commits_from_git) - len(missing_commits)
             logger.info(
                 f"Reconciliation complete: {indexed_count} indexed, "
-                f"{len(missing_commits)} missing ({indexed_count*100//(len(commits_from_git) or 1)}% complete)"
+                f"{len(missing_commits)} missing ({indexed_count * 100 // (len(commits_from_git) or 1)}% complete)"
             )
 
             # Replace commits_from_git with only missing commits
@@ -819,7 +819,7 @@ class TemporalIndexer:
                                                 else:  # transient
                                                     delay = self.RETRY_DELAYS[attempt]
                                                     logger.warning(
-                                                        f"Commit {commit.hash[:8]}: Batch {batch_num} retry {attempt+1}/{self.MAX_RETRIES} "
+                                                        f"Commit {commit.hash[:8]}: Batch {batch_num} retry {attempt + 1}/{self.MAX_RETRIES} "
                                                         f"in {delay}s: {batch_result.error}"
                                                     )
 

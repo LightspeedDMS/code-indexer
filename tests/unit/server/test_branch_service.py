@@ -258,20 +258,20 @@ class TestBranchService:
     def test_branch_service_has_close_method(self):
         """Test that BranchService has proper resource cleanup method."""
         # This test will fail until close() method is implemented
-        assert hasattr(
-            self.branch_service, "close"
-        ), "BranchService must have close() method"
+        assert hasattr(self.branch_service, "close"), (
+            "BranchService must have close() method"
+        )
         assert callable(self.branch_service.close), "close() must be callable"
 
     def test_branch_service_has_context_manager_support(self):
         """Test that BranchService supports context manager protocol."""
         # This test will fail until __enter__ and __exit__ are implemented
-        assert hasattr(
-            self.branch_service, "__enter__"
-        ), "BranchService must have __enter__"
-        assert hasattr(
-            self.branch_service, "__exit__"
-        ), "BranchService must have __exit__"
+        assert hasattr(self.branch_service, "__enter__"), (
+            "BranchService must have __enter__"
+        )
+        assert hasattr(self.branch_service, "__exit__"), (
+            "BranchService must have __exit__"
+        )
 
         # Test context manager usage
         temp_dir = Path(tempfile.mkdtemp())
@@ -313,9 +313,9 @@ class TestBranchService:
             service = BranchService(git_service, IndexStatusManagerForTesting())
 
             # Service should have __del__ method for cleanup
-            assert hasattr(
-                service, "__del__"
-            ), "BranchService must have __del__ for cleanup"
+            assert hasattr(service, "__del__"), (
+                "BranchService must have __del__ for cleanup"
+            )
         finally:
             shutil.rmtree(temp_dir)
 
@@ -399,9 +399,9 @@ class TestBranchService:
         for malicious_name in malicious_names:
             # BranchService should have validation method
             if hasattr(self.branch_service, "_validate_branch_name"):
-                assert not self.branch_service._validate_branch_name(
-                    malicious_name
-                ), f"Branch name '{malicious_name}' should be rejected"
+                assert not self.branch_service._validate_branch_name(malicious_name), (
+                    f"Branch name '{malicious_name}' should be rejected"
+                )
 
     def test_subprocess_replacement_with_gitpython_native(self):
         """Test that subprocess calls are replaced with GitPython native methods."""

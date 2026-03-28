@@ -65,25 +65,25 @@ class TestJobDatetimeSorting:
         recent_jobs = self.manager.get_recent_jobs_with_filter(time_filter="24h")
 
         # Verify we got jobs back
-        assert (
-            len(recent_jobs) >= 3
-        ), f"Expected at least 3 jobs, got {len(recent_jobs)}"
+        assert len(recent_jobs) >= 3, (
+            f"Expected at least 3 jobs, got {len(recent_jobs)}"
+        )
 
         # Verify they are sorted by completion time (newest first)
         for i in range(len(recent_jobs) - 1):
             current_time = recent_jobs[i]["completed_at"]
             next_time = recent_jobs[i + 1]["completed_at"]
             # Both should be ISO format strings
-            assert isinstance(
-                current_time, str
-            ), f"Expected string, got {type(current_time)}"
+            assert isinstance(current_time, str), (
+                f"Expected string, got {type(current_time)}"
+            )
             assert isinstance(next_time, str), f"Expected string, got {type(next_time)}"
             # Current should be >= next (descending order)
             current_dt = datetime.fromisoformat(current_time)
             next_dt = datetime.fromisoformat(next_time)
-            assert (
-                current_dt >= next_dt
-            ), f"Jobs not sorted correctly: {current_time} < {next_time}"
+            assert current_dt >= next_dt, (
+                f"Jobs not sorted correctly: {current_time} < {next_time}"
+            )
 
     def test_get_recent_jobs_handles_none_completed_at(self):
         """Test that sorting handles jobs with None completed_at gracefully."""
@@ -151,6 +151,6 @@ class TestJobDatetimeSorting:
             # Should be parseable as ISO format
             dt = datetime.fromisoformat(completed_at)
             # Should be timezone aware
-            assert (
-                dt.tzinfo is not None
-            ), f"Expected timezone-aware datetime, got {completed_at}"
+            assert dt.tzinfo is not None, (
+                f"Expected timezone-aware datetime, got {completed_at}"
+            )

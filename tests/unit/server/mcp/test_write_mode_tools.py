@@ -199,9 +199,9 @@ class TestHandleEnterWriteMode:
         # No marker file must be created
         write_mode_dir = golden_repos_dir / ".write_mode"
         if write_mode_dir.exists():
-            assert (
-                list(write_mode_dir.iterdir()) == []
-            ), "No marker files must be created for no-op"
+            assert list(write_mode_dir.iterdir()) == [], (
+                "No marker files must be created for no-op"
+            )
 
     def test_returns_error_when_lock_already_held(
         self, mock_refresh_scheduler, golden_repos_dir, cidx_meta_source
@@ -447,9 +447,9 @@ class TestHandleExitWriteMode:
         assert not marker.exists(), "Marker must be cleaned up even when refresh fails"
 
         # Lock must be released despite the refresh failure
-        assert not mock_refresh_scheduler.write_lock_manager.is_locked(
-            "cidx-meta"
-        ), "Write lock must be released even when refresh fails"
+        assert not mock_refresh_scheduler.write_lock_manager.is_locked("cidx-meta"), (
+            "Write lock must be released even when refresh fails"
+        )
 
 
 # ===========================================================================
@@ -511,9 +511,9 @@ class TestAliasManagerReadAliasWithWriteMode:
         marker_file.write_text("{ this is not valid json !!!")
 
         result = alias_manager.read_alias("cidx-meta-global")
-        assert (
-            result == "/versioned/path/cidx-meta/v_123"
-        ), "Should fall back on corrupt marker"
+        assert result == "/versioned/path/cidx-meta/v_123", (
+            "Should fall back on corrupt marker"
+        )
 
     def test_falls_back_when_marker_missing_source_path(
         self, alias_manager, golden_repos_dir
@@ -532,9 +532,9 @@ class TestAliasManagerReadAliasWithWriteMode:
         )
 
         result = alias_manager.read_alias("cidx-meta-global")
-        assert (
-            result == "/versioned/path/cidx-meta/v_123"
-        ), "Should fall back when source_path missing"
+        assert result == "/versioned/path/cidx-meta/v_123", (
+            "Should fall back when source_path missing"
+        )
 
     def test_no_marker_dir_does_not_break_read_alias(
         self, alias_manager, golden_repos_dir
@@ -732,8 +732,8 @@ class TestFileCRUDServiceWriteModeEnforcement:
                     )
                 except PermissionError as e:
                     # Ensure it's NOT the write-mode PermissionError
-                    assert (
-                        "write mode" not in str(e).lower()
-                    ), f"Non-write-exception repo should not be gated by write mode, got: {e}"
+                    assert "write mode" not in str(e).lower(), (
+                        f"Non-write-exception repo should not be gated by write mode, got: {e}"
+                    )
                 except Exception:
                     pass  # Other errors are acceptable

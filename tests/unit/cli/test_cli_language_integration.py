@@ -23,9 +23,9 @@ class TestCLILanguageParameterDeclaration:
 
         # Check if languages parameter exists in the command params
         language_params = [p for p in query_cmd.params if p.name == "languages"]
-        assert (
-            len(language_params) > 0
-        ), "Query command should have --language parameter"
+        assert len(language_params) > 0, (
+            "Query command should have --language parameter"
+        )
 
         # Verify it's a multi-value option
         language_param = language_params[0]
@@ -46,9 +46,9 @@ class TestCLILanguageParameterDeclaration:
         if language_params:
             language_param = language_params[0]
             # When multiple=True, Click converts to tuple
-            assert (
-                language_param.multiple
-            ), "Language parameter should support multiple values"
+            assert language_param.multiple, (
+                "Language parameter should support multiple values"
+            )
 
 
 class TestLanguageParameterEdgeCases:
@@ -64,9 +64,9 @@ class TestLanguageParameterEdgeCases:
         languages_tuple = ()
         languages_list = list(languages_tuple) if languages_tuple else None
 
-        assert (
-            languages_list is None or languages_list == []
-        ), "Empty tuple should convert to None or empty list"
+        assert languages_list is None or languages_list == [], (
+            "Empty tuple should convert to None or empty list"
+        )
 
     def test_multiple_languages_tuple_to_list_conversion(self):
         """

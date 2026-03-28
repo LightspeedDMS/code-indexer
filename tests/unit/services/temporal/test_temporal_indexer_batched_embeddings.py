@@ -186,7 +186,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             print("\nFAILING: Too many API calls! Should batch all diffs together.")
             print("Batch details:")
             for i, batch in enumerate(submitted_batches):
-                print(f"  Batch {i+1}: {len(batch)} chunks")
+                print(f"  Batch {i + 1}: {len(batch)} chunks")
 
         # After fix, this should pass
         self.assertLessEqual(

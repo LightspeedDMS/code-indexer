@@ -221,9 +221,9 @@ class TestSecureCredentialStorage:
 
         # Verify permissions were fixed to 600
         file_mode = creds_file.stat().st_mode
-        assert not (
-            file_mode & 0o077
-        ), f"File should have secure permissions (600), but has {oct(file_mode)}"
+        assert not (file_mode & 0o077), (
+            f"File should have secure permissions (600), but has {oct(file_mode)}"
+        )
 
     def test_credentials_file_location(self):
         """Test credentials are stored in correct location (.code-indexer/.creds)."""

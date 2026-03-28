@@ -21,9 +21,9 @@ class TestCLIRebuildFTSIndex:
         runner = CliRunner()
 
         result = runner.invoke(cli, ["index", "--help"])
-        assert (
-            "--rebuild-fts-index" in result.output
-        ), "The --rebuild-fts-index flag should be available in index command help"
+        assert "--rebuild-fts-index" in result.output, (
+            "The --rebuild-fts-index flag should be available in index command help"
+        )
 
     def test_rebuild_fts_index_help_text(self):
         """Test that --rebuild-fts-index has appropriate help text."""
@@ -71,9 +71,9 @@ class TestCLIRebuildFTSIndexE2E:
         )
 
         if expect_failure:
-            assert (
-                result.returncode != 0
-            ), f"Command should have failed: {' '.join(cmd)}"
+            assert result.returncode != 0, (
+                f"Command should have failed: {' '.join(cmd)}"
+            )
 
         return result
 
@@ -82,9 +82,9 @@ class TestCLIRebuildFTSIndexE2E:
         result = self.run_cli_command(["index", "--help"], timeout=10)
 
         # Check if help contains the flag
-        assert (
-            "--rebuild-fts-index" in result.stdout
-        ), "The --rebuild-fts-index flag should be in help output"
+        assert "--rebuild-fts-index" in result.stdout, (
+            "The --rebuild-fts-index flag should be in help output"
+        )
 
     def test_rebuild_fts_index_flag_no_value_error(self):
         """Test that --rebuild-fts-index doesn't require a value."""
@@ -96,9 +96,9 @@ class TestCLIRebuildFTSIndexE2E:
 
         # Verify --rebuild-fts-index is a flag (not requiring a value)
         assert "--rebuild-fts-index" in result.output, "Flag should exist"
-        assert (
-            "--rebuild-fts-index VALUE" not in result.output
-        ), "Flag should not require a value"
-        assert (
-            "--rebuild-fts-index [" not in result.output
-        ), "Flag should not have optional value syntax"
+        assert "--rebuild-fts-index VALUE" not in result.output, (
+            "Flag should not require a value"
+        )
+        assert "--rebuild-fts-index [" not in result.output, (
+            "Flag should not have optional value syntax"
+        )

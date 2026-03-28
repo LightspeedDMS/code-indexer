@@ -109,9 +109,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 0
-        ), f"Expected no warnings for default params, got: {filter_warnings}"
+        assert len(filter_warnings) == 0, (
+            f"Expected no warnings for default params, got: {filter_warnings}"
+        )
 
     def test_no_warning_for_none_accuracy(
         self, query_manager, mock_non_composite_repo, caplog
@@ -154,9 +154,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 0
-        ), f"Expected no warnings for None accuracy, got: {filter_warnings}"
+        assert len(filter_warnings) == 0, (
+            f"Expected no warnings for None accuracy, got: {filter_warnings}"
+        )
 
     def test_warning_for_explicit_path_filter(
         self, query_manager, mock_non_composite_repo, caplog
@@ -200,9 +200,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 1
-        ), f"Expected 1 warning for path_filter, got {len(filter_warnings)}: {filter_warnings}"
+        assert len(filter_warnings) == 1, (
+            f"Expected 1 warning for path_filter, got {len(filter_warnings)}: {filter_warnings}"
+        )
         assert "path_filter=*/tests/*" in filter_warnings[0]
 
     def test_warning_for_explicit_language_filter(
@@ -246,9 +246,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 1
-        ), f"Expected 1 warning for language, got {len(filter_warnings)}: {filter_warnings}"
+        assert len(filter_warnings) == 1, (
+            f"Expected 1 warning for language, got {len(filter_warnings)}: {filter_warnings}"
+        )
         assert "language=python" in filter_warnings[0]
 
     def test_warning_for_non_default_accuracy(
@@ -293,9 +293,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 1
-        ), f"Expected 1 warning for accuracy=high, got {len(filter_warnings)}: {filter_warnings}"
+        assert len(filter_warnings) == 1, (
+            f"Expected 1 warning for accuracy=high, got {len(filter_warnings)}: {filter_warnings}"
+        )
         assert "accuracy=high" in filter_warnings[0]
 
     def test_warning_for_exclude_language(
@@ -336,9 +336,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 1
-        ), f"Expected 1 warning for exclude_language, got {len(filter_warnings)}"
+        assert len(filter_warnings) == 1, (
+            f"Expected 1 warning for exclude_language, got {len(filter_warnings)}"
+        )
         assert "exclude_language=java" in filter_warnings[0]
 
     def test_warning_for_exclude_path(
@@ -379,9 +379,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 1
-        ), f"Expected 1 warning for exclude_path, got {len(filter_warnings)}"
+        assert len(filter_warnings) == 1, (
+            f"Expected 1 warning for exclude_path, got {len(filter_warnings)}"
+        )
         assert "exclude_path=*/node_modules/*" in filter_warnings[0]
 
     def test_warning_for_hybrid_mode_with_default_params(
@@ -426,9 +426,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 0
-        ), f"Expected no warnings for hybrid mode with defaults, got: {filter_warnings}"
+        assert len(filter_warnings) == 0, (
+            f"Expected no warnings for hybrid mode with defaults, got: {filter_warnings}"
+        )
 
     def test_no_warning_for_fts_mode(
         self, query_manager, mock_non_composite_repo, caplog
@@ -464,9 +464,9 @@ class TestWarningLogConditions:
             if "Advanced filter parameters" in m
             or "are not supported for non-composite" in m
         ]
-        assert (
-            len(filter_warnings) == 0
-        ), f"Expected no warnings for FTS mode, got: {filter_warnings}"
+        assert len(filter_warnings) == 0, (
+            f"Expected no warnings for FTS mode, got: {filter_warnings}"
+        )
 
     def test_multiple_explicit_filters_single_warning(
         self, query_manager, mock_non_composite_repo, caplog
@@ -507,9 +507,9 @@ class TestWarningLogConditions:
             or "are not supported for non-composite" in m
         ]
         # Should still be just ONE warning, listing all the filters
-        assert (
-            len(filter_warnings) == 1
-        ), f"Expected 1 warning for multiple filters, got {len(filter_warnings)}"
+        assert len(filter_warnings) == 1, (
+            f"Expected 1 warning for multiple filters, got {len(filter_warnings)}"
+        )
         # Verify all filters are mentioned in the warning
         assert "language=python" in filter_warnings[0]
         assert "exclude_language=java" in filter_warnings[0]

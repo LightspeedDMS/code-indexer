@@ -133,15 +133,15 @@ class TestDaemonCacheUsage:
         # CRITICAL ASSERTION: Verify BUG EXISTS - VectorStore IS being instantiated
         # when it should use cached HNSW index directly
         # After fix: This assertion should be inverted (assert init_call_count[0] == 0)
-        assert (
-            init_call_count[0] == 1
-        ), f"BUG VERIFICATION: Should create vector store (proving cache bypass) but got {init_call_count[0]} calls"
+        assert init_call_count[0] == 1, (
+            f"BUG VERIFICATION: Should create vector store (proving cache bypass) but got {init_call_count[0]} calls"
+        )
 
         # Additionally verify BUG: cached index's knn_query is NOT called
         # After fix: This should pass (knn_query.assert_called_once())
-        assert (
-            mock_hnsw_index.knn_query.call_count == 0
-        ), f"BUG VERIFICATION: Cached index should NOT be used (proving bug) but was called {mock_hnsw_index.knn_query.call_count} times"
+        assert mock_hnsw_index.knn_query.call_count == 0, (
+            f"BUG VERIFICATION: Cached index should NOT be used (proving bug) but was called {mock_hnsw_index.knn_query.call_count} times"
+        )
 
     def test_fts_search_should_use_cached_tantivy_searcher_not_reopen_index(
         self, daemon_service, mock_project_path
@@ -192,9 +192,9 @@ class TestDaemonCacheUsage:
                 # CRITICAL ASSERTION: Index.open should NOT be called
                 # because we should use cached index directly
                 # This will FAIL with original implementation
-                assert (
-                    mock_index_open.call_count == 0
-                ), f"Should use cached Tantivy index, not call Index.open() ({mock_index_open.call_count} times)"
+                assert mock_index_open.call_count == 0, (
+                    f"Should use cached Tantivy index, not call Index.open() ({mock_index_open.call_count} times)"
+                )
 
         except ImportError:
             # Tantivy not installed, skip this test

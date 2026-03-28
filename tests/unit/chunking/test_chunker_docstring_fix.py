@@ -92,17 +92,17 @@ def another_function_that_might_create_fragments():
                 for chunk in tiny_chunks:
                     print(f"  Size: {chunk['size']}, Content: {repr(chunk['text'])}")
 
-            assert (
-                len(tiny_chunks) == 0
-            ), f"Found {len(tiny_chunks)} tiny chunks under 100 bytes"
+            assert len(tiny_chunks) == 0, (
+                f"Found {len(tiny_chunks)} tiny chunks under 100 bytes"
+            )
 
             # Verify chunks contain meaningful content
             for chunk in chunks:
                 content = chunk["text"].strip()
                 # Each chunk should contain substantial content, not just delimiters
-                assert (
-                    len(content) >= 100
-                ), f"Chunk too small ({len(content)} chars): {repr(content[:50])}"
+                assert len(content) >= 100, (
+                    f"Chunk too small ({len(content)} chars): {repr(content[:50])}"
+                )
 
                 # Should not be just docstring delimiters or keywords
                 problematic_content = [
@@ -112,9 +112,9 @@ def another_function_that_might_create_fragments():
                     "'''",
                     "def",
                 ]
-                assert (
-                    content not in problematic_content
-                ), f"Chunk should not be just delimiter/keyword: {repr(content)}"
+                assert content not in problematic_content, (
+                    f"Chunk should not be just delimiter/keyword: {repr(content)}"
+                )
         finally:
             temp_path.unlink()
 
@@ -163,18 +163,18 @@ def another_function():
             ):
                 complete_function_chunks.append(chunk)
 
-        assert (
-            len(complete_function_chunks) > 0
-        ), "Function docstring should stay with function definition"
+        assert len(complete_function_chunks) > 0, (
+            "Function docstring should stay with function definition"
+        )
 
     def test_class_docstring_stays_with_class(self):
         """Test that class docstrings stay together with their class definitions."""
         python_code = '''class ClaudeIntegrationService:
     """Service for integrating Claude Code SDK with semantic search results.
-    
-    This class provides comprehensive integration between Claude AI and 
+
+    This class provides comprehensive integration between Claude AI and
     semantic search capabilities for intelligent code analysis.
-    
+
     Attributes:
         codebase_dir: Root directory of the codebase
         context_extractor: Extracts relevant code contexts
@@ -202,9 +202,9 @@ def another_function():
             ):
                 class_chunks.append(chunk)
 
-        assert (
-            len(class_chunks) > 0
-        ), "Class docstring should stay with class definition"
+        assert len(class_chunks) > 0, (
+            "Class docstring should stay with class definition"
+        )
 
     def test_module_docstring_handling(self):
         """Test that module-level docstrings are handled properly."""
@@ -235,12 +235,12 @@ def first_function():
 
         for chunk in module_docstring_chunks:
             # Should be substantial, not just the opening """
-            assert (
-                chunk["size"] > 100
-            ), f"Module docstring chunk too small: {chunk['size']} bytes"
-            assert (
-                "comprehensive description" in chunk["text"]
-            ), "Should contain full docstring content"
+            assert chunk["size"] > 100, (
+                f"Module docstring chunk too small: {chunk['size']} bytes"
+            )
+            assert "comprehensive description" in chunk["text"], (
+                "Should contain full docstring content"
+            )
 
     def test_no_empty_or_whitespace_only_chunks(self):
         """Test that no empty or whitespace-only chunks are created."""
@@ -251,7 +251,7 @@ import logging
 
 class TestClass:
     """Class docstring."""
-    
+
     def method(self):
         """Method docstring."""
         pass
@@ -279,6 +279,6 @@ class TestClass:
             )
             docstring_content = '"""' in content or "'''" in content
 
-            assert (
-                meaningful_content or docstring_content
-            ), f"Chunk should contain meaningful content: {repr(content[:100])}"
+            assert meaningful_content or docstring_content, (
+                f"Chunk should contain meaningful content: {repr(content[:100])}"
+            )

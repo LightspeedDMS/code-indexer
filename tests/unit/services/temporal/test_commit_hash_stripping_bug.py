@@ -108,26 +108,26 @@ class TestCommitHashStrippingBug:
         commit_hash = commits[0].hash
 
         # CRITICAL: These assertions will FAIL with the current buggy code
-        assert not commit_hash.startswith(
-            "\n"
-        ), f"BUG #1: Commit hash starts with newline: {repr(commit_hash)}"
-        assert not commit_hash.endswith(
-            "\n"
-        ), f"BUG #1: Commit hash ends with newline: {repr(commit_hash)}"
-        assert not commit_hash.startswith(
-            " "
-        ), f"BUG #1: Commit hash starts with space: {repr(commit_hash)}"
-        assert not commit_hash.endswith(
-            " "
-        ), f"BUG #1: Commit hash ends with space: {repr(commit_hash)}"
+        assert not commit_hash.startswith("\n"), (
+            f"BUG #1: Commit hash starts with newline: {repr(commit_hash)}"
+        )
+        assert not commit_hash.endswith("\n"), (
+            f"BUG #1: Commit hash ends with newline: {repr(commit_hash)}"
+        )
+        assert not commit_hash.startswith(" "), (
+            f"BUG #1: Commit hash starts with space: {repr(commit_hash)}"
+        )
+        assert not commit_hash.endswith(" "), (
+            f"BUG #1: Commit hash ends with space: {repr(commit_hash)}"
+        )
 
         # Verify it's a valid 40-character SHA-1 hash
-        assert (
-            len(commit_hash) == 40
-        ), f"Commit hash should be 40 chars, got {len(commit_hash)}: {repr(commit_hash)}"
-        assert all(
-            c in "0123456789abcdef" for c in commit_hash
-        ), f"Commit hash should be hex only: {repr(commit_hash)}"
+        assert len(commit_hash) == 40, (
+            f"Commit hash should be 40 chars, got {len(commit_hash)}: {repr(commit_hash)}"
+        )
+        assert all(c in "0123456789abcdef" for c in commit_hash), (
+            f"Commit hash should be hex only: {repr(commit_hash)}"
+        )
 
     def test_parent_hashes_should_also_be_stripped(self, tmp_path):
         """
@@ -211,20 +211,20 @@ class TestCommitHashStrippingBug:
 
         # Parent hashes (line 443 already has .strip(), so this should pass)
         if second_commit.parent_hashes:
-            assert not second_commit.parent_hashes.startswith(
-                "\n"
-            ), f"Parent hash starts with newline: {repr(second_commit.parent_hashes)}"
-            assert not second_commit.parent_hashes.endswith(
-                "\n"
-            ), f"Parent hash ends with newline: {repr(second_commit.parent_hashes)}"
+            assert not second_commit.parent_hashes.startswith("\n"), (
+                f"Parent hash starts with newline: {repr(second_commit.parent_hashes)}"
+            )
+            assert not second_commit.parent_hashes.endswith("\n"), (
+                f"Parent hash ends with newline: {repr(second_commit.parent_hashes)}"
+            )
 
         # BUT the commit hash itself should ALSO be clean (BUG #1)
-        assert not second_commit.hash.startswith(
-            "\n"
-        ), f"BUG #1: Commit hash starts with newline: {repr(second_commit.hash)}"
-        assert not second_commit.hash.endswith(
-            "\n"
-        ), f"BUG #1: Commit hash ends with newline: {repr(second_commit.hash)}"
+        assert not second_commit.hash.startswith("\n"), (
+            f"BUG #1: Commit hash starts with newline: {repr(second_commit.hash)}"
+        )
+        assert not second_commit.hash.endswith("\n"), (
+            f"BUG #1: Commit hash ends with newline: {repr(second_commit.hash)}"
+        )
 
 
 if __name__ == "__main__":

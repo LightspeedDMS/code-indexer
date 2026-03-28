@@ -49,12 +49,12 @@ class TestTemporalPathFilterBug(TestCase):
         annotation_str = str(path_filter_param.annotation)
 
         # Should be Optional[List[str]], NOT Optional[str]
-        assert (
-            "Optional[str]" != annotation_str or "[" in annotation_str
-        ), "BUG: path_filter signature is Optional[str], should be Optional[List[str]]"
-        assert (
-            "List[str]" in annotation_str or "list[str]" in annotation_str
-        ), f"path_filter signature should contain List[str], got {annotation_str}"
+        assert "Optional[str]" != annotation_str or "[" in annotation_str, (
+            "BUG: path_filter signature is Optional[str], should be Optional[List[str]]"
+        )
+        assert "List[str]" in annotation_str or "list[str]" in annotation_str, (
+            f"path_filter signature should contain List[str], got {annotation_str}"
+        )
 
     def test_daemon_service_exclude_path_signature_should_be_list(self):
         """Daemon service exclude_path parameter should be Optional[List[str]], not Optional[str]."""
@@ -74,12 +74,12 @@ class TestTemporalPathFilterBug(TestCase):
         annotation_str = str(exclude_path_param.annotation)
 
         # Should be Optional[List[str]], NOT Optional[str]
-        assert (
-            "Optional[str]" != annotation_str or "[" in annotation_str
-        ), "BUG: exclude_path signature is Optional[str], should be Optional[List[str]]"
-        assert (
-            "List[str]" in annotation_str or "list[str]" in annotation_str
-        ), f"exclude_path signature should contain List[str], got {annotation_str}"
+        assert "Optional[str]" != annotation_str or "[" in annotation_str, (
+            "BUG: exclude_path signature is Optional[str], should be Optional[List[str]]"
+        )
+        assert "List[str]" in annotation_str or "list[str]" in annotation_str, (
+            f"exclude_path signature should contain List[str], got {annotation_str}"
+        )
 
     def test_daemon_handles_multiple_path_filters_correctly(self):
         """Daemon should handle multiple path filter patterns correctly."""

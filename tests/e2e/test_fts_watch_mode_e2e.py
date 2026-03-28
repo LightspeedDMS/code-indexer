@@ -448,9 +448,9 @@ def test_watch_mode_handles_concurrent_modifications(initialized_repo_with_fts):
             assert file_path.exists(), f"File {filename} should exist"
 
         # Verify watch process still running (no crashes from concurrent access)
-        assert (
-            watch_proc.poll() is None
-        ), "Watch mode should handle concurrent modifications without crashing"
+        assert watch_proc.poll() is None, (
+            "Watch mode should handle concurrent modifications without crashing"
+        )
 
         # Check for any errors in stderr
         watch_proc.terminate()
@@ -458,9 +458,9 @@ def test_watch_mode_handles_concurrent_modifications(initialized_repo_with_fts):
 
         # Stderr may contain informational messages, but should not have exceptions
         # or stack traces indicating thread safety issues
-        assert (
-            "Traceback" not in stderr and "Exception" not in stderr
-        ), f"Watch mode encountered errors during concurrent modifications:\n{stderr}"
+        assert "Traceback" not in stderr and "Exception" not in stderr, (
+            f"Watch mode encountered errors during concurrent modifications:\n{stderr}"
+        )
 
     finally:
         if watch_proc.poll() is None:

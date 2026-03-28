@@ -49,8 +49,7 @@ class TestTemporalStatusStringHandling:
 
         # MUST NOT be truncated to just "8 chunks)"
         assert result != "├─ 8 chunks) (50.0 KB, 1s) vectorizing...", (
-            f"Path.name truncated temporal status string to '8 chunks)'. "
-            f"Got: {result}"
+            f"Path.name truncated temporal status string to '8 chunks)'. Got: {result}"
         )
 
     def test_regular_file_path_still_extracts_basename(self):
@@ -73,9 +72,9 @@ class TestTemporalStatusStringHandling:
             result = self.manager._format_file_line_from_data(file_data)
 
             # Must contain ONLY the basename, not full path
-            assert (
-                expected_basename in result
-            ), f"Expected basename '{expected_basename}' in result. Got: {result}"
+            assert expected_basename in result, (
+                f"Expected basename '{expected_basename}' in result. Got: {result}"
+            )
 
             # Must NOT contain the full path (except for the basename part)
             # Check that parent directories are not in the result
@@ -183,9 +182,9 @@ class TestTemporalStatusStringHandling:
         rendered_output = buffer.getvalue()
 
         # MUST contain only basename
-        assert (
-            expected_basename in rendered_output
-        ), f"Expected basename '{expected_basename}' in output. Got:\n{rendered_output}"
+        assert expected_basename in rendered_output, (
+            f"Expected basename '{expected_basename}' in output. Got:\n{rendered_output}"
+        )
 
         # MUST NOT contain parent directories
         assert "src/services/" not in rendered_output, (
@@ -225,9 +224,9 @@ class TestTemporalStatusStringHandling:
         rendered_output = buffer.getvalue()
 
         # MUST contain only basename
-        assert (
-            expected_basename in rendered_output
-        ), f"Expected basename '{expected_basename}' for Path object. Got:\n{rendered_output}"
+        assert expected_basename in rendered_output, (
+            f"Expected basename '{expected_basename}' for Path object. Got:\n{rendered_output}"
+        )
 
         # MUST NOT contain parent directory
         assert "src/utils/" not in rendered_output, (

@@ -616,9 +616,9 @@ class TestValidation:
 
         main_tables, groups_tables = ordered_tables
         for table in main_tables + groups_tables:
-            assert (
-                table in report["tables"]
-            ), f"Missing table '{table}' in validation report"
+            assert table in report["tables"], (
+                f"Missing table '{table}' in validation report"
+            )
 
 
 # ---------------------------------------------------------------------------

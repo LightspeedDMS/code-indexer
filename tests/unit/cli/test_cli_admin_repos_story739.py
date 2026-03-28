@@ -200,9 +200,9 @@ class TestAdminReposCommandStructure:
 
         required_commands = ["add", "list", "show", "refresh", "branches", "delete"]
         for cmd in required_commands:
-            assert (
-                cmd in result.output
-            ), f"Command '{cmd}' not found in admin repos group"
+            assert cmd in result.output, (
+                f"Command '{cmd}' not found in admin repos group"
+            )
 
     @patch("code_indexer.disabled_commands.detect_current_mode")
     def test_admin_repos_group_description(self, mock_detect_mode, runner: CliRunner):

@@ -93,19 +93,19 @@ def hello():
             if stripped:
                 # Should not be centered (would have lots of leading spaces)
                 leading_spaces = len(header_line) - len(header_line.lstrip())
-                assert (
-                    leading_spaces < 20
-                ), f"Header '{stripped}' appears to be centered with {leading_spaces} leading spaces"
+                assert leading_spaces < 20, (
+                    f"Header '{stripped}' appears to be centered with {leading_spaces} leading spaces"
+                )
 
         # Check that bold formatting is present but readable
-        assert (
-            "bold" in output.lower() or "**" in output
-        ), "Should preserve bold text indicators"
+        assert "bold" in output.lower() or "**" in output, (
+            "Should preserve bold text indicators"
+        )
 
         # Check that code blocks are preserved
-        assert (
-            "python" in output.lower()
-        ), "Should preserve code block language indicators"
+        assert "python" in output.lower(), (
+            "Should preserve code block language indicators"
+        )
 
 
 def test_claude_response_should_not_lose_markdown_structure():

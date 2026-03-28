@@ -286,13 +286,13 @@ class TestAC2ActivityJournalInitialization:
 
         journal.init.assert_called_once()
         init_path = journal.init.call_args[0][0]
-        assert isinstance(
-            init_path, Path
-        ), f"Expected journal.init() called with a Path, got {type(init_path)}"
+        assert isinstance(init_path, Path), (
+            f"Expected journal.init() called with a Path, got {type(init_path)}"
+        )
         # The parent directory must exist or be creatable
-        assert (
-            init_path.exists() or init_path.parent.exists()
-        ), f"Journal path {init_path} or its parent does not exist"
+        assert init_path.exists() or init_path.parent.exists(), (
+            f"Journal path {init_path} or its parent does not exist"
+        )
 
     def test_journal_init_uses_repair_specific_directory(self, tmp_path):
         """
@@ -431,9 +431,9 @@ class TestAC3JobTrackerAndProgressMilestones:
         progress, progress_info = _get_progress_from_service(dep_map_service)
 
         assert progress == 65, f"Expected progress=65 for repair job, got {progress}"
-        assert (
-            "Phase 2" in progress_info or "orphan" in progress_info.lower()
-        ), f"Expected progress_info to contain phase info, got '{progress_info}'"
+        assert "Phase 2" in progress_info or "orphan" in progress_info.lower(), (
+            f"Expected progress_info to contain phase info, got '{progress_info}'"
+        )
 
     def test_progress_milestones_reported_during_executor_phases(self, tmp_path):
         """
@@ -501,9 +501,9 @@ class TestAC3JobTrackerAndProgressMilestones:
 
         if len(progress_calls) >= 2:
             for i in range(1, len(progress_calls)):
-                assert (
-                    progress_calls[i] >= progress_calls[i - 1]
-                ), f"Progress must be non-decreasing. Got {progress_calls}"
+                assert progress_calls[i] >= progress_calls[i - 1], (
+                    f"Progress must be non-decreasing. Got {progress_calls}"
+                )
 
     def test_repair_job_completed_in_job_tracker_on_success(self, tmp_path):
         """
@@ -597,12 +597,12 @@ class TestAC4JournalPathPropagation:
 
         # After init, journal_path must be non-None
         journal.init(journal_dir)
-        assert (
-            journal.journal_path is not None
-        ), "ActivityJournalService.journal_path must be non-None after init()"
-        assert (
-            journal.journal_path
-        ).exists(), f"Journal file {journal.journal_path} must exist after init()"
+        assert journal.journal_path is not None, (
+            "ActivityJournalService.journal_path must be non-None after init()"
+        )
+        assert (journal.journal_path).exists(), (
+            f"Journal file {journal.journal_path} must exist after init()"
+        )
 
     def test_build_domain_analyzer_captures_journal_path(self, tmp_path):
         """
@@ -648,16 +648,16 @@ class TestAC4JournalPathPropagation:
         domain_list = [domain]
         domain_analyzer(tmp_path, domain, domain_list, [])
 
-        assert (
-            len(captured_journal_paths) == 1
-        ), "Expected run_pass_2_per_domain to be called once"
+        assert len(captured_journal_paths) == 1, (
+            "Expected run_pass_2_per_domain to be called once"
+        )
         assert captured_journal_paths[0] is not None, (
             "Expected journal_path to be non-None when passed to run_pass_2_per_domain. "
             "This is required for Claude to report to the journal (AC4)."
         )
-        assert (
-            captured_journal_paths[0] == journal_file
-        ), f"Expected journal_path={journal_file}, got {captured_journal_paths[0]}"
+        assert captured_journal_paths[0] == journal_file, (
+            f"Expected journal_path={journal_file}, got {captured_journal_paths[0]}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -832,9 +832,9 @@ class TestRepairExecutorProgressCallback:
         )
         # Final call must be 100%
         final_progress = progress_calls[-1][0]
-        assert (
-            final_progress == 100
-        ), f"Final progress must be 100%. Got {final_progress}"
+        assert final_progress == 100, (
+            f"Final progress must be 100%. Got {final_progress}"
+        )
 
     def test_executor_progress_callback_none_is_safe(self, tmp_path):
         """

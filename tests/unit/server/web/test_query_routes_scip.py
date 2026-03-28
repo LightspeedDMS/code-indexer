@@ -524,7 +524,9 @@ class TestSCIPQueryExecution:
                 assert (
                     "cidx scip generate" in error_message
                     or "cidx scip index" in error_message
-                ), f"Error message should include guidance to run 'cidx scip generate': {error_message}"
+                ), (
+                    f"Error message should include guidance to run 'cidx scip generate': {error_message}"
+                )
 
             except (TypeError, AttributeError) as e:
                 # Expected to fail - implementation doesn't exist yet

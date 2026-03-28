@@ -364,7 +364,7 @@ class MultiThreadedProgressManager:
                     else:
                         status_display = status
 
-                    line = f"├─ {filename} ({file_size/1024:.1f} KB) {status_display}"
+                    line = f"├─ {filename} ({file_size / 1024:.1f} KB) {status_display}"
                     main_table.add_row(Text(line, style="cyan"))
 
         return main_table

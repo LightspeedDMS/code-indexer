@@ -225,12 +225,12 @@ class TestUninitializedLocalRepoSkippedGracefully:
                 with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
-        assert (
-            result["success"] is True
-        ), "AC1: Langfuse per-user repo must not fail when .code-indexer/ is absent."
-        assert (
-            index_source_calls == []
-        ), "AC1: _index_source() must not be called for uninitialized Langfuse repos."
+        assert result["success"] is True, (
+            "AC1: Langfuse per-user repo must not fail when .code-indexer/ is absent."
+        )
+        assert index_source_calls == [], (
+            "AC1: _index_source() must not be called for uninitialized Langfuse repos."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -449,9 +449,9 @@ class TestNoFailedJobsForUninitializedLocalRepos:
 
         assert len(results) == 3, "All 3 uninitialized repos must return a result"
         for result in results:
-            assert (
-                result["success"] is True
-            ), f"AC3: All uninitialized repos must return success=True. Got: {result}"
+            assert result["success"] is True, (
+                f"AC3: All uninitialized repos must return success=True. Got: {result}"
+            )
 
     def test_scheduler_loop_does_not_produce_failures_for_uninitialized_local_repos(
         self, scheduler, golden_repos_dir, mock_registry

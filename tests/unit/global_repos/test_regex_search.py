@@ -136,9 +136,9 @@ class TestBuildGrepCommand:
             file_list=["single_file.py"],
         )
 
-        assert (
-            "-H" in cmd
-        ), "Grep command must include -H flag for consistent filename output"
+        assert "-H" in cmd, (
+            "Grep command must include -H flag for consistent filename output"
+        )
         assert cmd.index("-H") < cmd.index("test"), "-H flag must appear before pattern"
 
     def test_h_flag_present_with_single_file(self, grep_service):
@@ -280,24 +280,24 @@ class TestGrepPathBasedIncludePatterns:
         )
 
         # Should find Button.java and Label.java in src/widgets/
-        assert (
-            result.total_matches >= 2
-        ), "Should find at least 2 matches in widgets directory"
+        assert result.total_matches >= 2, (
+            "Should find at least 2 matches in widgets directory"
+        )
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "widgets" in f and "Button.java" in f for f in matched_files
-        ), "Should match Button.java in widgets directory"
-        assert any(
-            "widgets" in f and "Label.java" in f for f in matched_files
-        ), "Should match Label.java in widgets directory"
+        assert any("widgets" in f and "Button.java" in f for f in matched_files), (
+            "Should match Button.java in widgets directory"
+        )
+        assert any("widgets" in f and "Label.java" in f for f in matched_files), (
+            "Should match Label.java in widgets directory"
+        )
 
         # Should NOT find Helper.java or Main.java
-        assert not any(
-            "Helper.java" in f for f in matched_files
-        ), "Should not match Helper.java outside widgets directory"
-        assert not any(
-            "Main.java" in f for f in matched_files
-        ), "Should not match Main.java at root"
+        assert not any("Helper.java" in f for f in matched_files), (
+            "Should not match Helper.java outside widgets directory"
+        )
+        assert not any("Main.java" in f for f in matched_files), (
+            "Should not match Main.java at root"
+        )
 
     @pytest.mark.asyncio
     async def test_grep_handles_multiple_path_patterns(
@@ -310,13 +310,13 @@ class TestGrepPathBasedIncludePatterns:
 
         # Should find files in both widgets/ and utils/ directories
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "widgets" in f for f in matched_files
-        ), "Should match widgets directory"
+        assert any("widgets" in f for f in matched_files), (
+            "Should match widgets directory"
+        )
         assert any("utils" in f for f in matched_files), "Should match utils directory"
-        assert not any(
-            f.endswith("Main.java") for f in matched_files
-        ), "Should not match root-level files"
+        assert not any(f.endswith("Main.java") for f in matched_files), (
+            "Should not match root-level files"
+        )
 
     @pytest.mark.asyncio
     async def test_grep_handles_simple_filename_patterns(
@@ -341,16 +341,16 @@ class TestGrepPathBasedIncludePatterns:
 
         # Should find widgets files AND Main.java at root
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "widgets" in f for f in matched_files
-        ), "Should match widgets directory"
-        assert any(
-            f.endswith("Main.java") for f in matched_files
-        ), "Should match Main.java"
+        assert any("widgets" in f for f in matched_files), (
+            "Should match widgets directory"
+        )
+        assert any(f.endswith("Main.java") for f in matched_files), (
+            "Should match Main.java"
+        )
         # Should NOT find Helper.java (not in patterns)
-        assert not any(
-            "Helper.java" in f for f in matched_files
-        ), "Should not match Helper.java (not in patterns)"
+        assert not any("Helper.java" in f for f in matched_files), (
+            "Should not match Helper.java (not in patterns)"
+        )
 
 
 class TestFindFilesDoubleStarPattern:
@@ -433,9 +433,9 @@ class TestFindFilesDoubleStarPattern:
             ), f"Should find SalesGoalsWidget.java in {version}"
 
         # Should NOT find Main.java
-        assert not any(
-            "Main.java" in f for f in matched_files
-        ), "Should not match Main.java (different filename)"
+        assert not any("Main.java" in f for f in matched_files), (
+            "Should not match Main.java (different filename)"
+        )
 
     @pytest.mark.asyncio
     async def test_simple_filename_pattern_works_correctly(
@@ -451,9 +451,9 @@ class TestFindFilesDoubleStarPattern:
         )
 
         # Simple pattern should find at least 1 match (current behavior)
-        assert (
-            result.total_matches >= 1
-        ), "Simple pattern SalesGoalsWidget.java should find at least 1 match"
+        assert result.total_matches >= 1, (
+            "Simple pattern SalesGoalsWidget.java should find at least 1 match"
+        )
 
     @pytest.mark.asyncio
     async def test_double_star_directory_pattern_works_correctly(
@@ -469,9 +469,9 @@ class TestFindFilesDoubleStarPattern:
         )
 
         # Should find all 4 widget files
-        assert (
-            result.total_matches >= 4
-        ), "Pattern **/widgets/*.java should find at least 4 matches"
+        assert result.total_matches >= 4, (
+            "Pattern **/widgets/*.java should find at least 4 matches"
+        )
 
     @pytest.fixture
     def ripgrep_service_deep(self, deep_repo_structure):
@@ -510,9 +510,9 @@ class TestFindFilesDoubleStarPattern:
         )
 
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "Main.java" in f for f in matched_files
-        ), "Should find Main.java in v_1766032745"
+        assert any("Main.java" in f for f in matched_files), (
+            "Should find Main.java in v_1766032745"
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
@@ -637,9 +637,9 @@ class TestGlobPatternParity:
         )
 
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "Main.java" in f and "code/src" in f for f in matched_files
-        ), "Should find code/src/Main.java"
+        assert any("Main.java" in f and "code/src" in f for f in matched_files), (
+            "Should find code/src/Main.java"
+        )
 
     @pytest.mark.asyncio
     async def test_glob_pattern_multiple_mixed_patterns(
@@ -659,20 +659,20 @@ class TestGlobPatternParity:
         )
 
         # Should find all 3 files
-        assert (
-            result.total_matches == 3
-        ), f"Mixed patterns should find 3 matches, got {result.total_matches}"
+        assert result.total_matches == 3, (
+            f"Mixed patterns should find 3 matches, got {result.total_matches}"
+        )
 
         matched_files = {match.file_path for match in result.matches}
-        assert any(
-            "SalesGoalsWidget.java" in f for f in matched_files
-        ), "Should find SalesGoalsWidget.java via code/**/pattern"
-        assert any(
-            "Main.java" in f for f in matched_files
-        ), "Should find Main.java via explicit path"
-        assert any(
-            "TestHelper.java" in f for f in matched_files
-        ), "Should find TestHelper.java via **/pattern"
+        assert any("SalesGoalsWidget.java" in f for f in matched_files), (
+            "Should find SalesGoalsWidget.java via code/**/pattern"
+        )
+        assert any("Main.java" in f for f in matched_files), (
+            "Should find Main.java via explicit path"
+        )
+        assert any("TestHelper.java" in f for f in matched_files), (
+            "Should find TestHelper.java via **/pattern"
+        )
 
 
 class TestGrepContextLines:
@@ -726,12 +726,12 @@ class TestGrepContextLines:
         )
 
         # Should find 1 match
-        assert (
-            result.total_matches == 1
-        ), f"Expected 1 match, got {result.total_matches}"
-        assert (
-            len(result.matches) == 1
-        ), f"Expected 1 match object, got {len(result.matches)}"
+        assert result.total_matches == 1, (
+            f"Expected 1 match, got {result.total_matches}"
+        )
+        assert len(result.matches) == 1, (
+            f"Expected 1 match object, got {len(result.matches)}"
+        )
 
         match = result.matches[0]
         assert match.line_number == 4, f"Expected line 4, got {match.line_number}"
@@ -774,32 +774,32 @@ class TestGrepContextLines:
         )
 
         # Should find 2 matches
-        assert (
-            result.total_matches == 2
-        ), f"Expected 2 matches, got {result.total_matches}"
-        assert (
-            len(result.matches) == 2
-        ), f"Expected 2 match objects, got {len(result.matches)}"
+        assert result.total_matches == 2, (
+            f"Expected 2 matches, got {result.total_matches}"
+        )
+        assert len(result.matches) == 2, (
+            f"Expected 2 match objects, got {len(result.matches)}"
+        )
 
         # First match (line 3)
         match1 = result.matches[0]
         assert match1.line_number == 3, f"Expected line 3, got {match1.line_number}"
-        assert match1.context_before == [
-            "line 2"
-        ], f"Expected context_before=['line 2'], got {match1.context_before}"
-        assert match1.context_after == [
-            "line 4"
-        ], f"Expected context_after=['line 4'], got {match1.context_after}"
+        assert match1.context_before == ["line 2"], (
+            f"Expected context_before=['line 2'], got {match1.context_before}"
+        )
+        assert match1.context_after == ["line 4"], (
+            f"Expected context_after=['line 4'], got {match1.context_after}"
+        )
 
         # Second match (line 7)
         match2 = result.matches[1]
         assert match2.line_number == 7, f"Expected line 7, got {match2.line_number}"
-        assert match2.context_before == [
-            "line 6"
-        ], f"Expected context_before=['line 6'], got {match2.context_before}"
-        assert match2.context_after == [
-            "line 8"
-        ], f"Expected context_after=['line 8'], got {match2.context_after}"
+        assert match2.context_before == ["line 6"], (
+            f"Expected context_before=['line 6'], got {match2.context_before}"
+        )
+        assert match2.context_after == ["line 8"], (
+            f"Expected context_after=['line 8'], got {match2.context_after}"
+        )
 
     @pytest.mark.asyncio
     async def test_grep_context_lines_file_boundaries(
@@ -825,32 +825,32 @@ class TestGrepContextLines:
         )
 
         # Should find 2 matches
-        assert (
-            result.total_matches == 2
-        ), f"Expected 2 matches, got {result.total_matches}"
-        assert (
-            len(result.matches) == 2
-        ), f"Expected 2 match objects, got {len(result.matches)}"
+        assert result.total_matches == 2, (
+            f"Expected 2 matches, got {result.total_matches}"
+        )
+        assert len(result.matches) == 2, (
+            f"Expected 2 match objects, got {len(result.matches)}"
+        )
 
         # First match (line 1) - no context before
         match1 = result.matches[0]
         assert match1.line_number == 1, f"Expected line 1, got {match1.line_number}"
-        assert (
-            match1.context_before == []
-        ), f"Expected empty context_before at file start, got {match1.context_before}"
-        assert match1.context_after == [
-            "line 2"
-        ], f"Expected context_after=['line 2'], got {match1.context_after}"
+        assert match1.context_before == [], (
+            f"Expected empty context_before at file start, got {match1.context_before}"
+        )
+        assert match1.context_after == ["line 2"], (
+            f"Expected context_after=['line 2'], got {match1.context_after}"
+        )
 
         # Second match (line 4) - no context after (last line)
         match2 = result.matches[1]
         assert match2.line_number == 4, f"Expected line 4, got {match2.line_number}"
-        assert match2.context_before == [
-            "line 3"
-        ], f"Expected context_before=['line 3'], got {match2.context_before}"
-        assert (
-            match2.context_after == []
-        ), f"Expected empty context_after at file end, got {match2.context_after}"
+        assert match2.context_before == ["line 3"], (
+            f"Expected context_before=['line 3'], got {match2.context_before}"
+        )
+        assert match2.context_after == [], (
+            f"Expected empty context_after at file end, got {match2.context_after}"
+        )
 
     @pytest.mark.asyncio
     async def test_grep_context_lines_zero(
@@ -869,20 +869,20 @@ class TestGrepContextLines:
         )
 
         # Should find 1 match
-        assert (
-            result.total_matches == 1
-        ), f"Expected 1 match, got {result.total_matches}"
-        assert (
-            len(result.matches) == 1
-        ), f"Expected 1 match object, got {len(result.matches)}"
+        assert result.total_matches == 1, (
+            f"Expected 1 match, got {result.total_matches}"
+        )
+        assert len(result.matches) == 1, (
+            f"Expected 1 match object, got {len(result.matches)}"
+        )
 
         match = result.matches[0]
-        assert (
-            match.context_before == []
-        ), f"Expected empty context_before with context_lines=0, got {match.context_before}"
-        assert (
-            match.context_after == []
-        ), f"Expected empty context_after with context_lines=0, got {match.context_after}"
+        assert match.context_before == [], (
+            f"Expected empty context_before with context_lines=0, got {match.context_before}"
+        )
+        assert match.context_after == [], (
+            f"Expected empty context_after with context_lines=0, got {match.context_after}"
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(
@@ -925,12 +925,12 @@ class TestGrepContextLines:
         grep_match = grep_result.matches[0]
         ripgrep_match = ripgrep_result.matches[0]
 
-        assert (
-            grep_match.context_before == ripgrep_match.context_before
-        ), f"Context before mismatch: grep={grep_match.context_before}, ripgrep={ripgrep_match.context_before}"
-        assert (
-            grep_match.context_after == ripgrep_match.context_after
-        ), f"Context after mismatch: grep={grep_match.context_after}, ripgrep={ripgrep_match.context_after}"
+        assert grep_match.context_before == ripgrep_match.context_before, (
+            f"Context before mismatch: grep={grep_match.context_before}, ripgrep={ripgrep_match.context_before}"
+        )
+        assert grep_match.context_after == ripgrep_match.context_after, (
+            f"Context after mismatch: grep={grep_match.context_after}, ripgrep={ripgrep_match.context_after}"
+        )
 
 
 class TestSubprocessGlobProtections:
@@ -1087,9 +1087,9 @@ class TestSubprocessGlobProtections:
 
         # Verify results are relative paths (not absolute)
         for file_path in result:
-            assert not file_path.startswith(
-                "/"
-            ), f"Path should be relative: {file_path}"
+            assert not file_path.startswith("/"), (
+                f"Path should be relative: {file_path}"
+            )
             assert file_path.endswith(".py"), f"Path should end with .py: {file_path}"
 
     @pytest.mark.asyncio
@@ -1118,14 +1118,14 @@ class TestSubprocessGlobProtections:
                     timeout_seconds=5,
                 )
                 # If it succeeds, verify it's a list
-                assert isinstance(
-                    result, list
-                ), f"Should return list for invalid pattern {pattern}"
+                assert isinstance(result, list), (
+                    f"Should return list for invalid pattern {pattern}"
+                )
             except (ValueError, OSError) as e:
                 # Appropriate exceptions are acceptable
-                assert str(
-                    e
-                ), f"Exception for invalid pattern {pattern} should have message"
+                assert str(e), (
+                    f"Exception for invalid pattern {pattern} should have message"
+                )
 
     @pytest.mark.asyncio
     async def test_find_files_by_patterns_no_matches(
@@ -1320,15 +1320,15 @@ class TestRipgrepInternalDirectoryExclusion:
 
             # Verify error message includes pattern and path (Bug #159)
             error_msg = str(exc_info.value)
-            assert (
-                "test_pattern" in error_msg
-            ), "Bug #159: TimeoutError must include pattern"
-            assert (
-                str(test_repo) in error_msg
-            ), "Bug #159: TimeoutError must include path"
-            assert (
-                "30 seconds" in error_msg
-            ), "TimeoutError must include timeout duration"
+            assert "test_pattern" in error_msg, (
+                "Bug #159: TimeoutError must include pattern"
+            )
+            assert str(test_repo) in error_msg, (
+                "Bug #159: TimeoutError must include path"
+            )
+            assert "30 seconds" in error_msg, (
+                "TimeoutError must include timeout duration"
+            )
 
 
 class TestParseRipgrepJsonOutputBytesFormat:

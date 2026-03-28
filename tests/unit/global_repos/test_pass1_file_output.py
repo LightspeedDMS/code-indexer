@@ -174,7 +174,9 @@ class TestPass1PromptFileOutputInstructions:
             or "revalidate" in prompt_lower
             or "retry" in prompt_lower
         )
-        assert has_fix_instruction, f"Prompt missing fix/re-validate instruction. Prompt snippet: {prompt[200:400]}"
+        assert has_fix_instruction, (
+            f"Prompt missing fix/re-validate instruction. Prompt snippet: {prompt[200:400]}"
+        )
 
 
 # ─── AC1: Prompt structure — output format BEFORE repo descriptions ───────────
@@ -211,9 +213,9 @@ class TestPass1PromptPrimacy:
         repo_desc_section_pos = prompt.find("## Repository Descriptions")
 
         assert file_instruction_pos != -1, "File instruction not found in prompt"
-        assert (
-            repo_desc_section_pos != -1
-        ), "Repo descriptions section not found in prompt"
+        assert repo_desc_section_pos != -1, (
+            "Repo descriptions section not found in prompt"
+        )
         assert file_instruction_pos < repo_desc_section_pos, (
             f"File output instruction (pos {file_instruction_pos}) must appear "
             f"BEFORE repo descriptions (pos {repo_desc_section_pos})"
@@ -231,12 +233,12 @@ class TestPass1PromptPrimacy:
         schema_pos = prompt.find("participating_repos")
         repo_desc_section_pos = prompt.find("## Repository Descriptions")
 
-        assert (
-            schema_pos != -1
-        ), "JSON schema ('participating_repos') not found in prompt"
-        assert (
-            repo_desc_section_pos != -1
-        ), "Repo descriptions section not found in prompt"
+        assert schema_pos != -1, (
+            "JSON schema ('participating_repos') not found in prompt"
+        )
+        assert repo_desc_section_pos != -1, (
+            "Repo descriptions section not found in prompt"
+        )
         assert schema_pos < repo_desc_section_pos, (
             f"JSON schema (pos {schema_pos}) must appear "
             f"BEFORE repo descriptions (pos {repo_desc_section_pos})"
@@ -329,9 +331,9 @@ class TestPass1FileCleanup:
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
 
-        assert (
-            not pass1_file.exists()
-        ), "pass1_domains.json must be deleted after successful parse"
+        assert not pass1_file.exists(), (
+            "pass1_domains.json must be deleted after successful parse"
+        )
 
     def test_file_deleted_even_after_invalid_json_in_file(
         self, analyzer, staging_dir, repo_list, repo_descriptions
@@ -367,9 +369,9 @@ class TestPass1FileCleanup:
             pass  # May or may not succeed depending on retry behavior
 
         # File must be deleted regardless
-        assert (
-            not pass1_file.exists()
-        ), "pass1_domains.json must be deleted even after invalid JSON parse"
+        assert not pass1_file.exists(), (
+            "pass1_domains.json must be deleted even after invalid JSON parse"
+        )
 
 
 # ─── AC2: Stdout fallback ────────────────────────────────────────────────────
@@ -427,9 +429,9 @@ class TestPass1StdoutFallback:
             "fallback" in msg.lower() or "stdout" in msg.lower()
             for msg in warning_messages
         )
-        assert (
-            has_fallback_warning
-        ), f"Expected fallback warning, got warnings: {warning_messages}"
+        assert has_fallback_warning, (
+            f"Expected fallback warning, got warnings: {warning_messages}"
+        )
 
     def test_file_read_logs_info(
         self,
@@ -463,9 +465,9 @@ class TestPass1StdoutFallback:
             "pass1" in msg.lower() and ("file" in msg.lower() or "bytes" in msg.lower())
             for msg in info_messages
         )
-        assert (
-            has_file_info
-        ), f"Expected INFO about file read, got info messages: {info_messages}"
+        assert has_file_info, (
+            f"Expected INFO about file read, got info messages: {info_messages}"
+        )
 
 
 # ─── AC3 + AC4: Retry logic ──────────────────────────────────────────────────
@@ -496,9 +498,9 @@ class TestPass1RetryLogic:
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
 
-        assert (
-            call_count[0] == 2
-        ), f"Expected 2 invocations (initial + retry), got {call_count[0]}"
+        assert call_count[0] == 2, (
+            f"Expected 2 invocations (initial + retry), got {call_count[0]}"
+        )
         assert len(result) >= 1
 
     def test_retry_prompt_contains_file_reminder(
@@ -523,9 +525,9 @@ class TestPass1RetryLogic:
             staging_dir, repo_descriptions, repo_list, max_turns=10
         )
 
-        assert (
-            len(prompts_received) == 2
-        ), f"Expected 2 prompts, got {len(prompts_received)}"
+        assert len(prompts_received) == 2, (
+            f"Expected 2 prompts, got {len(prompts_received)}"
+        )
         retry_prompt = prompts_received[1]
         retry_lower = retry_prompt.lower()
         # Retry prompt must emphasize the file requirement
@@ -534,9 +536,9 @@ class TestPass1RetryLogic:
             or "must write" in retry_lower
             or "write" in retry_lower
         )
-        assert (
-            has_file_reminder
-        ), f"Retry prompt missing file reminder. Got: {retry_prompt[:300]}"
+        assert has_file_reminder, (
+            f"Retry prompt missing file reminder. Got: {retry_prompt[:300]}"
+        )
 
     def test_raises_runtime_error_when_both_attempts_fail(
         self, analyzer, staging_dir, repo_list, repo_descriptions
@@ -554,9 +556,9 @@ class TestPass1RetryLogic:
             )
 
         error_msg = str(exc_info.value).lower()
-        assert (
-            "pass 1" in error_msg
-        ), f"Error must mention 'Pass 1'. Got: {exc_info.value}"
+        assert "pass 1" in error_msg, (
+            f"Error must mention 'Pass 1'. Got: {exc_info.value}"
+        )
 
     def test_error_message_includes_file_path_info(
         self, analyzer, staging_dir, repo_list, repo_descriptions
@@ -575,9 +577,9 @@ class TestPass1RetryLogic:
 
         error_msg = str(exc_info.value)
         # Error must contain the file path for diagnostics
-        assert (
-            "pass1_domains.json" in error_msg
-        ), f"Error must include file path. Got: {error_msg}"
+        assert "pass1_domains.json" in error_msg, (
+            f"Error must include file path. Got: {error_msg}"
+        )
 
     def test_retry_reads_file_on_second_attempt(
         self, analyzer, staging_dir, repo_list, repo_descriptions, valid_domain_json
@@ -748,9 +750,9 @@ class TestPass1CanaryFileWriteTest:
 
         error_msg = str(exc_info.value)
         staging_dir_abs = str(staging_dir)
-        assert (
-            staging_dir_abs in error_msg
-        ), f"RuntimeError must include staging dir path. Got: {error_msg}"
+        assert staging_dir_abs in error_msg, (
+            f"RuntimeError must include staging dir path. Got: {error_msg}"
+        )
 
     def test_canary_fail_does_not_retry(
         self, analyzer, staging_dir, repo_descriptions, repo_list
@@ -769,9 +771,9 @@ class TestPass1CanaryFileWriteTest:
                 staging_dir, repo_descriptions, repo_list, max_turns=10
             )
 
-        assert (
-            call_count[0] == 1
-        ), f"CANARY_FAIL must not trigger retry. Expected 1 call, got {call_count[0]}"
+        assert call_count[0] == 1, (
+            f"CANARY_FAIL must not trigger retry. Expected 1 call, got {call_count[0]}"
+        )
 
     def test_canary_fail_multiline_output_extracts_fail_line(
         self, analyzer, staging_dir, repo_descriptions, repo_list

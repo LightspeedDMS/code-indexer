@@ -213,15 +213,15 @@ class TestParallelProcessingPerformance:
         # 1. Multiple chunks were processed concurrently (parallel evidence)
         total_chunks = len(test_files) * 3  # 3 chunks per file
         # Note: With batch processing, we may see lower concurrency as batches are processed together
-        assert (
-            max_concurrent_chunks >= 1
-        ), f"Expected at least some chunk processing, but max concurrent was {max_concurrent_chunks}"
+        assert max_concurrent_chunks >= 1, (
+            f"Expected at least some chunk processing, but max concurrent was {max_concurrent_chunks}"
+        )
 
         # 2. Check that processing actually happened
         # With batching, we might not see high concurrency but should see processing
-        assert (
-            max_concurrent_chunks > 0
-        ), f"Expected some processing activity, but got {max_concurrent_chunks}"
+        assert max_concurrent_chunks > 0, (
+            f"Expected some processing activity, but got {max_concurrent_chunks}"
+        )
 
         # 3. All files were processed successfully
         assert result.files_processed > 0, "Should have processed files successfully"
@@ -296,9 +296,9 @@ class TestParallelProcessingPerformance:
             results.append(results_queue.get())
 
         expected_results = 4 * 3 * 5  # 4 threads * 3 files * 5 content IDs each
-        assert (
-            len(results) == expected_results
-        ), f"Expected {expected_results} results, got {len(results)}"
+        assert len(results) == expected_results, (
+            f"Expected {expected_results} results, got {len(results)}"
+        )
 
         # Verify deterministic content ID generation (same inputs = same outputs)
         content_ids_by_key = {}
@@ -307,9 +307,9 @@ class TestParallelProcessingPerformance:
             if key not in content_ids_by_key:
                 content_ids_by_key[key] = content_id
             else:
-                assert (
-                    content_ids_by_key[key] == content_id
-                ), f"Content ID generation not deterministic for {key}: {content_ids_by_key[key]} != {content_id}"
+                assert content_ids_by_key[key] == content_id, (
+                    f"Content ID generation not deterministic for {key}: {content_ids_by_key[key]} != {content_id}"
+                )
 
         print(
             f"SUCCESS: Thread-safe operations completed without errors across {len(threads)} threads"
@@ -406,9 +406,9 @@ class TestParallelProcessingPerformance:
         assert not errors, f"Atomic operations failed: {errors}"
 
         successful_operations = [r for r in results if r[0] in ["hide", "visible"]]
-        assert (
-            len(successful_operations) == len(threads)
-        ), f"Expected {len(threads)} successful operations, got {len(successful_operations)}"
+        assert len(successful_operations) == len(threads), (
+            f"Expected {len(threads)} successful operations, got {len(successful_operations)}"
+        )
 
         print(
             f"SUCCESS: {len(successful_operations)} atomic branch visibility operations completed successfully"

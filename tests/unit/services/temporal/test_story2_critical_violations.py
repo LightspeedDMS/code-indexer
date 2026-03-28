@@ -23,9 +23,9 @@ class TestMethodDeletions:
         )
 
         # Verify method doesn't exist
-        assert not hasattr(
-            service, "_fetch_commit_file_changes"
-        ), "_fetch_commit_file_changes() should be deleted per spec line 166"
+        assert not hasattr(service, "_fetch_commit_file_changes"), (
+            "_fetch_commit_file_changes() should be deleted per spec line 166"
+        )
 
     def test_fetch_blob_content_deleted(self):
         """Verify _fetch_blob_content method no longer exists."""
@@ -36,9 +36,9 @@ class TestMethodDeletions:
         )
 
         # Verify method doesn't exist
-        assert not hasattr(
-            service, "_fetch_blob_content"
-        ), "_fetch_blob_content() should be deleted - all blob-based helpers removed"
+        assert not hasattr(service, "_fetch_blob_content"), (
+            "_fetch_blob_content() should be deleted - all blob-based helpers removed"
+        )
 
 
 class TestFetchMatchContent:
@@ -57,9 +57,9 @@ class TestFetchMatchContent:
         source = inspect.getsource(service._fetch_match_content)
 
         # Check for blob_hash references (should be removed per spec line 320)
-        assert (
-            "blob_hash" not in source
-        ), "_fetch_match_content should not reference blob_hash per spec line 320"
+        assert "blob_hash" not in source, (
+            "_fetch_match_content should not reference blob_hash per spec line 320"
+        )
 
 
 class TestContentDisplay:
@@ -106,6 +106,6 @@ class TestContentDisplay:
 
         # Verify result uses actual content from payload, not placeholder
         assert len(results) == 1
-        assert (
-            results[0].content == actual_content
-        ), "Should use payload['content'], not result.content placeholder"
+        assert results[0].content == actual_content, (
+            "Should use payload['content'], not result.content placeholder"
+        )

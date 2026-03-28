@@ -55,16 +55,16 @@ Multiple images with some malformed:
 <body>
     <!-- Missing closing angle bracket -->
     <img src="incomplete.png"
-    
+
     <!-- Missing src attribute -->
     <img alt="No source">
-    
+
     <!-- Empty src -->
     <img src="">
-    
+
     <!-- Valid tag -->
     <img src="valid.png">
-    
+
     <!-- Malformed nested tags -->
     <img src="<broken.png>">
 </body>
@@ -100,17 +100,17 @@ Multiple images with some malformed:
                 images = markdown_extractor.extract_images(
                     content, edge_file, multimodal_repo_path
                 )
-                assert isinstance(
-                    images, list
-                ), f"Markdown parser crashed on {edge_file.name}"
+                assert isinstance(images, list), (
+                    f"Markdown parser crashed on {edge_file.name}"
+                )
 
             elif edge_file.suffix in [".html", ".htmx", ".htm"]:
                 images = html_extractor.extract_images(
                     content, edge_file, multimodal_repo_path
                 )
-                assert isinstance(
-                    images, list
-                ), f"HTML parser crashed on {edge_file.name}"
+                assert isinstance(images, list), (
+                    f"HTML parser crashed on {edge_file.name}"
+                )
 
     def test_text_that_looks_like_image_syntax(self, multimodal_repo_path):
         """Verify parser handles text that looks like image syntax in code blocks."""

@@ -39,36 +39,36 @@ from typing import List, Dict
 
 class SampleClass:
     """A sample class for testing."""
-    
+
     def __init__(self, name: str):
         """Initialize the sample class."""
         self.name = name
         self.data = []
-    
+
     def add_data(self, item: Dict[str, Any]) -> None:
         """Add data item to the collection."""
         if not isinstance(item, dict):
             raise ValueError("Item must be a dictionary")
-        
+
         # Validate required fields
         if 'id' not in item or 'value' not in item:
             raise ValueError("Item must have 'id' and 'value' fields")
-        
+
         # Check for duplicates
         existing_ids = [d.get('id') for d in self.data]
         if item['id'] in existing_ids:
             raise ValueError(f"Item with id {item['id']} already exists")
-        
+
         self.data.append(item)
         print(f"Added item {item['id']} to {self.name}")
-    
+
     def get_data_by_id(self, item_id: str) -> Dict[str, Any]:
         """Retrieve data item by ID."""
         for item in self.data:
             if item.get('id') == item_id:
                 return item
         return None
-    
+
     def process_all_data(self) -> List[str]:
         """Process all data items and return results."""
         results = []
@@ -79,13 +79,13 @@ class SampleClass:
                 results.append(f"Processed {item['id']}: {processed_value}")
             except Exception as e:
                 results.append(f"Error processing {item['id']}: {str(e)}")
-        
+
         return results
-    
+
     def _process_item(self, item: Dict[str, Any]) -> str:
         """Internal method to process a single item."""
         value = item.get('value', '')
-        
+
         # Apply various transformations
         if isinstance(value, str):
             processed = value.upper().strip()
@@ -93,7 +93,7 @@ class SampleClass:
             processed = str(value * 2)
         else:
             processed = str(value)
-        
+
         return processed
 
 
@@ -105,7 +105,7 @@ def utility_function(data: List[Dict[str, Any]]) -> Dict[str, int]:
         'numeric_values': 0,
         'other_values': 0
     }
-    
+
     for item in data:
         value = item.get('value')
         if isinstance(value, str):
@@ -114,22 +114,22 @@ def utility_function(data: List[Dict[str, Any]]) -> Dict[str, int]:
             stats['numeric_values'] += 1
         else:
             stats['other_values'] += 1
-    
+
     return stats
 
 
 if __name__ == "__main__":
     # Example usage
     sample = SampleClass("test")
-    
+
     sample.add_data({"id": "1", "value": "hello"})
     sample.add_data({"id": "2", "value": 42})
     sample.add_data({"id": "3", "value": [1, 2, 3]})
-    
+
     results = sample.process_all_data()
     for result in results:
         print(result)
-    
+
     stats = utility_function(sample.data)
     print(f"Statistics: {stats}")
 '''
@@ -156,12 +156,12 @@ if __name__ == "__main__":
         distribution, quality = analyzer.analyze_file_chunking(sample_python_file)
 
         # Basic validation
-        assert (
-            quality.meaningful_chunks_count >= 0
-        ), "Meaningful chunks count should be non-negative"
-        assert (
-            quality.fragment_chunks_count >= 0
-        ), "Fragment chunks count should be non-negative"
+        assert quality.meaningful_chunks_count >= 0, (
+            "Meaningful chunks count should be non-negative"
+        )
+        assert quality.fragment_chunks_count >= 0, (
+            "Fragment chunks count should be non-negative"
+        )
         assert 0 <= quality.meaningful_percentage <= 100, "Percentage should be 0-100"
 
         # Quality expectations
@@ -235,36 +235,36 @@ if __name__ == "__main__":
         # All Story 7 requirements should now PASS with the completed implementation
 
         # PASS: Chunks are 1000 chars (except final)
-        assert requirements[
-            "under_1000_except_final"
-        ], "Story 7 requirement: Nearly all chunks should be 1000 chars (except final)"
+        assert requirements["under_1000_except_final"], (
+            "Story 7 requirement: Nearly all chunks should be 1000 chars (except final)"
+        )
 
         # PASS: Massive improvement over 300-char threshold
-        assert requirements[
-            "massive_improvement_under_300"
-        ], "Story 7 requirement: Should show massive improvement over 300-char threshold"
+        assert requirements["massive_improvement_under_300"], (
+            "Story 7 requirement: Should show massive improvement over 300-char threshold"
+        )
 
         # PASS: Massive improvement over 100-char threshold
-        assert requirements[
-            "massive_improvement_under_100"
-        ], "Story 7 requirement: Should show massive improvement over 100-char threshold"
+        assert requirements["massive_improvement_under_100"], (
+            "Story 7 requirement: Should show massive improvement over 100-char threshold"
+        )
 
         # PASS: Average size near 1000
-        assert requirements[
-            "average_size_near_1000"
-        ], "Story 7 requirement: Average size should be near 1000 chars"
+        assert requirements["average_size_near_1000"], (
+            "Story 7 requirement: Average size should be near 1000 chars"
+        )
 
         # Validate the actual improvements are substantial
         improvements = comparison["improvements"]
-        assert (
-            improvements["under_300_reduction"] >= 60
-        ), f"Should reduce under-300 chunks by at least 60%, got {improvements['under_300_reduction']:.1f}%"
-        assert (
-            improvements["under_100_reduction"] >= 40
-        ), f"Should reduce under-100 chunks by at least 40%, got {improvements['under_100_reduction']:.1f}%"
-        assert (
-            improvements["average_size_increase"] >= 200
-        ), f"Should increase average size by at least 200 chars, got {improvements['average_size_increase']:.0f}"
+        assert improvements["under_300_reduction"] >= 60, (
+            f"Should reduce under-300 chunks by at least 60%, got {improvements['under_300_reduction']:.1f}%"
+        )
+        assert improvements["under_100_reduction"] >= 40, (
+            f"Should reduce under-100 chunks by at least 40%, got {improvements['under_100_reduction']:.1f}%"
+        )
+        assert improvements["average_size_increase"] >= 200, (
+            f"Should increase average size by at least 200 chars, got {improvements['average_size_increase']:.0f}"
+        )
 
 
 class TestRealWorldValidation:
@@ -323,9 +323,9 @@ class TestRealWorldValidation:
                     actual_overlap = next_text[:150]
 
                     # This should FAIL initially if overlap is not exactly 150 chars
-                    assert (
-                        expected_overlap == actual_overlap
-                    ), f"Chunks {i}-{i+1}: Expected 150-char overlap not found"
+                    assert expected_overlap == actual_overlap, (
+                        f"Chunks {i}-{i + 1}: Expected 150-char overlap not found"
+                    )
 
         finally:
             # Clean up
@@ -337,7 +337,7 @@ class TestRealWorldValidation:
 
         # Create multi-line test content
         lines = [
-            f"Line {i+1}: This is content for line number {i+1}" for i in range(100)
+            f"Line {i + 1}: This is content for line number {i + 1}" for i in range(100)
         ]
         test_content = "\n".join(lines)
 
@@ -354,12 +354,12 @@ class TestRealWorldValidation:
 
                 # Basic validation
                 assert line_start >= 1, f"Chunk {i}: line_start should be >= 1"
-                assert (
-                    line_end >= line_start
-                ), f"Chunk {i}: line_end should be >= line_start"
-                assert (
-                    line_end <= 100
-                ), f"Chunk {i}: line_end should not exceed file length"
+                assert line_end >= line_start, (
+                    f"Chunk {i}: line_end should be >= line_start"
+                )
+                assert line_end <= 100, (
+                    f"Chunk {i}: line_end should not exceed file length"
+                )
 
                 # First chunk should start at line 1
                 if i == 0:

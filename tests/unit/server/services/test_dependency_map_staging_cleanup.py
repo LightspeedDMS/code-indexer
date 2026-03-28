@@ -99,9 +99,9 @@ class TestStagingDirCleanedOnFailure:
                     service.run_full_analysis()
 
         # Assert: staging dir must be gone
-        assert (
-            not staging_dir.exists()
-        ), "Bug #383: staging dir should have been cleaned up after analysis failure"
+        assert not staging_dir.exists(), (
+            "Bug #383: staging dir should have been cleaned up after analysis failure"
+        )
 
     def test_staging_dir_cleaned_when_finalize_fails(self, tmp_path):
         """When _finalize_analysis raises, staging dir is also removed in finally."""
@@ -141,9 +141,9 @@ class TestStagingDirCleanedOnFailure:
                     with pytest.raises(RuntimeError, match="finalize exploded"):
                         service.run_full_analysis()
 
-        assert (
-            not staging_dir.exists()
-        ), "Bug #383: staging dir should be cleaned when finalize fails"
+        assert not staging_dir.exists(), (
+            "Bug #383: staging dir should be cleaned when finalize fails"
+        )
 
 
 class TestStagingDirNotCleanedOnSuccess:
@@ -247,16 +247,16 @@ class TestStartupStagingCleanup:
         staging_dir.mkdir(parents=True)
         (staging_dir / "stale_file.json").write_text('{"stale": true}')
 
-        assert (
-            staging_dir.exists()
-        ), "Precondition: staging dir should exist before cleanup"
+        assert staging_dir.exists(), (
+            "Precondition: staging dir should exist before cleanup"
+        )
 
         # Execute the startup cleanup logic directly
         _startup_cleanup_staging_dir(golden_repos_dir)
 
-        assert (
-            not staging_dir.exists()
-        ), "Bug #383: startup cleanup should remove stale staging dir"
+        assert not staging_dir.exists(), (
+            "Bug #383: startup cleanup should remove stale staging dir"
+        )
 
     def test_startup_no_error_when_staging_dir_missing(self, tmp_path):
         """Startup cleanup is silent (no exception) when no staging dir exists."""

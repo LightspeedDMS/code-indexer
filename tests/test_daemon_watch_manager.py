@@ -253,12 +253,12 @@ class TestDaemonWatchManager:
             error_starts = [r for r in start_results if r.get("status") == "error"]
 
             # Only one start should succeed, rest should fail with "already running"
-            assert (
-                len(success_starts) <= 1
-            ), f"Too many successful starts: {success_starts}"
-            assert (
-                len(success_starts) + len(error_starts) == 5
-            ), f"Expected 5 start attempts, got {len(start_results)}"
+            assert len(success_starts) <= 1, (
+                f"Too many successful starts: {success_starts}"
+            )
+            assert len(success_starts) + len(error_starts) == 5, (
+                f"Expected 5 start attempts, got {len(start_results)}"
+            )
 
             if len(success_starts) == 1:
                 # If one succeeded, others should have failed with "already running"

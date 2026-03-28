@@ -85,9 +85,9 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, set(), is_admin_group=False)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert (
-                resp.status_code == 200
-            ), "User with role=admin must bypass group check even if not in admins group"
+            assert resp.status_code == 200, (
+                "User with role=admin must bypass group check even if not in admins group"
+            )
 
     def test_admins_group_member_can_access_wiki(self):
         """Existing behavior: user in admins group (is_admin_user=True) still works."""
@@ -98,9 +98,9 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, set(), is_admin_group=True)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert (
-                resp.status_code == 200
-            ), "User in admins group must still be able to access the wiki"
+            assert resp.status_code == 200, (
+                "User in admins group must still be able to access the wiki"
+            )
 
     def test_normal_user_with_group_access_can_access_wiki(self):
         """Non-admin user with the repo in their accessible repos gets 200."""
@@ -110,9 +110,9 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, {"test-repo"}, is_admin_group=False)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert (
-                resp.status_code == 200
-            ), "Normal user with accessible repo must reach the wiki"
+            assert resp.status_code == 200, (
+                "Normal user with accessible repo must reach the wiki"
+            )
 
     def test_normal_user_without_access_gets_404(self):
         """Non-admin user with no group access gets 404 (invisible repo)."""

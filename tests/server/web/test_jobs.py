@@ -67,9 +67,9 @@ class TestJobListDisplay:
 
         assert response.status_code == 200
         # The repo_alias should appear in the page, not "N/A" or "Unknown"
-        assert (
-            test_repo_alias in response.text
-        ), f"Expected '{test_repo_alias}' in page, but it was not found. Check if repo_alias is being used for repository_name."
+        assert test_repo_alias in response.text, (
+            f"Expected '{test_repo_alias}' in page, but it was not found. Check if repo_alias is being used for repository_name."
+        )
 
     def test_jobs_page_requires_auth(self, web_client: TestClient):
         """
@@ -86,9 +86,9 @@ class TestJobListDisplay:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_jobs_page_renders(self, authenticated_client: TestClient):
         """
@@ -101,9 +101,9 @@ class TestJobListDisplay:
         response = authenticated_client.get("/admin/jobs")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Jobs - CIDX Admin" in response.text
-        ), "Page title should be 'Jobs - CIDX Admin'"
+        assert "Jobs - CIDX Admin" in response.text, (
+            "Page title should be 'Jobs - CIDX Admin'"
+        )
 
     def test_jobs_page_has_table(self, authenticated_client: TestClient):
         """
@@ -153,9 +153,9 @@ class TestJobListDisplay:
 
         assert response.status_code == 200
         # The jobs should have aria-current="page" attribute
-        assert (
-            'aria-current="page"' in response.text
-        ), "Jobs should be highlighted with aria-current attribute"
+        assert 'aria-current="page"' in response.text, (
+            "Jobs should be highlighted with aria-current attribute"
+        )
 
 
 # =============================================================================
@@ -230,9 +230,9 @@ class TestAutoRefresh:
 
         assert response.status_code == 200
         # Check for htmx attributes
-        assert (
-            "hx-get" in response.text or "hx-trigger" in response.text
-        ), "Jobs page should use htmx for updates"
+        assert "hx-get" in response.text or "hx-trigger" in response.text, (
+            "Jobs page should use htmx for updates"
+        )
 
     def test_jobs_page_has_refresh_button(self, authenticated_client: TestClient):
         """
@@ -272,9 +272,9 @@ class TestJobCancellation:
         # rendered in cancel forms when there are jobs
         # The cookie proves CSRF protection is enabled for this page
         csrf_cookie = response.cookies.get("_csrf")
-        assert (
-            csrf_cookie is not None or "csrf_token" in response.text
-        ), "Jobs page should include CSRF protection (cookie or form field)"
+        assert csrf_cookie is not None or "csrf_token" in response.text, (
+            "Jobs page should include CSRF protection (cookie or form field)"
+        )
 
 
 # =============================================================================
@@ -315,9 +315,9 @@ class TestJobFiltering:
         # Test that the endpoint accepts status filter parameter
         response = authenticated_client.get("/admin/jobs?status_filter=running")
 
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 with status filter, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 with status filter, got {response.status_code}"
+        )
 
     def test_jobs_filter_by_type(self, authenticated_client: TestClient):
         """
@@ -330,9 +330,9 @@ class TestJobFiltering:
         # Test that the endpoint accepts job_type filter parameter
         response = authenticated_client.get("/admin/jobs?job_type=index")
 
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 with type filter, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 with type filter, got {response.status_code}"
+        )
 
 
 # =============================================================================
@@ -382,9 +382,9 @@ class TestJobPagination:
         """
         response = authenticated_client.get("/admin/jobs?page=1")
 
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 with page parameter, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 with page parameter, got {response.status_code}"
+        )
 
 
 # =============================================================================
@@ -407,9 +407,9 @@ class TestJobsPartials:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
 
     def test_jobs_partial_list_with_filters(self, authenticated_client: TestClient):
         """
@@ -423,9 +423,9 @@ class TestJobsPartials:
             "/admin/partials/jobs-list?status_filter=running&job_type=index"
         )
 
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 with filters, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 with filters, got {response.status_code}"
+        )
 
     def test_jobs_partial_requires_auth(self, web_client: TestClient):
         """

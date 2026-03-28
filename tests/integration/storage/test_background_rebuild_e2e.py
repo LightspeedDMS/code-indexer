@@ -123,16 +123,16 @@ class TestBackgroundRebuildE2EScenarios:
         assert rebuild_complete.is_set(), "Rebuild should complete"
 
         # All queries should succeed
-        assert all(
-            isinstance(r, int) and r == 10 for r in query_results
-        ), f"All queries should return 10 results, got: {query_results}"
+        assert all(isinstance(r, int) and r == 10 for r in query_results), (
+            f"All queries should return 10 results, got: {query_results}"
+        )
 
         # Query performance should not degrade significantly
         # (queries use old index, so rebuild doesn't slow them down)
         avg_query_time = sum(query_times) / len(query_times)
-        assert (
-            avg_query_time < 50
-        ), f"Query time during rebuild: {avg_query_time:.2f}ms (should be <50ms)"
+        assert avg_query_time < 50, (
+            f"Query time during rebuild: {avg_query_time:.2f}ms (should be <50ms)"
+        )
 
         # Verify no temp file left behind
         temp_file = tmp_path / "hnsw_index.bin.tmp"
@@ -264,9 +264,9 @@ class TestBackgroundRebuildE2EScenarios:
         idx_r2_complete = rebuild_order.index("rebuild2_complete")
 
         # Rebuild1 must complete before rebuild2 completes
-        assert (
-            idx_r1_complete < idx_r2_complete
-        ), f"Lock serialization failed: {rebuild_order}"
+        assert idx_r1_complete < idx_r2_complete, (
+            f"Lock serialization failed: {rebuild_order}"
+        )
 
     def test_cleanup_orphaned_temp_files(self, tmp_path: Path):
         """E2E test: Cleanup of orphaned .tmp files after crashes.
@@ -366,15 +366,15 @@ class TestBackgroundRebuildE2EScenarios:
         assert rebuild_complete.is_set()
 
         # All loads should succeed
-        assert all(
-            isinstance(r, int) for r in load_results
-        ), f"All loads should succeed, got: {load_results}"
+        assert all(isinstance(r, int) for r in load_results), (
+            f"All loads should succeed, got: {load_results}"
+        )
 
         # Some loads will see old index (30), some new (100)
         # This proves stale reads are working
-        assert any(
-            r == num_initial for r in load_results
-        ), "Should see old index during rebuild (stale reads)"
+        assert any(r == num_initial for r in load_results), (
+            "Should see old index during rebuild (stale reads)"
+        )
 
         # Final load should see new index
         final_index = manager.load_index(tmp_path)

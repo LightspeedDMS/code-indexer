@@ -124,9 +124,9 @@ class TestCascadeToGoldenRepos:
 
         result = _read_cidx_config(self.repo1_dir)
         for ext in result["file_extensions"]:
-            assert not ext.startswith(
-                "."
-            ), f"Extension {ext!r} should not have leading dot"
+            assert not ext.startswith("."), (
+                f"Extension {ext!r} should not have leading dot"
+            )
 
     def test_cascade_preserves_other_config_fields(self):
         """AC5: cascade must not overwrite other fields in repo config.json."""
@@ -241,9 +241,9 @@ class TestSeedNewRepoFromServerConfig:
 
         result = _read_cidx_config(self.repo_dir)
         for ext in result["file_extensions"]:
-            assert not ext.startswith(
-                "."
-            ), f"Extension {ext!r} should not have leading dot"
+            assert not ext.startswith("."), (
+                f"Extension {ext!r} should not have leading dot"
+            )
 
     def test_seed_handles_missing_cidx_config_gracefully(self):
         """AC6: seed must not raise if .code-indexer/config.json does not exist."""
@@ -323,9 +323,9 @@ class TestRefreshSyncCorrectsDrift:
         self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
 
         mtime_after = cidx_config_path.stat().st_mtime
-        assert (
-            mtime_before == mtime_after
-        ), "File was rewritten when it shouldn't have been"
+        assert mtime_before == mtime_after, (
+            "File was rewritten when it shouldn't have been"
+        )
 
     def test_sync_handles_missing_repo_config_gracefully(self):
         """AC7: sync must not raise if .code-indexer/config.json does not exist."""
@@ -349,6 +349,6 @@ class TestRefreshSyncCorrectsDrift:
 
         result = _read_cidx_config(self.repo_dir)
         for ext in result["file_extensions"]:
-            assert not ext.startswith(
-                "."
-            ), f"Extension {ext!r} should not have leading dot"
+            assert not ext.startswith("."), (
+                f"Extension {ext!r} should not have leading dot"
+            )

@@ -142,26 +142,26 @@ def test_concurrent_refreshes_different_repos_no_interference(
         elapsed_time = time.time() - start_time
 
         # Verify both refreshes completed
-        assert (
-            len(refresh_events["repo1"]) == 2
-        ), "Repo1 refresh should have started and ended"
-        assert (
-            len(refresh_events["repo2"]) == 2
-        ), "Repo2 refresh should have started and ended"
+        assert len(refresh_events["repo1"]) == 2, (
+            "Repo1 refresh should have started and ended"
+        )
+        assert len(refresh_events["repo2"]) == 2, (
+            "Repo2 refresh should have started and ended"
+        )
 
         # Verify concurrent execution (total time should be < sum of individual times)
-        assert (
-            elapsed_time < 0.15
-        ), f"Refreshes should run concurrently (took {elapsed_time}s)"
+        assert elapsed_time < 0.15, (
+            f"Refreshes should run concurrently (took {elapsed_time}s)"
+        )
 
         # Verify overlap: repo2 should start before repo1 ends
         refresh_events["repo1"][0][1]
         repo1_end = refresh_events["repo1"][1][1]
         repo2_start = refresh_events["repo2"][0][1]
 
-        assert (
-            repo2_start < repo1_end
-        ), "Repo2 should start before repo1 completes (concurrent execution)"
+        assert repo2_start < repo1_end, (
+            "Repo2 should start before repo1 completes (concurrent execution)"
+        )
 
 
 def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_updater):
@@ -229,9 +229,9 @@ def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_upda
         elapsed_time = time.time() - start_time
 
         # Verify both refreshes completed
-        assert (
-            len(refresh_order) == 4
-        ), f"Both refreshes should complete (got {len(refresh_order)} events)"
+        assert len(refresh_order) == 4, (
+            f"Both refreshes should complete (got {len(refresh_order)} events)"
+        )
 
         # Verify serialization: second refresh should not start until first completes
         first_start = next(
@@ -246,14 +246,14 @@ def test_concurrent_refreshes_same_repo_serialized(scheduler, mock_git_pull_upda
             if event == "start" and i > first_start
         )
 
-        assert (
-            first_end < second_start
-        ), f"Second refresh should start after first completes (order: {refresh_order})"
+        assert first_end < second_start, (
+            f"Second refresh should start after first completes (order: {refresh_order})"
+        )
 
         # Verify sequential execution (total time should be ~sum of individual times)
-        assert (
-            elapsed_time >= 0.2
-        ), f"Refreshes should run sequentially (took {elapsed_time}s)"
+        assert elapsed_time >= 0.2, (
+            f"Refreshes should run sequentially (took {elapsed_time}s)"
+        )
 
 
 def test_refresh_lock_released_on_exception(scheduler, mock_git_pull_updater):
@@ -373,9 +373,9 @@ def test_refresh_lock_released_on_timeout(scheduler, mock_git_pull_updater):
 
         # Verify lock was eventually released (both threads completed or timed out gracefully)
         assert not thread1.is_alive(), "Thread1 should have completed"
-        assert (
-            not thread2.is_alive()
-        ), "Thread2 should have completed or timed out gracefully"
+        assert not thread2.is_alive(), (
+            "Thread2 should have completed or timed out gracefully"
+        )
 
 
 def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_updater):
@@ -435,6 +435,6 @@ def test_refresh_lock_prevents_duplicate_refresh(scheduler, mock_git_pull_update
         assert all(not t.is_alive() for t in threads), "All threads should complete"
 
         # With per-repo locking, all 3 attempts should create indexes (serialized)
-        assert (
-            create_count[0] == 3
-        ), f"All 3 refresh attempts should complete sequentially (got {create_count[0]})"
+        assert create_count[0] == 3, (
+            f"All 3 refresh attempts should complete sequentially (got {create_count[0]})"
+        )

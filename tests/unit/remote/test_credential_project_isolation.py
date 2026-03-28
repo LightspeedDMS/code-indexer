@@ -111,9 +111,9 @@ class TestCredentialProjectIsolation:
         for i, (path1, data1) in enumerate(encrypted_data_list):
             for j, (path2, data2) in enumerate(encrypted_data_list):
                 if i != j:
-                    assert (
-                        data1 != data2
-                    ), f"Paths {path1} and {path2} produced same encryption"
+                    assert data1 != data2, (
+                        f"Paths {path1} and {path2} produced same encryption"
+                    )
 
         # Cross-decryption should fail
         for i, (path1, data1) in enumerate(encrypted_data_list):
@@ -139,9 +139,9 @@ class TestCredentialProjectIsolation:
         for i, (user1, data1) in enumerate(encrypted_data_list):
             for j, (user2, data2) in enumerate(encrypted_data_list):
                 if i != j:
-                    assert (
-                        data1 != data2
-                    ), f"Users {user1} and {user2} produced same encryption"
+                    assert data1 != data2, (
+                        f"Users {user1} and {user2} produced same encryption"
+                    )
 
         # Cross-user decryption should fail
         for i, (user1, data1) in enumerate(encrypted_data_list):
@@ -173,9 +173,9 @@ class TestCredentialProjectIsolation:
         for i, (url1, data1) in enumerate(encrypted_data_list):
             for j, (url2, data2) in enumerate(encrypted_data_list):
                 if i != j:
-                    assert (
-                        data1 != data2
-                    ), f"URLs {url1} and {url2} produced same encryption"
+                    assert data1 != data2, (
+                        f"URLs {url1} and {url2} produced same encryption"
+                    )
 
         # Cross-server decryption should fail
         for i, (url1, data1) in enumerate(encrypted_data_list):

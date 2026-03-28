@@ -80,12 +80,12 @@ class TestRemoteStatusRealServerChecking:
         output = captured.out
 
         # MESSI RULE #1 COMPLIANCE: Real server checks
-        assert (
-            "Checking server health" in output
-        ), "Should show real health check process"
-        assert (
-            "Connected" in output or "Authentication Failed" in output
-        ), "Should show real server status"
+        assert "Checking server health" in output, (
+            "Should show real health check process"
+        )
+        assert "Connected" in output or "Authentication Failed" in output, (
+            "Should show real server status"
+        )
         assert "Remote Code Indexer Status" in output, "Should show status table"
 
         # The implementation now makes real attempts to reach the server
@@ -198,9 +198,9 @@ class TestRemoteStatusRealServerChecking:
         assert "Connection Health" in output, "Should show connection health"
 
         # Real status implementation provides actual server responses
-        assert (
-            "Connected" in output or "Authentication Failed" in output
-        ), "Should show real connection status"
+        assert "Connected" in output or "Authentication Failed" in output, (
+            "Should show real connection status"
+        )
 
 
 class TestMESSIRulesCompliance:
@@ -224,12 +224,12 @@ class TestMESSIRulesCompliance:
         }
 
         # These values should NEVER be hardcoded - they should come from real server calls
-        assert (
-            fake_status["server_reachable"] is False
-        ), "Demonstrates hardcoded fake status"
-        assert (
-            fake_status["authentication_valid"] is False
-        ), "Demonstrates hardcoded fake auth"
+        assert fake_status["server_reachable"] is False, (
+            "Demonstrates hardcoded fake status"
+        )
+        assert fake_status["authentication_valid"] is False, (
+            "Demonstrates hardcoded fake auth"
+        )
 
         # This test shows what's wrong with the current approach
 

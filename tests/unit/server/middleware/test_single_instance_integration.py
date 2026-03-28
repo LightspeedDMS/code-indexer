@@ -85,9 +85,9 @@ class TestSingleInstanceIntegration:
 
         # All correlation IDs should be unique
         unique_ids = set(correlation_ids)
-        assert len(unique_ids) == len(
-            correlation_ids
-        ), "Correlation IDs should be unique across all requests"
+        assert len(unique_ids) == len(correlation_ids), (
+            "Correlation IDs should be unique across all requests"
+        )
 
         # All should be valid UUID format
         import uuid
@@ -150,9 +150,9 @@ class TestSingleInstanceIntegration:
             status_code_1 = handler.get_status_code_for_error_type(error_type)
             status_code_2 = handler.get_status_code_for_error_type(error_type)
 
-            assert (
-                status_code_1 == status_code_2
-            ), f"Status code mapping inconsistent for {error_type}"
+            assert status_code_1 == status_code_2, (
+                f"Status code mapping inconsistent for {error_type}"
+            )
 
     def test_error_handler_middleware_integration(self):
         """Test proper integration pattern with FastAPI middleware."""

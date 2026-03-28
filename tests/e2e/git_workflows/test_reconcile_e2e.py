@@ -40,7 +40,7 @@ def process_data(data):
     def __init__(self, name, email):
         self.name = name
         self.email = email
-    
+
     def __str__(self):
         return f"User({self.name}, {self.email})"
 
@@ -54,7 +54,7 @@ class Database:
     def __init__(self, db_path):
         self.db_path = db_path
         self.connection = None
-    
+
     def connect(self):
         self.connection = sqlite3.connect(self.db_path)
         return self.connection""",
@@ -151,9 +151,9 @@ def test_reconcile_after_full_index_shared_containers():
             text=True,
             timeout=180,
         )
-        assert (
-            reconcile_result.returncode == 0
-        ), f"Reconcile failed: {reconcile_result.stderr}"
+        assert reconcile_result.returncode == 0, (
+            f"Reconcile failed: {reconcile_result.stderr}"
+        )
 
         # Check reconcile output
         output = reconcile_result.stdout
@@ -224,9 +224,9 @@ def test_reconcile_after_full_index_shared_containers():
                         if processed_idx > 0:
                             processed_count = int(parts[processed_idx - 1])
                             # Should process 0 files if truly up-to-date
-                            assert (
-                                processed_count == 0
-                            ), f"Expected 0 files processed, got {processed_count}: {line}"
+                            assert processed_count == 0, (
+                                f"Expected 0 files processed, got {processed_count}: {line}"
+                            )
                     except (ValueError, IndexError):
                         pass  # Couldn't parse
 
@@ -282,9 +282,9 @@ def test_reconcile_detects_missing_files_shared_containers():
             text=True,
             timeout=180,
         )
-        assert (
-            reconcile_result.returncode == 0
-        ), f"Reconcile failed: {reconcile_result.stderr}"
+        assert reconcile_result.returncode == 0, (
+            f"Reconcile failed: {reconcile_result.stderr}"
+        )
 
         output = reconcile_result.stdout
 
@@ -311,9 +311,9 @@ def test_reconcile_detects_missing_files_shared_containers():
                 except (ValueError, IndexError):
                     pass
 
-            assert (
-                found_processing
-            ), f"Expected some files to be processed, but found: {output}"
+            assert found_processing, (
+                f"Expected some files to be processed, but found: {output}"
+            )
 
 
 @pytest.mark.skipif(
@@ -389,9 +389,9 @@ def test_manual_reconcile_workflow_shared_containers():
             text=True,
             timeout=180,
         )
-        assert (
-            reconcile_result.returncode == 0
-        ), f"Reconcile failed: {reconcile_result.stderr}"
+        assert reconcile_result.returncode == 0, (
+            f"Reconcile failed: {reconcile_result.stderr}"
+        )
         print("✅ Reconcile completed")
         print(f"   Output: {reconcile_result.stdout.strip()}")
 

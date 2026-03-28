@@ -573,9 +573,9 @@ class TestGitLabListPipelinesGroupAccess:
             await handle_gitlab_ci_list_pipelines(args, user)
 
         # Token resolver must NOT have been called
-        assert (
-            len(token_resolver_called) == 0
-        ), "Token resolver called despite access denial"
+        assert len(token_resolver_called) == 0, (
+            "Token resolver called despite access denial"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +987,9 @@ class TestAuditTrailInWriteHandlers:
         audit_logs = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
             getattr(r, "correlation_id", None) is not None for r in audit_logs
-        ), f"No audit log with correlation_id. Records: {[(r.message, r.__dict__) for r in audit_logs]}"
+        ), (
+            f"No audit log with correlation_id. Records: {[(r.message, r.__dict__) for r in audit_logs]}"
+        )
 
 
 # ---------------------------------------------------------------------------

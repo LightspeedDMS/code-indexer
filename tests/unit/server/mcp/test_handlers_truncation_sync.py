@@ -24,9 +24,9 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _apply_payload_truncation
 
         # Verify _apply_payload_truncation is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _apply_payload_truncation
-        ), "_apply_payload_truncation() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_apply_payload_truncation), (
+            "_apply_payload_truncation() should be sync, not async"
+        )
 
     def test_apply_fts_payload_truncation_is_sync_function(self):
         """
@@ -39,9 +39,9 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _apply_fts_payload_truncation
 
         # Verify _apply_fts_payload_truncation is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _apply_fts_payload_truncation
-        ), "_apply_fts_payload_truncation() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_apply_fts_payload_truncation), (
+            "_apply_fts_payload_truncation() should be sync, not async"
+        )
 
     def test_apply_regex_payload_truncation_is_sync_function(self):
         """
@@ -54,9 +54,9 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _apply_regex_payload_truncation
 
         # Verify _apply_regex_payload_truncation is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _apply_regex_payload_truncation
-        ), "_apply_regex_payload_truncation() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_apply_regex_payload_truncation), (
+            "_apply_regex_payload_truncation() should be sync, not async"
+        )
 
     def test_apply_temporal_payload_truncation_is_sync_function(self):
         """
@@ -69,9 +69,9 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _apply_temporal_payload_truncation
 
         # Verify _apply_temporal_payload_truncation is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _apply_temporal_payload_truncation
-        ), "_apply_temporal_payload_truncation() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_apply_temporal_payload_truncation), (
+            "_apply_temporal_payload_truncation() should be sync, not async"
+        )
 
     def test_apply_scip_payload_truncation_is_sync_function(self):
         """
@@ -84,9 +84,9 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _apply_scip_payload_truncation
 
         # Verify _apply_scip_payload_truncation is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _apply_scip_payload_truncation
-        ), "_apply_scip_payload_truncation() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_apply_scip_payload_truncation), (
+            "_apply_scip_payload_truncation() should be sync, not async"
+        )
 
     def test_truncate_regex_field_is_sync_function(self):
         """
@@ -99,9 +99,9 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _truncate_regex_field
 
         # Verify _truncate_regex_field is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _truncate_regex_field
-        ), "_truncate_regex_field() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_truncate_regex_field), (
+            "_truncate_regex_field() should be sync, not async"
+        )
 
     def test_truncate_field_is_sync_function(self):
         """
@@ -114,6 +114,6 @@ class TestHandlersTruncationFunctionsSyncMethods:
         from code_indexer.server.mcp.handlers import _truncate_field
 
         # Verify _truncate_field is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            _truncate_field
-        ), "_truncate_field() should be sync, not async"
+        assert not inspect.iscoroutinefunction(_truncate_field), (
+            "_truncate_field() should be sync, not async"
+        )

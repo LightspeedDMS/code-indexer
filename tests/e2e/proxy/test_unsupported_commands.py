@@ -137,9 +137,9 @@ class TestUnsupportedCommandsE2E:
             )
 
             # All should exit with code 3
-            assert (
-                result.returncode == 3
-            ), f"Command '{command}' should exit with code 3"
+            assert result.returncode == 3, (
+                f"Command '{command}' should exit with code 3"
+            )
 
             # All should mention the command and error
             assert command in result.stderr.lower()

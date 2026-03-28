@@ -99,9 +99,9 @@ class TestGitPushAutoDetectBranch:
         ):
             git_ops_service.git_push_with_pat(repo_dir, "origin", None, MOCK_CREDENTIAL)
 
-        assert (
-            "HEAD:refs/heads/feature/my-branch" in push_cmd
-        ), f"Expected refspec in push cmd: {push_cmd}"
+        assert "HEAD:refs/heads/feature/my-branch" in push_cmd, (
+            f"Expected refspec in push cmd: {push_cmd}"
+        )
 
     def test_push_does_not_call_rev_parse_when_branch_provided(
         self, repo_dir, git_ops_service
@@ -128,9 +128,9 @@ class TestGitPushAutoDetectBranch:
             )
 
         rev_parse_calls = [c for c in calls_made if "rev-parse" in c]
-        assert (
-            len(rev_parse_calls) == 0
-        ), f"Should not call rev-parse when branch provided: {calls_made}"
+        assert len(rev_parse_calls) == 0, (
+            f"Should not call rev-parse when branch provided: {calls_made}"
+        )
 
 
 class TestGitPushExplicitRefspecAndUpstream:
@@ -162,9 +162,9 @@ class TestGitPushExplicitRefspecAndUpstream:
                 repo_dir, "origin", "main", MOCK_CREDENTIAL
             )
 
-        assert (
-            "HEAD:refs/heads/main" in push_cmd
-        ), f"Expected explicit refspec in: {push_cmd}"
+        assert "HEAD:refs/heads/main" in push_cmd, (
+            f"Expected explicit refspec in: {push_cmd}"
+        )
 
     def test_push_sets_upstream_after_success(self, repo_dir, git_ops_service):
         """After successful push, calls git branch --set-upstream-to=origin/main main."""
@@ -195,13 +195,13 @@ class TestGitPushExplicitRefspecAndUpstream:
             for c in calls_made
             if "branch" in c and "--set-upstream-to" in " ".join(c)
         ]
-        assert (
-            len(upstream_calls) == 1
-        ), f"Expected upstream tracking call, got: {calls_made}"
+        assert len(upstream_calls) == 1, (
+            f"Expected upstream tracking call, got: {calls_made}"
+        )
         upstream_cmd = upstream_calls[0]
-        assert any(
-            "origin/main" in arg for arg in upstream_cmd
-        ), f"Expected origin/main in: {upstream_cmd}"
+        assert any("origin/main" in arg for arg in upstream_cmd), (
+            f"Expected origin/main in: {upstream_cmd}"
+        )
         assert "main" in upstream_cmd, f"Expected branch name in: {upstream_cmd}"
 
     def test_push_skips_upstream_when_set_upstream_false(
@@ -273,9 +273,9 @@ class TestGitPushExplicitRefspecAndUpstream:
             for c in calls_made
             if "branch" in c and "--set-upstream-to" in " ".join(c)
         ]
-        assert (
-            len(upstream_calls) == 0
-        ), f"Upstream should not be set after failed push: {calls_made}"
+        assert len(upstream_calls) == 0, (
+            f"Upstream should not be set after failed push: {calls_made}"
+        )
 
 
 class TestGitPushHandlerSetUpstream:

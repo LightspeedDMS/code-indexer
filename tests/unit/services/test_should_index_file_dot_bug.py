@@ -44,9 +44,9 @@ class TestShouldIndexFileDotBug:
         FAILS currently: ".java" not in ["java", ...] -> returns False.
         """
         indexer = self._make_indexer(tmp_path)
-        assert (
-            "java" in indexer.config.file_extensions
-        ), "Config must contain 'java' (no dot) in file_extensions"
+        assert "java" in indexer.config.file_extensions, (
+            "Config must contain 'java' (no dot) in file_extensions"
+        )
         result = indexer._should_index_file("src/Main.java")
         assert result is True, (
             "Bug 1: _should_index_file returned False for .java file — "
@@ -62,9 +62,9 @@ class TestShouldIndexFileDotBug:
         indexer = self._make_indexer(tmp_path)
         assert "kt" in indexer.config.file_extensions
         result = indexer._should_index_file("src/Utils.kt")
-        assert (
-            result is True
-        ), "Bug 1: _should_index_file returned False for .kt file — dot mismatch"
+        assert result is True, (
+            "Bug 1: _should_index_file returned False for .kt file — dot mismatch"
+        )
 
     def test_should_index_python_file(self, tmp_path: Path) -> None:
         """_should_index_file MUST return True for a .py file path.
@@ -74,9 +74,9 @@ class TestShouldIndexFileDotBug:
         indexer = self._make_indexer(tmp_path)
         assert "py" in indexer.config.file_extensions
         result = indexer._should_index_file("src/main.py")
-        assert (
-            result is True
-        ), "Bug 1: _should_index_file returned False for .py file — dot mismatch"
+        assert result is True, (
+            "Bug 1: _should_index_file returned False for .py file — dot mismatch"
+        )
 
     def test_should_index_typescript_file(self, tmp_path: Path) -> None:
         """_should_index_file MUST return True for a .ts file path.
@@ -86,9 +86,9 @@ class TestShouldIndexFileDotBug:
         indexer = self._make_indexer(tmp_path)
         assert "ts" in indexer.config.file_extensions
         result = indexer._should_index_file("src/App.ts")
-        assert (
-            result is True
-        ), "Bug 1: _should_index_file returned False for .ts file — dot mismatch"
+        assert result is True, (
+            "Bug 1: _should_index_file returned False for .ts file — dot mismatch"
+        )
 
     def test_should_reject_jar_file(self, tmp_path: Path) -> None:
         """_should_index_file MUST return False for a .jar file (not in extensions)."""
@@ -156,6 +156,6 @@ class TestShouldIndexFileDotBug:
         """All production binary extensions must be rejected by _should_index_file."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file(f"lib/file.{ext}")
-        assert (
-            result is False
-        ), f"_should_index_file should reject '.{ext}' (not a source extension)"
+        assert result is False, (
+            f"_should_index_file should reject '.{ext}' (not a source extension)"
+        )

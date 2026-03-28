@@ -234,9 +234,9 @@ A test repository for unit testing.
             activator.deactivate_golden_repo("test-repo")
 
             # Verify the meta description file was deleted
-            assert (
-                not meta_description_file.exists()
-            ), "Meta-directory .md file should be deleted after deactivation"
+            assert not meta_description_file.exists(), (
+                "Meta-directory .md file should be deleted after deactivation"
+            )
 
 
 class TestMetaDirectoryReIndexing:
@@ -295,9 +295,9 @@ class TestMetaDirectoryReIndexing:
                 activator.deactivate_golden_repo("test-repo")
 
             # Verify cidx index was called on meta-directory
-            assert (
-                len(index_calls) > 0
-            ), "cidx index should be called on meta-directory after deactivation"
+            assert len(index_calls) > 0, (
+                "cidx index should be called on meta-directory after deactivation"
+            )
 
             # Find the index call
             index_call = None
@@ -387,9 +387,9 @@ class TestGoldenRepoRemovalIntegration:
             assert job_status["status"] == "completed"
 
             # Verify all resources were cleaned up
-            assert not manager.golden_repo_exists(
-                "test-repo"
-            ), "Golden repo should be removed from manager"
+            assert not manager.golden_repo_exists("test-repo"), (
+                "Golden repo should be removed from manager"
+            )
 
             registry = GlobalRegistry(str(golden_repos_dir))  # Reload
             assert not any(
@@ -399,9 +399,9 @@ class TestGoldenRepoRemovalIntegration:
 
             assert not alias_file.exists(), "Alias file should be deleted"
 
-            assert (
-                not meta_description_file.exists()
-            ), "Meta-directory .md file should be deleted"
+            assert not meta_description_file.exists(), (
+                "Meta-directory .md file should be deleted"
+            )
 
 
 class TestGoldenRepoDeactivationErrorHandling:

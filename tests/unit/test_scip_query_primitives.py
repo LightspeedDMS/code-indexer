@@ -72,9 +72,9 @@ class TestMatchesSymbol:
 
         result = _matches_symbol(occurrence_symbol, target_symbol, exact=True)
 
-        assert (
-            result is True
-        ), "Should match 'CacheEntry' when extracted from SCIP symbol"
+        assert result is True, (
+            "Should match 'CacheEntry' when extracted from SCIP symbol"
+        )
 
     def test_exact_match_rejects_substring_matches(self):
         """Should reject substring matches when exact=True.
@@ -232,9 +232,9 @@ class TestFindDefinition:
         )
 
         # All results should be exactly "CacheEntry"
-        assert exact_symbols == {
-            "CacheEntry"
-        }, f"All results should be 'CacheEntry', got {exact_symbols}"
+        assert exact_symbols == {"CacheEntry"}, (
+            f"All results should be 'CacheEntry', got {exact_symbols}"
+        )
 
         # Should NOT contain fuzzy matches
         assert "FTSIndexCacheEntry" not in exact_symbols
@@ -299,9 +299,9 @@ class TestFindDefinition:
         method_symbols = [
             s for s in specific_symbols if s.endswith("().") and "().(" not in s
         ]
-        assert (
-            len(method_symbols) > 0
-        ), "Specific query with # should find method definitions"
+        assert len(method_symbols) > 0, (
+            "Specific query with # should find method definitions"
+        )
 
         # Should find attribute definitions (end with .  but not ().  )
         attribute_symbols = [
@@ -309,9 +309,9 @@ class TestFindDefinition:
             for s in specific_symbols
             if s.endswith(".") and not s.endswith("().") and not s.endswith("#")
         ]
-        assert (
-            len(attribute_symbols) > 0
-        ), "Specific query with # should find attribute definitions"
+        assert len(attribute_symbols) > 0, (
+            "Specific query with # should find attribute definitions"
+        )
 
     def test_find_definition_exact_flag_for_methods(self, real_query_engine):
         """Test that --exact flag works for method queries.
@@ -329,9 +329,9 @@ class TestFindDefinition:
         )
 
         # Should find __init__ methods for CacheEntry class
-        assert (
-            len(results_hash) >= 2
-        ), f"Expected at least 2 __init__ methods for CacheEntry, got {len(results_hash)}"
+        assert len(results_hash) >= 2, (
+            f"Expected at least 2 __init__ methods for CacheEntry, got {len(results_hash)}"
+        )
         assert all("__init__" in r.symbol for r in results_hash)
         assert all("CacheEntry#__init__()" in r.symbol for r in results_hash)
 
@@ -341,16 +341,16 @@ class TestFindDefinition:
         )
 
         # Should find same results
-        assert (
-            len(results_parens) >= 2
-        ), f"Expected at least 2 __init__ methods for CacheEntry, got {len(results_parens)}"
+        assert len(results_parens) >= 2, (
+            f"Expected at least 2 __init__ methods for CacheEntry, got {len(results_parens)}"
+        )
         assert all("__init__" in r.symbol for r in results_parens)
         assert all("CacheEntry#__init__()" in r.symbol for r in results_parens)
 
         # Both formats should return identical results
-        assert len(results_hash) == len(
-            results_parens
-        ), "Different formats should return same number of results"
+        assert len(results_hash) == len(results_parens), (
+            "Different formats should return same number of results"
+        )
 
     def test_find_definition_simple_name_shows_only_class_definitions(
         self, real_query_engine
@@ -669,15 +669,15 @@ class TestTraceCallChain:
         )
 
         assert len(chains) > 0, "Should find chain through non-call relationships"
-        assert (
-            chains[0].length >= 1
-        ), f"Should find valid chain, got length {chains[0].length}"
+        assert chains[0].length >= 1, (
+            f"Should find valid chain, got length {chains[0].length}"
+        )
 
         # Verify path includes DaemonService or FileFinder
         path_str = " -> ".join(chains[0].path)
-        assert (
-            "DaemonService" in path_str or "FileFinder" in path_str
-        ), f"Expected symbols in path: {path_str}"
+        assert "DaemonService" in path_str or "FileFinder" in path_str, (
+            f"Expected symbols in path: {path_str}"
+        )
 
     @pytest.mark.slow  # Inherently slow due to O(n²) algorithm in backend (not index issue)
     def test_trace_call_chain_performance(self, real_query_engine):

@@ -268,9 +268,9 @@ résumé = "document"  # Common Unicode
             column = result.get("column", 0)
 
             # Column should be 1 (or very close) for identifier at line start
-            assert (
-                column <= 3
-            ), f"Unicode identifier at line start should be at column 1-3, got {column}"
+            assert column <= 3, (
+                f"Unicode identifier at line start should be at column 1-3, got {column}"
+            )
 
     def test_unicode_in_middle_of_line_correct_column(self, indexed_manager_unicode):
         """
@@ -373,9 +373,9 @@ flag = "🇺🇸 USA"
             column = result.get("column", 0)
 
             # Verify column is calculated (should handle emoji correctly)
-            assert (
-                column > 0
-            ), f"Column should be positive even with emoji, got {column}"
+            assert column > 0, (
+                f"Column should be positive even with emoji, got {column}"
+            )
 
     def test_unicode_bom_doesnt_affect_column_calculation(
         self, indexed_manager_unicode
@@ -447,9 +447,9 @@ flag = "🇺🇸 USA"
 
         # Column should be calculated using character positions
         # "café " is 5 characters (not 6 bytes), so 'p' is at column 6
-        assert (
-            column == 6
-        ), f"Expected column 6 for 'python' after 'café ', got column {column}"
+        assert column == 6, (
+            f"Expected column 6 for 'python' after 'café ', got column {column}"
+        )
 
         assert line == 1, f"Expected line 1, got {line}"
 

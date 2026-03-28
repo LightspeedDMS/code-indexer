@@ -43,9 +43,9 @@ class TestLanguageValidatorCore:
 
         for language in test_cases:
             result = self.validator.validate_language(language)
-            assert (
-                result.is_valid
-            ), f"Language '{language}' should be valid (case insensitive)"
+            assert result.is_valid, (
+                f"Language '{language}' should be valid (case insensitive)"
+            )
 
     def test_invalid_language_with_suggestions(self):
         """Test that invalid languages provide helpful suggestions."""
@@ -74,14 +74,14 @@ class TestLanguageValidatorCore:
         for invalid_lang, expected_suggestions in test_cases:
             result = self.validator.validate_language(invalid_lang)
             if not result.is_valid:  # Only test if it's actually invalid
-                assert (
-                    len(result.suggestions) > 0
-                ), f"Language '{invalid_lang}' should have suggestions"
+                assert len(result.suggestions) > 0, (
+                    f"Language '{invalid_lang}' should have suggestions"
+                )
                 # Check that expected suggestions are present
                 for suggestion in expected_suggestions:
-                    assert (
-                        suggestion in result.suggestions
-                    ), f"Expected '{suggestion}' in suggestions for '{invalid_lang}'"
+                    assert suggestion in result.suggestions, (
+                        f"Expected '{suggestion}' in suggestions for '{invalid_lang}'"
+                    )
 
     def test_error_messages_for_invalid_languages(self):
         """Test that invalid languages have appropriate error messages."""
@@ -90,9 +90,9 @@ class TestLanguageValidatorCore:
         for language in invalid_languages:
             result = self.validator.validate_language(language)
             if not result.is_valid:
-                assert (
-                    result.error_message is not None
-                ), f"Language '{language}' should have error message"
+                assert result.error_message is not None, (
+                    f"Language '{language}' should have error message"
+                )
                 assert (
                     "unknown" in result.error_message.lower()
                     or "invalid" in result.error_message.lower()
@@ -107,9 +107,9 @@ class TestLanguageValidatorCore:
 
         for language in test_cases:
             result = self.validator.validate_language(language)
-            assert (
-                not result.is_valid
-            ), f"Empty/whitespace language '{repr(language)}' should be invalid"
+            assert not result.is_valid, (
+                f"Empty/whitespace language '{repr(language)}' should be invalid"
+            )
             assert result.error_message is not None
 
     def test_none_language_handling(self):
@@ -174,17 +174,17 @@ class TestLanguageValidatorSuggestionAlgorithm:
         for typo, expected in test_cases:
             result = self.validator.validate_language(typo)
             if not result.is_valid:
-                assert (
-                    expected in result.suggestions
-                ), f"Expected '{expected}' in suggestions for typo '{typo}'"
+                assert expected in result.suggestions, (
+                    f"Expected '{expected}' in suggestions for typo '{typo}'"
+                )
 
     def test_suggestion_limit(self):
         """Test that suggestions are limited to a reasonable number."""
         result = self.validator.validate_language("xyz")
         if not result.is_valid:
-            assert (
-                len(result.suggestions) <= 5
-            ), "Should limit suggestions to reasonable number"
+            assert len(result.suggestions) <= 5, (
+                "Should limit suggestions to reasonable number"
+            )
 
     def test_suggestions_are_sorted_by_relevance(self):
         """Test that suggestions are sorted by relevance/similarity."""
@@ -193,9 +193,9 @@ class TestLanguageValidatorSuggestionAlgorithm:
         if not result.is_valid and len(result.suggestions) > 1:
             # First suggestion should be most relevant
             # For "java123", "java" should be the top suggestion
-            assert (
-                result.suggestions[0] == "java"
-            ), f"Expected 'java' as top suggestion, got {result.suggestions}"
+            assert result.suggestions[0] == "java", (
+                f"Expected 'java' as top suggestion, got {result.suggestions}"
+            )
 
 
 class TestLanguageValidatorCommonMistakes:
@@ -220,9 +220,9 @@ class TestLanguageValidatorCommonMistakes:
             result = self.validator.validate_language(alternative)
             # These might be valid (if mapped) or invalid (if needing suggestions)
             if not result.is_valid:
-                assert (
-                    expected in result.suggestions
-                ), f"Expected '{expected}' suggested for '{alternative}'"
+                assert expected in result.suggestions, (
+                    f"Expected '{expected}' suggested for '{alternative}'"
+                )
 
     def test_file_extension_suggestions(self):
         """Test that file extensions with dots provide appropriate suggestions."""
@@ -271,6 +271,6 @@ class TestLanguageValidatorPerformance:
         end_time = time.time()
 
         duration = end_time - start_time
-        assert (
-            duration < 0.1
-        ), f"Suggestion generation took {duration}s, should be < 0.1s"
+        assert duration < 0.1, (
+            f"Suggestion generation took {duration}s, should be < 0.1s"
+        )

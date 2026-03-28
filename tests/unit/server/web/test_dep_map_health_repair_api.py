@@ -102,9 +102,9 @@ class TestHealthEndpoint:
         data = response.json()
         assert "status" in data, f"Missing 'status' in response: {data}"
         assert "anomalies" in data, f"Missing 'anomalies' in response: {data}"
-        assert (
-            "repairable_count" in data
-        ), f"Missing 'repairable_count' in response: {data}"
+        assert "repairable_count" in data, (
+            f"Missing 'repairable_count' in response: {data}"
+        )
 
     def test_health_requires_admin_auth(self, client):
         """GET /admin/dependency-map/health returns auth rejection without session."""
@@ -329,9 +329,9 @@ class TestJobStatusPartialAnomalyDetails:
 
         assert response.status_code == 200
         # uncovered_repo anomaly should produce "Uncovered repos: uncovered-service"
-        assert (
-            "Uncovered repos" in response.text
-        ), f"Expected 'Uncovered repos' in HTML. Got: {response.text[500:1200]}"
-        assert (
-            "uncovered-service" in response.text
-        ), f"Expected repo name 'uncovered-service' in HTML. Got: {response.text[500:1200]}"
+        assert "Uncovered repos" in response.text, (
+            f"Expected 'Uncovered repos' in HTML. Got: {response.text[500:1200]}"
+        )
+        assert "uncovered-service" in response.text, (
+            f"Expected repo name 'uncovered-service' in HTML. Got: {response.text[500:1200]}"
+        )

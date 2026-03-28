@@ -89,12 +89,12 @@ class TestBatchProcessingFixes:
 
         # EXPECTED: Should track 3 embeddings processed, not 1 task
         # Current implementation tracks tasks, so this will FAIL
-        assert hasattr(
-            stats, "total_embeddings_processed"
-        ), "Statistics should track total embeddings"
-        assert (
-            stats.total_embeddings_processed == 3
-        ), "Should count 3 embeddings, not 1 task"
+        assert hasattr(stats, "total_embeddings_processed"), (
+            "Statistics should track total embeddings"
+        )
+        assert stats.total_embeddings_processed == 3, (
+            "Should count 3 embeddings, not 1 task"
+        )
 
         # EXPECTED: embeddings_per_second calculation should use embedding count
         assert result.batch_size == 3, "Result should reflect 3 embeddings"
@@ -139,9 +139,9 @@ class TestBatchProcessingFixes:
 
         # EXPECTED: embeddings_per_second should be based on embedding count, not task count
         # This assertion will FAIL because current calculation uses task count
-        assert (
-            stats.embeddings_per_second > 0
-        ), "Should calculate rate based on embeddings"
+        assert stats.embeddings_per_second > 0, (
+            "Should calculate rate based on embeddings"
+        )
 
     def test_immutable_dataclasses_should_use_simpler_factory_pattern(self):
         """
@@ -175,16 +175,16 @@ class TestBatchProcessingFixes:
         # SUCCESS: Factory method now exists and works cleanly
         result = VectorResult.create_immutable(**result_data)
         assert isinstance(result.embeddings, tuple), "Should convert to tuple"
-        assert all(
-            isinstance(emb, tuple) for emb in result.embeddings
-        ), "Should convert nested lists"
+        assert all(isinstance(emb, tuple) for emb in result.embeddings), (
+            "Should convert nested lists"
+        )
         assert result.embeddings == ((1.0, 2.0), (3.0, 4.0)), "Should preserve content"
 
         # Verify both approaches work (factory vs direct constructor)
         task_direct = VectorTask(**task_data)
-        assert (
-            task_direct.chunk_texts == task.chunk_texts
-        ), "Both approaches should work"
+        assert task_direct.chunk_texts == task.chunk_texts, (
+            "Both approaches should work"
+        )
 
     def test_batch_processing_edge_cases_should_be_handled_gracefully(self):
         """
@@ -223,9 +223,9 @@ class TestBatchProcessingFixes:
 
         # EXPECTED: Should have embedding tracking field
         # This will FAIL because the field doesn't exist yet
-        assert hasattr(
-            stats, "total_embeddings_processed"
-        ), "Stats should track embeddings"
+        assert hasattr(stats, "total_embeddings_processed"), (
+            "Stats should track embeddings"
+        )
         assert stats.total_embeddings_processed == 0, "Should initialize to zero"
 
     def test_rolling_window_should_track_embeddings_not_tasks(self):

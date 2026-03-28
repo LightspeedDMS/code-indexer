@@ -55,9 +55,9 @@ class TestAdminMCPCredentialsCommandStructure:
             "list-all",
         ]
         for cmd in required_commands:
-            assert (
-                cmd in result.output
-            ), f"Command '{cmd}' not found in admin mcp-credentials"
+            assert cmd in result.output, (
+                f"Command '{cmd}' not found in admin mcp-credentials"
+            )
 
 
 class TestAdminMCPCredentialsSelfServiceJsonOutput:

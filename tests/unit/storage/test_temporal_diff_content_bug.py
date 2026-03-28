@@ -99,9 +99,9 @@ class TestTemporalDiffContentBug:
 
             # Find the vector file
             vector_files = list(collection_path.rglob(f"vector_{point_id}.json"))
-            assert (
-                len(vector_files) == 1
-            ), f"Expected 1 vector file, found {len(vector_files)}"
+            assert len(vector_files) == 1, (
+                f"Expected 1 vector file, found {len(vector_files)}"
+            )
 
             # Load the stored data
             with open(vector_files[0]) as f:
@@ -213,9 +213,9 @@ class TestTemporalDiffContentBug:
             # For regular clean files, we expect git optimization:
             # - Should have git_blob_hash
             # - Should NOT have chunk_text (saving space)
-            assert (
-                "git_blob_hash" in stored_data
-            ), "Regular clean file should use git blob hash optimization"
-            assert (
-                "chunk_text" not in stored_data
-            ), "Regular clean file should not store chunk_text (space optimization)"
+            assert "git_blob_hash" in stored_data, (
+                "Regular clean file should use git blob hash optimization"
+            )
+            assert "chunk_text" not in stored_data, (
+                "Regular clean file should not store chunk_text (space optimization)"
+            )

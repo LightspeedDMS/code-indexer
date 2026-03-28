@@ -18,16 +18,16 @@ class TestCancellationMinimal:
         """Test that HighThroughputProcessor has cancelled flag."""
         # Since cancelled is an instance attribute, we need to check the __init__ method
         # or check if instances have the attribute after initialization
-        assert hasattr(
-            HighThroughputProcessor, "request_cancellation"
-        ), "Should have request_cancellation method"
+        assert hasattr(HighThroughputProcessor, "request_cancellation"), (
+            "Should have request_cancellation method"
+        )
 
     def test_high_throughput_processor_has_request_cancellation_method(self):
         """Test that HighThroughputProcessor has request_cancellation method."""
         # Check if the class has the method
-        assert hasattr(
-            HighThroughputProcessor, "request_cancellation"
-        ), "Should have request_cancellation method"
+        assert hasattr(HighThroughputProcessor, "request_cancellation"), (
+            "Should have request_cancellation method"
+        )
 
     def test_cancelled_attribute_exists_in_instance(self):
         """Test that cancelled attribute exists in HighThroughputProcessor instances."""
@@ -52,9 +52,9 @@ class TestCancellationMinimal:
         )
 
         # Check that the instance has the cancelled attribute
-        assert hasattr(
-            processor, "cancelled"
-        ), "Instance should have cancelled attribute"
+        assert hasattr(processor, "cancelled"), (
+            "Instance should have cancelled attribute"
+        )
         assert isinstance(processor.cancelled, bool), "cancelled should be boolean"
         assert not processor.cancelled, "cancelled should be False initially"
 

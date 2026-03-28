@@ -77,9 +77,9 @@ class TestGoldenRepoWorkflowCommands:
 
         # Assert: Verify NO --force-docker flags in ANY command
         for command in executed_commands:
-            assert (
-                "--force-docker" not in command
-            ), f"Found obsolete --force-docker flag in command: {command}"
+            assert "--force-docker" not in command, (
+                f"Found obsolete --force-docker flag in command: {command}"
+            )
 
         # Assert: Workflow should ONLY contain init and index commands
         assert len(executed_commands) == 2, (
@@ -90,15 +90,15 @@ class TestGoldenRepoWorkflowCommands:
         # Assert: First command is 'cidx init'
         assert executed_commands[0][0] == "cidx", "First command should be cidx"
         assert executed_commands[0][1] == "init", "First command should be 'cidx init'"
-        assert (
-            "--embedding-provider" in executed_commands[0]
-        ), "init command missing --embedding-provider"
+        assert "--embedding-provider" in executed_commands[0], (
+            "init command missing --embedding-provider"
+        )
 
         # Assert: Second command is 'cidx index'
         assert executed_commands[1][0] == "cidx", "Second command should be cidx"
-        assert (
-            executed_commands[1][1] == "index"
-        ), "Second command should be 'cidx index'"
+        assert executed_commands[1][1] == "index", (
+            "Second command should be 'cidx index'"
+        )
 
         # Assert: NO start/stop/status commands (obsolete for FilesystemVectorStore)
         command_verbs = [cmd[1] for cmd in executed_commands if len(cmd) > 1]

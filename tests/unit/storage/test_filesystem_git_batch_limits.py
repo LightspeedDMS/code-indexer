@@ -176,9 +176,9 @@ class TestGitBatchLimits:
                         and arg != "HEAD"
                     ]
                 )
-                assert (
-                    file_count <= 100
-                ), f"Batch should have <= 100 files, got {file_count}"
+                assert file_count <= 100, (
+                    f"Batch should have <= 100 files, got {file_count}"
+                )
 
     def test_temporal_collection_skips_blob_hash_lookup(
         self, tmp_path, test_vectors, mock_git_repo
@@ -223,9 +223,9 @@ class TestGitBatchLimits:
 
             # Verify NO git ls-tree calls were made
             git_calls = mock_git_repo["git_calls"]
-            assert (
-                len(git_calls) == 0
-            ), "Temporal collection should skip git ls-tree entirely"
+            assert len(git_calls) == 0, (
+                "Temporal collection should skip git ls-tree entirely"
+            )
 
     def test_semantic_collection_still_uses_git_awareness(
         self, tmp_path, test_vectors, mock_git_repo
@@ -270,6 +270,6 @@ class TestGitBatchLimits:
 
             # Verify git ls-tree WAS called for semantic collection
             git_calls = mock_git_repo["git_calls"]
-            assert (
-                len(git_calls) > 0
-            ), "Semantic collection should use git ls-tree for git-awareness"
+            assert len(git_calls) > 0, (
+                "Semantic collection should use git ls-tree for git-awareness"
+            )

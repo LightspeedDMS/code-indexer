@@ -26,9 +26,9 @@ class TestCLIFlagValidation:
         )
 
         if expect_failure:
-            assert (
-                result.returncode != 0
-            ), f"Command should have failed: {' '.join(cmd)}"
+            assert result.returncode != 0, (
+                f"Command should have failed: {' '.join(cmd)}"
+            )
         else:
             assert result.returncode == 0, f"Command failed: {result.stderr}"
 
@@ -147,9 +147,9 @@ class TestCLIFlagValidation:
                         "SingletonCookie",
                     ]
                     error_output = result.stderr + result.stdout
-                    assert any(
-                        error in error_output for error in acceptable_errors
-                    ), f"Unexpected error (should be service-related): {error_output}"
+                    assert any(error in error_output for error in acceptable_errors), (
+                        f"Unexpected error (should be service-related): {error_output}"
+                    )
 
             finally:
                 os.chdir(original_cwd)
@@ -230,9 +230,9 @@ class TestCLIFlagValidation:
                         "SingletonCookie",
                     ]
                     error_output = result.stderr + result.stdout
-                    assert any(
-                        error in error_output for error in acceptable_errors
-                    ), f"Unexpected error (should be service-related): {error_output}"
+                    assert any(error in error_output for error in acceptable_errors), (
+                        f"Unexpected error (should be service-related): {error_output}"
+                    )
 
             finally:
                 os.chdir(original_cwd)
@@ -308,9 +308,9 @@ class TestCLIFlagValidation:
                         "SingletonCookie",
                     ]
                     error_output = result.stderr + result.stdout
-                    assert any(
-                        error in error_output for error in acceptable_errors
-                    ), f"Unexpected error (should be service-related): {error_output}"
+                    assert any(error in error_output for error in acceptable_errors), (
+                        f"Unexpected error (should be service-related): {error_output}"
+                    )
 
             finally:
                 os.chdir(original_cwd)

@@ -31,13 +31,13 @@ class TestStaticFileServing:
         response = web_client.get("/admin/static/pico.min.css")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert "text/css" in response.headers.get(
-            "content-type", ""
-        ), f"Expected text/css content-type, got {response.headers.get('content-type')}"
+        assert "text/css" in response.headers.get("content-type", ""), (
+            f"Expected text/css content-type, got {response.headers.get('content-type')}"
+        )
         # Verify it's actually CSS content
-        assert (
-            "html" in response.text.lower() or "{" in response.text
-        ), "Response does not appear to be CSS content"
+        assert "html" in response.text.lower() or "{" in response.text, (
+            "Response does not appear to be CSS content"
+        )
 
     def test_static_js_served(self, web_client: TestClient):
         """
@@ -51,9 +51,9 @@ class TestStaticFileServing:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         content_type = response.headers.get("content-type", "")
-        assert (
-            "javascript" in content_type or "text/javascript" in content_type
-        ), f"Expected javascript content-type, got {content_type}"
+        assert "javascript" in content_type or "text/javascript" in content_type, (
+            f"Expected javascript content-type, got {content_type}"
+        )
         # Verify it's actually JavaScript content
         assert (
             "function" in response.text
@@ -103,9 +103,9 @@ class TestLoginPageDisplay:
             307,
         ], f"Expected redirect (302/303/307), got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_login_page_styled_with_pico(self, web_client: TestClient):
         """
@@ -119,9 +119,9 @@ class TestLoginPageDisplay:
 
         assert response.status_code == 200
         # Verify Pico CSS is included
-        assert (
-            "pico" in response.text.lower()
-        ), "Login page should include Pico CSS reference"
+        assert "pico" in response.text.lower(), (
+            "Login page should include Pico CSS reference"
+        )
 
 
 # =============================================================================
@@ -167,9 +167,9 @@ class TestAuthenticationFlow:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert location == "/admin/" or location.endswith(
-            "/admin/"
-        ), f"Expected redirect to /admin/, got {location}"
+        assert location == "/admin/" or location.endswith("/admin/"), (
+            f"Expected redirect to /admin/, got {location}"
+        )
 
         # Should set session cookie
         assert "session" in response.cookies, "Session cookie should be set"
@@ -203,9 +203,9 @@ class TestAuthenticationFlow:
 
         # Check cookie headers for httponly flag
         set_cookie_header = response.headers.get("set-cookie", "")
-        assert (
-            "httponly" in set_cookie_header.lower()
-        ), "Session cookie should have httpOnly flag"
+        assert "httponly" in set_cookie_header.lower(), (
+            "Session cookie should have httpOnly flag"
+        )
 
     def test_login_invalid_credentials(self, web_infrastructure: WebTestInfrastructure):
         """
@@ -256,9 +256,9 @@ class TestAuthenticationFlow:
             )
 
         # Should contain error message
-        assert (
-            "invalid" in response.text.lower() or "error" in response.text.lower()
-        ), "Response should contain error message"
+        assert "invalid" in response.text.lower() or "error" in response.text.lower(), (
+            "Response should contain error message"
+        )
 
         # Should NOT set session cookie
         assert "session" not in response.cookies, "Session cookie should NOT be set"
@@ -337,9 +337,9 @@ class TestSessionManagement:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
         # Session cookie should be cleared (max-age=0 or expires in past)
         set_cookie = response.headers.get("set-cookie", "")
@@ -373,9 +373,9 @@ class TestSessionManagement:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
 
 # =============================================================================
@@ -477,9 +477,9 @@ class TestAdminOnlyAccess:
                 303,
             ], f"Expected redirect for {route}, got {response.status_code}"
             location = response.headers.get("location", "")
-            assert (
-                "/admin/login" in location
-            ), f"Expected redirect to /admin/login for {route}, got {location}"
+            assert "/admin/login" in location, (
+                f"Expected redirect to /admin/login for {route}, got {location}"
+            )
 
 
 # =============================================================================
@@ -512,9 +512,9 @@ class TestCSRFProtection:
         )
 
         # Bug #714: Auto-recovery redirects instead of 403
-        assert (
-            response.status_code == 303
-        ), f"Expected 303 redirect for CSRF auto-recovery, got {response.status_code}"
+        assert response.status_code == 303, (
+            f"Expected 303 redirect for CSRF auto-recovery, got {response.status_code}"
+        )
         location = response.headers.get("location", "")
         assert "/login" in location and "info=session_expired" in location
 
@@ -539,9 +539,9 @@ class TestCSRFProtection:
         )
 
         # Bug #714: Auto-recovery redirects instead of 403
-        assert (
-            response.status_code == 303
-        ), f"Expected 303 redirect for CSRF auto-recovery, got {response.status_code}"
+        assert response.status_code == 303, (
+            f"Expected 303 redirect for CSRF auto-recovery, got {response.status_code}"
+        )
         location = response.headers.get("location", "")
         assert "/login" in location and "info=session_expired" in location
 
@@ -557,9 +557,9 @@ class TestCSRFProtection:
         response = web_client.get("/login")
 
         assert response.status_code == 200
-        assert (
-            'name="csrf_token"' in response.text
-        ), "Form should contain csrf_token field"
+        assert 'name="csrf_token"' in response.text, (
+            "Form should contain csrf_token field"
+        )
         assert 'type="hidden"' in response.text, "CSRF token should be a hidden field"
 
     def test_login_csrf_failure_auto_recovers(
@@ -591,9 +591,9 @@ class TestCSRFProtection:
         )
         location = response.headers.get("location", "")
         assert "/login" in location, f"Expected redirect to /login, got {location}"
-        assert (
-            "info=session_expired" in location
-        ), f"Expected info=session_expired in redirect URL, got {location}"
+        assert "info=session_expired" in location, (
+            f"Expected info=session_expired in redirect URL, got {location}"
+        )
 
     def test_login_csrf_failure_sets_fresh_cookie(
         self, web_client: TestClient, admin_user: dict
@@ -617,9 +617,9 @@ class TestCSRFProtection:
         )
 
         # Should have new CSRF cookie set
-        assert (
-            "_csrf" in response.cookies
-        ), "CSRF failure response should include fresh CSRF cookie"
+        assert "_csrf" in response.cookies, (
+            "CSRF failure response should include fresh CSRF cookie"
+        )
 
     def test_login_missing_csrf_auto_recovers(
         self, web_client: TestClient, admin_user: dict
@@ -650,9 +650,9 @@ class TestCSRFProtection:
         )
         location = response.headers.get("location", "")
         assert "/login" in location, f"Expected redirect to /login, got {location}"
-        assert (
-            "info=session_expired" in location
-        ), f"Expected info=session_expired in redirect URL, got {location}"
+        assert "info=session_expired" in location, (
+            f"Expected info=session_expired in redirect URL, got {location}"
+        )
 
 
 # =============================================================================
@@ -723,15 +723,15 @@ class TestCSRFTokenRaceCondition:
 
         # Should have CSRF token in form
         csrf_token = web_infrastructure.extract_csrf_token(response.text)
-        assert (
-            csrf_token is not None
-        ), "Login page should generate CSRF token when no cookie exists"
+        assert csrf_token is not None, (
+            "Login page should generate CSRF token when no cookie exists"
+        )
 
         # Should set new CSRF cookie
         csrf_cookie = response.cookies.get("_csrf")
-        assert (
-            csrf_cookie is not None
-        ), "Login page should set CSRF cookie when no cookie exists"
+        assert csrf_cookie is not None, (
+            "Login page should set CSRF cookie when no cookie exists"
+        )
 
     def test_login_page_generates_new_token_when_cookie_expired(
         self, web_infrastructure: WebTestInfrastructure
@@ -756,17 +756,17 @@ class TestCSRFTokenRaceCondition:
 
         # Should have CSRF token in form
         csrf_token = web_infrastructure.extract_csrf_token(response.text)
-        assert (
-            csrf_token is not None
-        ), "Login page should generate CSRF token when cookie is invalid"
+        assert csrf_token is not None, (
+            "Login page should generate CSRF token when cookie is invalid"
+        )
 
         # The token should NOT be the invalid one we sent
-        assert (
-            csrf_token != "invalid_expired_csrf_token_12345"
-        ), "Login page should not use invalid cookie value as CSRF token"
+        assert csrf_token != "invalid_expired_csrf_token_12345", (
+            "Login page should not use invalid cookie value as CSRF token"
+        )
 
         # Should set new CSRF cookie
         csrf_cookie = response.cookies.get("_csrf")
-        assert (
-            csrf_cookie is not None
-        ), "Login page should set new CSRF cookie when old one is invalid"
+        assert csrf_cookie is not None, (
+            "Login page should set new CSRF cookie when old one is invalid"
+        )

@@ -153,9 +153,9 @@ class TestRichMarkupInjectionBehavioral:
             result = runner.invoke(cli, ["query", "nested", "--quiet", "--limit", "5"])
 
             # Must not crash
-            assert (
-                result.exit_code == 0
-            ), f"Complex markup patterns caused crash: {result.exception}"
+            assert result.exit_code == 0, (
+                f"Complex markup patterns caused crash: {result.exception}"
+            )
 
     def test_semantic_search_result_with_rich_markup(self, temp_test_dir):
         """

@@ -109,9 +109,9 @@ class TestSingleLanguageFilter:
 
         assert len(results) > 0, "Should return some results"
         for result in results:
-            assert (
-                result["language"] == "py"
-            ), f"Expected Python file, got {result['language']}"
+            assert result["language"] == "py", (
+                f"Expected Python file, got {result['language']}"
+            )
 
     def test_filter_by_javascript(self, indexed_files):
         """
@@ -123,9 +123,9 @@ class TestSingleLanguageFilter:
 
         assert len(results) > 0, "Should return some results"
         for result in results:
-            assert (
-                result["language"] == "js"
-            ), f"Expected JavaScript file, got {result['language']}"
+            assert result["language"] == "js", (
+                f"Expected JavaScript file, got {result['language']}"
+            )
 
 
 class TestMultiLanguageFilter:
@@ -147,9 +147,9 @@ class TestMultiLanguageFilter:
         languages_found = {r["language"] for r in results}
 
         # Should contain Python or JavaScript files
-        assert languages_found.issubset(
-            {"py", "js"}
-        ), f"Expected only Python/JavaScript, got {languages_found}"
+        assert languages_found.issubset({"py", "js"}), (
+            f"Expected only Python/JavaScript, got {languages_found}"
+        )
 
         # Should actually contain both (based on our test data)
         assert "py" in languages_found, "Should contain Python results"
@@ -168,9 +168,9 @@ class TestMultiLanguageFilter:
         assert len(results) > 0, "Should return some results"
 
         languages_found = {r["language"] for r in results}
-        assert languages_found.issubset(
-            {"py", "js", "java"}
-        ), f"Expected only py/js/java, got {languages_found}"
+        assert languages_found.issubset({"py", "js", "java"}), (
+            f"Expected only py/js/java, got {languages_found}"
+        )
 
 
 class TestLanguageFilterWithFuzzy:
@@ -191,9 +191,9 @@ class TestLanguageFilterWithFuzzy:
 
         # May or may not find results depending on fuzzy matching
         for result in results:
-            assert (
-                result["language"] == "py"
-            ), f"Expected Python file, got {result['language']}"
+            assert result["language"] == "py", (
+                f"Expected Python file, got {result['language']}"
+            )
 
 
 class TestLanguageFilterWithCaseSensitive:
@@ -214,9 +214,9 @@ class TestLanguageFilterWithCaseSensitive:
 
         # Should find the TypeScript file with "Test" in it
         for result in results:
-            assert (
-                result["language"] == "tsx"
-            ), f"Expected TypeScript file, got {result['language']}"
+            assert result["language"] == "tsx", (
+                f"Expected TypeScript file, got {result['language']}"
+            )
             assert "Test" in result["match_text"] or "Test" in result["snippet"]
 
 
@@ -247,9 +247,9 @@ class TestEmptyAndEdgeCases:
 
         # Should contain multiple languages
         languages_found = {r["language"] for r in results}
-        assert (
-            len(languages_found) > 1
-        ), "Should contain multiple languages when no filter applied"
+        assert len(languages_found) > 1, (
+            "Should contain multiple languages when no filter applied"
+        )
 
     def test_empty_language_list_returns_all(self, indexed_files):
         """
@@ -277,9 +277,9 @@ class TestBackwardCompatibility:
 
         assert len(results) > 0, "Should return some results"
         for result in results:
-            assert (
-                result["language"] == "py"
-            ), f"Expected Python file, got {result['language']}"
+            assert result["language"] == "py", (
+                f"Expected Python file, got {result['language']}"
+            )
 
     def test_languages_parameter_overrides_language_filter(self, indexed_files):
         """
@@ -296,9 +296,9 @@ class TestBackwardCompatibility:
 
         assert len(results) > 0, "Should return some results"
         for result in results:
-            assert (
-                result["language"] == "js"
-            ), "languages parameter should override language_filter"
+            assert result["language"] == "js", (
+                "languages parameter should override language_filter"
+            )
 
 
 class TestPerformance:
@@ -425,9 +425,9 @@ class TestExclusionPrecedenceOverInclusion:
         )
 
         # Exclusion wins - should return empty
-        assert (
-            len(results) == 0
-        ), "Exclusion should take precedence over inclusion (empty results expected)"
+        assert len(results) == 0, (
+            "Exclusion should take precedence over inclusion (empty results expected)"
+        )
 
     def test_include_multiple_exclude_one(self, indexed_files):
         """
@@ -530,9 +530,9 @@ class TestExcludeLanguageWithPathFilters:
 
         assert len(results) > 0, "Should have results in tests directory"
         for result in results:
-            assert (
-                "tests/" in result["path"]
-            ), f"Expected tests directory, got {result['path']}"
+            assert "tests/" in result["path"], (
+                f"Expected tests directory, got {result['path']}"
+            )
             assert result["language"] not in [
                 "js",
                 "jsx",
@@ -567,9 +567,9 @@ class TestExcludeLanguageWithPathFilters:
 
         for result in results:
             # Should not be in vendor
-            assert (
-                "vendor/" not in result["path"]
-            ), f"vendor directory should be excluded, got {result['path']}"
+            assert "vendor/" not in result["path"], (
+                f"vendor directory should be excluded, got {result['path']}"
+            )
             # Should not be JavaScript
             assert result["language"] not in [
                 "js",
@@ -640,13 +640,13 @@ class TestAllFiltersCombined:
                 "pyi",
             ], f"Expected Python only (Java excluded), got {result['language']}"
             # Must be in tests
-            assert (
-                "tests/" in result["path"]
-            ), f"Expected tests directory, got {result['path']}"
+            assert "tests/" in result["path"], (
+                f"Expected tests directory, got {result['path']}"
+            )
             # Must NOT be in slow tests
-            assert (
-                "slow/" not in result["path"]
-            ), f"slow tests should be excluded, got {result['path']}"
+            assert "slow/" not in result["path"], (
+                f"slow tests should be excluded, got {result['path']}"
+            )
 
 
 class TestExcludeLanguageWithFuzzyAndCaseSensitive:
@@ -713,9 +713,9 @@ class TestExcludeLanguagePerformance:
         )
         elapsed = time.time() - start_time
 
-        assert (
-            elapsed < 1.0
-        ), f"Search with exclusions took {elapsed:.2f}s, should be <1s"
+        assert elapsed < 1.0, (
+            f"Search with exclusions took {elapsed:.2f}s, should be <1s"
+        )
         assert len(results) >= 0, "Should complete successfully"
 
 

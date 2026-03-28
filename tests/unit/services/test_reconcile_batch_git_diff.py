@@ -220,6 +220,6 @@ class TestSourceCodeGuard:
 
     def test_get_modified_files_set_exists(self):
         """SmartIndexer must expose _get_modified_files_set as a method."""
-        assert hasattr(
-            SmartIndexer, "_get_modified_files_set"
-        ), "SmartIndexer is missing the new _get_modified_files_set() method."
+        assert hasattr(SmartIndexer, "_get_modified_files_set"), (
+            "SmartIndexer is missing the new _get_modified_files_set() method."
+        )

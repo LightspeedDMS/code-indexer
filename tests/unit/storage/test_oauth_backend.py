@@ -352,6 +352,6 @@ class TestBackendRegistryOAuth:
 
         registry = StorageFactory._create_sqlite_backends(data_dir)
         assert hasattr(registry, "oauth"), "BackendRegistry must have oauth attribute"
-        assert isinstance(
-            registry.oauth, OAuthBackend
-        ), "registry.oauth must satisfy OAuthBackend protocol"
+        assert isinstance(registry.oauth, OAuthBackend), (
+            "registry.oauth must satisfy OAuthBackend protocol"
+        )

@@ -187,9 +187,9 @@ class TestBug472CliInjectionFix:
             calls = self._run_and_capture_calls(
                 research_service, message, is_subsequent=True
             )
-            assert (
-                len(calls) >= 1
-            ), f"subprocess.run must be called for message: {message!r}"
+            assert len(calls) >= 1, (
+                f"subprocess.run must be called for message: {message!r}"
+            )
             cmd = calls[0]
             prompt_value = self._extract_prompt_value(cmd)
             assert not prompt_value.startswith("-"), (

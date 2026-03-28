@@ -71,9 +71,9 @@ class TestMetaDirectoryCLIIntegration:
 
         assert "cidx-meta-global" in registry_data, "Meta-directory not registered"
         meta_entry = registry_data["cidx-meta-global"]
-        assert (
-            meta_entry["repo_url"] is None
-        ), "Meta-directory should have repo_url=None"
+        assert meta_entry["repo_url"] is None, (
+            "Meta-directory should have repo_url=None"
+        )
         assert meta_entry["repo_name"] == "cidx-meta"
 
     def test_init_meta_generates_descriptions_for_existing_repos(self, tmp_path):

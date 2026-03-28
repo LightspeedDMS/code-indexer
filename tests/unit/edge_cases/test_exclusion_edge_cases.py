@@ -208,9 +208,9 @@ def test_exclude_language_case_insensitive_cli(tmp_path):
             result = runner.invoke(cli, args, catch_exceptions=False)
             # We don't check exit code here because services may not be running
             # The important thing is it doesn't crash on case variation
-            assert (
-                "Invalid language" not in result.output
-            ), f"Should handle case variation: {args}"
+            assert "Invalid language" not in result.output, (
+                f"Should handle case variation: {args}"
+            )
 
 
 def test_empty_exclusion_list_behaves_like_no_filter(tmp_path, test_vectors):

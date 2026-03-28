@@ -26,9 +26,9 @@ class TestRegexPerformanceOptimization:
         for pattern, replacement, field_names in sanitizer._compiled_rules:
             assert hasattr(pattern, "search"), "Pattern should be compiled regex object"
             assert hasattr(pattern, "sub"), "Pattern should be compiled regex object"
-            assert hasattr(
-                pattern, "pattern"
-            ), "Pattern should be compiled regex object"
+            assert hasattr(pattern, "pattern"), (
+                "Pattern should be compiled regex object"
+            )
 
     def test_no_runtime_pattern_compilation(self):
         """Test that regex patterns are not compiled during sanitization operations."""
@@ -156,9 +156,9 @@ class TestRegexPerformanceOptimization:
             sanitizer.sanitize_string(test_string)
 
         # Compiled rules should not have changed
-        assert (
-            sanitizer._compiled_rules == original_rules
-        ), "Compiled patterns were modified during sanitization operations"
+        assert sanitizer._compiled_rules == original_rules, (
+            "Compiled patterns were modified during sanitization operations"
+        )
 
     def test_performance_improvement_evidence(self):
         """Test that demonstrates patterns are pre-compiled for performance."""
@@ -181,18 +181,18 @@ class TestRegexPerformanceOptimization:
 
         # Should sanitize at least some sensitive data
         assert "secret123" not in result, "Should sanitize password value"
-        assert (
-            "[REDACTED]" in result or "***" in result
-        ), "Should contain redaction markers"
+        assert "[REDACTED]" in result or "***" in result, (
+            "Should contain redaction markers"
+        )
 
         # Verify patterns are reused (same object references)
         original_patterns = [rule[0] for rule in sanitizer._compiled_rules]
         sanitizer.sanitize_string(test_text)  # Use sanitizer again
         after_patterns = [rule[0] for rule in sanitizer._compiled_rules]
 
-        assert (
-            original_patterns == after_patterns
-        ), "Should reuse same compiled pattern objects"
+        assert original_patterns == after_patterns, (
+            "Should reuse same compiled pattern objects"
+        )
 
 
 class TestSanitizationPatternDetection:

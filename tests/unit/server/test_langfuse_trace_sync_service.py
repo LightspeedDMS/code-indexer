@@ -1177,9 +1177,9 @@ class TestTwoPhaseHashCheck:
 
             # Verify temp file was written to STAGING (not destination)
             staging_folder = service._get_staging_dir("TestProject", trace)
-            assert (
-                staging_folder / "test-trace-123.json"
-            ).exists(), "Staging file should have been written"
+            assert (staging_folder / "test-trace-123.json").exists(), (
+                "Staging file should have been written"
+            )
 
             # Verify 6-tuple metadata returned
             assert rename_info is not None
@@ -1196,12 +1196,12 @@ class TestTwoPhaseHashCheck:
             dest_folder = service._get_trace_folder("TestProject", trace)
             new_filename = trace_hashes["test-trace-123"]["filename"]
             assert new_filename == "001_turn_race-123.json"
-            assert (
-                dest_folder / new_filename
-            ).exists(), "Trace file should exist in destination"
-            assert not (
-                staging_folder / "test-trace-123.json"
-            ).exists(), "Staging file should be moved (not copied)"
+            assert (dest_folder / new_filename).exists(), (
+                "Trace file should exist in destination"
+            )
+            assert not (staging_folder / "test-trace-123.json").exists(), (
+                "Staging file should be moved (not copied)"
+            )
 
             # Should be counted as updated (not new, not unchanged)
             assert metrics.traces_written_new == 0  # Not "new" - trace was in hashes
@@ -1521,15 +1521,15 @@ class TestChronologicalTraceOrdering:
                     file_map[content["trace"]["id"]] = f.name
 
                 # Oldest trace (t1) should have lowest seq number
-                assert file_map["t1"].startswith(
-                    "001_"
-                ), f"Oldest trace should be 001, got {file_map['t1']}"
-                assert file_map["t2"].startswith(
-                    "002_"
-                ), f"Middle trace should be 002, got {file_map['t2']}"
-                assert file_map["t3"].startswith(
-                    "003_"
-                ), f"Newest trace should be 003, got {file_map['t3']}"
+                assert file_map["t1"].startswith("001_"), (
+                    f"Oldest trace should be 001, got {file_map['t1']}"
+                )
+                assert file_map["t2"].startswith("002_"), (
+                    f"Middle trace should be 002, got {file_map['t2']}"
+                )
+                assert file_map["t3"].startswith("003_"), (
+                    f"Newest trace should be 003, got {file_map['t3']}"
+                )
 
             finally:
                 cleanup()
@@ -1620,9 +1620,9 @@ class TestChronologicalTraceOrdering:
                 for i, expected_id in enumerate(expected_order, start=1):
                     seq_prefix = f"{i:03d}_"
                     matching_file = [f for f in files if f.name.startswith(seq_prefix)]
-                    assert (
-                        len(matching_file) == 1
-                    ), f"Expected one file with prefix {seq_prefix}"
+                    assert len(matching_file) == 1, (
+                        f"Expected one file with prefix {seq_prefix}"
+                    )
                     content = json.loads(matching_file[0].read_text())
                     assert content["trace"]["id"] == expected_id
 
@@ -1802,15 +1802,15 @@ class TestFinalizeTraceFiles:
             )
 
             # Verify files moved to destination in chronological order
-            assert (
-                dest_folder / "001_turn_23456789.json"
-            ).exists(), "Oldest trace should be 001"
-            assert (
-                dest_folder / "002_turn_12345678.json"
-            ).exists(), "Middle trace should be 002"
-            assert (
-                dest_folder / "003_turn_34567890.json"
-            ).exists(), "Newest trace should be 003"
+            assert (dest_folder / "001_turn_23456789.json").exists(), (
+                "Oldest trace should be 001"
+            )
+            assert (dest_folder / "002_turn_12345678.json").exists(), (
+                "Middle trace should be 002"
+            )
+            assert (dest_folder / "003_turn_34567890.json").exists(), (
+                "Newest trace should be 003"
+            )
 
             # Staged files should be gone (moved, not copied)
             assert not (staging_base / f"{trace_ids[0]}.json").exists()
@@ -2277,9 +2277,9 @@ class TestMigrationFromOldNaming:
             # Verify staging file exists
             staging_folder = service._get_staging_dir("test-project", trace)
             if rename_info:
-                assert (
-                    staging_folder / f"{trace['id']}.json"
-                ).exists(), "Staging file should exist"
+                assert (staging_folder / f"{trace['id']}.json").exists(), (
+                    "Staging file should exist"
+                )
 
             # Phase 2: Finalize (move from staging to destination with sequential name)
             if rename_info:
@@ -2290,9 +2290,9 @@ class TestMigrationFromOldNaming:
             assert (folder / new_filename).exists(), "New sequential file should exist"
             # Note: Old file stays in place - manual cleanup needed for migration
             assert old_file.exists(), "Old file remains (not automatically deleted)"
-            assert not (
-                staging_folder / f"{trace['id']}.json"
-            ).exists(), "Staging file should be moved"
+            assert not (staging_folder / f"{trace['id']}.json").exists(), (
+                "Staging file should be moved"
+            )
             assert metrics.traces_written_updated == 1
 
     def test_old_trace_unchanged_leaves_old_file_alone(self):

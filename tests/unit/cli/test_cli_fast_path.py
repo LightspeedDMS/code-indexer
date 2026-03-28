@@ -160,9 +160,9 @@ class TestCommandClassification:
         non_delegatable = ["init", "fix-config", "reconcile", "sync", "list-repos"]
 
         for cmd in non_delegatable:
-            assert (
-                is_delegatable_command(cmd) is False
-            ), f"{cmd} should not be delegatable"
+            assert is_delegatable_command(cmd) is False, (
+                f"{cmd} should not be delegatable"
+            )
 
 
 class TestFastPathRouting:
@@ -257,9 +257,9 @@ class TestFastPathPerformance:
         elapsed_ms = (time.time() - start) * 1000
 
         # Assert - should import very quickly (stdlib + rpyc + rich)
-        assert (
-            elapsed_ms < 100
-        ), f"Fast entry import took {elapsed_ms:.0f}ms, expected <100ms"
+        assert elapsed_ms < 100, (
+            f"Fast entry import took {elapsed_ms:.0f}ms, expected <100ms"
+        )
 
 
 class TestFallbackBehavior:

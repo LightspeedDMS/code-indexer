@@ -111,9 +111,9 @@ def test_function():
             assert result.returncode == 0
             # Performance target: <200ms for daemon mode
             # Note: E2E includes subprocess overhead, so allow more headroom
-            assert (
-                elapsed_ms < 500
-            ), f"Query took {elapsed_ms:.1f}ms (target: <500ms for E2E)"
+            assert elapsed_ms < 500, (
+                f"Query took {elapsed_ms:.1f}ms (target: <500ms for E2E)"
+            )
 
         finally:
             # Stop daemon

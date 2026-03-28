@@ -49,10 +49,10 @@ def function_{i}_3():
 
 class TestClass_{i}:
     '''Test class with methods'''
-    
+
     def method_1(self):
         return "Method implementation with enough content"
-    
+
     def method_2(self):
         return "Another method implementation"
 """
@@ -129,9 +129,9 @@ class TestClass_{i}:
             )
 
             speedup_fast = sequential_time_fast / parallel_time_fast
-            assert (
-                speedup_fast > 1.5
-            ), f"Expected >1.5x speedup with fast provider, got {speedup_fast:.2f}x"
+            assert speedup_fast > 1.5, (
+                f"Expected >1.5x speedup with fast provider, got {speedup_fast:.2f}x"
+            )
 
     def test_worker_thread_utilization(self):
         """Test that worker threads are continuously utilized."""
@@ -174,9 +174,9 @@ class TestClass_{i}:
             expected_sequential_time = stats.chunks_created * 0.05
             expected_speedup = expected_sequential_time / total_time
 
-            assert (
-                expected_speedup > 2.0
-            ), f"Poor thread utilization, speedup: {expected_speedup:.2f}x"
+            assert expected_speedup > 2.0, (
+                f"Poor thread utilization, speedup: {expected_speedup:.2f}x"
+            )
 
     def test_high_throughput_processing_success(self):
         """Test that high-throughput processing completes successfully."""

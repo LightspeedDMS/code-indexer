@@ -822,9 +822,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "init"]
             ]
-            assert (
-                len(cidx_init_calls) == 1
-            ), "cidx init should be called when .code-indexer missing"
+            assert len(cidx_init_calls) == 1, (
+                "cidx init should be called when .code-indexer missing"
+            )
             assert cidx_init_calls[0][1]["cwd"] == str(langfuse)
 
             # Verify: cidx index was called
@@ -833,9 +833,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "index", "--fts"]
             ]
-            assert (
-                len(cidx_index_calls) == 1
-            ), "cidx index should be called when index missing"
+            assert len(cidx_index_calls) == 1, (
+                "cidx index should be called when index missing"
+            )
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
 
     def test_re_indexes_when_registration_exists_but_index_dir_empty(
@@ -872,9 +872,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "init"]
             ]
-            assert (
-                len(cidx_init_calls) == 0
-            ), "cidx init should not be called when .code-indexer exists"
+            assert len(cidx_init_calls) == 0, (
+                "cidx init should not be called when .code-indexer exists"
+            )
 
             # Verify: cidx index WAS called (empty index directory)
             cidx_index_calls = [
@@ -882,9 +882,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "index", "--fts"]
             ]
-            assert (
-                len(cidx_index_calls) == 1
-            ), "cidx index should be called when index directory is empty"
+            assert len(cidx_index_calls) == 1, (
+                "cidx index should be called when index directory is empty"
+            )
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
 
     def test_skips_indexing_when_registration_exists_and_index_populated(
@@ -924,18 +924,18 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "init"]
             ]
-            assert (
-                len(cidx_init_calls) == 0
-            ), "cidx init should not be called when index exists"
+            assert len(cidx_init_calls) == 0, (
+                "cidx init should not be called when index exists"
+            )
 
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "index", "--fts"]
             ]
-            assert (
-                len(cidx_index_calls) == 0
-            ), "cidx index should not be called when index is populated"
+            assert len(cidx_index_calls) == 0, (
+                "cidx index should not be called when index is populated"
+            )
 
 
 class TestWatchModeIntegration:

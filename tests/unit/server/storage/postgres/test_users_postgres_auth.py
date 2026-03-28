@@ -171,9 +171,9 @@ class TestAddApiKey:
         sql, params = conn.execute.call_args[0]
         # created_at should be in params as a non-None string
         non_none_strings = [p for p in params if isinstance(p, str)]
-        assert any(
-            "T" in s and ":" in s for s in non_none_strings
-        ), "Expected ISO timestamp in params"
+        assert any("T" in s and ":" in s for s in non_none_strings), (
+            "Expected ISO timestamp in params"
+        )
 
 
 # ---------------------------------------------------------------------------

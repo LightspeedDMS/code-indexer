@@ -45,19 +45,19 @@ public class CustomerService {
 
     @Autowired
     private CustomerRepository customerRepository;
-    
+
     @Autowired
     private ValidationService validationService;
-    
+
     @Autowired
     private NotificationService notificationService;
-    
+
     private static final int MAX_SEARCH_RESULTS = 100;
     private static final String DEFAULT_SORT_FIELD = "lastName";
 
     /**
      * Creates a new customer with comprehensive validation.
-     * 
+     *
      * @param customerRequest The customer creation request
      * @return CompletableFuture containing the created customer
      * @throws ValidationException if the request is invalid
@@ -71,13 +71,13 @@ public class CustomerService {
                 if (!validation.isValid()) {
                     throw new ValidationException("Customer validation failed", validation.getErrors());
                 }
-                
+
                 // Check for duplicate email addresses
                 Optional<Customer> existingCustomer = customerRepository.findByEmail(customerRequest.getEmail());
                 if (existingCustomer.isPresent()) {
                     throw new DuplicateCustomerException("Customer with email already exists: " + customerRequest.getEmail());
                 }
-                
+
                 // Create the new customer entity
                 Customer customer = new Customer();
                 customer.setFirstName(customerRequest.getFirstName());
@@ -89,19 +89,19 @@ public class CustomerService {
                 customer.setCreatedAt(LocalDateTime.now());
                 customer.setUpdatedAt(LocalDateTime.now());
                 customer.setStatus(CustomerStatus.ACTIVE);
-                
+
                 // Save the customer to the database
                 Customer savedCustomer = customerRepository.save(customer);
-                
+
                 // Send welcome notification asynchronously
                 notificationService.sendWelcomeNotificationAsync(savedCustomer);
-                
+
                 // Log the successful customer creation
-                auditLogger.info("Customer created successfully: ID={}, Email={}", 
+                auditLogger.info("Customer created successfully: ID={}, Email={}",
                     savedCustomer.getId(), savedCustomer.getEmail());
-                
+
                 return savedCustomer;
-                
+
             } catch (ValidationException | DuplicateCustomerException e) {
                 auditLogger.warn("Customer creation failed: {}", e.getMessage());
                 throw e;
@@ -114,7 +114,7 @@ public class CustomerService {
 
     /**
      * Searches for customers based on various criteria with pagination.
-     * 
+     *
      * @param searchCriteria The search criteria including filters and pagination
      * @return PagedResult containing matching customers and pagination info
      */
@@ -124,42 +124,42 @@ public class CustomerService {
             if (searchCriteria.getPageSize() > MAX_SEARCH_RESULTS) {
                 throw new ValidationException("Page size exceeds maximum allowed: " + MAX_SEARCH_RESULTS);
             }
-            
+
             // Build dynamic query based on criteria
             CustomerQueryBuilder queryBuilder = new CustomerQueryBuilder();
-            
+
             if (searchCriteria.getEmailFilter() != null) {
                 queryBuilder.withEmailContaining(searchCriteria.getEmailFilter());
             }
-            
+
             if (searchCriteria.getNameFilter() != null) {
                 queryBuilder.withFirstNameOrLastNameContaining(searchCriteria.getNameFilter());
             }
-            
+
             if (searchCriteria.getStatusFilter() != null) {
                 queryBuilder.withStatus(searchCriteria.getStatusFilter());
             }
-            
+
             if (searchCriteria.getDateRange() != null) {
                 queryBuilder.withCreatedDateBetween(
                     searchCriteria.getDateRange().getStartDate(),
                     searchCriteria.getDateRange().getEndDate()
                 );
             }
-            
+
             // Apply sorting
-            String sortField = searchCriteria.getSortField() != null ? 
+            String sortField = searchCriteria.getSortField() != null ?
                 searchCriteria.getSortField() : DEFAULT_SORT_FIELD;
             SortDirection sortDirection = searchCriteria.getSortDirection() != null ?
                 searchCriteria.getSortDirection() : SortDirection.ASC;
-                
+
             queryBuilder.orderBy(sortField, sortDirection);
-            
+
             // Execute the query with pagination
             CustomerQuery query = queryBuilder.build();
-            Page<Customer> customerPage = customerRepository.findByQuery(query, 
+            Page<Customer> customerPage = customerRepository.findByQuery(query,
                 PageRequest.of(searchCriteria.getPageNumber(), searchCriteria.getPageSize()));
-            
+
             // Convert to PagedResult
             return new PagedResult<>(
                 customerPage.getContent(),
@@ -168,7 +168,7 @@ public class CustomerService {
                 customerPage.getNumber(),
                 customerPage.getSize()
             );
-            
+
         } catch (ValidationException e) {
             auditLogger.warn("Customer search validation failed: {}", e.getMessage());
             throw e;
@@ -177,19 +177,19 @@ public class CustomerService {
             throw new ServiceException("Failed to search customers", e);
         }
     }
-    
+
     private Address mapToAddress(AddressRequest addressRequest) {
         if (addressRequest == null) {
             return null;
         }
-        
+
         Address address = new Address();
         address.setStreet(addressRequest.getStreet());
         address.setCity(addressRequest.getCity());
         address.setState(addressRequest.getState());
         address.setZipCode(addressRequest.getZipCode());
         address.setCountry(addressRequest.getCountry());
-        
+
         return address;
     }
 }
@@ -210,9 +210,9 @@ public class CustomerService {
 
             # Verify all chunks except last are exactly 1000 characters
             for i, chunk in enumerate(chunks[:-1]):
-                assert (
-                    len(chunk["text"]) == 1000
-                ), f"Chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+                assert len(chunk["text"]) == 1000, (
+                    f"Chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+                )
 
             # Verify metadata is complete and accurate
             for i, chunk in enumerate(chunks):
@@ -264,9 +264,9 @@ public class CustomerService {
 
             # Most chunks should contain meaningful code
             meaningful_ratio = meaningful_chunks / len(chunks)
-            assert (
-                meaningful_ratio > 0.7
-            ), f"Only {meaningful_ratio:.1%} of chunks contain meaningful code"
+            assert meaningful_ratio > 0.7, (
+                f"Only {meaningful_ratio:.1%} of chunks contain meaningful code"
+            )
 
             # Verify overlap between consecutive chunks
             for i in range(len(chunks) - 1):
@@ -277,9 +277,9 @@ public class CustomerService {
                 overlap_current = current_chunk[-150:]
                 overlap_next = next_chunk[:150]
 
-                assert (
-                    overlap_current == overlap_next
-                ), f"Overlap mismatch between chunks {i} and {i+1}"
+                assert overlap_current == overlap_next, (
+                    f"Overlap mismatch between chunks {i} and {i + 1}"
+                )
 
             print(
                 f"E2E Java test: {len(chunks)} chunks, "
@@ -330,7 +330,7 @@ class ProcessingConfig:
 class AdvancedDataProcessor:
     """
     High-performance data processing engine with advanced features.
-    
+
     This processor provides:
     - Asynchronous batch processing with configurable parallelism
     - Intelligent caching with Redis integration
@@ -340,7 +340,7 @@ class AdvancedDataProcessor:
     - Memory-efficient streaming for large datasets
     - Flexible transformation pipeline architecture
     """
-    
+
     def __init__(self, config: ProcessingConfig):
         self.config = config
         self.stats = {
@@ -358,7 +358,7 @@ class AdvancedDataProcessor:
         self.session_factory = None
         self.thread_pool = ThreadPoolExecutor(max_workers=config.max_workers)
         self.process_pool = ProcessPoolExecutor(max_workers=config.max_workers)
-        
+
     async def initialize(self) -> None:
         """Initialize all external connections and resources."""
         try:
@@ -371,7 +371,7 @@ class AdvancedDataProcessor:
                 )
                 await self.cache_client.ping()
                 logger.info("Redis cache connection established")
-            
+
             # Initialize database connection
             self.database_engine = create_engine(
                 self.config.database_url,
@@ -382,58 +382,58 @@ class AdvancedDataProcessor:
             )
             self.session_factory = sessionmaker(bind=self.database_engine)
             logger.info("Database connection established")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize data processor: {e}")
             raise
-    
+
     async def process_dataset_async(
-        self, 
-        dataset: List[Dict[str, Any]], 
+        self,
+        dataset: List[Dict[str, Any]],
         transformation_pipeline: List[Callable],
         progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> Dict[str, Any]:
         """
         Process a complete dataset using the specified transformation pipeline.
-        
+
         Args:
             dataset: List of data items to process
             transformation_pipeline: List of transformation functions to apply
             progress_callback: Optional callback for progress updates
-        
+
         Returns:
             Comprehensive results including processed data, statistics, and errors
         """
         start_time = datetime.now()
         logger.info(f"Starting dataset processing: {len(dataset)} items, "
                    f"{len(transformation_pipeline)} transformations")
-        
+
         try:
             # Split dataset into batches for parallel processing
             batches = [
                 dataset[i:i + self.config.batch_size]
                 for i in range(0, len(dataset), self.config.batch_size)
             ]
-            
+
             # Process batches concurrently with semaphore for resource control
             semaphore = asyncio.Semaphore(self.config.max_workers)
             tasks = []
-            
+
             for batch_idx, batch in enumerate(batches):
                 task = self._process_batch_with_semaphore(
                     semaphore, batch, transformation_pipeline, batch_idx
                 )
                 tasks.append(task)
-            
+
             # Execute all batch processing tasks
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             # Aggregate results from all batches
             all_processed_items = []
             all_errors = []
             successful_batches = 0
             failed_batches = 0
-            
+
             for batch_idx, result in enumerate(batch_results):
                 if isinstance(result, Exception):
                     logger.error(f"Batch {batch_idx} failed completely: {result}")
@@ -448,18 +448,18 @@ class AdvancedDataProcessor:
                     successful_batches += 1
                     all_processed_items.extend(result.get('processed_items', []))
                     all_errors.extend(result.get('errors', []))
-                    
+
                     # Update progress if callback provided
                     if progress_callback:
                         progress_callback(batch_idx + 1, len(batches))
-            
+
             # Update global statistics
             processing_time = (datetime.now() - start_time).total_seconds()
             self.stats['items_processed'] += len(all_processed_items)
             self.stats['items_failed'] += len(all_errors)
             self.stats['batches_completed'] += successful_batches
             self.stats['total_processing_time'] += processing_time
-            
+
             # Generate comprehensive result summary
             return {
                 'success': True,
@@ -479,7 +479,7 @@ class AdvancedDataProcessor:
                     'total_cache_operations': self.stats['cache_hits'] + self.stats['cache_misses']
                 }
             }
-            
+
         except Exception as e:
             logger.error(f"Critical error in dataset processing: {e}")
             return {
@@ -490,7 +490,7 @@ class AdvancedDataProcessor:
                 'total_errors': len(dataset),
                 'processing_time_seconds': (datetime.now() - start_time).total_seconds()
             }
-    
+
     async def _process_batch_with_semaphore(
         self,
         semaphore: asyncio.Semaphore,
@@ -501,7 +501,7 @@ class AdvancedDataProcessor:
         """Process a single batch with semaphore-controlled concurrency."""
         async with semaphore:
             return await self._process_batch_with_retry(batch, transformation_pipeline, batch_idx)
-    
+
     async def _process_batch_with_retry(
         self,
         batch: List[Dict[str, Any]],
@@ -510,14 +510,14 @@ class AdvancedDataProcessor:
     ) -> Dict[str, Any]:
         """Process a batch with retry logic for resilience."""
         last_exception = None
-        
+
         for attempt in range(self.config.retry_attempts):
             try:
                 logger.debug(f"Processing batch {batch_idx}, attempt {attempt + 1}")
-                
+
                 processed_items = []
                 errors = []
-                
+
                 # Process each item in the batch
                 for item_idx, item in enumerate(batch):
                     try:
@@ -525,7 +525,7 @@ class AdvancedDataProcessor:
                             item, transformation_pipeline, f"{batch_idx}_{item_idx}"
                         )
                         processed_items.append(processed_item)
-                        
+
                     except Exception as e:
                         logger.warning(f"Item {item_idx} in batch {batch_idx} failed: {e}")
                         errors.append({
@@ -536,7 +536,7 @@ class AdvancedDataProcessor:
                             'original_item': item,
                             'attempt': attempt + 1
                         })
-                
+
                 return {
                     'processed_items': processed_items,
                     'errors': errors,
@@ -545,7 +545,7 @@ class AdvancedDataProcessor:
                     'items_processed': len(processed_items),
                     'items_failed': len(errors)
                 }
-                
+
             except Exception as e:
                 last_exception = e
                 logger.warning(f"Batch {batch_idx} attempt {attempt + 1} failed: {e}")
@@ -553,7 +553,7 @@ class AdvancedDataProcessor:
                     # Exponential backoff with jitter
                     delay = (2 ** attempt) + np.random.uniform(0, 1)
                     await asyncio.sleep(delay)
-        
+
         # All retry attempts failed
         raise last_exception or Exception(f"All retry attempts failed for batch {batch_idx}")
 '''
@@ -573,9 +573,9 @@ class AdvancedDataProcessor:
 
             # Verify all chunks except last are exactly 1000 characters
             for i, chunk in enumerate(chunks[:-1]):
-                assert (
-                    len(chunk["text"]) == 1000
-                ), f"Chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+                assert len(chunk["text"]) == 1000, (
+                    f"Chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+                )
 
             # Verify Python-specific content is handled well
             python_constructs = 0
@@ -605,9 +605,9 @@ class AdvancedDataProcessor:
                     python_constructs += 1
 
             python_ratio = python_constructs / len(chunks)
-            assert (
-                python_ratio > 0.8
-            ), f"Only {python_ratio:.1%} of chunks contain Python constructs"
+            assert python_ratio > 0.8, (
+                f"Only {python_ratio:.1%} of chunks contain Python constructs"
+            )
 
             print(
                 f"E2E Python test: {len(chunks)} chunks, "
@@ -625,30 +625,30 @@ public class DatabaseManager {
     private static final String CONNECTION_URL = "jdbc:postgresql://localhost:5432/app";
     private static final int MAX_CONNECTIONS = 100;
     private static final int CONNECTION_TIMEOUT = 30000;
-    
+
     private DataSource dataSource;
     private ConnectionPool connectionPool;
     private MetricsCollector metricsCollector;
-    
+
     public DatabaseManager(DataSourceConfig config) {
         this.dataSource = createDataSource(config);
         this.connectionPool = new ConnectionPool(MAX_CONNECTIONS);
         this.metricsCollector = new MetricsCollector("database");
     }
-    
+
     public CompletableFuture<List<User>> findUsersByEmail(String emailPattern) {
         return CompletableFuture.supplyAsync(() -> {
             String sql = "SELECT u.id, u.first_name, u.last_name, u.email, u.created_at, " +
                         "u.updated_at, u.status FROM users u WHERE u.email ILIKE ? ORDER BY u.email";
-            
+
             try (Connection conn = connectionPool.getConnection();
                  PreparedStatement stmt = conn.prepareStatement(sql)) {
-                
+
                 stmt.setString(1, "%" + emailPattern + "%");
-                
+
                 try (ResultSet rs = stmt.executeQuery()) {
                     List<User> users = new ArrayList<>();
-                    
+
                     while (rs.next()) {
                         User user = new User();
                         user.setId(rs.getLong("id"));
@@ -658,41 +658,41 @@ public class DatabaseManager {
                         user.setCreatedAt(rs.getTimestamp("created_at").toLocalDateTime());
                         user.setUpdatedAt(rs.getTimestamp("updated_at").toLocalDateTime());
                         user.setStatus(UserStatus.valueOf(rs.getString("status")));
-                        
+
                         users.add(user);
                     }
-                    
+
                     metricsCollector.recordQuery("findUsersByEmail", users.size());
                     return users;
                 }
-                
+
             } catch (SQLException e) {
                 metricsCollector.recordError("findUsersByEmail", e);
                 throw new DataAccessException("Failed to find users by email pattern: " + emailPattern, e);
             }
         });
     }
-    
+
     public boolean updateUserStatus(Long userId, UserStatus newStatus) {
         String sql = "UPDATE users SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?";
-        
+
         try (Connection conn = connectionPool.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
-            
+
             stmt.setString(1, newStatus.name());
             stmt.setLong(2, userId);
-            
+
             int rowsUpdated = stmt.executeUpdate();
             boolean success = rowsUpdated > 0;
-            
+
             if (success) {
                 metricsCollector.recordUpdate("updateUserStatus", 1);
             } else {
                 metricsCollector.recordWarning("updateUserStatus", "No rows updated for user: " + userId);
             }
-            
+
             return success;
-            
+
         } catch (SQLException e) {
             metricsCollector.recordError("updateUserStatus", e);
             throw new DataAccessException("Failed to update user status: " + userId, e);

@@ -77,12 +77,12 @@ class TestTemporalLanguageFilterE2E:
         # Verify only Python results returned
         assert len(results) > 0, "Should find Python authentication code"
         for result in results:
-            assert (
-                result["file_path"] == "auth.py"
-            ), f"Expected auth.py but got {result['file_path']}"
-            assert (
-                result.get("language") == "py"
-            ), f"Expected language 'py' but got {result.get('language')}"
+            assert result["file_path"] == "auth.py", (
+                f"Expected auth.py but got {result['file_path']}"
+            )
+            assert result.get("language") == "py", (
+                f"Expected language 'py' but got {result.get('language')}"
+            )
 
         # Search for "authenticate" with JavaScript language filter
         results = search_service.search(query="authenticate", limit=10, language="js")
@@ -90,12 +90,12 @@ class TestTemporalLanguageFilterE2E:
         # Verify only JavaScript results returned
         assert len(results) > 0, "Should find JavaScript authentication code"
         for result in results:
-            assert (
-                result["file_path"] == "app.js"
-            ), f"Expected app.js but got {result['file_path']}"
-            assert (
-                result.get("language") == "js"
-            ), f"Expected language 'js' but got {result.get('language')}"
+            assert result["file_path"] == "app.js", (
+                f"Expected app.js but got {result['file_path']}"
+            )
+            assert result.get("language") == "js", (
+                f"Expected language 'js' but got {result.get('language')}"
+            )
 
         # Search for "authenticate" with Java language filter
         results = search_service.search(query="authenticate", limit=10, language="java")
@@ -103,12 +103,12 @@ class TestTemporalLanguageFilterE2E:
         # Verify only Java results returned
         assert len(results) > 0, "Should find Java authentication code"
         for result in results:
-            assert (
-                result["file_path"] == "Auth.java"
-            ), f"Expected Auth.java but got {result['file_path']}"
-            assert (
-                result.get("language") == "java"
-            ), f"Expected language 'java' but got {result.get('language')}"
+            assert result["file_path"] == "Auth.java", (
+                f"Expected Auth.java but got {result['file_path']}"
+            )
+            assert result.get("language") == "java", (
+                f"Expected language 'java' but got {result.get('language')}"
+            )
 
 
 if __name__ == "__main__":

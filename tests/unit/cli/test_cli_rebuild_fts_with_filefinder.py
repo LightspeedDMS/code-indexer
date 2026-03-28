@@ -178,9 +178,9 @@ class TestRebuildFTSWithFileFinder:
             meta_file.write_text(json.dumps({"version": 1}))
 
             # Verify meta.json exists (indicates existing FTS index)
-            assert (
-                meta_file.exists()
-            ), "meta.json should exist to test incremental updates"
+            assert meta_file.exists(), (
+                "meta.json should exist to test incremental updates"
+            )
 
             # Now if we run "cidx index --fts", it should:
             # 1. Detect meta.json exists

@@ -110,9 +110,9 @@ class TestOnLangfuseSyncCompleteNoWatchStart:
         )
         source = app_path.read_text()
 
-        assert (
-            "def _on_langfuse_sync_complete" in source
-        ), "_on_langfuse_sync_complete must exist in app.py"
+        assert "def _on_langfuse_sync_complete" in source, (
+            "_on_langfuse_sync_complete must exist in app.py"
+        )
 
         # Extract the function body by tracking indentation
         lines = source.splitlines()
@@ -158,25 +158,25 @@ class TestDaemonWatchManagerNoSimpleWatchHandler:
         """DaemonWatchManager must not have _create_simple_watch_handler attribute."""
         from code_indexer.daemon.watch_manager import DaemonWatchManager
 
-        assert not hasattr(
-            DaemonWatchManager, "_create_simple_watch_handler"
-        ), "DaemonWatchManager._create_simple_watch_handler must be removed (Story #226)"
+        assert not hasattr(DaemonWatchManager, "_create_simple_watch_handler"), (
+            "DaemonWatchManager._create_simple_watch_handler must be removed (Story #226)"
+        )
 
     def test_daemon_watch_manager_no_is_git_folder(self):
         """DaemonWatchManager must not have _is_git_folder method (removed with simple watch handler)."""
         from code_indexer.daemon.watch_manager import DaemonWatchManager
 
-        assert not hasattr(
-            DaemonWatchManager, "_is_git_folder"
-        ), "DaemonWatchManager._is_git_folder must be removed (Story #226)"
+        assert not hasattr(DaemonWatchManager, "_is_git_folder"), (
+            "DaemonWatchManager._is_git_folder must be removed (Story #226)"
+        )
 
     def test_daemon_watch_manager_still_has_create_watch_handler(self):
         """DaemonWatchManager._create_watch_handler must still exist after cleanup."""
         from code_indexer.daemon.watch_manager import DaemonWatchManager
 
-        assert hasattr(
-            DaemonWatchManager, "_create_watch_handler"
-        ), "DaemonWatchManager._create_watch_handler must remain after Story #226 cleanup"
+        assert hasattr(DaemonWatchManager, "_create_watch_handler"), (
+            "DaemonWatchManager._create_watch_handler must remain after Story #226 cleanup"
+        )
 
 
 class TestLangfuseWatchIntegrationModuleDeleted:
@@ -218,9 +218,9 @@ class TestWatchManagerNoLangfuseImports:
 
         source = watch_manager_path.read_text()
 
-        assert (
-            "langfuse_watch_integration" not in source
-        ), "watch_manager.py must not import from langfuse_watch_integration (Story #226)"
+        assert "langfuse_watch_integration" not in source, (
+            "watch_manager.py must not import from langfuse_watch_integration (Story #226)"
+        )
 
     def test_watch_manager_no_default_langfuse_timeout_constant(self):
         """watch_manager.py must not reference DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS."""
@@ -234,9 +234,9 @@ class TestWatchManagerNoLangfuseImports:
 
         source = watch_manager_path.read_text()
 
-        assert (
-            "DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS" not in source
-        ), "watch_manager.py must not reference DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS (Story #226)"
+        assert "DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS" not in source, (
+            "watch_manager.py must not reference DEFAULT_LANGFUSE_WATCH_IDLE_TIMEOUT_SECONDS (Story #226)"
+        )
 
 
 class TestCreateWatchHandlerNoNonGitBranch:
@@ -248,9 +248,9 @@ class TestCreateWatchHandlerNoNonGitBranch:
 
         source = inspect.getsource(DaemonWatchManager._create_watch_handler)
 
-        assert (
-            "SimpleWatchHandler" not in source
-        ), "_create_watch_handler must not reference SimpleWatchHandler (Story #226)"
+        assert "SimpleWatchHandler" not in source, (
+            "_create_watch_handler must not reference SimpleWatchHandler (Story #226)"
+        )
 
     def test_create_watch_handler_no_simple_watch_handler_call(self):
         """_create_watch_handler() must not call _create_simple_watch_handler."""
@@ -258,9 +258,9 @@ class TestCreateWatchHandlerNoNonGitBranch:
 
         source = inspect.getsource(DaemonWatchManager._create_watch_handler)
 
-        assert (
-            "_create_simple_watch_handler" not in source
-        ), "_create_watch_handler must not call _create_simple_watch_handler (Story #226)"
+        assert "_create_simple_watch_handler" not in source, (
+            "_create_watch_handler must not call _create_simple_watch_handler (Story #226)"
+        )
 
     def test_create_watch_handler_no_is_git_folder_call(self):
         """_create_watch_handler() must not call _is_git_folder (no branching on folder type)."""
@@ -268,9 +268,9 @@ class TestCreateWatchHandlerNoNonGitBranch:
 
         source = inspect.getsource(DaemonWatchManager._create_watch_handler)
 
-        assert (
-            "_is_git_folder" not in source
-        ), "_create_watch_handler must not call _is_git_folder (Story #226)"
+        assert "_is_git_folder" not in source, (
+            "_create_watch_handler must not call _is_git_folder (Story #226)"
+        )
 
     def test_create_watch_handler_no_bug177_workaround(self):
         """_create_watch_handler() must not have Bug #177 workaround for non-git folders."""
@@ -278,12 +278,12 @@ class TestCreateWatchHandlerNoNonGitBranch:
 
         source = inspect.getsource(DaemonWatchManager._create_watch_handler)
 
-        assert (
-            "Bug #177" not in source
-        ), "_create_watch_handler must not have Bug #177 workaround (Story #226)"
-        assert (
-            "Non-git folder" not in source
-        ), "_create_watch_handler must not have non-git folder special case (Story #226)"
+        assert "Bug #177" not in source, (
+            "_create_watch_handler must not have Bug #177 workaround (Story #226)"
+        )
+        assert "Non-git folder" not in source, (
+            "_create_watch_handler must not have non-git folder special case (Story #226)"
+        )
 
     def test_create_watch_handler_always_creates_git_aware_handler(self):
         """_create_watch_handler() source must reference GitAwareWatchHandler."""
@@ -291,9 +291,9 @@ class TestCreateWatchHandlerNoNonGitBranch:
 
         source = inspect.getsource(DaemonWatchManager._create_watch_handler)
 
-        assert (
-            "GitAwareWatchHandler" in source
-        ), "_create_watch_handler must always create GitAwareWatchHandler (Story #226)"
+        assert "GitAwareWatchHandler" in source, (
+            "_create_watch_handler must always create GitAwareWatchHandler (Story #226)"
+        )
 
 
 class TestDeadCodeAudit:
@@ -365,9 +365,9 @@ class TestDeadCodeAudit:
 
         function_source = "\n".join(function_lines)
 
-        assert (
-            "import subprocess" not in function_source
-        ), "register_langfuse_golden_repos() must not contain 'import subprocess' (Story #226)"
+        assert "import subprocess" not in function_source, (
+            "register_langfuse_golden_repos() must not contain 'import subprocess' (Story #226)"
+        )
 
     def test_no_auto_watch_manager_in_on_langfuse_sync_complete(self):
         """app.py _on_langfuse_sync_complete must not reference auto_watch_manager."""

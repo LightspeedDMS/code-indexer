@@ -90,9 +90,9 @@ class TestServerRestAPIGlobPattern:
                 f"Found file with wrong extension: {scip_file.name}. "
                 f"Should only find .scip.db files, not .scip files."
             )
-            assert scip_file.name.endswith(
-                ".scip.db"
-            ), f"File {scip_file.name} doesn't end with .scip.db"
+            assert scip_file.name.endswith(".scip.db"), (
+                f"File {scip_file.name} doesn't end with .scip.db"
+            )
 
     def test_find_scip_files_works_with_nested_directories(
         self, scip_db_only_dir, monkeypatch
@@ -149,9 +149,9 @@ class TestCompositeQueriesFindTargetDefinition:
             )
 
             # Verify SCIPQueryEngine was called with .scip.db files
-            assert (
-                MockEngine.call_count >= 1
-            ), "Should have created SCIPQueryEngine instances"
+            assert MockEngine.call_count >= 1, (
+                "Should have created SCIPQueryEngine instances"
+            )
 
             # Check that files passed to engine have .scip.db extension
             for call_args in MockEngine.call_args_list:
@@ -193,9 +193,9 @@ class TestCompositeQueriesBFSTraverse:
             # Verify all engine calls used .scip.db files
             for call_args in MockEngine.call_args_list:
                 scip_file = call_args[0][0]
-                assert str(scip_file).endswith(
-                    ".scip.db"
-                ), f"Engine created with wrong file: {scip_file}"
+                assert str(scip_file).endswith(".scip.db"), (
+                    f"Engine created with wrong file: {scip_file}"
+                )
 
 
 class TestCompositeQueriesSmartContext:
@@ -241,14 +241,14 @@ class TestCompositeQueriesSmartContext:
             # Verify all engine calls used .scip.db files
             for call_args in MockEngine.call_args_list:
                 scip_file = call_args[0][0]
-                assert str(scip_file).endswith(
-                    ".scip.db"
-                ), f"Smart context used wrong file: {scip_file}"
+                assert str(scip_file).endswith(".scip.db"), (
+                    f"Smart context used wrong file: {scip_file}"
+                )
 
             # Should return valid result with at least the definition
-            assert (
-                result.total_files >= 1
-            ), "Expected at least 1 file in smart context (the definition file)"
+            assert result.total_files >= 1, (
+                "Expected at least 1 file in smart context (the definition file)"
+            )
 
 
 class TestRealSCIPFixture:

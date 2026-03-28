@@ -101,9 +101,9 @@ class TestJWTNoSleepAntiPattern:
             timestamps.append(payload["iat"])
 
         # All timestamps should be different (microsecond precision)
-        assert len(set(timestamps)) == len(
-            timestamps
-        ), "All token timestamps should be unique"
+        assert len(set(timestamps)) == len(timestamps), (
+            "All token timestamps should be unique"
+        )
 
     def test_jwt_extension_rapid_succession(self):
         """Test that JWT extension works properly in rapid succession without sleep."""
@@ -129,9 +129,9 @@ class TestJWTNoSleepAntiPattern:
 
             if previous_exp is not None:
                 # Each extension should increase expiration time
-                assert (
-                    current_exp > previous_exp
-                ), f"Extension {i}: expiration should increase"
+                assert current_exp > previous_exp, (
+                    f"Extension {i}: expiration should increase"
+                )
 
             previous_exp = current_exp
 

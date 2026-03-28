@@ -19,9 +19,9 @@ def test_query_result_item_import_no_server_init():
 
     # Verify server app was NOT initialized
     # If server app initialized, it would be in sys.modules
-    assert (
-        "src.code_indexer.server.app" not in sys.modules
-    ), "Server app should not be imported when importing QueryResultItem"
+    assert "src.code_indexer.server.app" not in sys.modules, (
+        "Server app should not be imported when importing QueryResultItem"
+    )
 
     # Verify QueryResultItem is a valid class
     assert QueryResultItem is not None

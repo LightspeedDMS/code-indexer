@@ -618,9 +618,9 @@ class TestCliProgressJsonFlag:
         for param in index_cmd.params:
             option_names.extend(param.opts)
 
-        assert (
-            "--progress-json" in option_names
-        ), f"--progress-json must be a registered option. Found: {option_names}"
+        assert "--progress-json" in option_names, (
+            f"--progress-json must be a registered option. Found: {option_names}"
+        )
 
     def test_progress_json_is_flag(self):
         """--progress-json should be a boolean flag (is_flag=True)."""

@@ -197,9 +197,9 @@ class TestDaemonTemporalQueryE2E:
             text=True,
             timeout=30,
         )
-        assert (
-            result_standalone.returncode == 0
-        ), f"Standalone query failed: {result_standalone.stderr}"
+        assert result_standalone.returncode == 0, (
+            f"Standalone query failed: {result_standalone.stderr}"
+        )
         standalone_output = result_standalone.stdout
 
         # Enable daemon mode
@@ -223,15 +223,15 @@ class TestDaemonTemporalQueryE2E:
                 text=True,
                 timeout=30,
             )
-            assert (
-                result_daemon.returncode == 0
-            ), f"Daemon query failed: {result_daemon.stderr}"
+            assert result_daemon.returncode == 0, (
+                f"Daemon query failed: {result_daemon.stderr}"
+            )
             daemon_output = result_daemon.stdout
 
             # Verify both outputs contain 'hello' (content parity)
-            assert (
-                "hello" in standalone_output.lower()
-            ), "Standalone results missing 'hello'"
+            assert "hello" in standalone_output.lower(), (
+                "Standalone results missing 'hello'"
+            )
             assert "hello" in daemon_output.lower(), "Daemon results missing 'hello'"
 
             # Note: Exact output match not required due to timing variations,
@@ -296,9 +296,9 @@ class TestDaemonTemporalQueryE2E:
             # Verify second query is faster (or similar, accounting for CLI overhead)
             # CLI overhead dominates (100-200ms), so we can't verify <5ms cache hit
             # directly, but we can verify it's not slower
-            assert (
-                second_query_time <= first_query_time * 1.5
-            ), f"Second query ({second_query_time:.3f}s) not faster than first ({first_query_time:.3f}s)"
+            assert second_query_time <= first_query_time * 1.5, (
+                f"Second query ({second_query_time:.3f}s) not faster than first ({first_query_time:.3f}s)"
+            )
 
             # Note: The <5ms cache hit target is achieved internally (HNSW mmap),
             # but CLI overhead (process spawn, arg parsing) dominates end-to-end timing

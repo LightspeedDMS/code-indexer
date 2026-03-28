@@ -89,9 +89,9 @@ class TestEdgeCountingWithFiveColumnTable:
                 elif line.startswith("#"):
                     break
 
-        assert (
-            edge_count == 2
-        ), f"Edge counting must work with 5-column table, got {edge_count}"
+        assert edge_count == 2, (
+            f"Edge counting must work with 5-column table, got {edge_count}"
+        )
 
     def test_edge_count_zero_for_empty_table(self, tmp_path):
         """AC9: Empty 5-column table produces edge_count = 0."""
@@ -125,9 +125,9 @@ class TestEdgeCountingWithFiveColumnTable:
                 elif line.startswith("#"):
                     break
 
-        assert (
-            edge_count == 0
-        ), f"Empty 5-column table must yield edge_count=0, got {edge_count}"
+        assert edge_count == 0, (
+            f"Empty 5-column table must yield edge_count=0, got {edge_count}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -202,9 +202,9 @@ class TestParseCrossDomainDeps5Column:
             )
             service = _make_domain_service(tmp)
             result = service._parse_cross_domain_deps()
-            assert (
-                result[0]["dep_type"] == "Code-level"
-            ), f"dep_type must be 'Code-level', got: {result[0].get('dep_type')!r}"
+            assert result[0]["dep_type"] == "Code-level", (
+                f"dep_type must be 'Code-level', got: {result[0].get('dep_type')!r}"
+            )
 
     def test_5_column_extracts_why(self):
         """AC10: why field populated from Why column."""
@@ -220,9 +220,9 @@ class TestParseCrossDomainDeps5Column:
             )
             service = _make_domain_service(tmp)
             result = service._parse_cross_domain_deps()
-            assert (
-                result[0]["why"] == "auth imports user types"
-            ), f"why must be 'auth imports user types', got: {result[0].get('why')!r}"
+            assert result[0]["why"] == "auth imports user types", (
+                f"why must be 'auth imports user types', got: {result[0].get('why')!r}"
+            )
 
     def test_3_column_table_dep_type_and_why_empty(self):
         """AC10: Old 3-column format: dep_type and why are empty strings."""
@@ -239,12 +239,12 @@ class TestParseCrossDomainDeps5Column:
             service = _make_domain_service(tmp)
             result = service._parse_cross_domain_deps()
             assert len(result) == 1
-            assert (
-                result[0].get("dep_type", "") == ""
-            ), "3-column format must yield empty dep_type"
-            assert (
-                result[0].get("why", "") == ""
-            ), "3-column format must yield empty why"
+            assert result[0].get("dep_type", "") == "", (
+                "3-column format must yield empty dep_type"
+            )
+            assert result[0].get("why", "") == "", (
+                "3-column format must yield empty why"
+            )
 
     def test_4_column_table_still_parses_correctly(self):
         """AC10: Old 4-column format (Source|Target|Via|Relationship) still works."""
@@ -340,9 +340,9 @@ class TestGetGraphDataWithDepType:
 
             assert len(result["edges"]) == 1
             edge = result["edges"][0]
-            assert (
-                "dep_type" in edge
-            ), f"Edge must include dep_type field, got keys: {list(edge.keys())}"
+            assert "dep_type" in edge, (
+                f"Edge must include dep_type field, got keys: {list(edge.keys())}"
+            )
 
     def test_edges_dep_type_value_from_table(self):
         """AC12: Edge dep_type contains value from Type column."""
@@ -376,9 +376,9 @@ class TestGetGraphDataWithDepType:
             result = service.get_graph_data()
 
             edge = result["edges"][0]
-            assert (
-                edge["dep_type"] == "Service integration"
-            ), f"Edge dep_type must be 'Service integration', got: {edge.get('dep_type')!r}"
+            assert edge["dep_type"] == "Service integration", (
+                f"Edge dep_type must be 'Service integration', got: {edge.get('dep_type')!r}"
+            )
 
     def test_edges_dep_type_empty_for_old_3_column_format(self):
         """AC12: Edge dep_type is empty string for old 3-column format."""
@@ -413,9 +413,9 @@ class TestGetGraphDataWithDepType:
             assert len(result["edges"]) == 1
             edge = result["edges"][0]
             assert "dep_type" in edge, "dep_type key must exist even for old format"
-            assert (
-                edge["dep_type"] == ""
-            ), f"dep_type must be empty for 3-column format, got: {edge.get('dep_type')!r}"
+            assert edge["dep_type"] == "", (
+                f"dep_type must be empty for 3-column format, got: {edge.get('dep_type')!r}"
+            )
 
     def test_edges_still_have_source_and_target(self):
         """AC12: Adding dep_type does not break existing source/target edge fields."""

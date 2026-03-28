@@ -107,9 +107,9 @@ class TestSemanticFtsIndexingErrorLogging:
             f"Records: {[r.message for r in error_logs]}"
         )
         log_message = indexing_logs[0].message
-        assert (
-            "CalledProcessError" in log_message
-        ), f"Log must contain 'CalledProcessError', got: {log_message}"
+        assert "CalledProcessError" in log_message, (
+            f"Log must contain 'CalledProcessError', got: {log_message}"
+        )
         assert alias_name in log_message
         assert indexing_logs[0].exc_info is not None
 
@@ -258,9 +258,9 @@ class TestCleanupErrorLogging:
             ]
             assert len(cleanup_logs) >= 1, "Expected at least one cleanup error log"
             log_message = cleanup_logs[0].message
-            assert (
-                "RuntimeError" in log_message
-            ), f"Log must contain 'RuntimeError', got: {log_message}"
-            assert (
-                alias_name in log_message
-            ), f"Log must contain alias '{alias_name}', got: {log_message}"
+            assert "RuntimeError" in log_message, (
+                f"Log must contain 'RuntimeError', got: {log_message}"
+            )
+            assert alias_name in log_message, (
+                f"Log must contain alias '{alias_name}', got: {log_message}"
+            )

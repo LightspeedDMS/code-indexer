@@ -47,9 +47,9 @@ class TestManagerAccessPatterns:
         """
         from code_indexer.server.auth import dependencies
 
-        assert hasattr(
-            dependencies, "mcp_credential_manager"
-        ), "mcp_credential_manager should be available in dependencies module"
+        assert hasattr(dependencies, "mcp_credential_manager"), (
+            "mcp_credential_manager should be available in dependencies module"
+        )
 
     def test_api_key_manager_not_in_app_module(self):
         """
@@ -59,9 +59,9 @@ class TestManagerAccessPatterns:
         """
         from code_indexer.server import app as app_module
 
-        assert not hasattr(
-            app_module, "api_key_manager"
-        ), "api_key_manager should NOT be a module-level attribute in app.py"
+        assert not hasattr(app_module, "api_key_manager"), (
+            "api_key_manager should NOT be a module-level attribute in app.py"
+        )
 
     def test_mcp_credential_manager_not_in_app_module(self):
         """
@@ -71,9 +71,9 @@ class TestManagerAccessPatterns:
         """
         from code_indexer.server import app as app_module
 
-        assert not hasattr(
-            app_module, "mcp_credential_manager"
-        ), "mcp_credential_manager should NOT be a module-level attribute in app.py"
+        assert not hasattr(app_module, "mcp_credential_manager"), (
+            "mcp_credential_manager should NOT be a module-level attribute in app.py"
+        )
 
     def test_user_manager_is_in_app_module(self):
         """
@@ -83,9 +83,9 @@ class TestManagerAccessPatterns:
         """
         from code_indexer.server import app as app_module
 
-        assert hasattr(
-            app_module, "user_manager"
-        ), "user_manager should exist as a module-level attribute in app.py"
+        assert hasattr(app_module, "user_manager"), (
+            "user_manager should exist as a module-level attribute in app.py"
+        )
 
 
 class TestCredentialHandlersNoAttributeError:
@@ -119,9 +119,9 @@ class TestCredentialHandlersNoAttributeError:
             content = json.loads(result["content"][0]["text"])
             # Response should have either success or error, not AttributeError message
             if "error" in content:
-                assert (
-                    "has no attribute 'api_key_manager'" not in content["error"]
-                ), "Should not have AttributeError for api_key_manager"
+                assert "has no attribute 'api_key_manager'" not in content["error"], (
+                    "Should not have AttributeError for api_key_manager"
+                )
         except AttributeError as e:
             pytest.fail(f"Handler raised AttributeError: {e}")
 

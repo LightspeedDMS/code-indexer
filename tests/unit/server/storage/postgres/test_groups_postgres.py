@@ -116,9 +116,9 @@ class TestProtocolCompliance:
             "get_audit_logs",
         ]
         for method_name in required_methods:
-            assert callable(
-                getattr(backend, method_name, None)
-            ), f"Missing or non-callable method: {method_name}"
+            assert callable(getattr(backend, method_name, None)), (
+                f"Missing or non-callable method: {method_name}"
+            )
 
 
 # ---------------------------------------------------------------------------

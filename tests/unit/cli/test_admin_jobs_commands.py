@@ -45,9 +45,9 @@ class TestAdminJobsCleanupCommand:
         commands = admin_jobs_group.commands
 
         # Check that 'cleanup' is one of the registered commands
-        assert (
-            "cleanup" in commands
-        ), f"cleanup not found in commands: {list(commands.keys())}"
+        assert "cleanup" in commands, (
+            f"cleanup not found in commands: {list(commands.keys())}"
+        )
 
     def test_admin_jobs_cleanup_has_options(self):
         """Test that cleanup command has the required options."""
@@ -59,15 +59,15 @@ class TestAdminJobsCleanupCommand:
         option_names = [param.name for param in cleanup_cmd.params]
 
         # Check required options exist
-        assert (
-            "older_than" in option_names
-        ), f"older_than option not found. Available: {option_names}"
-        assert (
-            "status" in option_names
-        ), f"status option not found. Available: {option_names}"
-        assert (
-            "dry_run" in option_names
-        ), f"dry_run option not found. Available: {option_names}"
+        assert "older_than" in option_names, (
+            f"older_than option not found. Available: {option_names}"
+        )
+        assert "status" in option_names, (
+            f"status option not found. Available: {option_names}"
+        )
+        assert "dry_run" in option_names, (
+            f"dry_run option not found. Available: {option_names}"
+        )
 
     @patch("requests.delete")
     def test_cleanup_status_parameter_sent_to_api(self, mock_delete):

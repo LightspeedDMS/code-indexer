@@ -25,9 +25,9 @@ class TestRemoteUrlSkip:
         # remote-url.md has 2 remote URLs and 1 local image
         # Remote URLs should be in all_results with skip_reason='remote_url'
         remote_results = [r for r in all_results if r.skip_reason == "remote_url"]
-        assert (
-            len(remote_results) >= 2
-        ), f"Expected at least 2 remote URLs, got {len(remote_results)}"
+        assert len(remote_results) >= 2, (
+            f"Expected at least 2 remote URLs, got {len(remote_results)}"
+        )
 
         # Verify remote URLs detected
         remote_urls = [r.path for r in remote_results]
@@ -67,6 +67,6 @@ class TestRemoteUrlSkip:
 
         # Should only return local images, no remote URLs
         assert len(images) > 0, "Expected at least one local image"
-        assert all(
-            not img.startswith("http") for img in images
-        ), "extract_images() should filter out remote URLs"
+        assert all(not img.startswith("http") for img in images), (
+            "extract_images() should filter out remote URLs"
+        )

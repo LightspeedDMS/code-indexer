@@ -78,9 +78,9 @@ class TestGitToolsHaveRepositoryAliasInSchema:
         properties so the centralized guard can detect and enforce access control."""
         missing = []
         for tool_name in GIT_TOOLS_WITH_REPO_ALIAS:
-            assert (
-                tool_name in TOOL_REGISTRY
-            ), f"Tool '{tool_name}' not found in TOOL_REGISTRY"
+            assert tool_name in TOOL_REGISTRY, (
+                f"Tool '{tool_name}' not found in TOOL_REGISTRY"
+            )
             tool_def = TOOL_REGISTRY[tool_name]
             input_schema = tool_def.get("inputSchema", {})
             properties = input_schema.get("properties", {})

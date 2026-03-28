@@ -226,6 +226,6 @@ class TestAdminPasswordChangeCommand:
         # All should be available and follow same pattern
         for cmd in ["create", "list", "show", "update", "delete", "change-password"]:
             cmd_result = runner.invoke(cli, ["admin", "users", cmd, "--help"])
-            assert (
-                cmd_result.exit_code == 0
-            ), f"Command {cmd} should exist and show help"
+            assert cmd_result.exit_code == 0, (
+                f"Command {cmd} should exist and show help"
+            )

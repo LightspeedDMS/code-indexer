@@ -31,9 +31,9 @@ class TestHtmxImageIndexing:
         extractor = ImageExtractorFactory.get_extractor(".htmx")
 
         assert extractor is not None, "Factory returned None for .htmx extension"
-        assert isinstance(
-            extractor, HtmlImageExtractor
-        ), f"Expected HtmlImageExtractor, got {type(extractor)}"
+        assert isinstance(extractor, HtmlImageExtractor), (
+            f"Expected HtmlImageExtractor, got {type(extractor)}"
+        )
 
     def test_htmx_extractor_ignores_htmx_attributes(self, multimodal_repo_path):
         """Verify HTMX-specific attributes don't interfere with image extraction."""
@@ -48,6 +48,6 @@ class TestHtmxImageIndexing:
         images = extractor.extract_images(content, htmx_file, multimodal_repo_path)
 
         # Verify images are extracted despite htmx attributes
-        assert (
-            len(images) > 0
-        ), "HTMX extractor should extract images despite htmx attributes"
+        assert len(images) > 0, (
+            "HTMX extractor should extract images despite htmx attributes"
+        )

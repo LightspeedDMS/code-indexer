@@ -228,10 +228,12 @@ class TestCallOrder:
                         alias_name="cwd-test-repo-global", source_path=str(source_repo)
                     )
 
-        assert index_cwds, "cidx index --fts (via run_with_popen_progress) was not called by _index_source()"
-        assert (
-            index_cwds[0] == str(source_repo)
-        ), f"cidx index --fts cwd must be source_path={source_repo}, got cwd={index_cwds[0]}."
+        assert index_cwds, (
+            "cidx index --fts (via run_with_popen_progress) was not called by _index_source()"
+        )
+        assert index_cwds[0] == str(source_repo), (
+            f"cidx index --fts cwd must be source_path={source_repo}, got cwd={index_cwds[0]}."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -337,12 +339,12 @@ class TestFixConfigOnCloneOnly:
             "cidx fix-config was never called from _create_snapshot(). "
             "C4: fix-config MUST run on the versioned clone."
         )
-        assert fix_config_cwds[0] != str(
-            source_repo
-        ), f"cidx fix-config cwd must NOT be source_path={source_repo}."
-        assert (
-            fix_config_cwds[0] == result_path
-        ), f"cidx fix-config cwd={fix_config_cwds[0]} must equal returned versioned_path={result_path}."
+        assert fix_config_cwds[0] != str(source_repo), (
+            f"cidx fix-config cwd must NOT be source_path={source_repo}."
+        )
+        assert fix_config_cwds[0] == result_path, (
+            f"cidx fix-config cwd={fix_config_cwds[0]} must equal returned versioned_path={result_path}."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -415,12 +417,12 @@ class TestExecuteRefreshCallSite:
 
                                         scheduler._execute_refresh(alias_name)
 
-        assert (
-            "_index_source" in call_order
-        ), "C5: _execute_refresh() must call _index_source()."
-        assert (
-            "_create_snapshot" in call_order
-        ), "C5: _execute_refresh() must call _create_snapshot()."
+        assert "_index_source" in call_order, (
+            "C5: _execute_refresh() must call _index_source()."
+        )
+        assert "_create_snapshot" in call_order, (
+            "C5: _execute_refresh() must call _create_snapshot()."
+        )
         assert call_order.index("_index_source") < call_order.index(
             "_create_snapshot"
         ), "C5: _index_source() must be called before _create_snapshot()."

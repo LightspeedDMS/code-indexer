@@ -56,9 +56,9 @@ class TestRemoveStaleReposFromDomainsJson:
     def test_method_exists_on_service(self, tmp_path):
         """Bug #396: DependencyMapService must expose _remove_stale_repos_from_domains_json."""
         svc = _make_service(tmp_path)
-        assert hasattr(
-            svc, "_remove_stale_repos_from_domains_json"
-        ), "DependencyMapService must have _remove_stale_repos_from_domains_json method"
+        assert hasattr(svc, "_remove_stale_repos_from_domains_json"), (
+            "DependencyMapService must have _remove_stale_repos_from_domains_json method"
+        )
 
     def test_stale_repos_removed_from_domains_json(self, tmp_path):
         """Bug #396: Removed repo alias is stripped from participating_repos in _domains.json."""
@@ -86,9 +86,9 @@ class TestRemoveStaleReposFromDomainsJson:
         written = json.loads((live_dir / "_domains.json").read_text())
         backend = next((d for d in written if d["name"] == "backend"), None)
         assert backend is not None
-        assert (
-            "repo-b" not in backend["participating_repos"]
-        ), "repo-b must be removed from participating_repos"
+        assert "repo-b" not in backend["participating_repos"], (
+            "repo-b must be removed from participating_repos"
+        )
         assert "repo-a" in backend["participating_repos"], "repo-a must remain"
         assert "repo-c" in backend["participating_repos"], "repo-c must remain"
 
@@ -155,9 +155,9 @@ class TestRemoveStaleReposFromDomainsJson:
 
         assert result is True
         # No file should be written for an empty removal list
-        assert not (
-            live_dir / "_domains.json"
-        ).exists(), "_domains.json must NOT be written when removed_repos is empty"
+        assert not (live_dir / "_domains.json").exists(), (
+            "_domains.json must NOT be written when removed_repos is empty"
+        )
 
     def test_no_modification_when_repo_not_in_any_domain(self, tmp_path):
         """Bug #396: Repo alias not present in any domain causes no content change."""
@@ -182,9 +182,9 @@ class TestRemoveStaleReposFromDomainsJson:
 
         assert result is True
         # No file should be written because nothing changed
-        assert not (
-            live_dir / "_domains.json"
-        ).exists(), "_domains.json must NOT be written when the repo alias is not found in any domain"
+        assert not (live_dir / "_domains.json").exists(), (
+            "_domains.json must NOT be written when the repo alias is not found in any domain"
+        )
 
     def test_domains_json_not_found_returns_true(self, tmp_path):
         """Bug #396: Missing _domains.json is not an error — returns True (nothing to clean)."""
@@ -225,12 +225,12 @@ class TestRemoveStaleReposFromDomainsJson:
         assert result is True
         written = json.loads((live_dir / "_domains.json").read_text())
         solo = next((d for d in written if d["name"] == "solo-domain"), None)
-        assert (
-            solo is not None
-        ), "Domain with zero repos must NOT be pruned from _domains.json"
-        assert (
-            solo["participating_repos"] == []
-        ), "participating_repos must be empty list"
+        assert solo is not None, (
+            "Domain with zero repos must NOT be pruned from _domains.json"
+        )
+        assert solo["participating_repos"] == [], (
+            "participating_repos must be empty list"
+        )
 
 
 class TestRunDeltaAnalysisStaleRepoCleanup:

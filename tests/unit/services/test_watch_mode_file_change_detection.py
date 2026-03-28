@@ -245,9 +245,9 @@ class TestWatchModeFileChangeDetection:
 
         # Verify correct files were passed for re-indexing
         call_args = mock_smart_indexer.process_files_incrementally.call_args
-        assert (
-            call_args is not None
-        ), "process_files_incrementally should have been called"
+        assert call_args is not None, (
+            "process_files_incrementally should have been called"
+        )
 
         # Extract the files that were passed for re-indexing
         if call_args[0]:  # Positional args
@@ -258,12 +258,12 @@ class TestWatchModeFileChangeDetection:
         # Should include modified and new files
         assert len(files_to_reindex) > 0, "Should have files to re-index"
         # Both files should be included
-        assert any(
-            "test.py" in f for f in files_to_reindex
-        ), "Should include modified test.py"
-        assert any(
-            "new_file.py" in f for f in files_to_reindex
-        ), "Should include new new_file.py"
+        assert any("test.py" in f for f in files_to_reindex), (
+            "Should include modified test.py"
+        )
+        assert any("new_file.py" in f for f in files_to_reindex), (
+            "Should include new new_file.py"
+        )
 
     def test_watch_mode_reports_correct_changed_file_count(self, git_repo, caplog):
         """Test that watch mode reports correct count of changed files, not '0 changed files'."""
@@ -327,9 +327,9 @@ class TestWatchModeFileChangeDetection:
         # This test will FAIL until we fix analyze_branch_change to detect same-branch commit changes
 
         # CRITICAL: Should report correct number of changed files
-        assert (
-            len(analysis.files_to_reindex) >= 2
-        ), f"Should detect at least 2 changed files, got {len(analysis.files_to_reindex)}"
+        assert len(analysis.files_to_reindex) >= 2, (
+            f"Should detect at least 2 changed files, got {len(analysis.files_to_reindex)}"
+        )
 
         # Verify log reports correct count (not "0 changed files")
         changed_file_logs = [
@@ -337,6 +337,6 @@ class TestWatchModeFileChangeDetection:
         ]
         if changed_file_logs:
             # Should NOT report "0 changed files"
-            assert not any(
-                "0 changed files" in r.message for r in changed_file_logs
-            ), "Should not report '0 changed files' when files were actually changed"
+            assert not any("0 changed files" in r.message for r in changed_file_logs), (
+                "Should not report '0 changed files' when files were actually changed"
+            )

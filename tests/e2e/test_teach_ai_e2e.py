@@ -250,9 +250,9 @@ class TestTeachAiClaude:
         skills_dir = Path.home() / ".claude" / "skills" / "cidx"
         assert skills_dir.exists(), "Skills directory was not created"
         assert (skills_dir / "SKILL.md").exists(), "SKILL.md not found"
-        assert (
-            skills_dir / "reference" / "scip-intelligence.md"
-        ).exists(), "scip-intelligence.md not found"
+        assert (skills_dir / "reference" / "scip-intelligence.md").exists(), (
+            "scip-intelligence.md not found"
+        )
 
         # No awareness files should be created in project
         assert not (tmp_path / "CLAUDE.md").exists(), "CLAUDE.md should not be created"

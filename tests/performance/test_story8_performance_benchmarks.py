@@ -257,27 +257,27 @@ class DataProcessor:
     """High-performance data processing service."""
     config: Dict[str, any]
     cache: Dict[str, any]
-    
+
     def __post_init__(self):
         self.results = []
         self.processed_count = 0
-    
+
     async def process_batch_async(self, items: List[Dict[str, any]]) -> List[Dict[str, any]]:
         """Process a batch of items asynchronously."""
         tasks = [self._process_item_async(item) for item in items]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         successful_results = [r for r in results if not isinstance(r, Exception)]
         self.processed_count += len(successful_results)
         return successful_results
-    
+
     async def _process_item_async(self, item: Dict[str, any]) -> Dict[str, any]:
         """Process a single item with complex business logic."""
         try:
             # Simulate complex processing
             processed_data = await self._transform_data(item)
             validation_result = await self._validate_data(processed_data)
-            
+
             if validation_result.is_valid:
                 enriched_data = await self._enrich_data(processed_data)
                 return {
@@ -289,11 +289,11 @@ class DataProcessor:
             else:
                 logger.warning(f"Validation failed for item {item.get('id')}: {validation_result.errors}")
                 return {"id": item.get("id"), "status": "validation_failed", "errors": validation_result.errors}
-                
+
         except Exception as e:
             logger.error(f"Failed to process item {item.get('id')}: {e}")
             return {"id": item.get("id"), "status": "error", "error": str(e)}
-    
+
     async def _transform_data(self, data: Dict[str, any]) -> Dict[str, any]:
         """Transform input data according to business rules."""
         await asyncio.sleep(0.001)  # Simulate processing delay
@@ -301,19 +301,19 @@ class DataProcessor:
             "transformed_" + k: str(v).upper() if isinstance(v, str) else v
             for k, v in data.items()
         }
-    
+
     async def _validate_data(self, data: Dict[str, any]) -> 'ValidationResult':
         """Validate processed data."""
         await asyncio.sleep(0.0005)  # Simulate validation delay
         errors = []
-        
+
         required_fields = ["transformed_id", "transformed_name"]
         for field in required_fields:
             if field not in data:
                 errors.append(f"Missing required field: {field}")
-        
+
         return ValidationResult(is_valid=len(errors) == 0, errors=errors)
-    
+
     async def _enrich_data(self, data: Dict[str, any]) -> Dict[str, any]:
         """Enrich data with additional information."""
         await asyncio.sleep(0.0003)  # Simulate enrichment delay
@@ -331,13 +331,13 @@ class ValidationResult:
 
 class ConfigurationManager:
     """Manages application configuration with hot reload support."""
-    
+
     def __init__(self, config_path: Path):
         self.config_path = config_path
         self.config_data = {}
         self.watchers = []
         self._load_config()
-    
+
     def _load_config(self):
         """Load configuration from file."""
         try:
@@ -347,7 +347,7 @@ class ConfigurationManager:
         except Exception as e:
             logger.error(f"Failed to load config from {self.config_path}: {e}")
             self.config_data = self._get_default_config()
-    
+
     def _get_default_config(self) -> Dict[str, any]:
         """Get default configuration values."""
         return {
@@ -361,33 +361,33 @@ class ConfigurationManager:
                 "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
             }
         }
-    
+
     def get(self, key: str, default=None):
         """Get configuration value by key."""
         keys = key.split('.')
         value = self.config_data
-        
+
         for k in keys:
             if isinstance(value, dict) and k in value:
                 value = value[k]
             else:
                 return default
-        
+
         return value
-    
+
     def set(self, key: str, value: any):
         """Set configuration value by key."""
         keys = key.split('.')
         current = self.config_data
-        
+
         for k in keys[:-1]:
             if k not in current:
                 current[k] = {}
             current = current[k]
-        
+
         current[keys[-1]] = value
         self._save_config()
-    
+
     def _save_config(self):
         """Save configuration to file."""
         try:
@@ -414,10 +414,10 @@ public class AdvancedDataProcessingService {
     private final ExecutorService executor = Executors.newFixedThreadPool(8);
     private final AtomicLong processedCount = new AtomicLong(0);
     private final BlockingQueue<ProcessingTask> taskQueue = new LinkedBlockingQueue<>();
-    
+
     private static final int MAX_CACHE_SIZE = 10000;
     private static final long CACHE_EXPIRY_MS = 300000; // 5 minutes
-    
+
     /**
      * Process a batch of data items with comprehensive error handling and metrics.
      */
@@ -425,47 +425,47 @@ public class AdvancedDataProcessingService {
         if (rawDataList == null || rawDataList.isEmpty()) {
             return Collections.emptyList();
         }
-        
+
         // Validate input data
         List<RawData> validData = rawDataList.stream()
             .filter(this::validateRawData)
             .collect(Collectors.toList());
-        
+
         // Process in parallel with proper error handling
         return validData.parallelStream()
             .map(this::processItemWithMetrics)
             .filter(Objects::nonNull)
             .collect(Collectors.toList());
     }
-    
+
     /**
      * Process individual item with comprehensive metrics and caching.
      */
     private ProcessedData processItemWithMetrics(RawData rawData) {
         long startTime = System.nanoTime();
-        
+
         try {
             String cacheKey = generateCacheKey(rawData);
             ProcessedData cachedResult = getCachedResult(cacheKey);
-            
+
             if (cachedResult != null) {
                 return cachedResult;
             }
-            
+
             // Complex processing pipeline
             ProcessedData result = executeProcessingPipeline(rawData);
-            
+
             // Cache successful results
             if (result != null && result.isValid()) {
                 cacheResult(cacheKey, result);
             }
-            
+
             // Update metrics
             long processingTime = System.nanoTime() - startTime;
             processedCount.incrementAndGet();
-            
+
             return result;
-            
+
         } catch (ProcessingException e) {
             handleProcessingError(rawData, e);
             return createErrorResult(rawData, e);
@@ -474,30 +474,30 @@ public class AdvancedDataProcessingService {
             return null;
         }
     }
-    
+
     /**
      * Execute complex processing pipeline with multiple stages.
      */
     private ProcessedData executeProcessingPipeline(RawData rawData) throws ProcessingException {
         // Stage 1: Data transformation
         TransformedData transformed = transformRawData(rawData);
-        
+
         // Stage 2: Business rule validation
         ValidationResult validation = validateBusinessRules(transformed);
         if (!validation.isValid()) {
-            throw new ProcessingException("Business rule validation failed: " + 
+            throw new ProcessingException("Business rule validation failed: " +
                 validation.getErrors().stream().collect(Collectors.joining(", ")));
         }
-        
+
         // Stage 3: Data enrichment
         EnrichedData enriched = enrichTransformedData(transformed);
-        
+
         // Stage 4: Final processing
         ProcessedData result = finalizeProcessedData(enriched);
-        
+
         return result;
     }
-    
+
     /**
      * Transform raw data according to business specifications.
      */
@@ -507,15 +507,15 @@ public class AdvancedDataProcessingService {
         transformed.setName(normalizeString(rawData.getName()));
         transformed.setCategory(mapCategory(rawData.getCategory()));
         transformed.setTimestamp(LocalDateTime.now());
-        
+
         // Complex transformation logic
         Map<String, Object> attributes = rawData.getAttributes();
         Map<String, Object> transformedAttributes = new HashMap<>();
-        
+
         for (Map.Entry<String, Object> entry : attributes.entrySet()) {
             String key = entry.getKey();
             Object value = entry.getValue();
-            
+
             if (value instanceof String) {
                 transformedAttributes.put(key, normalizeString((String) value));
             } else if (value instanceof Number) {
@@ -526,77 +526,77 @@ public class AdvancedDataProcessingService {
                 transformedAttributes.put(key, value);
             }
         }
-        
+
         transformed.setTransformedAttributes(transformedAttributes);
         return transformed;
     }
-    
+
     /**
      * Validate business rules against transformed data.
      */
     private ValidationResult validateBusinessRules(TransformedData data) {
         List<String> errors = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
-        
+
         // Required field validation
         if (data.getName() == null || data.getName().trim().isEmpty()) {
             errors.add("Name is required");
         }
-        
+
         if (data.getCategory() == null) {
             errors.add("Category is required");
         }
-        
+
         // Business logic validation
         if (data.getTransformedAttributes().size() > 100) {
             warnings.add("Large number of attributes may impact performance");
         }
-        
+
         // Complex validation rules
         if (data.getCategory() == ProcessingCategory.HIGH_PRIORITY) {
             if (data.getTransformedAttributes().get("priority_score") == null) {
                 errors.add("Priority score required for high priority items");
             }
         }
-        
+
         return new ValidationResult(errors.isEmpty(), errors, warnings);
     }
-    
+
     /**
      * Enrich transformed data with additional information.
      */
     private EnrichedData enrichTransformedData(TransformedData transformed) {
         EnrichedData enriched = new EnrichedData(transformed);
-        
+
         // Add processing metadata
         enriched.setProcessingTimestamp(LocalDateTime.now());
         enriched.setProcessorVersion("2.1.0");
         enriched.setProcessingNode(getProcessingNodeId());
-        
+
         // Add derived attributes
         enriched.addDerivedAttribute("hash", calculateDataHash(transformed));
         enriched.addDerivedAttribute("complexity_score", calculateComplexityScore(transformed));
         enriched.addDerivedAttribute("estimated_size", estimateDataSize(transformed));
-        
+
         return enriched;
     }
-    
+
     private ProcessedData finalizeProcessedData(EnrichedData enriched) {
         ProcessedData result = new ProcessedData();
         result.setSourceData(enriched);
         result.setFinalTimestamp(LocalDateTime.now());
         result.setStatus(ProcessingStatus.COMPLETED);
         result.setChecksum(calculateFinalChecksum(enriched));
-        
+
         return result;
     }
-    
+
     // Helper methods with complex logic
     private String normalizeString(String input) {
         if (input == null) return null;
         return input.trim().toLowerCase().replaceAll("\\s+", " ");
     }
-    
+
     private Number normalizeNumber(Number input) {
         if (input == null) return null;
         if (input instanceof Double || input instanceof Float) {
@@ -604,15 +604,15 @@ public class AdvancedDataProcessingService {
         }
         return input;
     }
-    
+
     private Collection<?> normalizeCollection(Collection<?> input) {
         if (input == null) return null;
         return input.stream().filter(Objects::nonNull).collect(Collectors.toList());
     }
-    
+
     private ProcessingCategory mapCategory(String category) {
         if (category == null) return ProcessingCategory.UNKNOWN;
-        
+
         switch (category.toUpperCase()) {
             case "URGENT": return ProcessingCategory.HIGH_PRIORITY;
             case "NORMAL": return ProcessingCategory.MEDIUM_PRIORITY;
@@ -620,18 +620,18 @@ public class AdvancedDataProcessingService {
             default: return ProcessingCategory.UNKNOWN;
         }
     }
-    
+
     private boolean validateRawData(RawData data) {
         return data != null && data.getId() != null && !data.getId().trim().isEmpty();
     }
-    
+
     private String generateCacheKey(RawData data) {
-        return String.format("%s_%s_%d", 
-            data.getType(), 
-            data.getCategory(), 
+        return String.format("%s_%s_%d",
+            data.getType(),
+            data.getCategory(),
             Objects.hashCode(data.getAttributes()));
     }
-    
+
     private ProcessedData getCachedResult(String key) {
         CacheEntry entry = (CacheEntry) cache.get(key);
         if (entry != null && !entry.isExpired()) {
@@ -639,7 +639,7 @@ public class AdvancedDataProcessingService {
         }
         return null;
     }
-    
+
     private void cacheResult(String key, ProcessedData data) {
         if (cache.size() >= MAX_CACHE_SIZE) {
             // Simple LRU eviction
@@ -647,36 +647,36 @@ public class AdvancedDataProcessingService {
         }
         cache.put(key, new CacheEntry(data, System.currentTimeMillis() + CACHE_EXPIRY_MS));
     }
-    
+
     private String calculateDataHash(TransformedData data) {
         return Integer.toHexString(Objects.hash(data.getId(), data.getName(), data.getCategory()));
     }
-    
+
     private double calculateComplexityScore(TransformedData data) {
         return data.getTransformedAttributes().size() * 1.5 + data.getName().length() * 0.1;
     }
-    
+
     private long estimateDataSize(TransformedData data) {
         return data.toString().getBytes().length;
     }
-    
+
     private String calculateFinalChecksum(EnrichedData data) {
         return Integer.toHexString(data.hashCode());
     }
-    
+
     private String getProcessingNodeId() {
         return System.getProperty("node.id", "node-" + Thread.currentThread().getId());
     }
-    
+
     private void handleProcessingError(RawData data, ProcessingException e) {
         System.err.println("Processing error for " + data.getId() + ": " + e.getMessage());
     }
-    
+
     private void handleUnexpectedError(RawData data, Exception e) {
         System.err.println("Unexpected error processing " + data.getId() + ": " + e.getMessage());
         e.printStackTrace();
     }
-    
+
     private ProcessedData createErrorResult(RawData data, ProcessingException e) {
         ProcessedData errorResult = new ProcessedData();
         errorResult.setStatus(ProcessingStatus.ERROR);
@@ -690,12 +690,12 @@ public class AdvancedDataProcessingService {
 class CacheEntry {
     private final ProcessedData data;
     private final long expiryTime;
-    
+
     public CacheEntry(ProcessedData data, long expiryTime) {
         this.data = data;
         this.expiryTime = expiryTime;
     }
-    
+
     public ProcessedData getData() { return data; }
     public boolean isExpired() { return System.currentTimeMillis() > expiryTime; }
 }
@@ -734,7 +734,7 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             cacheExpiry: 300000, // 5 minutes
             ...config
         };
-        
+
         this.cache = new Map();
         this.processingQueue = [];
         this.activeProcessing = new Set();
@@ -744,48 +744,48 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             cacheHits: 0,
             averageProcessingTime: 0
         };
-        
+
         this.setupCleanupInterval();
     }
-    
+
     /**
      * Process multiple data items with advanced concurrency control and error handling.
      */
     async processBatch(dataItems, options = {}) {
         const startTime = Date.now();
-        
+
         try {
             // Validate input data
             const validatedItems = await this.validateBatchInput(dataItems);
-            
+
             // Process with concurrency control
             const results = await this.processWithConcurrencyControl(validatedItems, options);
-            
+
             // Update metrics
             const processingTime = Date.now() - startTime;
             this.updateBatchMetrics(results, processingTime);
-            
+
             this.emit('batchCompleted', {
                 totalItems: dataItems.length,
                 successfulItems: results.filter(r => r.status === 'success').length,
                 processingTime
             });
-            
+
             return results;
-            
+
         } catch (error) {
             this.emit('batchError', error);
             throw new ProcessingError(`Batch processing failed: ${error.message}`);
         }
     }
-    
+
     /**
      * Process individual item with comprehensive retry logic and caching.
      */
     async processItem(dataItem, options = {}) {
         const itemId = this.generateItemId(dataItem);
         const startTime = Date.now();
-        
+
         try {
             // Check cache first
             const cachedResult = this.getCachedResult(itemId);
@@ -793,36 +793,36 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 this.metrics.cacheHits++;
                 return cachedResult;
             }
-            
+
             // Add to active processing set to prevent duplicates
             if (this.activeProcessing.has(itemId)) {
                 throw new ProcessingError(`Item ${itemId} is already being processed`);
             }
-            
+
             this.activeProcessing.add(itemId);
-            
+
             try {
                 const result = await this.executeProcessingPipeline(dataItem, options);
-                
+
                 // Cache successful results
                 if (result.status === 'success') {
                     this.cacheResult(itemId, result);
                 }
-                
+
                 // Update metrics
                 const processingTime = Date.now() - startTime;
                 this.updateItemMetrics(result, processingTime);
-                
+
                 return result;
-                
+
             } finally {
                 this.activeProcessing.delete(itemId);
             }
-            
+
         } catch (error) {
             this.metrics.errors++;
             this.emit('itemError', { itemId, error });
-            
+
             return {
                 itemId,
                 status: 'error',
@@ -831,7 +831,7 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             };
         }
     }
-    
+
     /**
      * Execute complex processing pipeline with multiple transformation stages.
      */
@@ -844,24 +844,24 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             this.performComplexCalculations.bind(this),
             this.generateOutputFormat.bind(this)
         ];
-        
+
         let currentData = { ...dataItem, originalInput: dataItem };
         const pipelineResults = [];
-        
+
         for (let i = 0; i < pipeline.length; i++) {
             const stage = pipeline[i];
             const stageStartTime = Date.now();
-            
+
             try {
                 currentData = await stage(currentData, options);
-                
+
                 pipelineResults.push({
                     stage: i + 1,
                     stageName: stage.name,
                     duration: Date.now() - stageStartTime,
                     status: 'success'
                 });
-                
+
             } catch (error) {
                 pipelineResults.push({
                     stage: i + 1,
@@ -870,11 +870,11 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                     status: 'error',
                     error: error.message
                 });
-                
+
                 throw new ProcessingError(`Pipeline failed at stage ${i + 1} (${stage.name}): ${error.message}`);
             }
         }
-        
+
         return {
             itemId: this.generateItemId(dataItem),
             status: 'success',
@@ -883,7 +883,7 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             timestamp: new Date().toISOString()
         };
     }
-    
+
     /**
      * Validate item structure and required fields.
      */
@@ -891,24 +891,24 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
         if (!dataItem || typeof dataItem !== 'object') {
             throw new ValidationError('Invalid data item structure');
         }
-        
+
         const requiredFields = ['id', 'type', 'data'];
         const missingFields = requiredFields.filter(field => !(field in dataItem));
-        
+
         if (missingFields.length > 0) {
             throw new ValidationError(`Missing required fields: ${missingFields.join(', ')}`);
         }
-        
+
         // Simulate complex validation logic
         await this.simulateAsyncValidation(dataItem);
-        
+
         return {
             ...dataItem,
             validatedAt: new Date().toISOString(),
             validationStatus: 'passed'
         };
     }
-    
+
     /**
      * Transform data format according to business requirements.
      */
@@ -927,7 +927,7 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 }
                 return normalized;
             },
-            
+
             standardizeNumbers: (obj) => {
                 const standardized = {};
                 for (const [key, value] of Object.entries(obj)) {
@@ -941,7 +941,7 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 }
                 return standardized;
             },
-            
+
             addMetadata: (obj) => ({
                 ...obj,
                 transformedAt: new Date().toISOString(),
@@ -949,9 +949,9 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 transformationId: crypto.randomUUID()
             })
         };
-        
+
         let transformedData = { ...dataItem };
-        
+
         // Apply transformations in sequence
         for (const [transformName, transform] of Object.entries(transformations)) {
             try {
@@ -961,10 +961,10 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 throw new TransformationError(`Failed in transformation ${transformName}: ${error.message}`);
             }
         }
-        
+
         return transformedData;
     }
-    
+
     /**
      * Apply complex business rules and validations.
      */
@@ -989,9 +989,9 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                         importance: item.importance || 1,
                         complexity: item.complexity || 1
                     };
-                    
-                    item.calculatedPriority = (factors.urgency * 0.4) + 
-                                            (factors.importance * 0.4) + 
+
+                    item.calculatedPriority = (factors.urgency * 0.4) +
+                                            (factors.importance * 0.4) +
                                             (factors.complexity * 0.2);
                 }
             },
@@ -999,24 +999,24 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 name: 'dataQualityScore',
                 rule: async (item) => {
                     let score = 100;
-                    
+
                     // Deduct points for missing optional fields
                     const optionalFields = ['description', 'tags', 'metadata'];
                     optionalFields.forEach(field => {
                         if (!item[field]) score -= 5;
                     });
-                    
+
                     // Deduct points for low data richness
                     const dataSize = JSON.stringify(item.data || {}).length;
                     if (dataSize < 100) score -= 10;
-                    
+
                     item.qualityScore = Math.max(0, score);
                 }
             }
         ];
-        
+
         let processedItem = { ...dataItem };
-        
+
         for (const businessRule of businessRules) {
             try {
                 await businessRule.rule(processedItem);
@@ -1025,13 +1025,13 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 throw new BusinessRuleError(`Business rule ${businessRule.name} failed: ${error.message}`);
             }
         }
-        
+
         processedItem.businessRulesApplied = businessRules.map(r => r.name);
         processedItem.businessRulesAppliedAt = new Date().toISOString();
-        
+
         return processedItem;
     }
-    
+
     /**
      * Enrich data with external data sources.
      */
@@ -1042,9 +1042,9 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             { name: 'demographics', delay: 30 },
             { name: 'preferences', delay: 40 }
         ];
-        
+
         const enrichmentResults = {};
-        
+
         for (const source of enrichmentSources) {
             try {
                 await this.simulateExternalApiCall(source.delay);
@@ -1061,25 +1061,25 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 };
             }
         }
-        
+
         return {
             ...dataItem,
             enrichmentData: enrichmentResults,
             enrichedAt: new Date().toISOString()
         };
     }
-    
+
     async performComplexCalculations(dataItem) {
         // Simulate CPU-intensive calculations
         const calculations = [
             'statisticalAnalysis',
-            'predictiveModeling', 
+            'predictiveModeling',
             'riskAssessment',
             'performanceProjection'
         ];
-        
+
         const calculationResults = {};
-        
+
         for (const calc of calculations) {
             await this.simulateComplexCalculation();
             calculationResults[calc] = {
@@ -1088,14 +1088,14 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
                 calculatedAt: new Date().toISOString()
             };
         }
-        
+
         return {
             ...dataItem,
             calculations: calculationResults,
             calculationsPerformed: new Date().toISOString()
         };
     }
-    
+
     async generateOutputFormat(dataItem) {
         return {
             id: dataItem.id,
@@ -1115,28 +1115,28 @@ class AdvancedAsyncDataProcessor extends EventEmitter {
             }
         };
     }
-    
+
     // Helper methods with realistic delays to simulate complexity
     async simulateAsyncValidation(dataItem) {
         await this.delay(Math.random() * 10 + 5); // 5-15ms
     }
-    
+
     async simulateTransformationDelay() {
-        await this.delay(Math.random() * 5 + 2); // 2-7ms  
+        await this.delay(Math.random() * 5 + 2); // 2-7ms
     }
-    
+
     async simulateBusinessRuleProcessing() {
         await this.delay(Math.random() * 8 + 3); // 3-11ms
     }
-    
+
     async simulateExternalApiCall(baseDelay) {
         await this.delay(baseDelay + Math.random() * 20); // baseDelay + 0-20ms
     }
-    
+
     async simulateComplexCalculation() {
         await this.delay(Math.random() * 15 + 10); // 10-25ms
     }
-    
+
     delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
@@ -1263,7 +1263,7 @@ module.exports = {
                 # Verify memory efficiency (should use significantly less memory)
                 assert memory_improvement > 1.0 or fixed_memory < ast_memory, (
                     f"Memory usage not improved for {size_kb}KB {language} file: "
-                    f"AST={ast_memory/(1024*1024):.1f}MB vs Fixed={fixed_memory/(1024*1024):.1f}MB"
+                    f"AST={ast_memory / (1024 * 1024):.1f}MB vs Fixed={fixed_memory / (1024 * 1024):.1f}MB"
                 )
 
                 print(
@@ -1332,15 +1332,15 @@ module.exports = {
             assert len(chunks) > 0, "Should produce chunks for large file"
 
             for i, chunk in enumerate(chunks[:-1]):  # All except last chunk
-                assert (
-                    len(chunk["text"]) == 1000
-                ), f"Chunk {i} should be exactly 1000 chars in large file processing"
+                assert len(chunk["text"]) == 1000, (
+                    f"Chunk {i} should be exactly 1000 chars in large file processing"
+                )
 
             # Calculate throughput
             throughput_mbps = file_size_mb / self.wall_time
-            assert (
-                throughput_mbps > 2
-            ), f"Large file throughput too low: {throughput_mbps:.1f} MB/s, expected > 2 MB/s"  # Should process at least 2MB/s (realistic for Python string processing)
+            assert throughput_mbps > 2, (
+                f"Large file throughput too low: {throughput_mbps:.1f} MB/s, expected > 2 MB/s"
+            )  # Should process at least 2MB/s (realistic for Python string processing)
 
             print(
                 f"✅ Large file streaming: {file_size_mb:.1f}MB processed in {self.wall_time:.2f}s "
@@ -1377,9 +1377,9 @@ module.exports = {
 
                 # Verify chunk quality consistency
                 for i, chunk in enumerate(chunks[:-1]):
-                    assert (
-                        len(chunk["text"]) == 1000
-                    ), f"Chunk {i} in {language} file should be exactly 1000 chars"
+                    assert len(chunk["text"]) == 1000, (
+                        f"Chunk {i} in {language} file should be exactly 1000 chars"
+                    )
 
             finally:
                 test_file.unlink()
@@ -1450,7 +1450,7 @@ module.exports = {
 
                 if i % 10 == 0:  # Log every 10 files
                     print(
-                        f"Processed {i+1}/{file_count} files, memory growth: {memory_growth:.1f}MB"
+                        f"Processed {i + 1}/{file_count} files, memory growth: {memory_growth:.1f}MB"
                     )
 
             finally:
@@ -1482,9 +1482,9 @@ module.exports = {
             else 0
         )
 
-        assert (
-            growth_trend < 2.0
-        ), f"Memory leak detected: {growth_trend:.1%} growth from first to last quarter"  # Allow some growth but not exponential
+        assert growth_trend < 2.0, (
+            f"Memory leak detected: {growth_trend:.1%} growth from first to last quarter"
+        )  # Allow some growth but not exponential
 
         print(
             f"✅ Memory leak test: {final_memory_growth:.1f}MB final growth, "
@@ -1558,7 +1558,7 @@ module.exports = {
 
         print(
             f"✅ Linear scaling verified: avg throughput {avg_throughput:.0f} KB/s "
-            f"(±{max(abs(t - avg_throughput)/avg_throughput for t in throughputs):.0%})"
+            f"(±{max(abs(t - avg_throughput) / avg_throughput for t in throughputs):.0%})"
         )
 
     def test_streaming_vs_standard_processing(self, fixed_size_chunker):
@@ -1589,9 +1589,9 @@ module.exports = {
 
             # All chunks except last should be exactly 1000 characters
             for i, chunk in enumerate(streaming_chunks[:-1]):
-                assert (
-                    len(chunk["text"]) == 1000
-                ), f"Streaming chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+                assert len(chunk["text"]) == 1000, (
+                    f"Streaming chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+                )
 
             # Verify overlap is maintained
             if len(streaming_chunks) > 1:
@@ -1603,18 +1603,18 @@ module.exports = {
                     overlap1 = chunk1_text[-150:]
                     overlap2 = chunk2_text[:150]
 
-                    assert (
-                        overlap1 == overlap2
-                    ), f"Streaming chunks {i} and {i+1} should have proper 150-char overlap"
+                    assert overlap1 == overlap2, (
+                        f"Streaming chunks {i} and {i + 1} should have proper 150-char overlap"
+                    )
 
             # Verify performance is reasonable for large file
             file_size_mb = large_file_size / (1024 * 1024)
             throughput_mbps = file_size_mb / streaming_time
             memory_usage_mb = streaming_memory / (1024 * 1024)
 
-            assert (
-                throughput_mbps > 1
-            ), f"Streaming throughput too low: {throughput_mbps:.1f} MB/s, expected > 1 MB/s"  # Should process at least 1MB/s even for very large files
+            assert throughput_mbps > 1, (
+                f"Streaming throughput too low: {throughput_mbps:.1f} MB/s, expected > 1 MB/s"
+            )  # Should process at least 1MB/s even for very large files
 
             # Memory usage should be bounded (not proportional to file size)
             max_acceptable_memory = (

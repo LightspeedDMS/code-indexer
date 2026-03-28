@@ -336,9 +336,9 @@ class TestRegistrationEndpointSecurity:
 
         # Timing should be similar
         time_difference = abs(new_account_time - existing_account_time)
-        assert (
-            time_difference < 0.1
-        ), f"Registration timing variance too high: {time_difference}s"
+        assert time_difference < 0.1, (
+            f"Registration timing variance too high: {time_difference}s"
+        )
 
 
 class TestPasswordResetEndpointSecurity:
@@ -390,6 +390,6 @@ class TestPasswordResetEndpointSecurity:
 
         # Timing should be similar
         time_difference = abs(nonexistent_time - existing_time)
-        assert (
-            time_difference < 0.1
-        ), f"Password reset timing variance too high: {time_difference}s"
+        assert time_difference < 0.1, (
+            f"Password reset timing variance too high: {time_difference}s"
+        )

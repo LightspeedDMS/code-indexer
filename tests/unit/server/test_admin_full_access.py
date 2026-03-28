@@ -132,12 +132,12 @@ class TestAdminFullAccessBug:
         # Admin should still see ALL repos from powerusers group
         admin_repos = access_filtering_service.get_accessible_repos("admin_user")
 
-        assert (
-            "secret-repo" in admin_repos
-        ), "Admin must see secret-repo from powerusers group"
-        assert (
-            "another-repo" in admin_repos
-        ), "Admin must see another-repo from powerusers group"
+        assert "secret-repo" in admin_repos, (
+            "Admin must see secret-repo from powerusers group"
+        )
+        assert "another-repo" in admin_repos, (
+            "Admin must see another-repo from powerusers group"
+        )
 
     def test_admin_full_access_includes_all_custom_groups(
         self, group_access_manager, access_filtering_service
@@ -178,9 +178,9 @@ class TestAdminFullAccessBug:
         assert "alpha-repo" in admin_repos, "Admin must see alpha-repo from team_alpha"
         assert "beta-repo" in admin_repos, "Admin must see beta-repo from team_beta"
         assert "gamma-repo" in admin_repos, "Admin must see gamma-repo from team_gamma"
-        assert (
-            "shared-repo" in admin_repos
-        ), "Admin must see shared-repo from powerusers"
+        assert "shared-repo" in admin_repos, (
+            "Admin must see shared-repo from powerusers"
+        )
         assert "cidx-meta" in admin_repos, "Admin must see cidx-meta"
 
     def test_admin_full_access_with_duplicate_repos_across_groups(
@@ -222,6 +222,6 @@ class TestAdminFullAccessBug:
 
         # Count occurrences - should be exactly 1 (sets handle this automatically)
         repo_list = list(admin_repos)
-        assert (
-            repo_list.count("shared-repo") == 1
-        ), "shared-repo should appear exactly once"
+        assert repo_list.count("shared-repo") == 1, (
+            "shared-repo should appear exactly once"
+        )

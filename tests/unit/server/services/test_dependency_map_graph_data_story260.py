@@ -74,9 +74,9 @@ class TestGraphDataDepCountFields:
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) > 0, "Expected at least one node"
-        assert (
-            "incoming_dep_count" in nodes[0]
-        ), f"Node missing 'incoming_dep_count' field. Got keys: {list(nodes[0].keys())}"
+        assert "incoming_dep_count" in nodes[0], (
+            f"Node missing 'incoming_dep_count' field. Got keys: {list(nodes[0].keys())}"
+        )
 
     def test_nodes_have_outgoing_dep_count_field(self, tmp_path):
         """AC1: Every node must have an outgoing_dep_count field."""
@@ -97,9 +97,9 @@ class TestGraphDataDepCountFields:
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) > 0, "Expected at least one node"
-        assert (
-            "outgoing_dep_count" in nodes[0]
-        ), f"Node missing 'outgoing_dep_count' field. Got keys: {list(nodes[0].keys())}"
+        assert "outgoing_dep_count" in nodes[0], (
+            f"Node missing 'outgoing_dep_count' field. Got keys: {list(nodes[0].keys())}"
+        )
 
     def test_zero_dep_node_has_count_zero(self, tmp_path):
         """AC4: Isolated node with no edges has both counts equal to zero."""
@@ -121,12 +121,12 @@ class TestGraphDataDepCountFields:
         nodes = result.get("nodes", [])
         assert len(nodes) == 1
         node = nodes[0]
-        assert (
-            node["incoming_dep_count"] == 0
-        ), f"Isolated node should have incoming_dep_count=0, got {node['incoming_dep_count']}"
-        assert (
-            node["outgoing_dep_count"] == 0
-        ), f"Isolated node should have outgoing_dep_count=0, got {node['outgoing_dep_count']}"
+        assert node["incoming_dep_count"] == 0, (
+            f"Isolated node should have incoming_dep_count=0, got {node['incoming_dep_count']}"
+        )
+        assert node["outgoing_dep_count"] == 0, (
+            f"Isolated node should have outgoing_dep_count=0, got {node['outgoing_dep_count']}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,9 +177,9 @@ class TestGraphDataDepCountAccuracy:
         result = service.get_graph_data()
         nodes_by_id = {n["id"]: n for n in result["nodes"]}
         # auth has 2 outgoing edges
-        assert (
-            nodes_by_id["auth"]["outgoing_dep_count"] == 2
-        ), f"Expected outgoing=2 for auth, got {nodes_by_id['auth']['outgoing_dep_count']}"
+        assert nodes_by_id["auth"]["outgoing_dep_count"] == 2, (
+            f"Expected outgoing=2 for auth, got {nodes_by_id['auth']['outgoing_dep_count']}"
+        )
         assert nodes_by_id["auth"]["incoming_dep_count"] == 0
         # billing and infra each have 1 incoming edge
         assert nodes_by_id["billing"]["incoming_dep_count"] == 1
@@ -227,9 +227,9 @@ class TestGraphDataDepCountAccuracy:
         result = service.get_graph_data()
         nodes_by_id = {n["id"]: n for n in result["nodes"]}
         # shared has 2 incoming edges (from auth and billing)
-        assert (
-            nodes_by_id["shared"]["incoming_dep_count"] == 2
-        ), f"Expected incoming=2 for shared, got {nodes_by_id['shared']['incoming_dep_count']}"
+        assert nodes_by_id["shared"]["incoming_dep_count"] == 2, (
+            f"Expected incoming=2 for shared, got {nodes_by_id['shared']['incoming_dep_count']}"
+        )
         assert nodes_by_id["shared"]["outgoing_dep_count"] == 0
 
     def test_bidirectional_edges_counted_correctly(self, tmp_path):
@@ -459,12 +459,12 @@ class TestGraphDataDepCountEdgeCases:
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         for node in result["nodes"]:
-            assert isinstance(
-                node["incoming_dep_count"], int
-            ), f"incoming_dep_count must be int, got {type(node['incoming_dep_count'])}"
-            assert isinstance(
-                node["outgoing_dep_count"], int
-            ), f"outgoing_dep_count must be int, got {type(node['outgoing_dep_count'])}"
+            assert isinstance(node["incoming_dep_count"], int), (
+                f"incoming_dep_count must be int, got {type(node['incoming_dep_count'])}"
+            )
+            assert isinstance(node["outgoing_dep_count"], int), (
+                f"outgoing_dep_count must be int, got {type(node['outgoing_dep_count'])}"
+            )
 
     def test_existing_fields_still_present(self, tmp_path):
         """Regression: Adding new fields must not remove existing id/name/description/repo_count."""

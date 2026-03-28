@@ -196,9 +196,9 @@ class TestGetSnapshot:
         all_keys = set(snap["by_count"].keys()) | set(snap["by_size_bytes"].keys())
         builtin_types = {"dict", "list", "str", "int", "tuple", "set", "bytes"}
         found = builtin_types.intersection(all_keys)
-        assert (
-            len(found) > 0
-        ), f"No builtin type names found. Sample keys: {list(all_keys)[:20]}"
+        assert len(found) > 0, (
+            f"No builtin type names found. Sample keys: {list(all_keys)[:20]}"
+        )
 
     def test_no_sustained_memory_growth(self):
         """AC6: Repeated calls stay within 10% object count tolerance."""
@@ -211,9 +211,9 @@ class TestGetSnapshot:
         base = snap1["total_objects"]
         for snap in (snap2, snap3):
             ratio = abs(snap["total_objects"] - base) / max(base, 1)
-            assert (
-                ratio < 0.10
-            ), f"Growth too large: base={base}, current={snap['total_objects']}"
+            assert ratio < 0.10, (
+                f"Growth too large: base={base}, current={snap['total_objects']}"
+            )
 
 
 class TestGetSnapshotSizeofException:

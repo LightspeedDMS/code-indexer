@@ -96,9 +96,9 @@ class TestRAGWorkflow:
         output = result.stdout
 
         # AC2 Verification: Output should contain repo_name
-        assert (
-            "auth-service" in output
-        ), f"Output should contain repo_name\nstdout: {output}\nstderr: {result.stderr}"
+        assert "auth-service" in output, (
+            f"Output should contain repo_name\nstdout: {output}\nstderr: {result.stderr}"
+        )
 
         # AC2 Verification: Output should show relevance score
         # (Score format varies, but should have numeric score)
@@ -109,9 +109,9 @@ class TestRAGWorkflow:
         ), "Output should contain relevance score"
 
         # AC2 Verification: Output should contain snippet/description
-        assert (
-            "JWT" in output or "OAuth2" in output or "Auth Service" in output
-        ), "Output should contain description snippet"
+        assert "JWT" in output or "OAuth2" in output or "Auth Service" in output, (
+            "Output should contain description snippet"
+        )
 
     def test_rag_workflow_discovery_to_targeted_query(self, tmp_path):
         """
@@ -208,15 +208,15 @@ def validate_jwt_token(token):
             env={**subprocess.os.environ, **env},
         )
 
-        assert (
-            discovery_result.returncode == 0
-        ), f"Discovery query failed: {discovery_result.stderr}"
+        assert discovery_result.returncode == 0, (
+            f"Discovery query failed: {discovery_result.stderr}"
+        )
 
         # Verify discovery found auth-service
         discovery_output = discovery_result.stdout
-        assert (
-            "auth-service" in discovery_output
-        ), "Discovery should find auth-service repo"
+        assert "auth-service" in discovery_output, (
+            "Discovery should find auth-service repo"
+        )
 
         # STEP 2: Index the discovered repo
         subprocess.run(["cidx", "init"], capture_output=True, cwd=str(auth_repo))
@@ -237,9 +237,9 @@ def validate_jwt_token(token):
             env={**subprocess.os.environ, **env},
         )
 
-        assert (
-            targeted_result.returncode == 0
-        ), f"Targeted query failed: {targeted_result.stderr}"
+        assert targeted_result.returncode == 0, (
+            f"Targeted query failed: {targeted_result.stderr}"
+        )
 
         # AC3 Verification: Targeted query should return code from auth-service
         targeted_output = targeted_result.stdout
@@ -330,13 +330,13 @@ def validate_jwt_token(token):
         output = result.stdout
 
         # Verify auth-service is found (highly relevant)
-        assert (
-            "auth-service" in output
-        ), "Discovery should find auth-service for authentication query"
+        assert "auth-service" in output, (
+            "Discovery should find auth-service for authentication query"
+        )
 
         # Verify frontend-ui is not in top result (less relevant)
         # Note: With limit=1, we should only see the most relevant repo
         # (Results show filenames like auth-service.md, not alias names)
-        assert (
-            "frontend" not in output.lower()
-        ), "With limit=1, should not see less relevant frontend repo"
+        assert "frontend" not in output.lower(), (
+            "With limit=1, should not see less relevant frontend repo"
+        )

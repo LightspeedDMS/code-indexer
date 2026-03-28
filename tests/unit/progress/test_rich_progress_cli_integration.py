@@ -88,9 +88,9 @@ class TestRichProgressCLIIntegration:
             mock_slot_tracker, mock_slot_tracker.max_slots
         )
         assert len(concurrent_lines) > 0, "Should have concurrent file lines"
-        assert any(
-            "test.py" in line for line in concurrent_lines
-        ), "Must show concurrent file info"
+        assert any("test.py" in line for line in concurrent_lines), (
+            "Must show concurrent file info"
+        )
 
         # Test scenario 2: Without concurrent files (empty list)
         self.progress_manager.update_complete_state(
@@ -103,17 +103,17 @@ class TestRichProgressCLIIntegration:
         )
 
         display2 = self.progress_manager.get_integrated_display()
-        assert (
-            display2 is not None
-        ), "Must provide display even without concurrent files"
+        assert display2 is not None, (
+            "Must provide display even without concurrent files"
+        )
         # Rich Table objects are sufficient for display integration
         assert isinstance(display2, Table), "Should return Rich Table object"
 
         # Test that progress was properly initialized
         assert self.progress_manager._progress_started, "Progress should be started"
-        assert (
-            self.progress_manager.main_task_id is not None
-        ), "Should have main task ID"
+        assert self.progress_manager.main_task_id is not None, (
+            "Should have main task ID"
+        )
 
         # Both scenarios MUST work without fallbacks
         # This proves the CLI anti-fallback fix is working
@@ -141,12 +141,12 @@ class TestRichProgressCLIIntegration:
         # Test that progress was properly initialized and metrics stored
         assert self.progress_manager._progress_started, "Progress should be started"
         assert self.progress_manager._current_metrics_info, "Should have metrics info"
-        assert (
-            "2.3 files/s" in self.progress_manager._current_metrics_info
-        ), "Should show processing rate"
-        assert (
-            "4 threads" in self.progress_manager._current_metrics_info
-        ), "Should show thread count"
+        assert "2.3 files/s" in self.progress_manager._current_metrics_info, (
+            "Should show processing rate"
+        )
+        assert "4 threads" in self.progress_manager._current_metrics_info, (
+            "Should show thread count"
+        )
 
     @pytest.mark.unit
     def test_rich_live_manager_integration(self):
@@ -168,9 +168,9 @@ class TestRichProgressCLIIntegration:
 
         # Should be able to stop
         self.live_manager.stop_display()
-        assert (
-            not self.live_manager.is_active
-        ), "Live manager should be inactive after stop"
+        assert not self.live_manager.is_active, (
+            "Live manager should be inactive after stop"
+        )
 
     @pytest.mark.unit
     def test_no_console_print_fallback_allowed(self):
@@ -197,9 +197,9 @@ class TestRichProgressCLIIntegration:
         display = self.progress_manager.get_integrated_display()
         assert isinstance(display, Table), "Should return Rich Table object"
         # Check that metrics info contains thread count
-        assert (
-            "1 threads" in self.progress_manager._current_metrics_info
-        ), "Must handle single thread scenario"
+        assert "1 threads" in self.progress_manager._current_metrics_info, (
+            "Must handle single thread scenario"
+        )
 
         # Scenario 3: Zero thread scenario (completion)
         self.progress_manager.update_complete_state(

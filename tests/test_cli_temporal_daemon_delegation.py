@@ -321,9 +321,9 @@ class TestCliTemporalDaemonDelegation:
                     mock_daemon.assert_called_once()
                     call_kwargs = mock_daemon.call_args.kwargs
                     for key, expected_value in expected_kwargs.items():
-                        assert (
-                            call_kwargs.get(key) == expected_value
-                        ), f"Flag {key} mismatch for args {args}: got {call_kwargs.get(key)}, expected {expected_value}"
+                        assert call_kwargs.get(key) == expected_value, (
+                            f"Flag {key} mismatch for args {args}: got {call_kwargs.get(key)}, expected {expected_value}"
+                        )
 
 
 class TestManualVerification:
@@ -360,20 +360,20 @@ class TestManualVerification:
             output = result.output
 
             # After fix: Should see temporal messages
-            assert (
-                "temporal" in output.lower() or "commit" in output.lower()
-            ), "Expected temporal indexing messages"
+            assert "temporal" in output.lower() or "commit" in output.lower(), (
+                "Expected temporal indexing messages"
+            )
 
             # After fix: Should NOT see semantic indexing messages
-            assert (
-                "🔍 Hashing" not in output
-            ), "BUG: Hashing phase shown during temporal indexing!"
-            assert (
-                "📁 Found" not in output or "files for indexing" not in output
-            ), "BUG: File discovery shown during temporal indexing!"
-            assert (
-                "🔍 Discovering files" not in output
-            ), "BUG: File discovery shown during temporal indexing!"
+            assert "🔍 Hashing" not in output, (
+                "BUG: Hashing phase shown during temporal indexing!"
+            )
+            assert "📁 Found" not in output or "files for indexing" not in output, (
+                "BUG: File discovery shown during temporal indexing!"
+            )
+            assert "🔍 Discovering files" not in output, (
+                "BUG: File discovery shown during temporal indexing!"
+            )
 
     def test_temporal_only_no_semantic(self, temp_repo):
         """
@@ -474,13 +474,13 @@ class TestTemporalDaemonE2E:
             output = result.stdout + result.stderr
 
             # CRITICAL ASSERTIONS - Verify NO semantic indexing messages
-            assert (
-                "🔍 Hashing" not in output
-            ), f"BUG: Semantic hashing appeared during temporal indexing!\n{output}"
+            assert "🔍 Hashing" not in output, (
+                f"BUG: Semantic hashing appeared during temporal indexing!\n{output}"
+            )
 
-            assert (
-                "🔍 Discovering files" not in output
-            ), f"BUG: File discovery appeared during temporal indexing!\n{output}"
+            assert "🔍 Discovering files" not in output, (
+                f"BUG: File discovery appeared during temporal indexing!\n{output}"
+            )
 
             # More specific check for the file count message
             if "📁 Found" in output and "files for indexing" in output:
@@ -492,13 +492,13 @@ class TestTemporalDaemonE2E:
             # NOTE: The key bug fix is that semantic file discovery is SKIPPED.
             # The actual temporal vs semantic behavior is determined by the daemon service.
             # We just need to verify completion without errors.
-            assert (
-                result.returncode == 0
-            ), f"Indexing failed with exit code {result.returncode}\n{output}"
+            assert result.returncode == 0, (
+                f"Indexing failed with exit code {result.returncode}\n{output}"
+            )
 
-            assert (
-                "✅" in output or "complete" in output.lower()
-            ), f"Expected completion message not found!\n{output}"
+            assert "✅" in output or "complete" in output.lower(), (
+                f"Expected completion message not found!\n{output}"
+            )
 
         finally:
             # Step 5: Stop daemon
@@ -555,21 +555,21 @@ class TestTemporalDaemonE2E:
                 (standalone_output, "standalone"),
                 (daemon_output, "daemon"),
             ]:
-                assert (
-                    "🔍 Hashing" not in output
-                ), f"BUG ({mode}): Hashing appeared during temporal indexing!"
-                assert (
-                    "🔍 Discovering files" not in output
-                ), f"BUG ({mode}): File discovery appeared during temporal indexing!"
+                assert "🔍 Hashing" not in output, (
+                    f"BUG ({mode}): Hashing appeared during temporal indexing!"
+                )
+                assert "🔍 Discovering files" not in output, (
+                    f"BUG ({mode}): File discovery appeared during temporal indexing!"
+                )
 
             # Both should show temporal messages
             for output, mode in [
                 (standalone_output, "standalone"),
                 (daemon_output, "daemon"),
             ]:
-                assert (
-                    "🕒" in output or "temporal" in output.lower()
-                ), f"Expected temporal messages in {mode} mode!"
+                assert "🕒" in output or "temporal" in output.lower(), (
+                    f"Expected temporal messages in {mode} mode!"
+                )
 
         finally:
             subprocess.run(

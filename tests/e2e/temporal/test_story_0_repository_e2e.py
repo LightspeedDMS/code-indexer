@@ -16,9 +16,9 @@ class TestStory0RepositoryE2E:
         repo_path = Path("/tmp/cidx-test-repo")
 
         # Verify repository exists
-        assert (
-            repo_path.exists()
-        ), "Story 0 test repository must exist at /tmp/cidx-test-repo"
+        assert repo_path.exists(), (
+            "Story 0 test repository must exist at /tmp/cidx-test-repo"
+        )
         assert (repo_path / ".git").exists(), "Must be a git repository"
 
         # Clean up any previous indexing
@@ -44,12 +44,12 @@ class TestStory0RepositoryE2E:
         assert result.returncode == 0, f"cidx index failed: {result.stderr}"
 
         # Verify NO SQLite databases created
-        assert not (
-            index_dir / "index/temporal/commits.db"
-        ).exists(), "Should NOT create commits.db"
-        assert not (
-            index_dir / "index/temporal/blob_registry.db"
-        ).exists(), "Should NOT create blob_registry.db"
+        assert not (index_dir / "index/temporal/commits.db").exists(), (
+            "Should NOT create commits.db"
+        )
+        assert not (index_dir / "index/temporal/blob_registry.db").exists(), (
+            "Should NOT create blob_registry.db"
+        )
 
         # Count .db files - should be zero
         db_files = list(index_dir.rglob("*.db"))
@@ -75,9 +75,9 @@ class TestStory0RepositoryE2E:
 
         # Story 1 expects ~50-100 vectors instead of 500+
         # With 12 commits and diff-based approach, should have way fewer vectors
-        assert (
-            vector_count < 150
-        ), f"Too many vectors: {vector_count}, expected < 150 for diff-based indexing"
+        assert vector_count < 150, (
+            f"Too many vectors: {vector_count}, expected < 150 for diff-based indexing"
+        )
         print(
             f"✓ Storage reduction achieved: {vector_count} vectors (vs 500+ in old approach)"
         )

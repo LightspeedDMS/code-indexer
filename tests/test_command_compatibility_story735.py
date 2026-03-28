@@ -65,9 +65,9 @@ class TestNewCommandCompatibilityEntries:
         for cmd in new_commands:
             assert cmd in COMMAND_COMPATIBILITY, f"Command {cmd} not in matrix"
             for mode in required_modes:
-                assert (
-                    mode in COMMAND_COMPATIBILITY[cmd]
-                ), f"Mode {mode} missing for {cmd}"
-                assert isinstance(
-                    COMMAND_COMPATIBILITY[cmd][mode], bool
-                ), f"Mode {mode} for {cmd} is not a boolean"
+                assert mode in COMMAND_COMPATIBILITY[cmd], (
+                    f"Mode {mode} missing for {cmd}"
+                )
+                assert isinstance(COMMAND_COMPATIBILITY[cmd][mode], bool), (
+                    f"Mode {mode} for {cmd} is not a boolean"
+                )

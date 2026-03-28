@@ -215,9 +215,9 @@ class TestDashboardServiceVectorStore:
         repo_counts = dashboard_service_with_real_managers._get_repo_counts("testuser")
 
         # Assert: Verify total_files is the sum of vector store counts
-        assert (
-            repo_counts.total_files == 400
-        ), "total_files should be sum of FilesystemVectorStore counts (150 + 250)"
+        assert repo_counts.total_files == 400, (
+            "total_files should be sum of FilesystemVectorStore counts (150 + 250)"
+        )
         assert repo_counts.activated == 2, "Should have 2 activated repos"
 
     def test_get_repo_counts_returns_zero_with_no_repos(self, temp_data_dir):
@@ -278,9 +278,9 @@ class TestDashboardServiceVectorStore:
         # Assert: Should handle error gracefully without raising exception
         # FilesystemVectorStore.get_indexed_file_count_fast() may return 0 or a fallback estimate (like 1)
         # The important thing is it doesn't crash
-        assert (
-            repo_counts.total_files >= 0
-        ), "Should handle missing vector store gracefully without crashing"
+        assert repo_counts.total_files >= 0, (
+            "Should handle missing vector store gracefully without crashing"
+        )
         assert repo_counts.activated == 1, "Should still count the activated repo"
 
     def test_get_repo_counts_uses_correct_collection_name(
@@ -305,14 +305,14 @@ class TestDashboardServiceVectorStore:
         repo_counts = dashboard_service_with_real_managers._get_repo_counts("testuser")
 
         # Assert: Verify the count is retrieved (proves collection_name was used correctly)
-        assert (
-            repo_counts.total_files == 100
-        ), "Should retrieve count from correct collection"
+        assert repo_counts.total_files == 100, (
+            "Should retrieve count from correct collection"
+        )
 
         # Additionally verify the vector store can be accessed with this collection name
         index_dir = temp_data_dir / "index"
         store = FilesystemVectorStore(base_path=index_dir)
         count = store.get_indexed_file_count_fast(specific_collection)
-        assert (
-            count == 100
-        ), "FilesystemVectorStore should return correct count for collection"
+        assert count == 100, (
+            "FilesystemVectorStore should return correct count for collection"
+        )

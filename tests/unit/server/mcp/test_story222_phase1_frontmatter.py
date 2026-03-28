@@ -37,17 +37,17 @@ class TestGuideRequiredPermission:
         """first_time_user_guide required_permission must be query_repos."""
         md_file = TOOL_DOCS_DIR / "guides" / "first_time_user_guide.md"
         fm = _get_frontmatter(md_file)
-        assert (
-            fm.get("required_permission") == "query_repos"
-        ), f"Expected 'query_repos', got {fm.get('required_permission')!r}"
+        assert fm.get("required_permission") == "query_repos", (
+            f"Expected 'query_repos', got {fm.get('required_permission')!r}"
+        )
 
     def test_get_tool_categories_has_query_repos_permission(self):
         """get_tool_categories required_permission must be query_repos."""
         md_file = TOOL_DOCS_DIR / "guides" / "get_tool_categories.md"
         fm = _get_frontmatter(md_file)
-        assert (
-            fm.get("required_permission") == "query_repos"
-        ), f"Expected 'query_repos', got {fm.get('required_permission')!r}"
+        assert fm.get("required_permission") == "query_repos", (
+            f"Expected 'query_repos', got {fm.get('required_permission')!r}"
+        )
 
 
 class TestQuickReferenceFieldRemoval:
@@ -59,17 +59,17 @@ class TestQuickReferenceFieldRemoval:
         from code_indexer.server.mcp.tool_doc_loader import ToolDoc
 
         field_names = {f.name for f in dataclasses.fields(ToolDoc)}
-        assert (
-            "quick_reference" not in field_names
-        ), "ToolDoc still has quick_reference field - it must be removed"
+        assert "quick_reference" not in field_names, (
+            "ToolDoc still has quick_reference field - it must be removed"
+        )
 
     def test_tool_doc_loader_has_no_generate_quick_reference_method(self):
         """ToolDocLoader must not have generate_quick_reference() method."""
         from code_indexer.server.mcp.tool_doc_loader import ToolDocLoader
 
-        assert not hasattr(
-            ToolDocLoader, "generate_quick_reference"
-        ), "ToolDocLoader still has generate_quick_reference() - it must be removed"
+        assert not hasattr(ToolDocLoader, "generate_quick_reference"), (
+            "ToolDocLoader still has generate_quick_reference() - it must be removed"
+        )
 
     def test_cidx_quick_reference_md_has_no_quick_reference_flag(self):
         """cidx_quick_reference.md frontmatter must not have quick_reference field."""

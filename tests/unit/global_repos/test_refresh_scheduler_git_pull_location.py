@@ -147,17 +147,17 @@ class TestGitPullLocation:
             scheduler._execute_refresh(alias_name)
 
         # GitPullUpdater must have been called with master path
-        assert (
-            len(captured_git_pull_paths) == 1
-        ), f"Expected 1 GitPullUpdater call, got {len(captured_git_pull_paths)}"
+        assert len(captured_git_pull_paths) == 1, (
+            f"Expected 1 GitPullUpdater call, got {len(captured_git_pull_paths)}"
+        )
         assert captured_git_pull_paths[0] == master_path, (
             f"GitPullUpdater called with '{captured_git_pull_paths[0]}' "
             f"instead of master path '{master_path}'"
         )
         # Must NOT be called with old versioned path
-        assert (
-            captured_git_pull_paths[0] != old_versioned_path
-        ), f"GitPullUpdater must not be called with versioned path: {old_versioned_path}"
+        assert captured_git_pull_paths[0] != old_versioned_path, (
+            f"GitPullUpdater must not be called with versioned path: {old_versioned_path}"
+        )
 
     def test_git_pull_uses_master_path_on_first_refresh(
         self, scheduler, golden_repos_dir, mock_registry
@@ -261,13 +261,13 @@ class TestGitPullLocation:
 
             scheduler._execute_refresh(alias_name)
 
-        assert (
-            len(captured_snapshot_sources) == 1
-        ), f"Expected 1 _create_snapshot call, got {len(captured_snapshot_sources)}"
+        assert len(captured_snapshot_sources) == 1, (
+            f"Expected 1 _create_snapshot call, got {len(captured_snapshot_sources)}"
+        )
         assert captured_snapshot_sources[0] == master_path, (
             f"_create_snapshot called with '{captured_snapshot_sources[0]}' "
             f"instead of master path '{master_path}'"
         )
-        assert (
-            captured_snapshot_sources[0] != old_versioned_path
-        ), f"_create_snapshot must not receive old versioned path: {old_versioned_path}"
+        assert captured_snapshot_sources[0] != old_versioned_path, (
+            f"_create_snapshot must not receive old versioned path: {old_versioned_path}"
+        )

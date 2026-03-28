@@ -64,9 +64,9 @@ class TestReposListFix:
         result = self.runner.invoke(cli, ["repos", "list"])
 
         # Should succeed after fix
-        assert (
-            result.exit_code == 0
-        ), f"Command should succeed after fix, got: {result.output}"
+        assert result.exit_code == 0, (
+            f"Command should succeed after fix, got: {result.output}"
+        )
         assert "my-project" in result.output
         assert "main" in result.output
 

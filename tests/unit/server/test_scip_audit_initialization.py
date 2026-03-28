@@ -67,9 +67,9 @@ class TestScipAuditDatabaseInitialization:
                 "AND name='scip_dependency_installations'"
             )
             result = cursor.fetchone()
-            assert (
-                result is not None
-            ), "scip_dependency_installations table should exist"
+            assert result is not None, (
+                "scip_dependency_installations table should exist"
+            )
             assert result[0] == "scip_dependency_installations"
 
     def test_initialize_scip_audit_database_creates_indexes(
@@ -371,9 +371,9 @@ class TestHealthServiceWithEagerInitialization:
         health_results = service.get_all_database_health()
 
         # Verify all 7 databases are healthy
-        assert (
-            len(health_results) == 7
-        ), f"Expected 7 databases, got {len(health_results)}"
+        assert len(health_results) == 7, (
+            f"Expected 7 databases, got {len(health_results)}"
+        )
 
         for result in health_results:
             assert result.status == DatabaseHealthStatus.HEALTHY, (

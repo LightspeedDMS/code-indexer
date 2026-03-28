@@ -95,11 +95,11 @@ class TestTemporalReconcileE2E:
         for i, commit_hash in enumerate(commit_hashes[:5]):
             vector_file = collection_path / f"vector_{i:03d}.json"
             vector_data = {
-                "id": f"test_repo:diff:{commit_hash}:file{i+1}.py:0",
+                "id": f"test_repo:diff:{commit_hash}:file{i + 1}.py:0",
                 "vector": [0.1] * 1024,
                 "payload": {
                     "commit_hash": commit_hash,
-                    "file_path": f"file{i+1}.py",
+                    "file_path": f"file{i + 1}.py",
                     "chunk_index": 0,
                 },
             }
@@ -163,9 +163,9 @@ class TestTemporalReconcileE2E:
         for i, commit_hash in enumerate(commit_hashes):
             vector_file = collection_path / f"vector_{i:03d}.json"
             vector_data = {
-                "id": f"test_repo:diff:{commit_hash}:file{i+1}.py:0",
+                "id": f"test_repo:diff:{commit_hash}:file{i + 1}.py:0",
                 "vector": [0.1] * 1024,
-                "payload": {"commit_hash": commit_hash, "file_path": f"file{i+1}.py"},
+                "payload": {"commit_hash": commit_hash, "file_path": f"file{i + 1}.py"},
             }
             vector_file.write_text(json.dumps(vector_data))
 
@@ -191,7 +191,9 @@ class TestTemporalReconcileE2E:
 
             # Check no duplicates created
             vectors_after = len(list(collection_path.glob("vector_*.json")))
-            assert vectors_after == vectors_before, f"Run {run+1}: Duplicates created!"
+            assert vectors_after == vectors_before, (
+                f"Run {run + 1}: Duplicates created!"
+            )
 
             # Even if embedding fails, reconciliation should detect all commits indexed
 
@@ -220,9 +222,9 @@ class TestTemporalReconcileE2E:
         for i, commit_hash in enumerate(commit_hashes):
             vector_file = collection_path / f"vector_{i:03d}.json"
             vector_data = {
-                "id": f"test_repo:diff:{commit_hash}:file{i+1}.py:0",
+                "id": f"test_repo:diff:{commit_hash}:file{i + 1}.py:0",
                 "vector": [0.1] * 1024,
-                "payload": {"commit_hash": commit_hash, "file_path": f"file{i+1}.py"},
+                "payload": {"commit_hash": commit_hash, "file_path": f"file{i + 1}.py"},
             }
             vector_file.write_text(json.dumps(vector_data))
 
@@ -259,9 +261,9 @@ class TestTemporalReconcileE2E:
 
         # Assert: Indexes should be rebuilt
         # Note: This depends on end_indexing being called even when no new commits
-        assert (
-            hnsw_index.exists() or result.returncode != 0
-        ), "HNSW index should be rebuilt"
+        assert hnsw_index.exists() or result.returncode != 0, (
+            "HNSW index should be rebuilt"
+        )
         assert id_index.exists() or result.returncode != 0, "ID index should be rebuilt"
 
         # Vector count should remain the same
@@ -325,7 +327,7 @@ class TestTemporalReconcileE2E:
         for i in range(5):
             vector_file = collection_path / f"vector_{i:03d}.json"
             vector_data = {
-                "id": f"test_repo:diff:{commit_hashes[i]}:file{i+1}.py:0",
+                "id": f"test_repo:diff:{commit_hashes[i]}:file{i + 1}.py:0",
                 "vector": [0.1] * 1024,
                 "payload": {"commit_hash": commit_hashes[i]},
             }

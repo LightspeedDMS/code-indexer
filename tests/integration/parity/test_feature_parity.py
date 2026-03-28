@@ -103,9 +103,9 @@ def test_mcp_rest_feature_parity(mcp_tool_registry, rest_app):
             mcp_only_tools.append(mcp_tool)
 
     # Report results
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("MCP/REST Feature Parity Analysis")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Total MCP tools: {len(mcp_tools)}")
     print(f"Tools with REST mapping: {len(MCP_TO_REST_MAPPING)}")
     print(f"MCP-only tools (expected): {len(mcp_only_tools)}")
@@ -129,9 +129,9 @@ def test_mcp_rest_feature_parity(mcp_tool_registry, rest_app):
         for item in missing_rest
     )
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"PASS: All {len(MCP_TO_REST_MAPPING)} mapped MCP tools have REST endpoints")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
 
 def test_rest_endpoints_documented(rest_app):

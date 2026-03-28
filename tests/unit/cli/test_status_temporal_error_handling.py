@@ -119,9 +119,9 @@ def test_temporal_index_error_logged_not_silenced(
                     status = temporal_row[1]
                     details = temporal_row[2]
 
-                    assert (
-                        "⚠️ Error" in status or "⚠️" in status
-                    ), f"Error not visible in status! Got: {status}"
-                    assert (
-                        "Failed to read" in details or "Error" in details
-                    ), f"Error details not shown! Got: {details}"
+                    assert "⚠️ Error" in status or "⚠️" in status, (
+                        f"Error not visible in status! Got: {status}"
+                    )
+                    assert "Failed to read" in details or "Error" in details, (
+                        f"Error details not shown! Got: {details}"
+                    )

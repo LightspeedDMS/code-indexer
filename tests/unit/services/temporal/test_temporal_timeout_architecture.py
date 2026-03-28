@@ -50,9 +50,9 @@ class TestAPITimeoutArchitecture:
             result = future.result(timeout=5)
 
             # VERIFY: Cancellation signal was triggered
-            assert (
-                vector_manager.cancellation_event.is_set()
-            ), "API timeout should trigger cancellation signal"
+            assert vector_manager.cancellation_event.is_set(), (
+                "API timeout should trigger cancellation signal"
+            )
 
             # VERIFY: Result contains error message about timeout
             assert result.error is not None, "Result should contain error"
@@ -179,9 +179,9 @@ class TestWorkerCancellationHandling:
                 )
 
                 # VERIFY: No commits were saved (cancellation prevented processing)
-                assert (
-                    mock_progressive_metadata.save_completed.call_count == 0
-                ), "Cancelled workers should not save commits"
+                assert mock_progressive_metadata.save_completed.call_count == 0, (
+                    "Cancelled workers should not save commits"
+                )
 
         finally:
             vector_manager.shutdown(wait=True, timeout=5)
@@ -207,14 +207,14 @@ class TestWorkerCancellationHandling:
 
             # VERIFY: Task was cancelled before processing
             assert result.error is not None, "Should return error for cancelled task"
-            assert (
-                "cancelled" in result.error.lower()
-            ), f"Error should indicate cancellation: {result.error}"
+            assert "cancelled" in result.error.lower(), (
+                f"Error should indicate cancellation: {result.error}"
+            )
 
             # VERIFY: API was NOT called (cancelled before processing)
-            assert (
-                mock_provider.get_embeddings_batch.call_count == 0
-            ), "API should not be called after cancellation"
+            assert mock_provider.get_embeddings_batch.call_count == 0, (
+                "API should not be called after cancellation"
+            )
 
         finally:
             vector_manager.shutdown(wait=True, timeout=5)
@@ -313,9 +313,9 @@ class TestProgressiveMetadataErrorHandling:
                     for call in mock_progressive_metadata.save_completed.call_args_list
                 ]
                 # In case of errors, we expect zero saves (or very few if some succeeded before error)
-                assert (
-                    len(saved_commits) == 0
-                ), f"Failed commits should not be saved, but got: {saved_commits}"
+                assert len(saved_commits) == 0, (
+                    f"Failed commits should not be saved, but got: {saved_commits}"
+                )
 
         finally:
             vector_manager.shutdown(wait=True, timeout=5)
@@ -395,9 +395,9 @@ class TestProgressiveMetadataErrorHandling:
                 )
 
                 # VERIFY: Successful commits WERE saved
-                assert (
-                    mock_progressive_metadata.save_completed.call_count > 0
-                ), "Successful commits should be saved to metadata"
+                assert mock_progressive_metadata.save_completed.call_count > 0, (
+                    "Successful commits should be saved to metadata"
+                )
 
         finally:
             vector_manager.shutdown(wait=True, timeout=5)
@@ -513,16 +513,16 @@ class TestWaveBasedCancellation:
 
                 # Only verify cancellation if we made at least 2 calls (second call should trigger it)
                 if call_count[0] >= 2:
-                    assert (
-                        vector_manager.cancellation_event.is_set()
-                    ), f"Should be cancelled after {call_count[0]} calls"
+                    assert vector_manager.cancellation_event.is_set(), (
+                        f"Should be cancelled after {call_count[0]} calls"
+                    )
 
                 # VERIFY: Not all batches were processed (stopped mid-processing)
                 # With 50 files, we'd expect many batches, but cancellation should limit this
                 if call_count[0] >= 2:  # Only check if cancellation was attempted
-                    assert (
-                        call_count[0] < 10
-                    ), f"Should stop processing after cancellation, but made {call_count[0]} calls"
+                    assert call_count[0] < 10, (
+                        f"Should stop processing after cancellation, but made {call_count[0]} calls"
+                    )
 
         finally:
             vector_manager.shutdown(wait=True, timeout=5)

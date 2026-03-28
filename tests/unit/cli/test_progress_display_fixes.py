@@ -169,9 +169,9 @@ class TestHashPhaseSlotTracker:
         call_kwargs = progress_callback_mock.call_args[1]
 
         # CRITICAL ASSERTION: slot_tracker must be in kwargs
-        assert (
-            "slot_tracker" in call_kwargs
-        ), "slot_tracker parameter is missing from hash phase progress callback"
+        assert "slot_tracker" in call_kwargs, (
+            "slot_tracker parameter is missing from hash phase progress callback"
+        )
         assert call_kwargs["slot_tracker"] is hash_slot_tracker
 
     def test_hash_phase_slot_tracker_used_in_display(self):

@@ -30,7 +30,7 @@ def create_test_config_and_files():
     for i, filename in enumerate(["file1.py", "file2.py", "file3.py"]):
         file_path = temp_dir / filename
         # Write some content to the file so it has a real size
-        file_path.write_text(f"# Test file {i+1}\nprint('Hello from {filename}')\n")
+        file_path.write_text(f"# Test file {i + 1}\nprint('Hello from {filename}')\n")
         test_files.append(file_path)
 
     return config, test_files, temp_dir
@@ -117,17 +117,17 @@ class TestFileLevelCollectionRequirements:
 
         # Verify as_completed was called with file_futures (collection of file futures)
         # Note: as_completed is called twice - once for hash calculation, once for file processing
-        assert (
-            mock_as_completed.call_count >= 1
-        ), "as_completed should be called at least once"
+        assert mock_as_completed.call_count >= 1, (
+            "as_completed should be called at least once"
+        )
 
         # Check the last call args (which should be the file processing futures)
         last_call_args = mock_as_completed.call_args[0][0]
 
         # The argument to as_completed should be a collection of futures from submit_file_for_processing
-        assert hasattr(
-            last_call_args, "__iter__"
-        ), "as_completed should be called with iterable of futures"
+        assert hasattr(last_call_args, "__iter__"), (
+            "as_completed should be called with iterable of futures"
+        )
 
         # Should NOT be called with chunk-level futures
         # (i.e., vector_manager.submit_chunk should not be called in main thread)

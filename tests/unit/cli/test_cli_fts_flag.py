@@ -22,9 +22,9 @@ class TestCLIFTSFlag:
 
         # This should fail initially - flag doesn't exist yet
         result = runner.invoke(cli, ["index", "--help"])
-        assert (
-            "--fts" in result.output
-        ), "The --fts flag should be available in index command help"
+        assert "--fts" in result.output, (
+            "The --fts flag should be available in index command help"
+        )
 
     def test_fts_help_text(self):
         """Test that --fts has appropriate help text."""
@@ -68,9 +68,9 @@ class TestCLIFTSFlagE2E:
         )
 
         if expect_failure:
-            assert (
-                result.returncode != 0
-            ), f"Command should have failed: {' '.join(cmd)}"
+            assert result.returncode != 0, (
+                f"Command should have failed: {' '.join(cmd)}"
+            )
         else:
             # For this test, we'll be more lenient since services may not be running
             pass
@@ -97,9 +97,9 @@ class TestCLIFTSFlagE2E:
         # Verify --fts is a flag (not requiring a value)
         assert "--fts" in result.output, "Flag should exist"
         assert "--fts VALUE" not in result.output, "Flag should not require a value"
-        assert (
-            "--fts [" not in result.output
-        ), "Flag should not have optional value syntax"
+        assert "--fts [" not in result.output, (
+            "Flag should not have optional value syntax"
+        )
 
     def test_default_behavior_no_fts(self):
         """Test that without --fts flag, only semantic indexing occurs (default behavior)."""

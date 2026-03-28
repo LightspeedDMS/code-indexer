@@ -38,20 +38,20 @@ class TestGetRepositoryPathBugFix:
         source = inspect.getsource(service._get_repository_path)
 
         # Verify it does NOT use GoldenRepoManager anymore (the bug)
-        assert (
-            "GoldenRepoManager" not in source
-        ), "_get_repository_path should NOT use GoldenRepoManager (causes alias mismatch)"
+        assert "GoldenRepoManager" not in source, (
+            "_get_repository_path should NOT use GoldenRepoManager (causes alias mismatch)"
+        )
 
         # Verify it uses correct components:
         # 1. GlobalRegistry for looking up repos by alias_name
-        assert (
-            "GlobalRegistry" in source or "get_server_global_registry" in source
-        ), "_get_repository_path should use GlobalRegistry or get_server_global_registry"
+        assert "GlobalRegistry" in source or "get_server_global_registry" in source, (
+            "_get_repository_path should use GlobalRegistry or get_server_global_registry"
+        )
 
         # 2. AliasManager for getting current target path
-        assert (
-            "AliasManager" in source
-        ), "_get_repository_path should use AliasManager for current target path"
+        assert "AliasManager" in source, (
+            "_get_repository_path should use AliasManager for current target path"
+        )
 
     def test_get_repository_path_source_uses_alias_name_not_alias(self):
         """
@@ -70,9 +70,9 @@ class TestGetRepositoryPathBugFix:
         source = inspect.getsource(service._get_repository_path)
 
         # Verify it uses alias_name for lookup (GlobalRegistry field), not alias (GoldenRepoManager field)
-        assert (
-            "alias_name" in source
-        ), "_get_repository_path should look up by 'alias_name' (GlobalRegistry field)"
+        assert "alias_name" in source, (
+            "_get_repository_path should look up by 'alias_name' (GlobalRegistry field)"
+        )
 
     def test_get_repository_path_error_message_says_global_not_registry(self):
         """
@@ -89,9 +89,9 @@ class TestGetRepositoryPathBugFix:
         source = inspect.getsource(service._get_repository_path)
 
         # Should use "global repositories" for user-facing errors
-        assert (
-            "global repositor" in source.lower()
-        ), "Error messages should reference 'global repositories'"
+        assert "global repositor" in source.lower(), (
+            "Error messages should reference 'global repositories'"
+        )
 
 
 class TestGetRepositoryPathFunctional:
@@ -177,9 +177,9 @@ class TestGetRepositoryPathFunctional:
 
             # Error message should mention "global repositories"
             error_msg = str(exc_info.value)
-            assert (
-                "global repositor" in error_msg.lower()
-            ), f"Error should mention 'global repositories', got: {error_msg}"
+            assert "global repositor" in error_msg.lower(), (
+                f"Error should mention 'global repositories', got: {error_msg}"
+            )
 
     def test_get_repository_path_raises_when_alias_has_no_target(self, tmp_path):
         """
@@ -324,9 +324,9 @@ class TestGetScipFileForRepoExceptionHandling:
 
             # Error message should mention "global repositories"
             error_msg = str(exc_info.value)
-            assert (
-                "global repositor" in error_msg.lower()
-            ), f"Error should mention 'global repositories', got: {error_msg}"
+            assert "global repositor" in error_msg.lower(), (
+                f"Error should mention 'global repositories', got: {error_msg}"
+            )
 
     def test_get_scip_file_for_repo_still_catches_other_exceptions(self, tmp_path):
         """

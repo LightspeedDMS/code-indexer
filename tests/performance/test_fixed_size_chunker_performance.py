@@ -169,24 +169,24 @@ public class DataProcessingService {
                     chunks = chunker.chunk_file(test_file)
 
                 # Performance assertions
-                assert (
-                    self.duration < 0.1
-                ), f"Chunking {size_kb}KB file took {self.duration:.3f}s, expected < 0.1s"
+                assert self.duration < 0.1, (
+                    f"Chunking {size_kb}KB file took {self.duration:.3f}s, expected < 0.1s"
+                )
 
                 # Memory usage should be reasonable (under 10MB delta)
                 memory_mb = self.memory_delta / (1024 * 1024)
-                assert (
-                    memory_mb < 10
-                ), f"Memory usage for {size_kb}KB file: {memory_mb:.2f}MB, expected < 10MB"
+                assert memory_mb < 10, (
+                    f"Memory usage for {size_kb}KB file: {memory_mb:.2f}MB, expected < 10MB"
+                )
 
                 # Verify results
                 assert len(chunks) > 0, "Should produce at least one chunk"
 
                 # All chunks except last should be exactly 1000 characters
                 for i, chunk in enumerate(chunks[:-1]):
-                    assert (
-                        len(chunk["text"]) == 1000
-                    ), f"Chunk {i} should be exactly 1000 chars"
+                    assert len(chunk["text"]) == 1000, (
+                        f"Chunk {i} should be exactly 1000 chars"
+                    )
 
                 print(
                     f"Small file ({size_kb}KB): {len(chunks)} chunks in {self.duration:.3f}s"
@@ -207,9 +207,9 @@ public class DataProcessingService {
                     chunks = chunker.chunk_file(test_file)
 
                 # Performance assertions - should still be very fast
-                assert (
-                    self.duration < 0.5
-                ), f"Chunking {size_kb}KB file took {self.duration:.3f}s, expected < 0.5s"
+                assert self.duration < 0.5, (
+                    f"Chunking {size_kb}KB file took {self.duration:.3f}s, expected < 0.5s"
+                )
 
                 # Memory usage should scale reasonably
                 memory_mb = self.memory_delta / (1024 * 1024)
@@ -223,9 +223,9 @@ public class DataProcessingService {
 
                 # Calculate chunks per second
                 chunks_per_second = len(chunks) / self.duration
-                assert (
-                    chunks_per_second > 1000
-                ), f"Processing rate too slow: {chunks_per_second:.0f} chunks/sec"
+                assert chunks_per_second > 1000, (
+                    f"Processing rate too slow: {chunks_per_second:.0f} chunks/sec"
+                )
 
                 print(
                     f"Medium file ({size_kb}KB): {len(chunks)} chunks in {self.duration:.3f}s "
@@ -264,9 +264,9 @@ public class DataProcessingService {
 
                 # Calculate throughput
                 throughput_mbps = (size_kb / 1024) / self.duration
-                assert (
-                    throughput_mbps > 1
-                ), f"Throughput too slow: {throughput_mbps:.1f} MB/s, expected > 1 MB/s"  # More realistic for string processing in Python
+                assert throughput_mbps > 1, (
+                    f"Throughput too slow: {throughput_mbps:.1f} MB/s, expected > 1 MB/s"
+                )  # More realistic for string processing in Python
 
                 print(
                     f"Large file ({size_kb}KB): {len(chunks)} chunks in {self.duration:.3f}s "
@@ -297,13 +297,13 @@ public class DataProcessingService {
                 # Verify chunking correctness under stress
                 assert len(chunks) > 0, f"File {i} should produce chunks"
                 for j, chunk in enumerate(chunks[:-1]):
-                    assert (
-                        len(chunk["text"]) == 1000
-                    ), f"File {i}, chunk {j} should be exactly 1000 chars"
+                    assert len(chunk["text"]) == 1000, (
+                        f"File {i}, chunk {j} should be exactly 1000 chars"
+                    )
 
                 print(
-                    f"Processed file {i+1}/10: {len(chunks)} chunks, "
-                    f"Memory: {(current_memory - initial_memory)/(1024*1024):.1f}MB"
+                    f"Processed file {i + 1}/10: {len(chunks)} chunks, "
+                    f"Memory: {(current_memory - initial_memory) / (1024 * 1024):.1f}MB"
                 )
 
             finally:
@@ -311,9 +311,9 @@ public class DataProcessingService {
 
         # Memory growth should be bounded
         memory_growth = (peak_memory - initial_memory) / (1024 * 1024)  # MB
-        assert (
-            memory_growth < 50
-        ), f"Memory growth too high: {memory_growth:.1f}MB, expected < 50MB"
+        assert memory_growth < 50, (
+            f"Memory growth too high: {memory_growth:.1f}MB, expected < 50MB"
+        )
 
     def test_consistency_across_multiple_runs(self, chunker):
         """Test that chunking produces identical results across multiple runs."""
@@ -334,20 +334,20 @@ public class DataProcessingService {
             # Verify consistency
             first_result = all_results[0]
             for i, result in enumerate(all_results[1:], 1):
-                assert (
-                    len(result) == len(first_result)
-                ), f"Run {i} produced {len(result)} chunks, expected {len(first_result)}"
+                assert len(result) == len(first_result), (
+                    f"Run {i} produced {len(result)} chunks, expected {len(first_result)}"
+                )
 
                 for j, (chunk1, chunk2) in enumerate(zip(first_result, result)):
-                    assert (
-                        chunk1["text"] == chunk2["text"]
-                    ), f"Run {i}, chunk {j} text differs from first run"
-                    assert (
-                        chunk1["chunk_index"] == chunk2["chunk_index"]
-                    ), f"Run {i}, chunk {j} index differs"
-                    assert (
-                        chunk1["size"] == chunk2["size"]
-                    ), f"Run {i}, chunk {j} size differs"
+                    assert chunk1["text"] == chunk2["text"], (
+                        f"Run {i}, chunk {j} text differs from first run"
+                    )
+                    assert chunk1["chunk_index"] == chunk2["chunk_index"], (
+                        f"Run {i}, chunk {j} index differs"
+                    )
+                    assert chunk1["size"] == chunk2["size"], (
+                        f"Run {i}, chunk {j} size differs"
+                    )
 
             # Performance should be consistent (within 50% variance)
             avg_duration = sum(all_durations) / len(all_durations)

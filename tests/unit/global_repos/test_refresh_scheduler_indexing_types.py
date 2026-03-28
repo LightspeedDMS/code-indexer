@@ -263,9 +263,9 @@ class TestTemporalIndexingInIndexSource:
         )
 
         cmd, cwd = temporal_calls[0]
-        assert cwd == str(
-            source_repo
-        ), f"cidx index --index-commits cwd={cwd} must be source_path={source_repo}."
+        assert cwd == str(source_repo), (
+            f"cidx index --index-commits cwd={cwd} must be source_path={source_repo}."
+        )
         assert "--max-commits" in cmd, "temporal option --max-commits not passed"
         assert "500" in cmd, "temporal option max_commits value 500 not passed"
         assert "--since-date" in cmd, "temporal option --since-date not passed"
@@ -386,9 +386,9 @@ class TestScipIndexingInIndexSource:
             "C7: SCIP indexing must run on source in _index_source()."
         )
         cmd, cwd = scip_calls[0]
-        assert cwd == str(
-            source_repo
-        ), f"cidx scip generate cwd={cwd} must be source_path={source_repo}."
+        assert cwd == str(source_repo), (
+            f"cidx scip generate cwd={cwd} must be source_path={source_repo}."
+        )
 
     def test_scip_not_called_in_create_snapshot(self, scheduler, registry, source_repo):
         """
@@ -534,6 +534,6 @@ class TestIndexingFailureAbortsPipeline:
 
         source = inspect.getsource(RefreshScheduler._index_source)
         # Verify no TimeoutExpired handler exists
-        assert (
-            "TimeoutExpired" not in source
-        ), "_index_source should not handle TimeoutExpired (Bug #467)"
+        assert "TimeoutExpired" not in source, (
+            "_index_source should not handle TimeoutExpired (Bug #467)"
+        )

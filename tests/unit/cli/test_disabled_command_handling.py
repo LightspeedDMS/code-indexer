@@ -36,21 +36,21 @@ class TestCommandCompatibilityMatrix:
         ]
 
         for command in required_commands:
-            assert (
-                command in COMMAND_COMPATIBILITY
-            ), f"Command {command} missing from compatibility matrix"
+            assert command in COMMAND_COMPATIBILITY, (
+                f"Command {command} missing from compatibility matrix"
+            )
 
             # Each command should have mode definitions
             command_modes = COMMAND_COMPATIBILITY[command]
-            assert (
-                "local" in command_modes
-            ), f"Command {command} missing local mode definition"
-            assert (
-                "remote" in command_modes
-            ), f"Command {command} missing remote mode definition"
-            assert (
-                "uninitialized" in command_modes
-            ), f"Command {command} missing uninitialized mode definition"
+            assert "local" in command_modes, (
+                f"Command {command} missing local mode definition"
+            )
+            assert "remote" in command_modes, (
+                f"Command {command} missing remote mode definition"
+            )
+            assert "uninitialized" in command_modes, (
+                f"Command {command} missing uninitialized mode definition"
+            )
 
             # Mode values should be boolean
             assert isinstance(command_modes["local"], bool)
@@ -77,15 +77,15 @@ class TestCommandCompatibilityMatrix:
 
         for command in local_only:
             command_modes = COMMAND_COMPATIBILITY[command]
-            assert (
-                command_modes["local"] is True
-            ), f"Command {command} should be available in local mode"
-            assert (
-                command_modes["remote"] is False
-            ), f"Command {command} should be disabled in remote mode"
-            assert (
-                command_modes["uninitialized"] is False
-            ), f"Command {command} should be disabled in uninitialized mode"
+            assert command_modes["local"] is True, (
+                f"Command {command} should be available in local mode"
+            )
+            assert command_modes["remote"] is False, (
+                f"Command {command} should be disabled in remote mode"
+            )
+            assert command_modes["uninitialized"] is False, (
+                f"Command {command} should be disabled in uninitialized mode"
+            )
 
     def test_core_functionality_commands(self):
         """Test that core functionality commands work in initialized modes only."""
@@ -95,15 +95,15 @@ class TestCommandCompatibilityMatrix:
 
         for command in core_commands:
             command_modes = COMMAND_COMPATIBILITY[command]
-            assert (
-                command_modes["local"] is True
-            ), f"Command {command} should work in local mode"
-            assert (
-                command_modes["remote"] is True
-            ), f"Command {command} should work in remote mode"
-            assert (
-                command_modes["uninitialized"] is False
-            ), f"Command {command} should be disabled in uninitialized mode"
+            assert command_modes["local"] is True, (
+                f"Command {command} should work in local mode"
+            )
+            assert command_modes["remote"] is True, (
+                f"Command {command} should work in remote mode"
+            )
+            assert command_modes["uninitialized"] is False, (
+                f"Command {command} should be disabled in uninitialized mode"
+            )
 
 
 class TestDisabledCommandError:

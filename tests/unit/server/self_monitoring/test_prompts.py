@@ -82,9 +82,9 @@ class TestGetDefaultPrompt:
 
         assert repeating_pos != -1, "Repeating Warning Detection section not found"
         assert ignore_pos != -1, "DO NOT CREATE ISSUES FOR section not found"
-        assert (
-            repeating_pos < ignore_pos
-        ), "Repeating Warning Detection section must appear BEFORE the ignore list"
+        assert repeating_pos < ignore_pos, (
+            "Repeating Warning Detection section must appear BEFORE the ignore list"
+        )
 
     def test_prompt_contains_escalation_threshold(self):
         """AC1: Prompt must state the 5+ occurrence escalation threshold."""
@@ -180,9 +180,9 @@ class TestGetDefaultPrompt:
         repeating_section_pos = prompt.find("Repeating Warning Detection")
         ignore_list_pos = prompt.find("DO NOT CREATE ISSUES FOR")
 
-        assert (
-            repeating_section_pos < ignore_list_pos
-        ), "Frequency detection section must come before the ignore list"
+        assert repeating_section_pos < ignore_list_pos, (
+            "Frequency detection section must come before the ignore list"
+        )
 
     # --- AC4: Stuck-State Warning Examples ---
 
@@ -245,9 +245,9 @@ class TestGetDefaultPrompt:
 
         version_pos = prompt.find("Prompt version:")
         assert version_pos != -1, "Prompt version comment not found"
-        assert (
-            version_pos < 300
-        ), f"Version comment must be within first 300 chars, found at position {version_pos}"
+        assert version_pos < 300, (
+            f"Version comment must be within first 300 chars, found at position {version_pos}"
+        )
 
     def test_prompt_version_is_2(self):
         """AC5: Prompt version must be 2 after this update."""

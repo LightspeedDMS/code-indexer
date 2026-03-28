@@ -560,9 +560,9 @@ class TestProxyModeIntegrationScenarios:
         )
 
         # Step 4: Verify command succeeds
-        assert (
-            result2.returncode == 0
-        ), f"Regular init failed: {result2.stderr}\nStdout: {result2.stdout}"
+        assert result2.returncode == 0, (
+            f"Regular init failed: {result2.stderr}\nStdout: {result2.stdout}"
+        )
 
         # Step 5: Verify .code-indexer directory created in subdirectory
         child_config_dir = child_dir / ".code-indexer"
@@ -577,9 +577,9 @@ class TestProxyModeIntegrationScenarios:
             child_config = json.load(f)
 
         # Regular init should NOT have proxy_mode=true
-        assert (
-            child_config.get("proxy_mode", False) is False
-        ), "Child config incorrectly marked as proxy"
+        assert child_config.get("proxy_mode", False) is False, (
+            "Child config incorrectly marked as proxy"
+        )
 
         # Step 7: Verify parent proxy config remains unchanged
         parent_config_file = parent_proxy / ".code-indexer" / "config.json"

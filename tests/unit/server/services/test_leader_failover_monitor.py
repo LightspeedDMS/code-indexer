@@ -330,9 +330,9 @@ def test_monitor_attempts_acquisition_when_not_leader():
     monitor.start()
     try:
         triggered = acquire_event.wait(timeout=5)
-        assert (
-            triggered
-        ), f"try_acquire_leadership called only {call_count[0]} time(s) in 5s"
+        assert triggered, (
+            f"try_acquire_leadership called only {call_count[0]} time(s) in 5s"
+        )
         assert call_count[0] >= 2
     finally:
         monitor.stop()

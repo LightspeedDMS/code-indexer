@@ -88,14 +88,14 @@ class TestBug200EmptyCollectionFalsePositive:
 
             # Empty collection should be healthy (no issues reported)
             # BUG: Currently reports "Missing HNSW index file in voyage-multimodal-3"
-            assert (
-                result.status == DiagnosticStatus.WORKING
-            ), f"Expected WORKING but got {result.status}: {result.message}"
+            assert result.status == DiagnosticStatus.WORKING, (
+                f"Expected WORKING but got {result.status}: {result.message}"
+            )
             assert result.details["repos_checked"] == 1
             assert result.details["repos_with_healthy_indexes"] == 1
-            assert (
-                len(result.details.get("repos_with_issues", [])) == 0
-            ), f"Should have no issues, but got: {result.details.get('repos_with_issues', [])}"
+            assert len(result.details.get("repos_with_issues", [])) == 0, (
+                f"Should have no issues, but got: {result.details.get('repos_with_issues', [])}"
+            )
 
     @pytest.mark.asyncio
     async def test_empty_collection_with_unique_file_count_zero_is_healthy(

@@ -423,15 +423,15 @@ class TestWriteModeRunRefreshStopsWatch:
             )
 
         # stop_watch must have been called before execute_refresh
-        assert (
-            len(call_order) >= 2
-        ), f"Expected at least 2 calls (stop_watch + execute_refresh). Got: {call_order}"
-        assert (
-            call_order[0][0] == "stop_watch"
-        ), f"stop_watch must be called FIRST. Call order: {call_order}"
-        assert (
-            call_order[1][0] == "execute_refresh"
-        ), f"execute_refresh must be called SECOND. Call order: {call_order}"
+        assert len(call_order) >= 2, (
+            f"Expected at least 2 calls (stop_watch + execute_refresh). Got: {call_order}"
+        )
+        assert call_order[0][0] == "stop_watch", (
+            f"stop_watch must be called FIRST. Call order: {call_order}"
+        )
+        assert call_order[1][0] == "execute_refresh", (
+            f"execute_refresh must be called SECOND. Call order: {call_order}"
+        )
 
     def test_stop_watch_called_even_when_execute_refresh_raises(
         self, golden_repos_dir, mock_refresh_scheduler, mock_auto_watch_manager

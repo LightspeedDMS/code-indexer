@@ -145,9 +145,9 @@ class TestCommitMessageIntegration:
                 )
 
                 # Assert: _index_commit_message should be called for each commit
-                assert mock_index_msg.call_count == len(
-                    commits
-                ), "Expected _index_commit_message to be called once per commit"
+                assert mock_index_msg.call_count == len(commits), (
+                    "Expected _index_commit_message to be called once per commit"
+                )
 
                 # Verify called with correct arguments
                 call_args = mock_index_msg.call_args_list[0]

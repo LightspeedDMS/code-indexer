@@ -127,20 +127,20 @@ class TestCallChainTracing:
 
         # Assert
         # If using get_dependencies correctly, should find chain A->B->C
-        assert (
-            result.total_chains_found > 0
-        ), "Should find at least one chain from methodA to methodC"
+        assert result.total_chains_found > 0, (
+            "Should find at least one chain from methodA to methodC"
+        )
         assert len(result.chains) > 0, "Should have chains in result"
 
         # Verify the chain is A->B->C (length 2: A->B, B->C)
         chain = result.chains[0]
         assert chain.length == 2, f"Chain should have 2 steps, got {chain.length}"
-        assert (
-            chain.path[0].symbol == "Service#methodB()."
-        ), "First step should be methodA->methodB"
-        assert (
-            chain.path[1].symbol == "Service#methodC()."
-        ), "Second step should be methodB->methodC"
+        assert chain.path[0].symbol == "Service#methodB().", (
+            "First step should be methodA->methodB"
+        )
+        assert chain.path[1].symbol == "Service#methodC().", (
+            "Second step should be methodB->methodC"
+        )
 
     def test_direct_call_chain_found(self, comprehensive_scip_fixture):
         """Test that direct call chain (A -> B) is found."""

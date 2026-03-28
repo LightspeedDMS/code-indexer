@@ -93,15 +93,15 @@ class TestMultiProjectCredentialIsolation:
         # Verify all projects have their own credential files
         for project_name, config in self.projects.items():
             credentials_file = config["path"] / ".code-indexer" / ".creds"
-            assert (
-                credentials_file.exists()
-            ), f"Credentials not found for {project_name}"
+            assert credentials_file.exists(), (
+                f"Credentials not found for {project_name}"
+            )
 
             # Verify file permissions are secure (owner read/write only)
             file_mode = credentials_file.stat().st_mode & 0o777
-            assert (
-                file_mode == 0o600
-            ), f"Insecure permissions for {project_name}: {oct(file_mode)}"
+            assert file_mode == 0o600, (
+                f"Insecure permissions for {project_name}: {oct(file_mode)}"
+            )
 
         # Verify each project can decrypt its own credentials correctly
         for project_name, config in self.projects.items():
@@ -122,9 +122,9 @@ class TestMultiProjectCredentialIsolation:
         credential_values = list(stored_credentials.values())
         for i in range(len(credential_values)):
             for j in range(i + 1, len(credential_values)):
-                assert (
-                    credential_values[i] != credential_values[j]
-                ), "Different projects produced identical encrypted credentials"
+                assert credential_values[i] != credential_values[j], (
+                    "Different projects produced identical encrypted credentials"
+                )
 
     def test_cross_project_credential_access_completely_fails(self):
         """Test that no project can access another project's credentials."""
@@ -352,9 +352,9 @@ class TestMultiProjectCredentialIsolation:
         cred_values = list(encrypted_credentials.values())
         for i in range(len(cred_values)):
             for j in range(i + 1, len(cred_values)):
-                assert (
-                    cred_values[i] != cred_values[j]
-                ), "Same user/password produced identical encryption across different servers/projects"
+                assert cred_values[i] != cred_values[j], (
+                    "Same user/password produced identical encryption across different servers/projects"
+                )
 
         # Verify cross-server access fails
         for project1_name, config1 in projects_same_user.items():
@@ -485,9 +485,9 @@ class TestMultiProjectCredentialIsolation:
         assert len(errors) == 0, f"Concurrent operations failed: {errors}"
 
         for project_name, result in results.items():
-            assert result[
-                "success"
-            ], f"Project {project_name} failed: {result.get('error')}"
+            assert result["success"], (
+                f"Project {project_name} failed: {result.get('error')}"
+            )
 
             config = self.projects[project_name]
             assert result["username"] == config["username"]
@@ -540,9 +540,9 @@ class TestMultiProjectCredentialIsolation:
         cred_values = list(encrypted_data.values())
         for i in range(len(cred_values)):
             for j in range(i + 1, len(cred_values)):
-                assert (
-                    cred_values[i] != cred_values[j]
-                ), "Identical credentials in different projects produced same encryption"
+                assert cred_values[i] != cred_values[j], (
+                    "Identical credentials in different projects produced same encryption"
+                )
 
         # Verify strict cross-project access denial
         for project1_name, project1_encrypted in encrypted_data.items():

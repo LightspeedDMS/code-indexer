@@ -72,22 +72,22 @@ class TestListJobsFilteredBasicStructure:
 
     def test_method_exists_on_backend(self, backend) -> None:
         """list_jobs_filtered() must exist on BackgroundJobsSqliteBackend."""
-        assert hasattr(
-            backend, "list_jobs_filtered"
-        ), "BackgroundJobsSqliteBackend must have list_jobs_filtered() method"
+        assert hasattr(backend, "list_jobs_filtered"), (
+            "BackgroundJobsSqliteBackend must have list_jobs_filtered() method"
+        )
 
     def test_returns_tuple_of_list_and_count(self, backend) -> None:
         """list_jobs_filtered() must return (List[Dict], int) tuple."""
         result = backend.list_jobs_filtered()
         assert isinstance(result, tuple), "Must return a tuple"
-        assert (
-            len(result) == 2
-        ), "Tuple must have exactly 2 elements: (jobs, total_count)"
+        assert len(result) == 2, (
+            "Tuple must have exactly 2 elements: (jobs, total_count)"
+        )
         jobs, total_count = result
         assert isinstance(jobs, list), "First element must be a list"
-        assert isinstance(
-            total_count, int
-        ), "Second element must be an int (total count)"
+        assert isinstance(total_count, int), (
+            "Second element must be an int (total count)"
+        )
 
     def test_empty_database_returns_empty_list_and_zero_count(self, backend) -> None:
         """AC12: Empty state - no jobs returns ([], 0)."""
@@ -135,9 +135,9 @@ class TestListJobsFilteredByStatus:
         assert len(jobs) == 2, f"Expected 2 completed jobs, got {len(jobs)}"
         assert total_count == 2, f"Expected total_count=2, got {total_count}"
         for job in jobs:
-            assert (
-                job["status"] == "completed"
-            ), f"Got non-completed job: {job['status']}"
+            assert job["status"] == "completed", (
+                f"Got non-completed job: {job['status']}"
+            )
 
     def test_status_filter_failed_returns_only_failed(self, backend) -> None:
         """AC2: Status filter 'failed' returns only failed jobs."""
@@ -350,9 +350,9 @@ class TestListJobsFilteredPagination:
 
         jobs, total_count = backend.list_jobs_filtered(limit=5, offset=0)
         assert len(jobs) == 5
-        assert (
-            total_count == 20
-        ), f"total_count must reflect all 20 matching jobs, got {total_count}"
+        assert total_count == 20, (
+            f"total_count must reflect all 20 matching jobs, got {total_count}"
+        )
 
     def test_pagination_last_page_has_fewer_results(self, backend) -> None:
         """AC6: Last page may have fewer results than page_size."""

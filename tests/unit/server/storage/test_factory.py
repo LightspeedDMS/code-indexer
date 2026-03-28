@@ -74,9 +74,9 @@ class TestBackendRegistryStructure:
         from code_indexer.server.storage.factory import BackendRegistry
 
         field_names = {f.name for f in dataclasses.fields(BackendRegistry)}
-        assert (
-            "node_metrics" in field_names
-        ), "BackendRegistry.node_metrics is required for cluster-aware dashboard"
+        assert "node_metrics" in field_names, (
+            "BackendRegistry.node_metrics is required for cluster-aware dashboard"
+        )
 
     def test_backend_registry_is_dataclass(self) -> None:
         """BackendRegistry must be a dataclass."""
@@ -103,12 +103,12 @@ class TestStorageFactoryNodeMetrics:
         registry = StorageFactory.create_backends(config={}, data_dir=data_dir)
 
         assert registry.node_metrics is not None, "node_metrics must not be None"
-        assert isinstance(
-            registry.node_metrics, NodeMetricsSqliteBackend
-        ), f"Expected NodeMetricsSqliteBackend, got {type(registry.node_metrics)}"
-        assert isinstance(
-            registry.node_metrics, NodeMetricsBackend
-        ), "node_metrics must satisfy NodeMetricsBackend Protocol"
+        assert isinstance(registry.node_metrics, NodeMetricsSqliteBackend), (
+            f"Expected NodeMetricsSqliteBackend, got {type(registry.node_metrics)}"
+        )
+        assert isinstance(registry.node_metrics, NodeMetricsBackend), (
+            "node_metrics must satisfy NodeMetricsBackend Protocol"
+        )
 
 
 # ---------------------------------------------------------------------------

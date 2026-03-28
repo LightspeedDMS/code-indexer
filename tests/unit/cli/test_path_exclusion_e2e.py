@@ -179,9 +179,9 @@ class TestFilterConstructionIntegration:
         ]
 
         # CRITICAL ASSERTION: Should only return 2 results (module.py and utils.py)
-        assert (
-            len(filtered_results) == 2
-        ), f"Expected 2 results, got {len(filtered_results)}"
+        assert len(filtered_results) == 2, (
+            f"Expected 2 results, got {len(filtered_results)}"
+        )
 
         # Verify the correct files are included
         result_paths = [

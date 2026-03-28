@@ -57,9 +57,9 @@ class TestFilesystemCompleteIsolation:
             ), f"Expected filesystem message in output: {result.stdout}"
 
             # Verify no port registry file was created
-            assert not Path(
-                "/tmp/SHOULD_NOT_EXIST"
-            ).exists(), "Port registry was accessed despite filesystem backend"
+            assert not Path("/tmp/SHOULD_NOT_EXIST").exists(), (
+                "Port registry was accessed despite filesystem backend"
+            )
 
     def test_uninstall_command_no_port_registry_access(self):
         """Test that uninstall command with filesystem backend never touches port registry."""
@@ -106,9 +106,9 @@ class TestFilesystemCompleteIsolation:
             ), f"Expected filesystem/container message in output: {result.stdout}"
 
             # Verify no port registry file was created
-            assert not Path(
-                "/tmp/SHOULD_NOT_EXIST_UNINSTALL"
-            ).exists(), "Port registry was accessed despite filesystem backend"
+            assert not Path("/tmp/SHOULD_NOT_EXIST_UNINSTALL").exists(), (
+                "Port registry was accessed despite filesystem backend"
+            )
 
     def test_clean_command_no_port_registry_access(self):
         """Verify cidx clean with filesystem backend doesn't access port registry."""
@@ -161,9 +161,9 @@ class TestFilesystemCompleteIsolation:
             ), f"Expected clean success message in output: {result.stdout}"
 
             # Verify no port registry file was created
-            assert not Path(
-                "/tmp/SHOULD_NOT_EXIST_CLEANUP"
-            ).exists(), "Port registry was accessed despite filesystem backend"
+            assert not Path("/tmp/SHOULD_NOT_EXIST_CLEANUP").exists(), (
+                "Port registry was accessed despite filesystem backend"
+            )
 
     def test_uninstall_wipe_all_no_port_registry_access(self):
         """Verify cidx uninstall --wipe-all with filesystem backend doesn't access port registry."""
@@ -199,9 +199,9 @@ class TestFilesystemCompleteIsolation:
             )
 
             # Should succeed without port registry
-            assert (
-                result.returncode == 0
-            ), f"Uninstall --wipe-all failed: {result.stderr}"
+            assert result.returncode == 0, (
+                f"Uninstall --wipe-all failed: {result.stderr}"
+            )
 
             # Should mention filesystem or no containers
             output_lower = result.stdout.lower()
@@ -214,9 +214,9 @@ class TestFilesystemCompleteIsolation:
             ), f"Expected filesystem/wipe message in output: {result.stdout}"
 
             # Verify no port registry file was created
-            assert not Path(
-                "/tmp/SHOULD_NOT_EXIST_WIPE_ALL"
-            ).exists(), "Port registry was accessed despite filesystem backend"
+            assert not Path("/tmp/SHOULD_NOT_EXIST_WIPE_ALL").exists(), (
+                "Port registry was accessed despite filesystem backend"
+            )
 
 
 if __name__ == "__main__":

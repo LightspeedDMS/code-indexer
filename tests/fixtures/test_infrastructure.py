@@ -118,9 +118,9 @@ class RealComponentTestInfrastructure:
         original_audit_logger = getattr(audit_module, "password_audit_logger", None)
 
         # Create our own user manager with weak password config for testing
-        assert (
-            self.temp_dir is not None
-        ), "temp_dir must be set before creating test app"
+        assert self.temp_dir is not None, (
+            "temp_dir must be set before creating test app"
+        )
         weak_password_config = self.create_weak_password_config()
         users_file_path = str(self.temp_dir / "users.json")
         test_user_manager = UserManager(
@@ -322,9 +322,9 @@ class RealComponentTestInfrastructure:
             )
 
         # Read real audit logs from real files
-        assert (
-            self.temp_dir is not None
-        ), "temp_dir must be set before reading audit logs"
+        assert self.temp_dir is not None, (
+            "temp_dir must be set before reading audit logs"
+        )
         audit_dir = self.temp_dir / "audit"
         if not audit_dir.exists():
             return []

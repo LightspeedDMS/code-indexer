@@ -79,9 +79,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
         semantic_collections = [
             c for c in collections_before if c != "code-indexer-temporal"
         ]
-        assert (
-            len(semantic_collections) >= 1
-        ), f"No semantic collection found! Collections: {collections_before}"
+        assert len(semantic_collections) >= 1, (
+            f"No semantic collection found! Collections: {collections_before}"
+        )
         semantic_collection_name = semantic_collections[0]
 
         # Count vectors in semantic index
@@ -91,9 +91,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
             [f for f in semantic_vectors_before if f.name.startswith("vector_")]
         )
 
-        assert (
-            semantic_vector_count_before > 0
-        ), "Semantic index has no vectors after initial indexing!"
+        assert semantic_vector_count_before > 0, (
+            "Semantic index has no vectors after initial indexing!"
+        )
 
         print(f"✓ Semantic index created: {semantic_collection_name}")
         print(f"✓ Semantic vectors: {semantic_vector_count_before}")
@@ -106,9 +106,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
             text=True,
             timeout=60,
         )
-        assert (
-            temporal_index_result.returncode == 0
-        ), f"cidx index --index-commits failed: {temporal_index_result.stderr}"
+        assert temporal_index_result.returncode == 0, (
+            f"cidx index --index-commits failed: {temporal_index_result.stderr}"
+        )
 
         # STEP 5: Verify temporal index exists
         temporal_collection_path = index_dir / "code-indexer-temporal"
@@ -119,9 +119,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
             [f for f in temporal_vectors_before if f.name.startswith("vector_")]
         )
 
-        assert (
-            temporal_vector_count_before > 0
-        ), "Temporal index has no vectors after indexing!"
+        assert temporal_vector_count_before > 0, (
+            "Temporal index has no vectors after indexing!"
+        )
 
         print("✓ Temporal index created: code-indexer-temporal")
         print(f"✓ Temporal vectors: {temporal_vector_count_before}")
@@ -135,9 +135,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
             text=True,
             timeout=60,
         )
-        assert (
-            clear_result.returncode == 0
-        ), f"cidx index --index-commits --clear failed: {clear_result.stderr}"
+        assert clear_result.returncode == 0, (
+            f"cidx index --index-commits --clear failed: {clear_result.stderr}"
+        )
 
         # STEP 7: Check regular semantic index SHOULD STILL EXIST (this is the bug!)
         semantic_vectors_after = list(semantic_collection_path.glob("**/*.json"))
@@ -169,9 +169,9 @@ def test_index_commits_clear_does_not_wipe_regular_index():
         print(f"  Temporal vectors AFTER clear:  {temporal_vector_count_after}")
 
         # Temporal should be re-indexed (same or similar count)
-        assert (
-            temporal_vector_count_after > 0
-        ), "Temporal index should be re-indexed but has no vectors"
+        assert temporal_vector_count_after > 0, (
+            "Temporal index should be re-indexed but has no vectors"
+        )
 
         print(
             "\n✅ TEST PASSED: --index-commits --clear correctly preserves semantic index and rebuilds temporal"

@@ -426,9 +426,9 @@ class TestOIDCManager:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='oidc_identity_links'"
             )
             result = await cursor.fetchone()
-            assert (
-                result is not None
-            ), "oidc_identity_links table should exist after initialize()"
+            assert result is not None, (
+                "oidc_identity_links table should exist after initialize()"
+            )
             assert result[0] == "oidc_identity_links"
 
     @pytest.mark.asyncio

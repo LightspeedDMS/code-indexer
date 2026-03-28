@@ -78,12 +78,12 @@ class TestAuthenticationStatusCommands:
         result = self.runner.invoke(cli, ["auth", "status", "--help"])
 
         # Should now pass as command exists (TDD - green phase)
-        assert (
-            result.exit_code == 0
-        ), f"Status command should exist and work, got exit code {result.exit_code}, output: {result.output}"
-        assert (
-            "Display current authentication status" in result.output
-        ), "Status command help should be displayed"
+        assert result.exit_code == 0, (
+            f"Status command should exist and work, got exit code {result.exit_code}, output: {result.output}"
+        )
+        assert "Display current authentication status" in result.output, (
+            "Status command help should be displayed"
+        )
 
     def test_auth_status_shows_authenticated_state(self):
         """Test that status command displays authentication state when authenticated."""
@@ -133,9 +133,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should pass now as command is implemented
-        assert (
-            result.exit_code == 0
-        ), f"Status command should work, got: {result.output}"
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
         assert "Authenticated: Yes" in result.output
         assert "test_user" in result.output
 
@@ -187,9 +187,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should pass and show not authenticated
-        assert (
-            result.exit_code == 0
-        ), f"Status command should work, got: {result.output}"
+        assert result.exit_code == 0, (
+            f"Status command should work, got: {result.output}"
+        )
         assert "Authenticated: No" in result.output
         assert "Use 'cidx auth login' to authenticate" in result.output
 
@@ -212,9 +212,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Username/role display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Username/role display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_displays_token_expiration(self):
         """Test that status command calculates and displays token expiration time."""
@@ -228,9 +228,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Token expiration display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Token expiration display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_displays_server_url(self):
         """Test that status command displays current server URL from configuration."""
@@ -277,9 +277,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Token server verification should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Token server verification should fail (TDD - red phase)"
+        )
 
     def test_auth_status_detects_expired_token(self):
         """Test that status command detects expired tokens and displays expiration status."""
@@ -293,9 +293,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Expired token detection should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Expired token detection should fail (TDD - red phase)"
+        )
 
     def test_auth_status_attempts_automatic_token_refresh(self):
         """Test that status command attempts automatic token refresh when token is expired."""
@@ -313,9 +313,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Automatic token refresh should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Automatic token refresh should fail (TDD - red phase)"
+        )
 
     def test_auth_status_displays_refresh_success(self):
         """Test that status command displays successful refresh result."""
@@ -333,9 +333,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Refresh success display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Refresh success display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_handles_refresh_failure(self):
         """Test that status command handles refresh failure and suggests re-authentication."""
@@ -358,9 +358,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Refresh failure handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Refresh failure handling should fail (TDD - red phase)"
+        )
 
     def test_auth_status_clears_invalid_credentials_on_refresh_failure(self):
         """Test that status command clears invalid credentials when refresh fails."""
@@ -387,9 +387,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Invalid credential clearing should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Invalid credential clearing should fail (TDD - red phase)"
+        )
 
     # AC3: Detailed Credential Information Tests
 
@@ -398,12 +398,12 @@ class TestAuthenticationStatusCommands:
         result = self.runner.invoke(cli, ["auth", "status", "--help"])
 
         # Should pass as command and option exist
-        assert (
-            result.exit_code == 0
-        ), f"Status command help should work, got: {result.output}"
-        assert (
-            "--verbose" in result.output or "-v" in result.output
-        ), "Verbose option should be available"
+        assert result.exit_code == 0, (
+            f"Status command help should work, got: {result.output}"
+        )
+        assert "--verbose" in result.output or "-v" in result.output, (
+            "Verbose option should be available"
+        )
 
     def test_auth_status_verbose_displays_token_timestamps(self):
         """Test that verbose mode displays token issuance and refresh timestamps."""
@@ -414,9 +414,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Token timestamps display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Token timestamps display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_verbose_displays_refresh_token_expiration(self):
         """Test that verbose mode displays refresh token expiration if available."""
@@ -427,9 +427,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Refresh token expiration display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Refresh token expiration display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_verbose_displays_user_permissions(self):
         """Test that verbose mode displays user permissions from token claims."""
@@ -440,9 +440,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "User permissions display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "User permissions display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_verbose_tests_server_connectivity(self):
         """Test that verbose mode tests and displays server connectivity status."""
@@ -460,9 +460,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Server connectivity test should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Server connectivity test should fail (TDD - red phase)"
+        )
 
     def test_auth_status_verbose_displays_server_version(self):
         """Test that verbose mode displays server version information if available."""
@@ -480,9 +480,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status", "--verbose"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Server version display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Server version display should fail (TDD - red phase)"
+        )
 
     # AC4: Credential Health Monitoring Tests
 
@@ -491,9 +491,9 @@ class TestAuthenticationStatusCommands:
         result = self.runner.invoke(cli, ["auth", "status", "--help"])
 
         # Should pass as command and option exist
-        assert (
-            result.exit_code == 0
-        ), f"Status command help should work, got: {result.output}"
+        assert result.exit_code == 0, (
+            f"Status command help should work, got: {result.output}"
+        )
         assert "--health" in result.output, "Health option should be available"
 
     def test_auth_status_health_checks_credential_file_integrity(self):
@@ -541,9 +541,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should pass and show health status
-        assert (
-            result.exit_code == 0
-        ), f"Health command should work, got: {result.output}"
+        assert result.exit_code == 0, (
+            f"Health command should work, got: {result.output}"
+        )
         assert "Overall Health: Healthy" in result.output
         assert "Credential file encryption" in result.output
 
@@ -556,9 +556,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Encryption key verification should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Encryption key verification should fail (TDD - red phase)"
+        )
 
     def test_auth_status_health_tests_server_connectivity_for_validation(self):
         """Test that health mode tests server connectivity for token validation."""
@@ -576,9 +576,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Health connectivity test should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Health connectivity test should fail (TDD - red phase)"
+        )
 
     def test_auth_status_health_validates_token_signature(self):
         """Test that health mode validates JWT token structure and signature."""
@@ -589,9 +589,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Token signature validation should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Token signature validation should fail (TDD - red phase)"
+        )
 
     def test_auth_status_health_checks_file_permissions(self):
         """Test that health mode checks credential file permissions."""
@@ -602,9 +602,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "File permissions check should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "File permissions check should fail (TDD - red phase)"
+        )
 
     def test_auth_status_health_displays_healthy_status(self):
         """Test that health mode displays healthy status when all checks pass."""
@@ -615,9 +615,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Healthy status display should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Healthy status display should fail (TDD - red phase)"
+        )
 
     def test_auth_status_health_handles_corrupted_credentials(self):
         """Test that health mode detects and reports corrupted credential files."""
@@ -632,9 +632,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "status", "--health"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Corrupted credentials handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Corrupted credentials handling should fail (TDD - red phase)"
+        )
 
     def test_auth_status_health_provides_recovery_guidance(self):
         """Test that health mode provides specific recovery guidance for each issue type."""
@@ -654,12 +654,12 @@ class TestAuthenticationStatusCommands:
         result = self.runner.invoke(cli, ["auth", "refresh", "--help"])
 
         # Should now pass as command exists (TDD - green phase)
-        assert (
-            result.exit_code == 0
-        ), f"Refresh command should exist and work, got exit code {result.exit_code}, output: {result.output}"
-        assert (
-            "Manually refresh authentication token" in result.output
-        ), "Refresh command help should be displayed"
+        assert result.exit_code == 0, (
+            f"Refresh command should exist and work, got exit code {result.exit_code}, output: {result.output}"
+        )
+        assert "Manually refresh authentication token" in result.output, (
+            "Refresh command help should be displayed"
+        )
 
     def test_auth_refresh_attempts_token_refresh(self):
         """Test that refresh command attempts to refresh the current token."""
@@ -695,9 +695,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "refresh"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Refresh success message should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Refresh success message should fail (TDD - red phase)"
+        )
 
     def test_auth_refresh_updates_stored_credentials(self):
         """Test that refresh command updates stored credentials with new token."""
@@ -738,9 +738,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "refresh"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Expired refresh token handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Expired refresh token handling should fail (TDD - red phase)"
+        )
 
     def test_auth_refresh_clears_invalid_credentials_on_failure(self):
         """Test that refresh command clears invalid credentials when refresh fails."""
@@ -767,21 +767,21 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "refresh"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Credential clearing on failure should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Credential clearing on failure should fail (TDD - red phase)"
+        )
 
     def test_auth_validate_command_exists(self):
         """Test that 'cidx auth validate' command is registered and accessible."""
         result = self.runner.invoke(cli, ["auth", "validate", "--help"])
 
         # Should now pass as command exists (TDD - green phase)
-        assert (
-            result.exit_code == 0
-        ), f"Validate command should exist and work, got exit code {result.exit_code}, output: {result.output}"
-        assert (
-            "Validate current credentials" in result.output
-        ), "Validate command help should be displayed"
+        assert result.exit_code == 0, (
+            f"Validate command should exist and work, got exit code {result.exit_code}, output: {result.output}"
+        )
+        assert "Validate current credentials" in result.output, (
+            "Validate command help should be displayed"
+        )
 
     def test_auth_validate_silent_operation(self):
         """Test that validate command operates silently by default."""
@@ -828,9 +828,9 @@ class TestAuthenticationStatusCommands:
             result = self.runner.invoke(cli, ["auth", "validate", "--verbose"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Validate verbose mode should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Validate verbose mode should fail (TDD - red phase)"
+        )
 
     def test_auth_validate_handles_invalid_credentials(self):
         """Test that validate command handles invalid credentials appropriately."""
@@ -848,9 +848,9 @@ class TestAuthenticationStatusCommands:
                 result = self.runner.invoke(cli, ["auth", "validate"])
 
         # Should fail as command doesn't exist yet (TDD - red phase)
-        assert (
-            result.exit_code != 0
-        ), "Invalid credential handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Invalid credential handling should fail (TDD - red phase)"
+        )
 
 
 class TestAuthStatusDataModels:
@@ -931,9 +931,9 @@ class TestAuthAPIClientExtensions:
 
         # Should now pass as method exists (TDD - green phase)
         assert hasattr(client, "get_auth_status"), "get_auth_status method should exist"
-        assert callable(
-            getattr(client, "get_auth_status")
-        ), "get_auth_status should be callable"
+        assert callable(getattr(client, "get_auth_status")), (
+            "get_auth_status should be callable"
+        )
 
     def test_auth_api_client_has_refresh_token_method(self):
         """Test that AuthAPIClient has refresh_token method."""
@@ -943,9 +943,9 @@ class TestAuthAPIClientExtensions:
 
         # Should now pass as method exists (TDD - green phase)
         assert hasattr(client, "refresh_token"), "refresh_token method should exist"
-        assert callable(
-            getattr(client, "refresh_token")
-        ), "refresh_token should be callable"
+        assert callable(getattr(client, "refresh_token")), (
+            "refresh_token should be callable"
+        )
 
     def test_auth_api_client_has_validate_credentials_method(self):
         """Test that AuthAPIClient has validate_credentials method."""
@@ -954,12 +954,12 @@ class TestAuthAPIClientExtensions:
         client = AuthAPIClient("http://localhost:8000", None, {})
 
         # Should now pass as method exists (TDD - green phase)
-        assert hasattr(
-            client, "validate_credentials"
-        ), "validate_credentials method should exist"
-        assert callable(
-            getattr(client, "validate_credentials")
-        ), "validate_credentials should be callable"
+        assert hasattr(client, "validate_credentials"), (
+            "validate_credentials method should exist"
+        )
+        assert callable(getattr(client, "validate_credentials")), (
+            "validate_credentials should be callable"
+        )
 
     def test_auth_api_client_has_check_credential_health_method(self):
         """Test that AuthAPIClient has check_credential_health method."""
@@ -968,12 +968,12 @@ class TestAuthAPIClientExtensions:
         client = AuthAPIClient("http://localhost:8000", None, {})
 
         # Should now pass as method exists (TDD - green phase)
-        assert hasattr(
-            client, "check_credential_health"
-        ), "check_credential_health method should exist"
-        assert callable(
-            getattr(client, "check_credential_health")
-        ), "check_credential_health should be callable"
+        assert hasattr(client, "check_credential_health"), (
+            "check_credential_health method should exist"
+        )
+        assert callable(getattr(client, "check_credential_health")), (
+            "check_credential_health should be callable"
+        )
 
 
 # Run the failing tests to confirm TDD red phase

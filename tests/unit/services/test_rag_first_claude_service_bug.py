@@ -88,15 +88,15 @@ def test_rag_first_vs_claude_first_comparison():
         # Main goal: ensure no variable scope errors in either approach
         assert "claude_service" not in str(
             result_claude_first.output
-        ) and "UnboundLocalError" not in str(
-            result_claude_first.output
-        ), "Claude-first should not have variable scope errors"
+        ) and "UnboundLocalError" not in str(result_claude_first.output), (
+            "Claude-first should not have variable scope errors"
+        )
 
         assert "claude_service" not in str(
             result_rag_first.output
-        ) and "UnboundLocalError" not in str(
-            result_rag_first.output
-        ), "RAG-first should not have variable scope errors"
+        ) and "UnboundLocalError" not in str(result_rag_first.output), (
+            "RAG-first should not have variable scope errors"
+        )
 
 
 def test_rag_first_with_dry_run():

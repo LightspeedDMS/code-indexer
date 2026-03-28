@@ -81,12 +81,12 @@ class TestExplicitAuthenticationCommands:
         result = self.runner.invoke(cli, ["auth", "login", "--help"])
 
         # Should now pass as command exists (TDD - green phase)
-        assert (
-            result.exit_code == 0
-        ), f"Login command should exist and be accessible, got: {result.output}"
-        assert (
-            "login" in result.output.lower()
-        ), "Login command help should contain 'login'"
+        assert result.exit_code == 0, (
+            f"Login command should exist and be accessible, got: {result.output}"
+        )
+        assert "login" in result.output.lower(), (
+            "Login command help should contain 'login'"
+        )
 
     def test_auth_login_command_parameters(self):
         """Test that login command accepts username and password parameters."""
@@ -95,12 +95,12 @@ class TestExplicitAuthenticationCommands:
 
         # Should now pass as command exists (TDD - green phase)
         assert result.exit_code == 0, "Login help should work"
-        assert (
-            "--username" in result.output
-        ), "Login command should accept --username parameter"
-        assert (
-            "--password" in result.output
-        ), "Login command should accept --password parameter"
+        assert "--username" in result.output, (
+            "Login command should accept --username parameter"
+        )
+        assert "--password" in result.output, (
+            "Login command should accept --password parameter"
+        )
 
     @patch("code_indexer.cli.require_mode")
     def test_auth_login_requires_remote_mode(self, mock_require_mode):
@@ -112,9 +112,9 @@ class TestExplicitAuthenticationCommands:
         )
 
         # Should fail as command doesn't exist yet (will fail differently once implemented)
-        assert (
-            result.exit_code != 0
-        ), "Login should fail when not in remote mode (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Login should fail when not in remote mode (TDD - red phase)"
+        )
 
     def test_auth_login_integrates_with_auth_endpoint(self):
         """Test that login command integrates with POST /auth/login endpoint."""
@@ -139,9 +139,9 @@ class TestExplicitAuthenticationCommands:
             # Should now work as command exists (TDD - green phase) - though may fail due to missing dependencies
             # We're testing that the command integration works, not that it necessarily succeeds
             # (since we may be missing required dependencies like the remote config loader)
-            assert (
-                result.exit_code is not None
-            ), "Login command should execute and return an exit code"
+            assert result.exit_code is not None, (
+                "Login command should execute and return an exit code"
+            )
 
     def test_auth_login_stores_encrypted_credentials(self):
         """Test that successful login stores encrypted credentials locally."""
@@ -161,9 +161,9 @@ class TestExplicitAuthenticationCommands:
 
             # Should now work as command exists (TDD - green phase)
             # Command executes but may fail due to dependencies - that's expected
-            assert (
-                result.exit_code is not None
-            ), "Login command should execute and return an exit code"
+            assert result.exit_code is not None, (
+                "Login command should execute and return an exit code"
+            )
 
     # AC2: User Registration Command Implementation Tests
 
@@ -172,12 +172,12 @@ class TestExplicitAuthenticationCommands:
         result = self.runner.invoke(cli, ["auth", "register", "--help"])
 
         # Should now pass as command exists (TDD - green phase)
-        assert (
-            result.exit_code == 0
-        ), f"Register command should exist and be accessible, got: {result.output}"
-        assert (
-            "register" in result.output.lower()
-        ), "Register command help should contain 'register'"
+        assert result.exit_code == 0, (
+            f"Register command should exist and be accessible, got: {result.output}"
+        )
+        assert "register" in result.output.lower(), (
+            "Register command help should contain 'register'"
+        )
 
     def test_auth_register_command_parameters(self):
         """Test that register command accepts username, password, and role parameters."""
@@ -186,15 +186,15 @@ class TestExplicitAuthenticationCommands:
 
         # Should now pass as command exists (TDD - green phase)
         assert result.exit_code == 0, "Register help should work"
-        assert (
-            "--username" in result.output
-        ), "Register command should accept --username parameter"
-        assert (
-            "--password" in result.output
-        ), "Register command should accept --password parameter"
-        assert (
-            "--role" in result.output
-        ), "Register command should accept --role parameter"
+        assert "--username" in result.output, (
+            "Register command should accept --username parameter"
+        )
+        assert "--password" in result.output, (
+            "Register command should accept --password parameter"
+        )
+        assert "--role" in result.output, (
+            "Register command should accept --role parameter"
+        )
 
     def test_auth_register_role_parameter_validation(self):
         """Test that register command validates role parameter (user/admin)."""
@@ -203,12 +203,12 @@ class TestExplicitAuthenticationCommands:
 
         # Should now pass as command exists (TDD - green phase)
         assert result.exit_code == 0, "Register help should work"
-        assert (
-            "user" in result.output
-        ), "Register command should show 'user' as valid role"
-        assert (
-            "admin" in result.output
-        ), "Register command should show 'admin' as valid role"
+        assert "user" in result.output, (
+            "Register command should show 'user' as valid role"
+        )
+        assert "admin" in result.output, (
+            "Register command should show 'admin' as valid role"
+        )
 
     def test_auth_register_integrates_with_register_endpoint(self):
         """Test that register command integrates with POST /auth/register endpoint."""
@@ -240,9 +240,9 @@ class TestExplicitAuthenticationCommands:
 
             # Should now work as command exists (TDD - green phase)
             # Command executes but may fail due to dependencies - that's expected
-            assert (
-                result.exit_code is not None
-            ), "Register command should execute and return an exit code"
+            assert result.exit_code is not None, (
+                "Register command should execute and return an exit code"
+            )
 
     def test_auth_register_auto_login_after_success(self):
         """Test that register command automatically logs in after successful registration."""
@@ -271,9 +271,9 @@ class TestExplicitAuthenticationCommands:
 
             # Should now work as command exists (TDD - green phase)
             # Command executes but may fail due to dependencies - that's expected
-            assert (
-                result.exit_code is not None
-            ), "Register command should execute and return an exit code"
+            assert result.exit_code is not None, (
+                "Register command should execute and return an exit code"
+            )
 
     # AC3: Explicit Logout Command Implementation Tests
 
@@ -282,12 +282,12 @@ class TestExplicitAuthenticationCommands:
         result = self.runner.invoke(cli, ["auth", "logout", "--help"])
 
         # Should now pass as command exists (TDD - green phase)
-        assert (
-            result.exit_code == 0
-        ), f"Logout command should exist and be accessible, got: {result.output}"
-        assert (
-            "logout" in result.output.lower()
-        ), "Logout command help should contain 'logout'"
+        assert result.exit_code == 0, (
+            f"Logout command should exist and be accessible, got: {result.output}"
+        )
+        assert "logout" in result.output.lower(), (
+            "Logout command help should contain 'logout'"
+        )
 
     def test_auth_logout_clears_stored_credentials(self):
         """Test that logout command clears all stored credentials."""
@@ -303,9 +303,9 @@ class TestExplicitAuthenticationCommands:
 
         # Should now work as command exists (TDD - green phase)
         # Command executes but may fail due to dependencies - that's expected
-        assert (
-            result.exit_code is not None
-        ), "Logout command should execute and return an exit code"
+        assert result.exit_code is not None, (
+            "Logout command should execute and return an exit code"
+        )
 
     def test_auth_logout_removes_encryption_keys(self):
         """Test that logout command removes encryption keys from local storage."""
@@ -323,9 +323,9 @@ class TestExplicitAuthenticationCommands:
 
             # Should now work as command exists (TDD - green phase)
             # Command executes but may fail due to dependencies - that's expected
-            assert (
-                result.exit_code is not None
-            ), "Logout command should execute and return an exit code"
+            assert result.exit_code is not None, (
+                "Logout command should execute and return an exit code"
+            )
 
     def test_auth_logout_handles_not_authenticated_state(self):
         """Test that logout command handles case when user is not currently authenticated."""
@@ -342,9 +342,9 @@ class TestExplicitAuthenticationCommands:
 
         # Should now work as command exists (TDD - green phase)
         # Command executes but may fail due to dependencies - that's expected
-        assert (
-            result.exit_code is not None
-        ), "Logout command should execute and return an exit code"
+        assert result.exit_code is not None, (
+            "Logout command should execute and return an exit code"
+        )
 
     # AC4: Interactive Authentication Flow Tests
 
@@ -378,9 +378,9 @@ class TestExplicitAuthenticationCommands:
             result = self.runner.invoke(cli, ["auth", "register"])
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Interactive register should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Interactive register should fail (TDD - red phase)"
+        )
 
     @patch("getpass.getpass")
     def test_interactive_password_uses_getpass(self, mock_getpass):
@@ -395,9 +395,9 @@ class TestExplicitAuthenticationCommands:
                 result = self.runner.invoke(cli, ["auth", "login"])
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Interactive password with getpass should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Interactive password with getpass should fail (TDD - red phase)"
+        )
 
     def test_interactive_handles_empty_inputs(self):
         """Test that interactive mode handles empty username and password inputs."""
@@ -410,9 +410,9 @@ class TestExplicitAuthenticationCommands:
                     result = self.runner.invoke(cli, ["auth", "login"])
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Interactive empty input handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Interactive empty input handling should fail (TDD - red phase)"
+        )
 
     # AC5: Authentication Error Handling Tests
 
@@ -439,9 +439,9 @@ class TestExplicitAuthenticationCommands:
                 )
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Invalid credentials handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Invalid credentials handling should fail (TDD - red phase)"
+        )
 
     def test_auth_register_handles_username_conflict(self):
         """Test register command handles 409 Conflict (username exists) with clear error message."""
@@ -474,9 +474,9 @@ class TestExplicitAuthenticationCommands:
                 )
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Username conflict handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Username conflict handling should fail (TDD - red phase)"
+        )
 
     def test_auth_commands_handle_server_unreachable(self):
         """Test auth commands handle network connectivity issues with appropriate feedback."""
@@ -501,9 +501,9 @@ class TestExplicitAuthenticationCommands:
                 )
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Network error handling should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Network error handling should fail (TDD - red phase)"
+        )
 
     def test_auth_commands_preserve_credentials_on_failure(self):
         """Test that failed authentication attempts don't corrupt existing stored credentials."""
@@ -531,9 +531,9 @@ class TestExplicitAuthenticationCommands:
                 )
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Credential preservation should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Credential preservation should fail (TDD - red phase)"
+        )
 
     def test_auth_commands_provide_helpful_error_messages(self):
         """Test that auth commands provide helpful error messages without exposing security details."""
@@ -556,9 +556,9 @@ class TestExplicitAuthenticationCommands:
                 )
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Helpful error messages should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Helpful error messages should fail (TDD - red phase)"
+        )
 
     def test_auth_commands_include_troubleshooting_guidance(self):
         """Test that error messages include troubleshooting guidance for common issues."""
@@ -583,9 +583,9 @@ class TestExplicitAuthenticationCommands:
                 )
 
         # Should fail as command doesn't exist yet
-        assert (
-            result.exit_code != 0
-        ), "Troubleshooting guidance should fail (TDD - red phase)"
+        assert result.exit_code != 0, (
+            "Troubleshooting guidance should fail (TDD - red phase)"
+        )
 
 
 class TestAuthAPIClientIntegration:
@@ -604,9 +604,9 @@ class TestAuthAPIClientIntegration:
         from code_indexer.api_clients.base_client import CIDXRemoteAPIClient
 
         # Should now pass (TDD - green phase)
-        assert issubclass(
-            AuthAPIClient, CIDXRemoteAPIClient
-        ), "AuthAPIClient should extend CIDXRemoteAPIClient"
+        assert issubclass(AuthAPIClient, CIDXRemoteAPIClient), (
+            "AuthAPIClient should extend CIDXRemoteAPIClient"
+        )
 
     @pytest.mark.asyncio
     async def test_auth_api_client_login_method(self):
@@ -679,12 +679,12 @@ class TestCredentialStorageSecurity:
             repo_path=str(self.project_root),
         )
 
-        assert isinstance(
-            encrypted_data, bytes
-        ), "Encrypted credentials should be bytes"
-        assert (
-            len(encrypted_data) > 64
-        ), "Encrypted data should include salt, IV, and ciphertext"
+        assert isinstance(encrypted_data, bytes), (
+            "Encrypted credentials should be bytes"
+        )
+        assert len(encrypted_data) > 64, (
+            "Encrypted data should include salt, IV, and ciphertext"
+        )
 
     def test_credential_storage_uses_secure_file_permissions(self):
         """Test that credential files are stored with 600 permissions (user read/write only)."""
@@ -710,9 +710,9 @@ class TestCredentialStorageSecurity:
 
         file_mode = creds_path.stat().st_mode
         # Check that only user has read/write permissions (600)
-        assert (
-            file_mode & 0o077
-        ) == 0, "Credentials file should have 600 permissions (user only)"
+        assert (file_mode & 0o077) == 0, (
+            "Credentials file should have 600 permissions (user only)"
+        )
 
     def test_credential_encryption_uses_project_specific_keys(self):
         """Test that credential encryption uses project-specific key derivation."""
@@ -736,9 +736,9 @@ class TestCredentialStorageSecurity:
         )
 
         # Different projects should produce different encrypted data
-        assert (
-            encrypted1 != encrypted2
-        ), "Same credentials should encrypt differently for different projects"
+        assert encrypted1 != encrypted2, (
+            "Same credentials should encrypt differently for different projects"
+        )
 
     def test_credential_decryption_requires_correct_project_context(self):
         """Test that credential decryption requires correct project path and server URL."""

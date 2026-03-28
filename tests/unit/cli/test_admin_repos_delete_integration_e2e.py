@@ -33,17 +33,17 @@ class TestAdminReposDeleteE2EIntegration:
                 "No remote configuration found",
             ]
 
-            assert any(
-                pattern in result.output for pattern in error_patterns
-            ), "Delete command should show clear error message about mode restriction"
+            assert any(pattern in result.output for pattern in error_patterns), (
+                "Delete command should show clear error message about mode restriction"
+            )
 
             # Should not crash or show stack traces
-            assert (
-                "Traceback" not in result.output
-            ), "Delete command should not show stack traces"
-            assert (
-                "Exception" not in result.output
-            ), "Delete command should not show raw exceptions"
+            assert "Traceback" not in result.output, (
+                "Delete command should not show stack traces"
+            )
+            assert "Exception" not in result.output, (
+                "Delete command should not show raw exceptions"
+            )
 
     def test_admin_repos_delete_with_force_fails_gracefully_in_local_mode(self):
         """Test that delete command with --force fails gracefully in local mode."""
@@ -130,9 +130,9 @@ class TestAdminReposDeleteE2EIntegration:
             ), "Delete command should provide actionable error message"
 
             # Should not leave users without guidance
-            assert (
-                result.output.strip() != ""
-            ), "Delete command should not produce empty output"
+            assert result.output.strip() != "", (
+                "Delete command should not produce empty output"
+            )
 
     def test_admin_repos_delete_help_format_and_consistency(self):
         """Test that delete command help has consistent formatting."""
@@ -145,9 +145,9 @@ class TestAdminReposDeleteE2EIntegration:
 
         # Should have consistent formatting elements
         assert "Examples:" in result.output, "Help should contain examples"
-        assert (
-            "cidx admin repos delete" in result.output
-        ), "Help should contain command examples"
+        assert "cidx admin repos delete" in result.output, (
+            "Help should contain command examples"
+        )
 
         # Should mention admin privileges
         assert (
@@ -210,9 +210,9 @@ class TestAdminReposDeleteE2EIntegration:
                 "requires: 'remote' mode",
             ]
 
-            assert any(
-                pattern in result.output for pattern in guidance_patterns
-            ), "Error should provide actionable guidance"
+            assert any(pattern in result.output for pattern in guidance_patterns), (
+                "Error should provide actionable guidance"
+            )
 
     def test_admin_repos_delete_handles_keyboard_interruption(self):
         """Test that delete command handles keyboard interruption gracefully."""
@@ -274,9 +274,9 @@ class TestAdminReposDeleteSafetyFeatures:
         found_warnings = [
             indicator for indicator in warning_indicators if indicator in result.output
         ]
-        assert (
-            len(found_warnings) >= 2
-        ), "Help should have prominent destructive operation warnings"
+        assert len(found_warnings) >= 2, (
+            "Help should have prominent destructive operation warnings"
+        )
 
     def test_admin_repos_delete_command_follows_cli_conventions(self):
         """Test that delete command follows established CLI conventions."""
@@ -320,9 +320,9 @@ class TestAdminReposDeleteSafetyFeatures:
                 result = runner.invoke(cli, cmd_args)
 
                 # All should fail with same mode restriction pattern
-                assert (
-                    result.exit_code == 1
-                ), f"Command {cmd_name} should fail in local mode"
+                assert result.exit_code == 1, (
+                    f"Command {cmd_name} should fail in local mode"
+                )
 
                 error_patterns = [
                     "not available in local mode",
@@ -331,9 +331,9 @@ class TestAdminReposDeleteSafetyFeatures:
                     "No remote configuration found",
                 ]
 
-                assert any(
-                    pattern in result.output for pattern in error_patterns
-                ), f"Command {cmd_name} should show consistent error pattern"
+                assert any(pattern in result.output for pattern in error_patterns), (
+                    f"Command {cmd_name} should show consistent error pattern"
+                )
 
 
 class TestAdminReposDeleteWorkflowValidation:
@@ -352,9 +352,9 @@ class TestAdminReposDeleteWorkflowValidation:
 
         output_lower = result.output.lower()
         for element in workflow_elements:
-            assert (
-                element in output_lower
-            ), f"Help should describe {element} in workflow"
+            assert element in output_lower, (
+                f"Help should describe {element} in workflow"
+            )
 
     def test_admin_repos_delete_parameter_validation(self):
         """Test parameter validation follows expected patterns."""
@@ -365,9 +365,9 @@ class TestAdminReposDeleteWorkflowValidation:
         assert result.exit_code == 0
 
         # Should show alias as required parameter
-        assert (
-            "ALIAS" in result.output or "alias" in result.output.lower()
-        ), "Help should show alias parameter"
+        assert "ALIAS" in result.output or "alias" in result.output.lower(), (
+            "Help should show alias parameter"
+        )
 
         # Should show force as optional flag
         assert "--force" in result.output, "Help should show force flag"
@@ -434,9 +434,9 @@ class TestAdminReposDeleteWorkflowValidation:
             else:
                 result = runner.invoke(cli, cmd_args)
 
-            assert (
-                result.exit_code != 0
-            ), f"Command {cmd_args} should fail appropriately"
-            assert (
-                "Traceback" not in result.output
-            ), f"Command {cmd_args} should not show stack traces"
+            assert result.exit_code != 0, (
+                f"Command {cmd_args} should fail appropriately"
+            )
+            assert "Traceback" not in result.output, (
+                f"Command {cmd_args} should not show stack traces"
+            )

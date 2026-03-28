@@ -177,21 +177,21 @@ class TestQueryParameterParity:
         """Verify total number of expected query parameters."""
         # Should have exactly 26 query parameters (excluding repository_alias, async_query)
         # Updated from 24 to 26 after adding omni-search parameters (aggregation_mode, exclude_patterns)
-        assert (
-            len(ALL_PARAMETERS) == 26
-        ), f"Expected 26 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
+        assert len(ALL_PARAMETERS) == 26, (
+            f"Expected 26 parameters, got {len(ALL_PARAMETERS)}: {sorted(ALL_PARAMETERS)}"
+        )
 
         # CLI should have 19 parameters (subset of all parameters)
         # Unchanged - omni-search parameters are API-only
-        assert (
-            len(CLI_EXPECTED_PARAMETERS) == 19
-        ), f"Expected 19 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
+        assert len(CLI_EXPECTED_PARAMETERS) == 19, (
+            f"Expected 19 CLI parameters, got {len(CLI_EXPECTED_PARAMETERS)}: {sorted(CLI_EXPECTED_PARAMETERS)}"
+        )
 
         # REST/MCP should have all 26 parameters
         # Updated from 24 to 26 after adding omni-search parameters
-        assert (
-            len(API_EXPECTED_PARAMETERS) == 26
-        ), f"Expected 26 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
+        assert len(API_EXPECTED_PARAMETERS) == 26, (
+            f"Expected 26 API parameters, got {len(API_EXPECTED_PARAMETERS)}: {sorted(API_EXPECTED_PARAMETERS)}"
+        )
 
     def test_cli_has_all_parameters(self):
         """Verify CLI exposes all 19 expected query parameters (updated from 18 after adding time_range_all)."""
@@ -303,9 +303,9 @@ class TestQueryParameterParity:
         mcp_only = mcp_params - rest_params - mcp_only_params
 
         assert not rest_only, f"Parameters only in REST: {sorted(rest_only)}"
-        assert (
-            not mcp_only
-        ), f"Parameters only in MCP (excluding documented MCP-only): {sorted(mcp_only)}"
+        assert not mcp_only, (
+            f"Parameters only in MCP (excluding documented MCP-only): {sorted(mcp_only)}"
+        )
 
     def test_core_parameters_exist(self):
         """Verify core query parameters exist in all interfaces."""
@@ -340,15 +340,15 @@ class TestQueryParameterParity:
         missing_rest = phase1_params - rest_params
         missing_mcp = phase1_params - mcp_params
 
-        assert (
-            not missing_cli
-        ), f"Phase 1 parameters missing from CLI: {sorted(missing_cli)}"
-        assert (
-            not missing_rest
-        ), f"Phase 1 parameters missing from REST: {sorted(missing_rest)}"
-        assert (
-            not missing_mcp
-        ), f"Phase 1 parameters missing from MCP: {sorted(missing_mcp)}"
+        assert not missing_cli, (
+            f"Phase 1 parameters missing from CLI: {sorted(missing_cli)}"
+        )
+        assert not missing_rest, (
+            f"Phase 1 parameters missing from REST: {sorted(missing_rest)}"
+        )
+        assert not missing_mcp, (
+            f"Phase 1 parameters missing from MCP: {sorted(missing_mcp)}"
+        )
 
     def test_phase2_fts_parameters_exist(self):
         """Verify Phase 2 FTS parameters exist in all interfaces (Story #503)."""
@@ -362,15 +362,15 @@ class TestQueryParameterParity:
         missing_rest = phase2_params - rest_params
         missing_mcp = phase2_params - mcp_params
 
-        assert (
-            not missing_cli
-        ), f"Phase 2 FTS parameters missing from CLI: {sorted(missing_cli)}"
-        assert (
-            not missing_rest
-        ), f"Phase 2 FTS parameters missing from REST: {sorted(missing_rest)}"
-        assert (
-            not missing_mcp
-        ), f"Phase 2 FTS parameters missing from MCP: {sorted(missing_mcp)}"
+        assert not missing_cli, (
+            f"Phase 2 FTS parameters missing from CLI: {sorted(missing_cli)}"
+        )
+        assert not missing_rest, (
+            f"Phase 2 FTS parameters missing from REST: {sorted(missing_rest)}"
+        )
+        assert not missing_mcp, (
+            f"Phase 2 FTS parameters missing from MCP: {sorted(missing_mcp)}"
+        )
 
     def test_phase3_temporal_filtering_parameters_exist(self):
         """Verify Phase 3 temporal filtering parameters exist in all interfaces (Story #503)."""
@@ -384,15 +384,15 @@ class TestQueryParameterParity:
         missing_rest = phase3_params - rest_params
         missing_mcp = phase3_params - mcp_params
 
-        assert (
-            not missing_cli
-        ), f"Phase 3 temporal parameters missing from CLI: {sorted(missing_cli)}"
-        assert (
-            not missing_rest
-        ), f"Phase 3 temporal parameters missing from REST: {sorted(missing_rest)}"
-        assert (
-            not missing_mcp
-        ), f"Phase 3 temporal parameters missing from MCP: {sorted(missing_mcp)}"
+        assert not missing_cli, (
+            f"Phase 3 temporal parameters missing from CLI: {sorted(missing_cli)}"
+        )
+        assert not missing_rest, (
+            f"Phase 3 temporal parameters missing from REST: {sorted(missing_rest)}"
+        )
+        assert not missing_mcp, (
+            f"Phase 3 temporal parameters missing from MCP: {sorted(missing_mcp)}"
+        )
 
     def test_temporal_parameters_exist(self):
         """Verify temporal query parameters exist in interfaces (Story #446)."""
@@ -416,15 +416,15 @@ class TestQueryParameterParity:
         missing_rest = all_temporal_params - rest_params
         missing_mcp = all_temporal_params - mcp_params
 
-        assert (
-            not missing_cli
-        ), f"Temporal parameters missing from CLI: {sorted(missing_cli)}"
-        assert (
-            not missing_rest
-        ), f"Temporal parameters missing from REST: {sorted(missing_rest)}"
-        assert (
-            not missing_mcp
-        ), f"Temporal parameters missing from MCP: {sorted(missing_mcp)}"
+        assert not missing_cli, (
+            f"Temporal parameters missing from CLI: {sorted(missing_cli)}"
+        )
+        assert not missing_rest, (
+            f"Temporal parameters missing from REST: {sorted(missing_rest)}"
+        )
+        assert not missing_mcp, (
+            f"Temporal parameters missing from MCP: {sorted(missing_mcp)}"
+        )
 
     def test_language_path_filters_exist(self):
         """Verify language and path filtering parameters exist in all interfaces."""
@@ -438,15 +438,15 @@ class TestQueryParameterParity:
         missing_rest = filter_params - rest_params
         missing_mcp = filter_params - mcp_params
 
-        assert (
-            not missing_cli
-        ), f"Filter parameters missing from CLI: {sorted(missing_cli)}"
-        assert (
-            not missing_rest
-        ), f"Filter parameters missing from REST: {sorted(missing_rest)}"
-        assert (
-            not missing_mcp
-        ), f"Filter parameters missing from MCP: {sorted(missing_mcp)}"
+        assert not missing_cli, (
+            f"Filter parameters missing from CLI: {sorted(missing_cli)}"
+        )
+        assert not missing_rest, (
+            f"Filter parameters missing from REST: {sorted(missing_rest)}"
+        )
+        assert not missing_mcp, (
+            f"Filter parameters missing from MCP: {sorted(missing_mcp)}"
+        )
 
     def test_search_mode_parameters_exist(self):
         """Verify search mode selection parameters exist in REST and MCP."""

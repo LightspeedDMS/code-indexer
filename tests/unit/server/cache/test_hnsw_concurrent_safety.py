@@ -75,9 +75,9 @@ class TestHNSWCacheThreadSafety:
         for t in threads:
             t.join(timeout=10)
 
-        assert (
-            len(exceptions) == 0
-        ), f"Concurrent queries raised exceptions: {exceptions}"
+        assert len(exceptions) == 0, (
+            f"Concurrent queries raised exceptions: {exceptions}"
+        )
         assert len(results) == 10, f"Expected 10 results, got {len(results)}"
 
         # All results should be identical cached objects
@@ -95,9 +95,9 @@ class TestHNSWCacheThreadSafety:
         # and each find the cached entry (incrementing hit_count).
         assert stats.miss_count >= 1, "Should have at least 1 miss (loader thread)"
         assert stats.miss_count <= 10, "miss_count cannot exceed number of threads"
-        assert (
-            stats.hit_count == 9
-        ), "Should have 9 hits (waiters that looped back to cache)"
+        assert stats.hit_count == 9, (
+            "Should have 9 hits (waiters that looped back to cache)"
+        )
 
     def test_concurrent_different_repos(self, tmp_path: Path) -> None:
         """
@@ -137,19 +137,19 @@ class TestHNSWCacheThreadSafety:
         for t in threads:
             t.join(timeout=30)
 
-        assert (
-            len(exceptions) == 0
-        ), f"Concurrent queries raised exceptions: {exceptions}"
+        assert len(exceptions) == 0, (
+            f"Concurrent queries raised exceptions: {exceptions}"
+        )
 
         for repo_name, repo_results in results.items():
-            assert (
-                len(repo_results) == queries_per_repo
-            ), f"Repo {repo_name}: expected {queries_per_repo}, got {len(repo_results)}"
+            assert len(repo_results) == queries_per_repo, (
+                f"Repo {repo_name}: expected {queries_per_repo}, got {len(repo_results)}"
+            )
             first_index = repo_results[0][0]
             for idx, (index, _) in enumerate(repo_results[1:]):
-                assert (
-                    index is first_index
-                ), f"Repo {repo_name}: result {idx + 1} has different index object"
+                assert index is first_index, (
+                    f"Repo {repo_name}: result {idx + 1} has different index object"
+                )
 
         assert cache.get_stats().cached_repositories == num_repos
 

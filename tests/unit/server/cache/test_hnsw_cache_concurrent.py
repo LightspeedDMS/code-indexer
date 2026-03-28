@@ -289,9 +289,9 @@ class TestHNSWCacheLoaderFailure:
 
         # Cache must NOT contain a stale entry
         normalized_key = str(Path(key).resolve())
-        assert (
-            normalized_key not in cache._cache
-        ), "Failed load must not leave a cache entry"
+        assert normalized_key not in cache._cache, (
+            "Failed load must not leave a cache entry"
+        )
 
     def test_loader_failure_waiter_retries(self, tmp_path: Path) -> None:
         """
@@ -354,20 +354,20 @@ class TestHNSWCacheLoaderFailure:
         t2.join(timeout=5.0)
 
         # Thread-1 must have received the error
-        assert (
-            results_errors[0] is not None
-        ), "Thread-1 should have received the IOError"
+        assert results_errors[0] is not None, (
+            "Thread-1 should have received the IOError"
+        )
         assert isinstance(results_errors[0], IOError)
 
         # Thread-2 should have succeeded (became new loader after thread-1 failed)
-        assert (
-            results_errors[1] is None
-        ), f"Thread-2 should not have raised: {results_errors[1]}"
+        assert results_errors[1] is None, (
+            f"Thread-2 should not have raised: {results_errors[1]}"
+        )
         assert results_values[1] is not None, "Thread-2 should have gotten a result"
         result_index, result_mapping = results_values[1]
-        assert (
-            result_index is mock_index
-        ), "Thread-2 must get the mock index from its own load"
+        assert result_index is mock_index, (
+            "Thread-2 must get the mock index from its own load"
+        )
 
     def test_loader_failure_no_stale_sentinel(self, tmp_path: Path) -> None:
         """
@@ -389,9 +389,9 @@ class TestHNSWCacheLoaderFailure:
 
         # Verify no stale sentinel
         loading_dict = getattr(cache, "_loading", {})
-        assert (
-            normalized_key not in loading_dict
-        ), f"Stale sentinel found in _loading after failure: {loading_dict}"
+        assert normalized_key not in loading_dict, (
+            f"Stale sentinel found in _loading after failure: {loading_dict}"
+        )
 
         # Second attempt: succeed (must work as fresh first-loader, not waiter)
         mock_index = MagicMock()
@@ -603,6 +603,6 @@ class TestHNSWCacheEdgeCases:
         # Loader called once
         assert load_count == 1, f"Loader called {load_count} times, expected 1"
         # All got same index
-        assert all(
-            r[0] is mock_index for r in results
-        ), "All threads must get same index"
+        assert all(r[0] is mock_index for r in results), (
+            "All threads must get same index"
+        )

@@ -75,6 +75,6 @@ class TestBlobHashField:
         assert hasattr(diff, "blob_hash"), "DiffInfo should have blob_hash attribute"
 
         # The blob_hash should be populated with the actual git blob hash
-        assert (
-            diff.blob_hash == expected_blob_hash
-        ), f"blob_hash should be '{expected_blob_hash}' but got '{diff.blob_hash}'"
+        assert diff.blob_hash == expected_blob_hash, (
+            f"blob_hash should be '{expected_blob_hash}' but got '{diff.blob_hash}'"
+        )

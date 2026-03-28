@@ -77,9 +77,9 @@ class TestCacheHitSkipsAPI:
         )
 
         assert result.success, f"Expected success but got error: {result.error}"
-        assert (
-            len(vector_manager.batch_calls) == 0
-        ), f"Expected 0 batch API calls for cache hit, got {len(vector_manager.batch_calls)}"
+        assert len(vector_manager.batch_calls) == 0, (
+            f"Expected 0 batch API calls for cache hit, got {len(vector_manager.batch_calls)}"
+        )
 
     def test_cache_hit_stores_existing_vector(self, tmp_path):
         """Cache hit must store the existing vector, not generate a new one."""
@@ -126,13 +126,13 @@ class TestCacheHitSkipsAPI:
         )
 
         assert result.success
-        assert (
-            len(fake_client.upserted_points) > 0
-        ), "Must have upserted at least one point"
+        assert len(fake_client.upserted_points) > 0, (
+            "Must have upserted at least one point"
+        )
         upserted = fake_client.upserted_points[0]
-        assert (
-            upserted["vector"] == existing_vector
-        ), "Cache hit must reuse the stored vector, not generate a new one"
+        assert upserted["vector"] == existing_vector, (
+            "Cache hit must reuse the stored vector, not generate a new one"
+        )
 
     def test_cache_hit_result_is_success(self, tmp_path):
         """Cache hit processing must return a successful FileProcessingResult."""
@@ -228,9 +228,9 @@ class TestCacheMissCallsAPI:
         )
 
         assert result.success, f"Processing failed: {result.error}"
-        assert (
-            len(vector_manager.batch_calls) > 0
-        ), "Cache miss must trigger at least one embedding API call"
+        assert len(vector_manager.batch_calls) > 0, (
+            "Cache miss must trigger at least one embedding API call"
+        )
         all_sent = [t for batch in vector_manager.batch_calls for t in batch]
         assert new_text in all_sent, "New (changed) text must be sent to the API"
 
@@ -271,9 +271,9 @@ class TestCacheMissCallsAPI:
         )
 
         assert result.success
-        assert (
-            len(vector_manager.batch_calls) > 0
-        ), "First-time indexing must always call the embedding API"
+        assert len(vector_manager.batch_calls) > 0, (
+            "First-time indexing must always call the embedding API"
+        )
 
 
 class TestMixedCacheAndEmbedding:
@@ -342,9 +342,9 @@ class TestMixedCacheAndEmbedding:
 
         all_sent = [t for batch in vector_manager.batch_calls for t in batch]
         assert changed_text in all_sent, "Changed chunk must be embedded via API"
-        assert (
-            unchanged_text not in all_sent
-        ), "Unchanged chunk must NOT be re-embedded (cache hit)"
+        assert unchanged_text not in all_sent, (
+            "Unchanged chunk must NOT be re-embedded (cache hit)"
+        )
 
     def test_mixed_both_points_upserted(self, tmp_path):
         """Both cached and newly-embedded points must be written to the store."""

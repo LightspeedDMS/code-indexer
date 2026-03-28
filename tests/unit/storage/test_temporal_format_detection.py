@@ -64,17 +64,17 @@ class TestTemporalFormatDetection:
             # Then: Error message should contain clear instructions
             error_message = str(exc_info.value)
 
-            assert (
-                "Legacy temporal index format (v1) detected" in error_message
-            ), "Error should mention v1 format detection"
+            assert "Legacy temporal index format (v1) detected" in error_message, (
+                "Error should mention v1 format detection"
+            )
 
-            assert (
-                "cidx index --index-commits --reconcile" in error_message
-            ), "Error should provide re-index command"
+            assert "cidx index --index-commits --reconcile" in error_message, (
+                "Error should provide re-index command"
+            )
 
-            assert (
-                str(collection_path) in error_message
-            ), "Error should include collection path for debugging"
+            assert str(collection_path) in error_message, (
+                "Error should include collection path for debugging"
+            )
 
     def test_handle_v2_format_does_not_raise_error(self):
         """AC4: V2 format detection should not raise error."""
@@ -155,8 +155,8 @@ class TestTemporalFormatDetection:
                 expected_indexes = {"idx_point_id", "idx_commit_hash", "idx_file_path"}
                 missing_indexes = expected_indexes - indexes
 
-                assert (
-                    not missing_indexes
-                ), f"Missing indexes: {missing_indexes}. Found: {indexes}"
+                assert not missing_indexes, (
+                    f"Missing indexes: {missing_indexes}. Found: {indexes}"
+                )
             finally:
                 conn.close()

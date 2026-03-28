@@ -199,9 +199,9 @@ class TestTemporalQueryStory21E2E:
 
         # If both types are present, commit messages should come first
         if commit_msg_pos > -1 and file_chunk_pos > -1:
-            assert (
-                commit_msg_pos < file_chunk_pos
-            ), "Commit messages should be displayed before file chunks"
+            assert commit_msg_pos < file_chunk_pos, (
+                "Commit messages should be displayed before file chunks"
+            )
 
     @pytest.mark.skip(reason="E2E test times out on re-indexing (>180s)")
     def test_temporal_query_no_chunk_text_in_payload(self):

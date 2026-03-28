@@ -274,15 +274,15 @@ class TestMultiplePathFilters:
                     assert response.status_code == 200
 
                     # Verify search was called
-                    assert (
-                        mock_tantivy_instance.search.called
-                    ), "Tantivy search should have been called"
+                    assert mock_tantivy_instance.search.called, (
+                        "Tantivy search should have been called"
+                    )
 
                     call_kwargs = mock_tantivy_instance.search.call_args[1]
                     # This will FAIL until we wire the normalization
-                    assert (
-                        "path_filters" in call_kwargs
-                    ), f"path_filters not in kwargs: {call_kwargs.keys()}"
+                    assert "path_filters" in call_kwargs, (
+                        f"path_filters not in kwargs: {call_kwargs.keys()}"
+                    )
                     assert call_kwargs["path_filters"] == ["*/src/*", "*/lib/*"]
 
         finally:

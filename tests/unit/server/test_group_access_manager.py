@@ -80,9 +80,9 @@ class TestGroupAccessManagerBootstrap:
         manager = GroupAccessManager(temp_db_path)
 
         for group in manager.get_all_groups():
-            assert (
-                group.is_default is True
-            ), f"Group {group.name} should have is_default=TRUE"
+            assert group.is_default is True, (
+                f"Group {group.name} should have is_default=TRUE"
+            )
 
     def test_default_groups_have_unique_integer_ids(self, temp_db_path):
         """Test that each default group has a unique integer ID."""
@@ -411,9 +411,9 @@ class TestIdempotentBootstrap:
 
         # Should have no error logs
         error_logs = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert (
-            len(error_logs) == 0
-        ), f"Unexpected errors during restart: {[r.message for r in error_logs]}"
+        assert len(error_logs) == 0, (
+            f"Unexpected errors during restart: {[r.message for r in error_logs]}"
+        )
 
 
 class TestGroupCRUDOperations:

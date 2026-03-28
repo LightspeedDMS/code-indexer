@@ -15,9 +15,9 @@ class TestAdminJobsStatsCommand:
     def test_admin_jobs_stats_command_exists(self):
         """Test that the stats command exists under admin jobs."""
         # Check that 'stats' is registered as a command under admin_jobs_group
-        assert (
-            "stats" in admin_jobs_group.commands
-        ), f"stats not found in commands: {list(admin_jobs_group.commands.keys())}"
+        assert "stats" in admin_jobs_group.commands, (
+            f"stats not found in commands: {list(admin_jobs_group.commands.keys())}"
+        )
 
     @patch("requests.get")
     def test_stats_basic_operation(self, mock_get):

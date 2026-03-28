@@ -55,9 +55,9 @@ class TestNegationIndicatorsRemoved:
         """AC7: NEGATION_INDICATORS must not be importable from dependency_map_analyzer."""
         import code_indexer.global_repos.dependency_map_analyzer as mod
 
-        assert not hasattr(
-            mod, "NEGATION_INDICATORS"
-        ), "NEGATION_INDICATORS constant must be removed from dependency_map_analyzer module"
+        assert not hasattr(mod, "NEGATION_INDICATORS"), (
+            "NEGATION_INDICATORS constant must be removed from dependency_map_analyzer module"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,9 +266,9 @@ class TestDeltaMergePromptSchema:
     def test_self_correction_references_table_format(self, tmp_path):
         """AC3: Delta merge self-correction rules reference table format."""
         prompt = _build_delta_merge_prompt(tmp_path)
-        assert (
-            "table" in prompt.lower()
-        ), "Delta merge self-correction rules must reference table format"
+        assert "table" in prompt.lower(), (
+            "Delta merge self-correction rules must reference table format"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

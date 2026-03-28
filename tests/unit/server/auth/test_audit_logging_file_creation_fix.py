@@ -193,9 +193,9 @@ class TestAuditLoggingFileCreationFix:
         )
 
         # Verify custom path is used
-        assert (
-            custom_log_path.exists()
-        ), f"Custom audit log should exist at {custom_log_path}"
+        assert custom_log_path.exists(), (
+            f"Custom audit log should exist at {custom_log_path}"
+        )
 
         # Verify content
         log_content = custom_log_path.read_text()
@@ -291,30 +291,30 @@ class TestAuditLoggingFileCreationFix:
             handler.flush()
 
         # Verify all operations are logged
-        assert (
-            coverage_log_path.exists()
-        ), "Audit log file should exist after operations"
+        assert coverage_log_path.exists(), (
+            "Audit log file should exist after operations"
+        )
         log_content = coverage_log_path.read_text()
 
         # Should contain success logging
-        assert (
-            "TOKEN_REFRESH_SUCCESS" in log_content
-        ), "Log should contain successful refresh operations"
+        assert "TOKEN_REFRESH_SUCCESS" in log_content, (
+            "Log should contain successful refresh operations"
+        )
 
         # Should contain failure logging
-        assert (
-            "TOKEN_REFRESH_FAILURE" in log_content
-        ), "Log should contain failed refresh operations"
+        assert "TOKEN_REFRESH_FAILURE" in log_content, (
+            "Log should contain failed refresh operations"
+        )
 
         # Should contain rate limiting
-        assert (
-            "RATE_LIMIT" in log_content
-        ), "Log should contain rate limiting operations"
+        assert "RATE_LIMIT" in log_content, (
+            "Log should contain rate limiting operations"
+        )
 
         # Should contain security incidents
-        assert (
-            "SECURITY_INCIDENT" in log_content
-        ), "Log should contain security incident operations"
+        assert "SECURITY_INCIDENT" in log_content, (
+            "Log should contain security incident operations"
+        )
 
         # Should contain rate limiting
         assert any(
@@ -355,9 +355,9 @@ class TestAuditLoggingFileCreationFix:
         # Check contents are separate
         custom_content = custom_log_path.read_text()
         assert "custom_user" in custom_content, "Custom log should contain custom user"
-        assert (
-            "global_user" not in custom_content
-        ), "Custom log should not contain global user"
+        assert "global_user" not in custom_content, (
+            "Custom log should not contain global user"
+        )
 
         # Verify the global singleton still works at its default location
         global_default_path = Path.home() / ".cidx-server" / "password_audit.log"

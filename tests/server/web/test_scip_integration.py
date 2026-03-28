@@ -67,9 +67,9 @@ class TestSCIPIndexDetection:
 
             # Verify SCIP badge is present in response
             text_lower = response.text.lower()
-            assert (
-                "scip" in text_lower
-            ), "Response should contain 'scip' indicator when SCIP index exists"
+            assert "scip" in text_lower, (
+                "Response should contain 'scip' indicator when SCIP index exists"
+            )
 
         finally:
             # Cleanup
@@ -119,9 +119,9 @@ class TestSCIPQueryViaWebUI:
             / "test-fixtures"
             / "scip-python-mock"
         )
-        assert (
-            test_fixture_path.exists()
-        ), f"Test fixture not found: {test_fixture_path}"
+        assert test_fixture_path.exists(), (
+            f"Test fixture not found: {test_fixture_path}"
+        )
 
         scip_file = test_fixture_path / ".code-indexer" / "scip" / "index.scip"
         assert scip_file.exists(), f"SCIP index not found: {scip_file}"

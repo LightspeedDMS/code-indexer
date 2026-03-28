@@ -1123,9 +1123,9 @@ class TestDependencyMapServicePublicAccessors:
             DependencyMapService,
         )
 
-        assert hasattr(
-            DependencyMapService, "get_activated_repos"
-        ), "DependencyMapService must have a public get_activated_repos() method"
+        assert hasattr(DependencyMapService, "get_activated_repos"), (
+            "DependencyMapService must have a public get_activated_repos() method"
+        )
 
     def test_golden_repos_dir_public_property_exists(self):
         """DependencyMapService.golden_repos_dir must be a public property."""
@@ -1133,9 +1133,9 @@ class TestDependencyMapServicePublicAccessors:
             DependencyMapService,
         )
 
-        assert hasattr(
-            DependencyMapService, "golden_repos_dir"
-        ), "DependencyMapService must have a public golden_repos_dir property"
+        assert hasattr(DependencyMapService, "golden_repos_dir"), (
+            "DependencyMapService must have a public golden_repos_dir property"
+        )
 
     def test_get_activated_repos_delegates_to_private(self):
         """get_activated_repos() returns same result as _get_activated_repos()."""

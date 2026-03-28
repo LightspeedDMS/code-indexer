@@ -84,9 +84,9 @@ class TestTantivyLimitZero:
         for result in results:
             snippet = result.get("snippet", "")
             # With limit=0, snippets should be minimal/empty
-            assert (
-                snippet == "" or len(snippet.split("\n")) <= 1
-            ), f"Expected minimal snippet for limit=0, got: {snippet}"
+            assert snippet == "" or len(snippet.split("\n")) <= 1, (
+                f"Expected minimal snippet for limit=0, got: {snippet}"
+            )
 
     def test_limit_zero_minimal_output_format(self, populated_index):
         """Test that limit=0 results have minimal fields (grep-like)."""
@@ -116,9 +116,7 @@ class TestTantivyLimitZero:
         # Create 200 documents
         for i in range(200):
             content = (
-                f"public class Test{i} {{\n"
-                f"    @Test public void testMethod() {{}}\n"
-                f"}}"
+                f"public class Test{i} {{\n    @Test public void testMethod() {{}}\n}}"
             )
             doc = {
                 "path": f"src/test/Test{i}.java",

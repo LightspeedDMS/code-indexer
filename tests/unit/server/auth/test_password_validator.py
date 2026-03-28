@@ -30,9 +30,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in valid_passwords:
-            assert validate_password_complexity(
-                password
-            ), f"Password '{password}' should be valid"
+            assert validate_password_complexity(password), (
+                f"Password '{password}' should be valid"
+            )
 
     def test_passwords_too_short(self):
         """Test that passwords under 9 characters fail validation."""
@@ -46,9 +46,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in short_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid (too short)"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid (too short)"
+            )
 
     def test_passwords_missing_uppercase(self):
         """Test that passwords without uppercase letters fail validation."""
@@ -62,9 +62,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in no_uppercase_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid (no uppercase)"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid (no uppercase)"
+            )
 
     def test_passwords_missing_lowercase(self):
         """Test that passwords without lowercase letters fail validation."""
@@ -78,9 +78,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in no_lowercase_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid (no lowercase)"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid (no lowercase)"
+            )
 
     def test_passwords_missing_digits(self):
         """Test that passwords without digits fail validation."""
@@ -94,9 +94,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in no_digits_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid (no digits)"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid (no digits)"
+            )
 
     def test_passwords_missing_special_chars(self):
         """Test that passwords without special characters fail validation."""
@@ -110,9 +110,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in no_special_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid (no special chars)"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid (no special chars)"
+            )
 
     def test_edge_case_exactly_9_characters(self):
         """Test passwords that are exactly 9 characters."""
@@ -128,13 +128,13 @@ class TestValidatePasswordComplexity:
         ]
 
         for password, expected in exactly_9_char_passwords:
-            assert (
-                len(password) == 9
-            ), f"Test setup error: '{password}' is not exactly 9 characters"
+            assert len(password) == 9, (
+                f"Test setup error: '{password}' is not exactly 9 characters"
+            )
             actual = validate_password_complexity(password)
-            assert (
-                actual == expected
-            ), f"Password '{password}' validation result should be {expected}, got {actual}"
+            assert actual == expected, (
+                f"Password '{password}' validation result should be {expected}, got {actual}"
+            )
 
     def test_all_required_special_characters(self):
         """Test that all documented special characters are accepted."""
@@ -142,9 +142,9 @@ class TestValidatePasswordComplexity:
 
         for char in special_chars:
             password = f"ValidPass123{char}"
-            assert validate_password_complexity(
-                password
-            ), f"Password with special char '{char}' should be valid"
+            assert validate_password_complexity(password), (
+                f"Password with special char '{char}' should be valid"
+            )
 
     def test_multiple_failures(self):
         """Test passwords that fail multiple requirements."""
@@ -158,9 +158,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in multiple_failure_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid (multiple failures)"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid (multiple failures)"
+            )
 
     def test_empty_and_whitespace_passwords(self):
         """Test edge cases with empty or whitespace-only passwords."""
@@ -172,9 +172,9 @@ class TestValidatePasswordComplexity:
         ]
 
         for password in edge_case_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid"
+            )
 
     def test_unicode_and_international_characters(self):
         """Test passwords with unicode and international characters."""
@@ -193,9 +193,9 @@ class TestValidatePasswordComplexity:
 
         for password, expected in unicode_passwords:
             actual = validate_password_complexity(password)
-            assert (
-                actual == expected
-            ), f"Unicode password '{password}' validation should be {expected}, got {actual}"
+            assert actual == expected, (
+                f"Unicode password '{password}' validation should be {expected}, got {actual}"
+            )
 
 
 class TestGetPasswordRequirements:
@@ -312,9 +312,9 @@ class TestGetPasswordComplexityErrorMessage:
         # Should use clear language
         user_friendly_terms = ["must", "at least", "contain"]
         for term in user_friendly_terms:
-            assert (
-                term in message.lower()
-            ), f"Message should contain user-friendly term '{term}'"
+            assert term in message.lower(), (
+                f"Message should contain user-friendly term '{term}'"
+            )
 
 
 class TestPasswordValidatorIntegration:
@@ -327,9 +327,9 @@ class TestPasswordValidatorIntegration:
         # Create a password that meets all requirements from the spec
         test_password = "A" + "a" + "1" + "!" + "x" * (requirements["min_length"] - 4)
 
-        assert validate_password_complexity(
-            test_password
-        ), "Password built from requirements should be valid"
+        assert validate_password_complexity(test_password), (
+            "Password built from requirements should be valid"
+        )
 
     def test_error_message_matches_validation_logic(self):
         """Test that error message accurately describes validation logic."""
@@ -338,35 +338,35 @@ class TestPasswordValidatorIntegration:
 
         # Length requirement
         if "9 characters" in message:
-            assert not validate_password_complexity(
-                "Test123!"
-            ), "8 char password should fail"
-            assert validate_password_complexity(
-                "Test123!A"
-            ), "9 char password should pass"
+            assert not validate_password_complexity("Test123!"), (
+                "8 char password should fail"
+            )
+            assert validate_password_complexity("Test123!A"), (
+                "9 char password should pass"
+            )
 
         # Case requirements
         if "uppercase" in message:
-            assert not validate_password_complexity(
-                "nouppercasepass123!"
-            ), "No uppercase should fail"
+            assert not validate_password_complexity("nouppercasepass123!"), (
+                "No uppercase should fail"
+            )
 
         if "lowercase" in message:
-            assert not validate_password_complexity(
-                "NOLOWERCASEPASS123!"
-            ), "No lowercase should fail"
+            assert not validate_password_complexity("NOLOWERCASEPASS123!"), (
+                "No lowercase should fail"
+            )
 
         # Digit requirement
         if "digit" in message:
-            assert not validate_password_complexity(
-                "NoDigitsPass!"
-            ), "No digits should fail"
+            assert not validate_password_complexity("NoDigitsPass!"), (
+                "No digits should fail"
+            )
 
         # Special char requirement
         if "special character" in message:
-            assert not validate_password_complexity(
-                "NoSpecialChars123"
-            ), "No special chars should fail"
+            assert not validate_password_complexity("NoSpecialChars123"), (
+                "No special chars should fail"
+            )
 
     def test_comprehensive_password_scenarios(self):
         """Test comprehensive real-world password scenarios."""
@@ -395,6 +395,6 @@ class TestPasswordValidatorIntegration:
 
         for password, expected, description in test_scenarios:
             actual = validate_password_complexity(password)
-            assert (
-                actual == expected
-            ), f"{description}: Password '{password}' should be {expected}, got {actual}"
+            assert actual == expected, (
+                f"{description}: Password '{password}' should be {expected}, got {actual}"
+            )

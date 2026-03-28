@@ -77,9 +77,9 @@ class TestNonBlockingWorkSubmission:
         elapsed = time.time() - start
 
         # Should return in <10ms (well before callback completes)
-        assert (
-            elapsed < 0.01
-        ), f"submit_work took {elapsed*1000:.2f}ms (should be <10ms)"
+        assert elapsed < 0.01, (
+            f"submit_work took {elapsed * 1000:.2f}ms (should be <10ms)"
+        )
 
         # Wait for callback to complete
         callback_invoked.wait(timeout=2.0)

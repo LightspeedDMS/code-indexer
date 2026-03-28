@@ -39,9 +39,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify initialize is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.initialize
-        ), "initialize() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.initialize), (
+            "initialize() should be sync, not async"
+        )
 
     def test_store_is_sync_method(self, temp_db_path):
         """
@@ -60,9 +60,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify store is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.store
-        ), "store() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.store), (
+            "store() should be sync, not async"
+        )
 
     def test_store_with_key_is_sync_method(self, temp_db_path):
         """
@@ -81,9 +81,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify store_with_key is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.store_with_key
-        ), "store_with_key() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.store_with_key), (
+            "store_with_key() should be sync, not async"
+        )
 
     def test_has_key_is_sync_method(self, temp_db_path):
         """
@@ -102,9 +102,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify has_key is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.has_key
-        ), "has_key() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.has_key), (
+            "has_key() should be sync, not async"
+        )
 
     def test_retrieve_is_sync_method(self, temp_db_path):
         """
@@ -123,9 +123,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify retrieve is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.retrieve
-        ), "retrieve() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.retrieve), (
+            "retrieve() should be sync, not async"
+        )
 
     def test_truncate_result_is_sync_method(self, temp_db_path):
         """
@@ -144,9 +144,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify truncate_result is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.truncate_result
-        ), "truncate_result() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.truncate_result), (
+            "truncate_result() should be sync, not async"
+        )
 
     def test_cleanup_expired_is_sync_method(self, temp_db_path):
         """
@@ -165,9 +165,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify cleanup_expired is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.cleanup_expired
-        ), "cleanup_expired() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.cleanup_expired), (
+            "cleanup_expired() should be sync, not async"
+        )
 
     def test_close_is_sync_method(self, temp_db_path):
         """
@@ -186,9 +186,9 @@ class TestPayloadCacheSyncMethods:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Verify close is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            cache.close
-        ), "close() should be sync, not async"
+        assert not inspect.iscoroutinefunction(cache.close), (
+            "close() should be sync, not async"
+        )
 
 
 class TestPayloadCacheSyncBehavior:
@@ -349,7 +349,7 @@ class TestPayloadCacheSyncThreadSafety:
         import inspect
 
         source = inspect.getsource(cache_module)
-        assert (
-            "aiosqlite" not in source
-        ), "aiosqlite should not be used in sync implementation"
+        assert "aiosqlite" not in source, (
+            "aiosqlite should not be used in sync implementation"
+        )
         assert "sqlite3" in source, "sqlite3 should be used in sync implementation"

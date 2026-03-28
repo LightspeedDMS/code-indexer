@@ -56,9 +56,9 @@ class TestJWTSecretPersistence:
                 secret_key2 = jwt_manager2.secret_key
 
                 # Verify secret keys are the same
-                assert (
-                    secret_key1 == secret_key2
-                ), "JWT secret should persist across restarts"
+                assert secret_key1 == secret_key2, (
+                    "JWT secret should persist across restarts"
+                )
 
                 # Verify token from first instance works with second instance
                 payload = jwt_manager2.validate_token(token1)
@@ -78,9 +78,9 @@ class TestJWTSecretPersistence:
 
                 # File should be readable only by owner (600 permissions)
                 file_mode = secret_file.stat().st_mode & 0o777
-                assert (
-                    file_mode == 0o600
-                ), f"Expected 0o600 permissions, got {oct(file_mode)}"
+                assert file_mode == 0o600, (
+                    f"Expected 0o600 permissions, got {oct(file_mode)}"
+                )
 
     def test_jwt_secret_reused_if_file_exists(self):
         """Test that existing JWT secret file is reused rather than overwritten."""

@@ -117,9 +117,9 @@ class TestPathFilterBasics:
 
         assert len(results) > 0, "Should find matches in tests directory"
         for result in results:
-            assert "/tests/" in result["path"] or result["path"].startswith(
-                "tests/"
-            ), f"Expected path to contain '/tests/', got: {result['path']}"
+            assert "/tests/" in result["path"] or result["path"].startswith("tests/"), (
+                f"Expected path to contain '/tests/', got: {result['path']}"
+            )
 
     def test_path_filter_server_directory(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -137,9 +137,9 @@ class TestPathFilterBasics:
 
         assert len(results) > 0, "Should find matches in server directory"
         for result in results:
-            assert (
-                "/server/" in result["path"] or "server/" in result["path"]
-            ), f"Expected path to contain '/server/', got: {result['path']}"
+            assert "/server/" in result["path"] or "server/" in result["path"], (
+                f"Expected path to contain '/server/', got: {result['path']}"
+            )
 
     def test_path_filter_file_extension(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -157,9 +157,9 @@ class TestPathFilterBasics:
 
         assert len(results) > 0, "Should find matches in Python files"
         for result in results:
-            assert result["path"].endswith(
-                ".py"
-            ), f"Expected .py file, got: {result['path']}"
+            assert result["path"].endswith(".py"), (
+                f"Expected .py file, got: {result['path']}"
+            )
 
     def test_path_filter_no_match_returns_empty(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -175,9 +175,9 @@ class TestPathFilterBasics:
             query_text="test", path_filter="*/nonexistent/*", limit=50
         )
 
-        assert (
-            len(results) == 0
-        ), "Should return empty list for non-matching path filter"
+        assert len(results) == 0, (
+            "Should return empty list for non-matching path filter"
+        )
 
     def test_no_path_filter_returns_all_matches(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -221,9 +221,9 @@ class TestPathFilterWithOtherFeatures:
         # Fuzzy matching should find "test" despite typo
         assert len(results) >= 0  # May or may not find fuzzy matches
         for result in results:
-            assert "/tests/" in result["path"] or result["path"].startswith(
-                "tests/"
-            ), f"Expected path to contain '/tests/', got: {result['path']}"
+            assert "/tests/" in result["path"] or result["path"].startswith("tests/"), (
+                f"Expected path to contain '/tests/', got: {result['path']}"
+            )
 
     def test_path_filter_with_case_sensitive(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -245,9 +245,9 @@ class TestPathFilterWithOtherFeatures:
         # Case-sensitive search for "TEST" likely won't match lowercase "test"
         # But path filter should still be applied
         for result in results:
-            assert "/tests/" in result["path"] or result["path"].startswith(
-                "tests/"
-            ), f"Expected path to contain '/tests/', got: {result['path']}"
+            assert "/tests/" in result["path"] or result["path"].startswith("tests/"), (
+                f"Expected path to contain '/tests/', got: {result['path']}"
+            )
 
     def test_path_filter_with_language_filter(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -268,9 +268,9 @@ class TestPathFilterWithOtherFeatures:
 
         assert len(results) > 0, "Should find Python test files"
         for result in results:
-            assert "/tests/" in result["path"] or result["path"].startswith(
-                "tests/"
-            ), f"Expected path to contain '/tests/', got: {result['path']}"
+            assert "/tests/" in result["path"] or result["path"].startswith("tests/"), (
+                f"Expected path to contain '/tests/', got: {result['path']}"
+            )
             assert result["language"] in [
                 "py",
                 "pyw",
@@ -291,9 +291,9 @@ class TestPathFilterEdgeCases:
 
         # Should match src/utils/helpers.py
         for result in results:
-            assert (
-                "helpers.py" in result["path"]
-            ), f"Expected helpers.py in path, got: {result['path']}"
+            assert "helpers.py" in result["path"], (
+                f"Expected helpers.py in path, got: {result['path']}"
+            )
 
     def test_path_filter_root_level_files(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -307,9 +307,9 @@ class TestPathFilterEdgeCases:
 
         # Should match main.js but not files in subdirectories
         for result in results:
-            assert result["path"].endswith(
-                ".js"
-            ), f"Expected .js file, got: {result['path']}"
+            assert result["path"].endswith(".js"), (
+                f"Expected .js file, got: {result['path']}"
+            )
             # Note: fnmatch behavior for *.js may match files in any directory
             # This tests the current implementation behavior
 
@@ -323,9 +323,9 @@ class TestPathFilterEdgeCases:
         )
 
         # Results should not exceed limit
-        assert (
-            len(results) <= limit
-        ), f"Expected at most {limit} results, got {len(results)}"
+        assert len(results) <= limit, (
+            f"Expected at most {limit} results, got {len(results)}"
+        )
 
 
 class TestMultiplePathFilters:
@@ -352,9 +352,9 @@ class TestMultiplePathFilters:
                 "tests/"
             )
             matches_src = "/src/" in result["path"] or result["path"].startswith("src/")
-            assert (
-                matches_tests or matches_src
-            ), f"Expected path to match tests OR src, got: {result['path']}"
+            assert matches_tests or matches_src, (
+                f"Expected path to match tests OR src, got: {result['path']}"
+            )
 
     def test_three_path_filters(self, indexed_tantivy_manager: TantivyIndexManager):
         """
@@ -374,9 +374,9 @@ class TestMultiplePathFilters:
             matches_tests = "/tests/" in path or path.startswith("tests/")
             matches_src = "/src/" in path or path.startswith("src/")
             matches_js = path.endswith(".js")
-            assert (
-                matches_tests or matches_src or matches_js
-            ), f"Expected path to match one of three patterns, got: {path}"
+            assert matches_tests or matches_src or matches_js, (
+                f"Expected path to match one of three patterns, got: {path}"
+            )
 
     def test_multiple_path_filters_with_language(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -402,9 +402,9 @@ class TestMultiplePathFilters:
                 "tests/"
             )
             matches_src = "/src/" in result["path"] or result["path"].startswith("src/")
-            assert (
-                matches_tests or matches_src
-            ), f"Expected path to match tests OR src, got: {result['path']}"
+            assert matches_tests or matches_src, (
+                f"Expected path to match tests OR src, got: {result['path']}"
+            )
 
             # Must be Python
             assert result["language"] in [
@@ -429,9 +429,9 @@ class TestMultiplePathFilters:
 
         assert len(results) > 0, "Single path_filter should still work"
         for result in results:
-            assert "/tests/" in result["path"] or result["path"].startswith(
-                "tests/"
-            ), f"Expected path to contain '/tests/', got: {result['path']}"
+            assert "/tests/" in result["path"] or result["path"].startswith("tests/"), (
+                f"Expected path to contain '/tests/', got: {result['path']}"
+            )
 
     def test_empty_path_filters_returns_all(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -472,9 +472,9 @@ class TestMultiplePathFilters:
 
         # Combined should have at least as many as the max individual count
         max_individual = max(len(tests_results), len(src_results))
-        assert (
-            len(combined_results) >= max_individual
-        ), f"OR logic should return at least {max_individual} results, got {len(combined_results)}"
+        assert len(combined_results) >= max_individual, (
+            f"OR logic should return at least {max_individual} results, got {len(combined_results)}"
+        )
 
 
 class TestPathPatternMatcherIntegration:
@@ -497,9 +497,9 @@ class TestPathPatternMatcherIntegration:
         # Should match src/server/config.py and src/server/app.py
         assert len(results) > 0, "Should find matches in server directory at any depth"
         for result in results:
-            assert (
-                "server" in result["path"]
-            ), f"Expected 'server' in path, got: {result['path']}"
+            assert "server" in result["path"], (
+                f"Expected 'server' in path, got: {result['path']}"
+            )
 
     def test_double_star_prefix_pattern(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -518,9 +518,9 @@ class TestPathPatternMatcherIntegration:
         # Should match src/utils/helpers.py regardless of depth
         assert len(results) > 0, "Should find helpers.py at any depth"
         for result in results:
-            assert result["path"].endswith(
-                "helpers.py"
-            ), f"Expected path to end with helpers.py, got: {result['path']}"
+            assert result["path"].endswith("helpers.py"), (
+                f"Expected path to end with helpers.py, got: {result['path']}"
+            )
 
     def test_cross_platform_separator_normalization(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -543,9 +543,9 @@ class TestPathPatternMatcherIntegration:
         for result in results:
             # Normalize path for comparison
             normalized_path = result["path"].replace("\\", "/")
-            assert normalized_path.endswith(
-                "tests/test_auth.py"
-            ), f"Expected tests/test_auth.py, got: {result['path']}"
+            assert normalized_path.endswith("tests/test_auth.py"), (
+                f"Expected tests/test_auth.py, got: {result['path']}"
+            )
 
     def test_pattern_matching_consistency_with_semantic_search(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -567,9 +567,9 @@ class TestPathPatternMatcherIntegration:
         # Verify all results match using PathPatternMatcher directly
         matcher = PathPatternMatcher()
         for result in results:
-            assert matcher.matches_pattern(
-                result["path"], pattern
-            ), f"Path {result['path']} should match pattern {pattern} using PathPatternMatcher"
+            assert matcher.matches_pattern(result["path"], pattern), (
+                f"Path {result['path']} should match pattern {pattern} using PathPatternMatcher"
+            )
 
     def test_backward_compatibility_with_fnmatch_patterns(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -597,9 +597,9 @@ class TestPathPatternMatcherIntegration:
             if len(results) > 0:
                 # All results should match expected path pattern
                 for result in results:
-                    assert path_check(
-                        result["path"]
-                    ), f"Pattern {pattern} failed for path {result['path']}"
+                    assert path_check(result["path"]), (
+                        f"Pattern {pattern} failed for path {result['path']}"
+                    )
 
 
 class TestExcludePath:
@@ -639,12 +639,12 @@ class TestExcludePath:
         # Should find matches outside excluded directories
         for result in results:
             path = result["path"]
-            assert "/tests/" not in path and not path.startswith(
-                "tests/"
-            ), f"Expected no tests/ in path, got: {path}"
-            assert "/docs/" not in path and not path.startswith(
-                "docs/"
-            ), f"Expected no docs/ in path, got: {path}"
+            assert "/tests/" not in path and not path.startswith("tests/"), (
+                f"Expected no tests/ in path, got: {path}"
+            )
+            assert "/docs/" not in path and not path.startswith("docs/"), (
+                f"Expected no docs/ in path, got: {path}"
+            )
 
     def test_exclude_with_include_path_filters(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -666,9 +666,9 @@ class TestExcludePath:
         # Should have src files but not server files
         for result in results:
             path = result["path"]
-            assert "/src/" in path or path.startswith(
-                "src/"
-            ), f"Expected /src/ in path, got: {path}"
+            assert "/src/" in path or path.startswith("src/"), (
+                f"Expected /src/ in path, got: {path}"
+            )
             assert "/server/" not in path, f"Expected no /server/ in path, got: {path}"
 
     def test_exclusion_precedence_over_inclusion(
@@ -693,9 +693,9 @@ class TestExcludePath:
         for result in results:
             path = result["path"]
             assert path.endswith(".py"), f"Expected .py file, got: {path}"
-            assert "/tests/" not in path and not path.startswith(
-                "tests/"
-            ), f"Expected no tests/ in path (exclusion precedence), got: {path}"
+            assert "/tests/" not in path and not path.startswith("tests/"), (
+                f"Expected no tests/ in path (exclusion precedence), got: {path}"
+            )
 
     def test_exclude_with_language_filter(
         self, indexed_tantivy_manager: TantivyIndexManager
@@ -801,6 +801,6 @@ class TestExcludePath:
 
         # Should not have .md files
         for result in results:
-            assert not result["path"].endswith(
-                ".md"
-            ), f"Expected no .md files, got: {result['path']}"
+            assert not result["path"].endswith(".md"), (
+                f"Expected no .md files, got: {result['path']}"
+            )

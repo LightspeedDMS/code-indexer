@@ -182,12 +182,12 @@ from typing import Dict, List, Optional
 
 class DataProcessor{i}:
     """High-performance data processing service."""
-    
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.processed_items = []
         self.cache = {{}}
-    
+
     async def process_data(self, items: List[Dict]) -> List[Dict]:
         """Process data items with complex business logic."""
         results = []
@@ -202,7 +202,7 @@ class DataProcessor{i}:
                 print(f"Processing error: {{e}}")
                 continue
         return results
-    
+
     async def _transform_item(self, item: Dict) -> Dict:
         """Transform item with async operations."""
         await asyncio.sleep(0.001)  # Simulate async processing
@@ -212,7 +212,7 @@ class DataProcessor{i}:
             'timestamp': time.time(),
             'status': 'processed'
         }}
-    
+
     def _validate_result(self, result: Dict) -> bool:
         """Validate processing result."""
         required_fields = ['id', 'processed_data', 'timestamp']
@@ -238,48 +238,48 @@ class AsyncDataProcessor{i} extends EventEmitter {{
         this.cache = new Map();
         this.processedCount = 0;
     }}
-    
+
     async processBatch(dataItems, options = {{}}) {{
         const startTime = Date.now();
-        
+
         try {{
             const validatedItems = await this.validateBatchInput(dataItems);
             const results = await this.processWithConcurrency(validatedItems, options);
-            
+
             const processingTime = Date.now() - startTime;
             this.updateMetrics(results, processingTime);
-            
+
             this.emit('batchCompleted', {{
                 totalItems: dataItems.length,
                 successful: results.filter(r => r.status === 'success').length,
                 processingTime
             }});
-            
+
             return results;
-            
+
         }} catch (error) {{
             this.emit('batchError', error);
             throw new Error(`Batch processing failed: ${{error.message}}`);
         }}
     }}
-    
+
     async processItem(dataItem) {{
         const itemId = this.generateItemId(dataItem);
-        
+
         if (this.cache.has(itemId)) {{
             return this.cache.get(itemId);
         }}
-        
+
         try {{
             const result = await this.executeProcessingPipeline(dataItem);
-            
+
             if (result.status === 'success') {{
                 this.cache.set(itemId, result);
             }}
-            
+
             this.processedCount++;
             return result;
-            
+
         }} catch (error) {{
             return {{
                 itemId,
@@ -289,7 +289,7 @@ class AsyncDataProcessor{i} extends EventEmitter {{
             }};
         }}
     }}
-    
+
     async executeProcessingPipeline(dataItem) {{
         const pipeline = [
             this.validateStructure.bind(this),
@@ -297,13 +297,13 @@ class AsyncDataProcessor{i} extends EventEmitter {{
             this.applyBusinessRules.bind(this),
             this.enrichData.bind(this)
         ];
-        
+
         let currentData = {{ ...dataItem }};
-        
+
         for (const stage of pipeline) {{
             currentData = await stage(currentData);
         }}
-        
+
         return {{
             itemId: this.generateItemId(dataItem),
             status: 'success',
@@ -311,7 +311,7 @@ class AsyncDataProcessor{i} extends EventEmitter {{
             timestamp: new Date().toISOString()
         }};
     }}
-    
+
     generateItemId(item) {{
         return crypto.createHash('sha256').update(JSON.stringify(item)).digest('hex');
     }}
@@ -332,95 +332,95 @@ public class HighPerformanceProcessor{i} {{
     private final ExecutorService executor = Executors.newFixedThreadPool(8);
     private final AtomicLong processedCount = new AtomicLong(0);
     private final BlockingQueue<ProcessingTask> taskQueue = new LinkedBlockingQueue<>();
-    
+
     private static final int MAX_CACHE_SIZE = 10000;
     private static final long CACHE_EXPIRY_MS = 300000;
-    
+
     public List<ProcessedData> processDataBatch(List<RawData> rawDataList) {{
         if (rawDataList == null || rawDataList.isEmpty()) {{
             return Collections.emptyList();
         }}
-        
+
         List<RawData> validData = rawDataList.stream()
             .filter(this::validateRawData)
             .collect(Collectors.toList());
-        
+
         return validData.parallelStream()
             .map(this::processItemWithMetrics)
             .filter(Objects::nonNull)
             .collect(Collectors.toList());
     }}
-    
+
     private ProcessedData processItemWithMetrics(RawData rawData) {{
         long startTime = System.nanoTime();
-        
+
         try {{
             String cacheKey = generateCacheKey(rawData);
             ProcessedData cached = getCachedResult(cacheKey);
-            
+
             if (cached != null) {{
                 return cached;
             }}
-            
+
             ProcessedData result = executeProcessingPipeline(rawData);
-            
+
             if (result != null && result.isValid()) {{
                 cacheResult(cacheKey, result);
             }}
-            
+
             processedCount.incrementAndGet();
             return result;
-            
+
         }} catch (ProcessingException e) {{
             return createErrorResult(rawData, e);
         }}
     }}
-    
+
     private ProcessedData executeProcessingPipeline(RawData rawData) {{
         TransformedData transformed = transformRawData(rawData);
         ValidationResult validation = validateBusinessRules(transformed);
-        
+
         if (!validation.isValid()) {{
             throw new ProcessingException("Validation failed");
         }}
-        
+
         EnrichedData enriched = enrichTransformedData(transformed);
         return finalizeProcessedData(enriched);
     }}
-    
+
     private TransformedData transformRawData(RawData rawData) {{
         TransformedData transformed = new TransformedData();
         transformed.setId(rawData.getId());
         transformed.setName(normalizeString(rawData.getName()));
         transformed.setTimestamp(LocalDateTime.now());
-        
+
         return transformed;
     }}
-    
+
     private ValidationResult validateBusinessRules(TransformedData data) {{
         List<String> errors = new ArrayList<>();
-        
+
         if (data.getName() == null || data.getName().trim().isEmpty()) {{
             errors.add("Name is required");
         }}
-        
+
         return new ValidationResult(errors.isEmpty(), errors);
     }}
-    
+
     private EnrichedData enrichTransformedData(TransformedData transformed) {{
         EnrichedData enriched = new EnrichedData(transformed);
         enriched.setProcessingTimestamp(LocalDateTime.now());
         enriched.setProcessorVersion("2.1.0");
-        
+
         return enriched;
     }}
-    
+
     private ProcessedData finalizeProcessedData(EnrichedData enriched) {{
         ProcessedData result = new ProcessedData();
         result.setSourceData(enriched);
         result.setFinalTimestamp(LocalDateTime.now());
         result.setStatus(ProcessingStatus.COMPLETED);
-        
+
         return result;
     }}
 }}
@@ -451,7 +451,7 @@ class TypeSafeDataProcessor{i}<T = any> {{
     private cache: Map<string, ProcessingResult<T>>;
     private processingQueue: Array<T>;
     private activeProcessing: Set<string>;
-    
+
     constructor(config: Partial<DataProcessor{i}Config> = {{}}) {{
         this.config = {{
             maxConcurrency: 10,
@@ -460,25 +460,25 @@ class TypeSafeDataProcessor{i}<T = any> {{
             timeout: 30000,
             ...config
         }};
-        
+
         this.cache = new Map();
         this.processingQueue = [];
         this.activeProcessing = new Set();
     }}
-    
+
     async processBatch<U>(
-        items: T[], 
+        items: T[],
         transformer: (item: T) => Promise<U>
     ): Promise<ProcessingResult<U>[]> {{
         const startTime = Date.now();
-        
+
         try {{
             const validatedItems = await this.validateInput(items);
             const results = await this.processWithConcurrencyControl(
-                validatedItems, 
+                validatedItems,
                 transformer
             );
-            
+
             return results.map(result => ({{
                 ...result,
                 metadata: {{
@@ -488,34 +488,34 @@ class TypeSafeDataProcessor{i}<T = any> {{
                     processorId: `processor-{i}`
                 }}
             }}));
-            
+
         }} catch (error) {{
             throw new Error(`Batch processing failed: ${{error.message}}`);
         }}
     }}
-    
+
     async processItem<U>(
-        item: T, 
+        item: T,
         transformer: (item: T) => Promise<U>
     ): Promise<ProcessingResult<U>> {{
         const itemId = this.generateItemId(item);
-        
+
         if (this.cache.has(itemId)) {{
             return this.cache.get(itemId)! as ProcessingResult<U>;
         }}
-        
+
         if (this.activeProcessing.has(itemId)) {{
             throw new Error(`Item ${{itemId}} is already being processed`);
         }}
-        
+
         this.activeProcessing.add(itemId);
-        
+
         try {{
             const result = await this.executeWithTimeout(
                 () => transformer(item),
                 this.config.timeout
             );
-            
+
             const processedResult: ProcessingResult<U> = {{
                 success: true,
                 data: result,
@@ -525,10 +525,10 @@ class TypeSafeDataProcessor{i}<T = any> {{
                     processorId: `processor-{i}`
                 }}
             }};
-            
+
             this.cacheResult(itemId, processedResult);
             return processedResult;
-            
+
         }} catch (error) {{
             return {{
                 success: false,
@@ -543,18 +543,18 @@ class TypeSafeDataProcessor{i}<T = any> {{
             this.activeProcessing.delete(itemId);
         }}
     }}
-    
+
     private async validateInput<U>(items: U[]): Promise<U[]> {{
-        return items.filter(item => 
-            item != null && 
+        return items.filter(item =>
+            item != null &&
             typeof item === 'object'
         );
     }}
-    
+
     private generateItemId(item: T): string {{
         return Buffer.from(JSON.stringify(item)).toString('base64');
     }}
-    
+
     private cacheResult<U>(key: string, result: ProcessingResult<U>): void {{
         if (this.cache.size >= this.config.cacheSize) {{
             const firstKey = this.cache.keys().next().value;
@@ -770,15 +770,15 @@ class TestEpic4PerformanceValidation:
             )
 
             # Additional assertions for Story 6 requirements
-            assert (
-                speedup_factor >= 4.0
-            ), f"Branch changes speedup {speedup_factor:.1f}x < required 4.0x"
-            assert (
-                thread_utilization >= 0.8
-            ), f"Thread utilization {thread_utilization:.1%} < required 80%"
-            assert (
-                throughput_improvement >= 4.0
-            ), f"Throughput improvement {throughput_improvement:.1f}x < required 4.0x"
+            assert speedup_factor >= 4.0, (
+                f"Branch changes speedup {speedup_factor:.1f}x < required 4.0x"
+            )
+            assert thread_utilization >= 0.8, (
+                f"Thread utilization {thread_utilization:.1%} < required 80%"
+            )
+            assert throughput_improvement >= 4.0, (
+                f"Throughput improvement {throughput_improvement:.1f}x < required 4.0x"
+            )
 
             # Store benchmark for regression tracking
             framework.results_history.append(benchmark)
@@ -914,15 +914,15 @@ class TestEpic4PerformanceValidation:
             )
 
             # Additional assertions for Story 6 requirements
-            assert (
-                speedup_factor >= 4.0
-            ), f"Full index speedup {speedup_factor:.1f}x < required 4.0x"
-            assert (
-                thread_utilization >= 0.8
-            ), f"Thread utilization {thread_utilization:.1%} < required 80%"
-            assert (
-                throughput_improvement >= 4.0
-            ), f"Throughput improvement {throughput_improvement:.1f}x < required 4.0x"
+            assert speedup_factor >= 4.0, (
+                f"Full index speedup {speedup_factor:.1f}x < required 4.0x"
+            )
+            assert thread_utilization >= 0.8, (
+                f"Thread utilization {thread_utilization:.1%} < required 80%"
+            )
+            assert throughput_improvement >= 4.0, (
+                f"Throughput improvement {throughput_improvement:.1f}x < required 4.0x"
+            )
 
             # Store benchmark for regression tracking
             framework.results_history.append(benchmark)
@@ -1061,15 +1061,15 @@ class TestEpic4PerformanceValidation:
             )
 
             # Additional assertions for Story 6 requirements
-            assert (
-                speedup_factor >= 4.0
-            ), f"Incremental speedup {speedup_factor:.1f}x < required 4.0x"
-            assert (
-                thread_utilization >= 0.8
-            ), f"Thread utilization {thread_utilization:.1%} < required 80%"
-            assert (
-                throughput_improvement >= 4.0
-            ), f"Throughput improvement {throughput_improvement:.1f}x < required 4.0x"
+            assert speedup_factor >= 4.0, (
+                f"Incremental speedup {speedup_factor:.1f}x < required 4.0x"
+            )
+            assert thread_utilization >= 0.8, (
+                f"Thread utilization {thread_utilization:.1%} < required 80%"
+            )
+            assert throughput_improvement >= 4.0, (
+                f"Throughput improvement {throughput_improvement:.1f}x < required 4.0x"
+            )
 
             # Store benchmark for regression tracking
             framework.results_history.append(benchmark)
@@ -1181,26 +1181,26 @@ class TestEpic4PerformanceValidation:
             avg_utilization_rate = avg_concurrent_workers / 8.0
 
             # Validate 8-worker requirements
-            assert (
-                unique_worker_count >= 6
-            ), f"Too few unique workers: {unique_worker_count}/8 (expected ≥6)"
-            assert (
-                peak_concurrent_workers >= 6
-            ), f"Peak concurrency too low: {peak_concurrent_workers}/8 (expected ≥6)"
-            assert (
-                worker_utilization_rate >= 0.75
-            ), f"Worker utilization too low: {worker_utilization_rate:.1%} (expected ≥75%)"
-            assert (
-                avg_utilization_rate >= 0.5
-            ), f"Average utilization too low: {avg_utilization_rate:.1%} (expected ≥50%)"
+            assert unique_worker_count >= 6, (
+                f"Too few unique workers: {unique_worker_count}/8 (expected ≥6)"
+            )
+            assert peak_concurrent_workers >= 6, (
+                f"Peak concurrency too low: {peak_concurrent_workers}/8 (expected ≥6)"
+            )
+            assert worker_utilization_rate >= 0.75, (
+                f"Worker utilization too low: {worker_utilization_rate:.1%} (expected ≥75%)"
+            )
+            assert avg_utilization_rate >= 0.5, (
+                f"Average utilization too low: {avg_utilization_rate:.1%} (expected ≥50%)"
+            )
 
             # Validate processing effectiveness
-            assert (
-                result and result.files_processed > 0
-            ), "Processing should complete successfully"
-            assert (
-                framework.wall_time < len(test_files) * 0.01 / 4
-            ), "Should show parallelization benefit"
+            assert result and result.files_processed > 0, (
+                "Processing should complete successfully"
+            )
+            assert framework.wall_time < len(test_files) * 0.01 / 4, (
+                "Should show parallelization benefit"
+            )
 
             print("✅ Thread Utilization Validation:")
             print(f"   Unique workers used: {unique_worker_count}/8")
@@ -1294,9 +1294,9 @@ class TestEpic4PerformanceValidation:
             )
 
             # Validate hide operation results are equivalent
-            assert (
-                baseline_hide_result == optimized_hide_result
-            ), f"Hide operation results differ: baseline={baseline_hide_result} vs optimized={optimized_hide_result}"
+            assert baseline_hide_result == optimized_hide_result, (
+                f"Hide operation results differ: baseline={baseline_hide_result} vs optimized={optimized_hide_result}"
+            )
 
             # Test ensure visible operation consistency
             baseline_visible_result = (
@@ -1312,9 +1312,9 @@ class TestEpic4PerformanceValidation:
             )
 
             # Validate visible operation results are equivalent
-            assert (
-                baseline_visible_result == optimized_visible_result
-            ), f"Visible operation results differ: baseline={baseline_visible_result} vs optimized={optimized_visible_result}"
+            assert baseline_visible_result == optimized_visible_result, (
+                f"Visible operation results differ: baseline={baseline_visible_result} vs optimized={optimized_visible_result}"
+            )
 
             # Test batch update consistency (verify same calls made to Filesystem)
             baseline_calls = mock_filesystem_client._batch_update_points.call_count
@@ -1331,9 +1331,9 @@ class TestEpic4PerformanceValidation:
             optimized_calls = mock_filesystem_client._batch_update_points.call_count
 
             # Validate same number of database operations
-            assert (
-                baseline_calls == optimized_calls
-            ), f"Database operation count differs: baseline={baseline_calls} vs optimized={optimized_calls}"
+            assert baseline_calls == optimized_calls, (
+                f"Database operation count differs: baseline={baseline_calls} vs optimized={optimized_calls}"
+            )
 
             print("✅ Git-Awareness Functionality Preservation:")
             print(
@@ -1523,12 +1523,12 @@ class TestEpic4PerformanceValidation:
         )
 
         # Validate regression detection
-        assert regression_result[
-            "regression_detected"
-        ], "Should detect performance regression"
-        assert (
-            len(regression_result["regressions"]) >= 2
-        ), f"Should detect multiple regressions, got: {regression_result['regressions']}"
+        assert regression_result["regression_detected"], (
+            "Should detect performance regression"
+        )
+        assert len(regression_result["regressions"]) >= 2, (
+            f"Should detect multiple regressions, got: {regression_result['regressions']}"
+        )
 
         # Test non-regression scenario
         good_benchmark = PerformanceBenchmark(
@@ -1567,9 +1567,9 @@ class TestEpic4PerformanceValidation:
         )
 
         # Validate no false positives
-        assert not good_result[
-            "regression_detected"
-        ], f"Should not detect regression for good performance: {good_result}"
+        assert not good_result["regression_detected"], (
+            f"Should not detect regression for good performance: {good_result}"
+        )
 
         print("✅ Automated Performance Regression Detection:")
         print(

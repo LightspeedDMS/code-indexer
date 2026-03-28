@@ -1214,9 +1214,9 @@ class TantivyIndexManager:
 
             with self._lock:
                 # Delete old version if it exists using query-based deletion (idempotent)
-                assert (
-                    self._index is not None
-                ), "Index must be initialized when writer is initialized"
+                assert self._index is not None, (
+                    "Index must be initialized when writer is initialized"
+                )
                 delete_query = self._index.parse_query(file_path, ["path"])
                 self._writer.delete_documents_by_query(delete_query)
 
@@ -1255,9 +1255,9 @@ class TantivyIndexManager:
         try:
             with self._lock:
                 # Delete document using query-based deletion (idempotent)
-                assert (
-                    self._index is not None
-                ), "Index must be initialized when writer is initialized"
+                assert self._index is not None, (
+                    "Index must be initialized when writer is initialized"
+                )
                 delete_query = self._index.parse_query(file_path, ["path"])
                 self._writer.delete_documents_by_query(delete_query)
 

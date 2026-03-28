@@ -45,11 +45,11 @@ def test_display_file_chunk_match_uses_path_field():
 
         # ASSERT: Output should contain the correct file path, not "unknown"
         output = captured_output.getvalue()
-        assert (
-            "src/auth.py" in output
-        ), f"Expected 'src/auth.py' in output, got: {output}"
-        assert (
-            "unknown" not in output
-        ), f"Should not show 'unknown' when 'path' is present: {output}"
+        assert "src/auth.py" in output, (
+            f"Expected 'src/auth.py' in output, got: {output}"
+        )
+        assert "unknown" not in output, (
+            f"Should not show 'unknown' when 'path' is present: {output}"
+        )
     finally:
         sys.stdout = sys.__stdout__

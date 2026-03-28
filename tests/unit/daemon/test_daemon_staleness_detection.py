@@ -86,9 +86,9 @@ def test_daemon_query_includes_staleness_metadata(test_project, daemon_service):
 
     # File was modified after indexing, so should be stale
     assert staleness["is_stale"] is True, "Modified file should be marked as stale"
-    assert (
-        staleness["staleness_indicator"] != "🟢 Fresh"
-    ), "Modified file should not show fresh indicator"
+    assert staleness["staleness_indicator"] != "🟢 Fresh", (
+        "Modified file should not show fresh indicator"
+    )
 
 
 def test_daemon_fresh_files_show_green_indicator(test_project, daemon_service):
@@ -111,9 +111,9 @@ def test_daemon_fresh_files_show_green_indicator(test_project, daemon_service):
     staleness = result["staleness"]
 
     assert staleness["is_stale"] is False, "Unchanged file should not be stale"
-    assert (
-        staleness["staleness_indicator"] == "🟢 Fresh"
-    ), "Unchanged file should show green fresh indicator"
+    assert staleness["staleness_indicator"] == "🟢 Fresh", (
+        "Unchanged file should show green fresh indicator"
+    )
 
 
 def test_daemon_staleness_works_with_non_git_folders(tmp_path, daemon_service):
@@ -164,9 +164,9 @@ def test_daemon_staleness_works_with_non_git_folders(tmp_path, daemon_service):
     assert "staleness" in result
 
     staleness = result["staleness"]
-    assert (
-        staleness["is_stale"] is True
-    ), "Modified file should be stale even without git"
+    assert staleness["is_stale"] is True, (
+        "Modified file should be stale even without git"
+    )
     assert staleness["staleness_indicator"] != "🟢 Fresh"
 
 
@@ -207,6 +207,6 @@ def test_daemon_staleness_failure_doesnt_break_query(
     # If staleness exists, it's from cache before the patch
     # If it doesn't exist, that's the fallback behavior
     # Either way, the query succeeded
-    assert (
-        "payload" in result
-    ), "Query should return valid results even if staleness fails"
+    assert "payload" in result, (
+        "Query should return valid results even if staleness fails"
+    )

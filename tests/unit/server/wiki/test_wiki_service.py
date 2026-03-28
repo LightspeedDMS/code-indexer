@@ -50,12 +50,12 @@ class TestWikiServiceFrontMatter:
                 "builtins.__import__", side_effect=_import_raise_for_frontmatter
             ):
                 metadata, body = svc._strip_front_matter(content)
-            assert (
-                metadata == {}
-            ), "Expected empty metadata when frontmatter module is missing"
-            assert (
-                body == content
-            ), "Expected original content returned when frontmatter module is missing"
+            assert metadata == {}, (
+                "Expected empty metadata when frontmatter module is missing"
+            )
+            assert body == content, (
+                "Expected original content returned when frontmatter module is missing"
+            )
         finally:
             if saved is not None:
                 sys.modules["frontmatter"] = saved

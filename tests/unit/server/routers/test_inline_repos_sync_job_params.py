@@ -80,9 +80,9 @@ class TestSyncJobWrapperParamsKwarg:
             job = job_manager.jobs.get(job_id)
 
         # Job should still be in memory (failed jobs remain until retrieved)
-        assert (
-            job is not None
-        ), "Job should be in memory after failure (BackgroundJobManager keeps failed jobs)"
+        assert job is not None, (
+            "Job should be in memory after failure (BackgroundJobManager keeps failed jobs)"
+        )
         assert job.status.value == "failed", (
             f"Expected job status 'failed' due to TypeError from unexpected 'params' kwarg, "
             f"but got '{job.status.value}'"

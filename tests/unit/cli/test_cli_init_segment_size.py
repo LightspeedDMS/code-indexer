@@ -22,13 +22,13 @@ class TestCLIInitSegmentSize:
         )
 
         if expect_failure:
-            assert (
-                result.returncode != 0
-            ), f"Command should have failed: {' '.join(cmd)}"
+            assert result.returncode != 0, (
+                f"Command should have failed: {' '.join(cmd)}"
+            )
         else:
-            assert (
-                result.returncode == 0
-            ), f"Command failed: {result.stderr}\nStdout: {result.stdout}"
+            assert result.returncode == 0, (
+                f"Command failed: {result.stderr}\nStdout: {result.stdout}"
+            )
 
         return result
 

@@ -170,9 +170,9 @@ class TestCLIPathFilterBasics:
         lines = output.strip().split("\n")
         for line in lines:
             if line.strip() and not line.startswith("#"):  # Skip comments/headers
-                assert "tests/" in line or line.startswith(
-                    "tests/"
-                ), f"Expected tests/ in path, got: {line}"
+                assert "tests/" in line or line.startswith("tests/"), (
+                    f"Expected tests/ in path, got: {line}"
+                )
 
     def test_cli_path_filter_server_directory(self, sample_repo: Path):
         """
@@ -267,9 +267,9 @@ class TestCLIPathFilterCombinations:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "tests/" in line or line.startswith(
-                        "tests/"
-                    ), f"Expected tests/ in path, got: {line}"
+                    assert "tests/" in line or line.startswith("tests/"), (
+                        f"Expected tests/ in path, got: {line}"
+                    )
 
     def test_cli_path_filter_with_case_sensitive(self, sample_repo: Path):
         """
@@ -301,9 +301,9 @@ class TestCLIPathFilterCombinations:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "tests/" in line or line.startswith(
-                        "tests/"
-                    ), f"Expected tests/ in path, got: {line}"
+                    assert "tests/" in line or line.startswith("tests/"), (
+                        f"Expected tests/ in path, got: {line}"
+                    )
 
     def test_cli_path_filter_with_language(self, sample_repo: Path):
         """
@@ -337,9 +337,9 @@ class TestCLIPathFilterCombinations:
         lines = output.strip().split("\n")
         for line in lines:
             if line.strip() and not line.startswith("#"):
-                assert "tests/" in line or line.startswith(
-                    "tests/"
-                ), f"Expected tests/ in path, got: {line}"
+                assert "tests/" in line or line.startswith("tests/"), (
+                    f"Expected tests/ in path, got: {line}"
+                )
                 assert ".py" in line, f"Expected .py file, got: {line}"
 
 
@@ -448,9 +448,9 @@ class TestCLIMultiplePathFilters:
             if line.strip() and not line.startswith("#"):
                 matches_tests = "tests/" in line or line.startswith("tests/")
                 matches_src = "src/" in line or line.startswith("src/")
-                assert (
-                    matches_tests or matches_src
-                ), f"Expected path to match tests OR src, got: {line}"
+                assert matches_tests or matches_src, (
+                    f"Expected path to match tests OR src, got: {line}"
+                )
 
     def test_cli_three_path_filters(self, sample_repo: Path):
         """
@@ -489,9 +489,9 @@ class TestCLIMultiplePathFilters:
                 matches_tests = "tests/" in line or line.startswith("tests/")
                 matches_src = "src/" in line or line.startswith("src/")
                 matches_js = ".js" in line
-                assert (
-                    matches_tests or matches_src or matches_js
-                ), f"Expected path to match one of three patterns, got: {line}"
+                assert matches_tests or matches_src or matches_js, (
+                    f"Expected path to match one of three patterns, got: {line}"
+                )
 
     def test_cli_path_and_language_filters(self, sample_repo: Path):
         """
@@ -529,9 +529,9 @@ class TestCLIMultiplePathFilters:
             if line.strip() and not line.startswith("#"):
                 matches_tests = "tests/" in line or line.startswith("tests/")
                 matches_src = "src/" in line or line.startswith("src/")
-                assert (
-                    matches_tests or matches_src
-                ), f"Expected path to match tests OR src, got: {line}"
+                assert matches_tests or matches_src, (
+                    f"Expected path to match tests OR src, got: {line}"
+                )
                 assert ".py" in line, f"Expected Python file, got: {line}"
 
     def test_cli_backward_compat_single_filter(self, sample_repo: Path):
@@ -556,9 +556,9 @@ class TestCLIMultiplePathFilters:
         lines = output.strip().split("\n")
         for line in lines:
             if line.strip() and not line.startswith("#"):
-                assert "tests/" in line or line.startswith(
-                    "tests/"
-                ), f"Expected tests/ in path, got: {line}"
+                assert "tests/" in line or line.startswith("tests/"), (
+                    f"Expected tests/ in path, got: {line}"
+                )
 
     def test_cli_help_shows_multiple_filters_supported(self):
         """
@@ -679,9 +679,9 @@ class TestCLIPathPatternMatcherIntegration:
             if line.strip() and not line.startswith("#"):
                 # Normalize for comparison
                 normalized = line.replace("\\", "/")
-                assert (
-                    "tests/test_auth.py" in normalized
-                ), f"Expected tests/test_auth.py, got: {line}"
+                assert "tests/test_auth.py" in normalized, (
+                    f"Expected tests/test_auth.py, got: {line}"
+                )
 
 
 class TestCLIExcludePath:
@@ -716,9 +716,9 @@ class TestCLIExcludePath:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "tests/" not in line and not line.startswith(
-                        "tests/"
-                    ), f"Expected no tests/ in path, got: {line}"
+                    assert "tests/" not in line and not line.startswith("tests/"), (
+                        f"Expected no tests/ in path, got: {line}"
+                    )
 
     def test_cli_multiple_exclusions(self, sample_repo: Path):
         """
@@ -750,12 +750,12 @@ class TestCLIExcludePath:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "tests/" not in line and not line.startswith(
-                        "tests/"
-                    ), f"Expected no tests/ in path, got: {line}"
-                    assert "docs/" not in line and not line.startswith(
-                        "docs/"
-                    ), f"Expected no docs/ in path, got: {line}"
+                    assert "tests/" not in line and not line.startswith("tests/"), (
+                        f"Expected no tests/ in path, got: {line}"
+                    )
+                    assert "docs/" not in line and not line.startswith("docs/"), (
+                        f"Expected no docs/ in path, got: {line}"
+                    )
 
     def test_cli_include_and_exclude_combination(self, sample_repo: Path):
         """
@@ -787,12 +787,12 @@ class TestCLIExcludePath:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "src/" in line or line.startswith(
-                        "src/"
-                    ), f"Expected src/ in path, got: {line}"
-                    assert (
-                        "server/" not in line
-                    ), f"Expected no server/ in path (exclusion precedence), got: {line}"
+                    assert "src/" in line or line.startswith("src/"), (
+                        f"Expected src/ in path, got: {line}"
+                    )
+                    assert "server/" not in line, (
+                        f"Expected no server/ in path (exclusion precedence), got: {line}"
+                    )
 
     def test_cli_exclusion_precedence_over_inclusion(self, sample_repo: Path):
         """
@@ -841,9 +841,9 @@ class TestCLIExcludePath:
             for line in lines:
                 if line.strip() and not line.startswith("#"):
                     assert ".py" in line, f"Expected .py file, got: {line}"
-                    assert "tests/" not in line and not line.startswith(
-                        "tests/"
-                    ), f"Expected no tests/ (exclusion precedence), got: {line}"
+                    assert "tests/" not in line and not line.startswith("tests/"), (
+                        f"Expected no tests/ (exclusion precedence), got: {line}"
+                    )
 
     def test_cli_exclude_with_language_filter(self, sample_repo: Path):
         """
@@ -876,9 +876,9 @@ class TestCLIExcludePath:
             for line in lines:
                 if line.strip() and not line.startswith("#"):
                     assert ".py" in line, f"Expected Python file, got: {line}"
-                    assert "tests/" not in line and not line.startswith(
-                        "tests/"
-                    ), f"Expected no tests/ in path, got: {line}"
+                    assert "tests/" not in line and not line.startswith("tests/"), (
+                        f"Expected no tests/ in path, got: {line}"
+                    )
 
     def test_cli_exclude_with_fuzzy_search(self, sample_repo: Path):
         """
@@ -909,9 +909,9 @@ class TestCLIExcludePath:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "docs/" not in line and not line.startswith(
-                        "docs/"
-                    ), f"Expected no docs/ in path, got: {line}"
+                    assert "docs/" not in line and not line.startswith("docs/"), (
+                        f"Expected no docs/ in path, got: {line}"
+                    )
 
     def test_cli_exclude_with_case_sensitive(self, sample_repo: Path):
         """
@@ -942,9 +942,9 @@ class TestCLIExcludePath:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert "tests/" not in line and not line.startswith(
-                        "tests/"
-                    ), f"Expected no tests/ in path, got: {line}"
+                    assert "tests/" not in line and not line.startswith("tests/"), (
+                        f"Expected no tests/ in path, got: {line}"
+                    )
 
     def test_cli_exclude_file_extension(self, sample_repo: Path):
         """
@@ -964,9 +964,9 @@ class TestCLIExcludePath:
             lines = output.split("\n")
             for line in lines:
                 if line.strip() and not line.startswith("#"):
-                    assert not line.endswith(
-                        ".md"
-                    ), f"Expected no .md files, got: {line}"
+                    assert not line.endswith(".md"), (
+                        f"Expected no .md files, got: {line}"
+                    )
 
     def test_cli_help_shows_exclude_path(self):
         """Verify that --help displays the --exclude-path option."""
@@ -980,6 +980,6 @@ class TestCLIExcludePath:
         assert "--exclude-path" in result.stdout, "Expected --exclude-path in help text"
         # Should mention precedence
         help_text = result.stdout.lower()
-        assert (
-            "precedence" in help_text or "exclude" in help_text
-        ), "Help text should mention exclusion behavior"
+        assert "precedence" in help_text or "exclude" in help_text, (
+            "Help text should mention exclusion behavior"
+        )

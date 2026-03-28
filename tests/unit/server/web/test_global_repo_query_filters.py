@@ -82,9 +82,9 @@ class TestGlobalRepoQueryFilterWiring:
 
         source = inspect.getsource(routes.query_submit)
         # Verify the SemanticSearchRequest construction includes language
-        assert (
-            "language=language" in source
-        ), "routes.py query_submit must wire language form field to SemanticSearchRequest"
+        assert "language=language" in source, (
+            "routes.py query_submit must wire language form field to SemanticSearchRequest"
+        )
 
     def test_global_repo_query_route_source_wires_path_filter(self):
         """The routes.py global repo code path must wire path_pattern as path_filter."""
@@ -92,6 +92,6 @@ class TestGlobalRepoQueryFilterWiring:
 
         source = inspect.getsource(routes.query_submit)
         # Verify the SemanticSearchRequest construction includes path_filter
-        assert (
-            "path_filter=path_pattern" in source
-        ), "routes.py query_submit must wire path_pattern form field as path_filter to SemanticSearchRequest"
+        assert "path_filter=path_pattern" in source, (
+            "routes.py query_submit must wire path_pattern form field as path_filter to SemanticSearchRequest"
+        )

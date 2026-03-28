@@ -51,9 +51,9 @@ class TestProgressMetricsParsing:
 
         # ASSERTIONS - This demonstrates the bug
         assert files_per_second == 0.0, "BUG: parsing fails, falls back to 0.0"
-        assert (
-            kb_per_second == 0.0
-        ), "BUG: both metrics set to 0.0 even though KB/s is valid"
+        assert kb_per_second == 0.0, (
+            "BUG: both metrics set to 0.0 even though KB/s is valid"
+        )
         assert active_threads == 12, "threads fallback to 12"
 
     def test_parse_commits_per_second_format(self):
@@ -139,9 +139,9 @@ class TestItemTypePreservation:
         # ASSERTIONS - Verify bug: item_type is NOT in filtered_kwargs
         mock_callback.assert_called_once()
         call_kwargs = mock_callback.call_args.kwargs
-        assert (
-            "item_type" not in call_kwargs
-        ), "BUG: item_type is dropped from filtered_kwargs"
+        assert "item_type" not in call_kwargs, (
+            "BUG: item_type is dropped from filtered_kwargs"
+        )
 
     def test_daemon_service_must_preserve_item_type(self):
         """
@@ -194,12 +194,12 @@ class TestItemTypePreservation:
         # ASSERTIONS - After fix: item_type MUST be in filtered_kwargs
         mock_callback.assert_called_once()
         call_kwargs = mock_callback.call_args.kwargs
-        assert (
-            "item_type" in call_kwargs
-        ), "FAIL: item_type must be in filtered_kwargs after fix"
-        assert (
-            call_kwargs["item_type"] == "commits"
-        ), "FAIL: item_type must be 'commits' after fix"
+        assert "item_type" in call_kwargs, (
+            "FAIL: item_type must be in filtered_kwargs after fix"
+        )
+        assert call_kwargs["item_type"] == "commits", (
+            "FAIL: item_type must be 'commits' after fix"
+        )
 
 
 if __name__ == "__main__":

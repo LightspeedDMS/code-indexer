@@ -87,9 +87,9 @@ class TestDatabaseBackend:
         results = backend.find_references("UserService", limit=10, exact=False)
 
         # Should find references (not empty)
-        assert (
-            len(results) > 0
-        ), "find_references with exact=False should return results for substring matching"
+        assert len(results) > 0, (
+            "find_references with exact=False should return results for substring matching"
+        )
         assert all(isinstance(r, QueryResult) for r in results)
         assert all(r.kind == "reference" for r in results)
         # Verify substring matching worked - all symbols should contain "UserService"

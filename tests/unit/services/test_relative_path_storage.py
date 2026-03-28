@@ -431,9 +431,9 @@ class TestRelativePathStorage:
         try:
             context = rag_extractor.extract_context(test_file_relative, max_chunks=2)
             # Should succeed if paths are relative
-            assert (
-                context is not None or context == []
-            ), "RAG extraction should work with relative paths after location change"
+            assert context is not None or context == [], (
+                "RAG extraction should work with relative paths after location change"
+            )
         except Exception as e:
             pytest.fail(
                 f"RAG extraction failed after location change: {e}. "
@@ -532,9 +532,9 @@ class TestPathNormalizationHelper:
         else:
             result = str(absolute_path)
 
-        assert (
-            result == expected_relative
-        ), f"Expected '{expected_relative}', got '{result}'"
+        assert result == expected_relative, (
+            f"Expected '{expected_relative}', got '{result}'"
+        )
 
     def test_normalize_already_relative_path(self):
         """Test that already relative path remains unchanged."""

@@ -96,9 +96,9 @@ class TestResearchSessionsHTMXReinitialization:
         assert "function renameSession(" in html, "renameSession function must exist"
 
         # Verify htmx.process() is called
-        assert (
-            "htmx.process(" in html
-        ), "renameSession must call htmx.process() to reinitialize HTMX on dynamic HTML"
+        assert "htmx.process(" in html, (
+            "renameSession must call htmx.process() to reinitialize HTMX on dynamic HTML"
+        )
 
     def test_htmx_process_called_after_innerhtml(self, jinja_env, sample_sessions):
         """
@@ -118,21 +118,21 @@ class TestResearchSessionsHTMXReinitialization:
         script_content = html[script_start:script_end]
 
         # Verify innerHTML assignment exists
-        assert (
-            "innerHTML = html" in script_content
-        ), "renameSession must use innerHTML to update content"
+        assert "innerHTML = html" in script_content, (
+            "renameSession must use innerHTML to update content"
+        )
 
         # Verify htmx.process() exists
-        assert (
-            "htmx.process(" in script_content
-        ), "renameSession must call htmx.process()"
+        assert "htmx.process(" in script_content, (
+            "renameSession must call htmx.process()"
+        )
 
         # Verify order: innerHTML comes BEFORE htmx.process()
         innerhtml_idx = script_content.index("innerHTML = html")
         htmx_process_idx = script_content.index("htmx.process(")
-        assert (
-            innerhtml_idx < htmx_process_idx
-        ), "htmx.process() must be called AFTER innerHTML assignment"
+        assert innerhtml_idx < htmx_process_idx, (
+            "htmx.process() must be called AFTER innerHTML assignment"
+        )
 
     def test_htmx_process_targets_correct_element(self, jinja_env, sample_sessions):
         """
@@ -190,9 +190,9 @@ class TestResearchSessionsHTMXReinitialization:
         ]
 
         for component in required_components:
-            assert (
-                component in script_content
-            ), f"Missing required component in renameSession fix: {component}"
+            assert component in script_content, (
+                f"Missing required component in renameSession fix: {component}"
+            )
 
     def test_no_regression_in_existing_functionality(self, jinja_env, sample_sessions):
         """
@@ -215,15 +215,15 @@ class TestResearchSessionsHTMXReinitialization:
         script_content = html[script_start:script_end]
 
         # Verify all original functionality is preserved
-        assert (
-            "var newName = prompt(" in script_content
-        ), "Must still prompt user for new name"
-        assert (
-            "var formData = new FormData()" in script_content
-        ), "Must still create FormData"
-        assert (
-            "formData.append('new_name', newName)" in script_content
-        ), "Must still append new_name to FormData"
+        assert "var newName = prompt(" in script_content, (
+            "Must still prompt user for new name"
+        )
+        assert "var formData = new FormData()" in script_content, (
+            "Must still create FormData"
+        )
+        assert "formData.append('new_name', newName)" in script_content, (
+            "Must still append new_name to FormData"
+        )
         assert "method: 'PUT'" in script_content, "Must still use PUT method"
         assert "fetch(" in script_content, "Must still use fetch API"
 
@@ -269,11 +269,11 @@ class TestResearchSessionsHTMXReinitialization:
         then_html_callback = then_html_section[: then_html_end + 1]
 
         # Verify htmx.process() is inside this callback
-        assert (
-            "htmx.process(" in then_html_callback
-        ), "htmx.process() must be inside the .then(html => {...}) success callback"
+        assert "htmx.process(" in then_html_callback, (
+            "htmx.process() must be inside the .then(html => {...}) success callback"
+        )
 
         # Verify innerHTML is also in the same callback
-        assert (
-            "innerHTML = html" in then_html_callback
-        ), "innerHTML update must be in the same callback as htmx.process()"
+        assert "innerHTML = html" in then_html_callback, (
+            "innerHTML update must be in the same callback as htmx.process()"
+        )

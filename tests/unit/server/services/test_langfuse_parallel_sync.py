@@ -419,9 +419,9 @@ class TestAC4PreserveReentrancyProtection:
         # CRITICAL: Verify that fetch_traces_page was actually called
         # With the bug (before fix), sync_all_projects() would return immediately
         # After fix, _do_sync_all_projects() executes sync logic without lock acquisition
-        assert (
-            mock_client.fetch_traces_page.called
-        ), "Background sync silently skipped due to lock double-acquisition bug"
+        assert mock_client.fetch_traces_page.called, (
+            "Background sync silently skipped due to lock double-acquisition bug"
+        )
 
 
 class TestAC5ErrorIsolation:
@@ -658,22 +658,22 @@ class TestAC8ConfigUIField:
         content = template_path.read_text()
 
         # Verify field name is present
-        assert (
-            "pull_max_concurrent_observations" in content
-        ), "Template should reference pull_max_concurrent_observations field"
+        assert "pull_max_concurrent_observations" in content, (
+            "Template should reference pull_max_concurrent_observations field"
+        )
 
         # Verify input field exists with correct attributes
-        assert (
-            'name="pull_max_concurrent_observations"' in content
-        ), "Template should have input with name='pull_max_concurrent_observations'"
+        assert 'name="pull_max_concurrent_observations"' in content, (
+            "Template should have input with name='pull_max_concurrent_observations'"
+        )
 
         # Verify min/max constraints are present
-        assert (
-            'min="1"' in content or "min='1'" in content
-        ), "Template should enforce min=1"
-        assert (
-            'max="20"' in content or "max='20'" in content
-        ), "Template should enforce max=20"
+        assert 'min="1"' in content or "min='1'" in content, (
+            "Template should enforce min=1"
+        )
+        assert 'max="20"' in content or "max='20'" in content, (
+            "Template should enforce max=20"
+        )
 
 
 class TestProcessTraceReturnsResult:

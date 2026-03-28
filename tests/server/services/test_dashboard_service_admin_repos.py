@@ -142,9 +142,9 @@ class TestDashboardServiceAdminRepoVisibility:
         )
 
         # Assert: Dashboard should show 3 total activated repos (2 from user1 + 1 from user2)
-        assert (
-            dashboard_data.repo_counts.activated == 3
-        ), f"Admin should see 3 activated repos, got {dashboard_data.repo_counts.activated}"
+        assert dashboard_data.repo_counts.activated == 3, (
+            f"Admin should see 3 activated repos, got {dashboard_data.repo_counts.activated}"
+        )
 
     def test_regular_user_sees_only_own_repos(
         self, dashboard_service_with_test_manager, setup_multi_user_repos
@@ -162,6 +162,6 @@ class TestDashboardServiceAdminRepoVisibility:
         )
 
         # Assert: Dashboard should show only 2 repos from user1
-        assert (
-            dashboard_data.repo_counts.activated == 2
-        ), f"user1 should see only 2 activated repos, got {dashboard_data.repo_counts.activated}"
+        assert dashboard_data.repo_counts.activated == 2, (
+            f"user1 should see only 2 activated repos, got {dashboard_data.repo_counts.activated}"
+        )

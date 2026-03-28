@@ -170,9 +170,9 @@ def execute_query(conn, query):
 
         # Verify config has correct settings
         assert config.vector_store is not None, "vector_store must be configured"
-        assert (
-            config.vector_store.provider == "filesystem"
-        ), "vector_store provider must be 'filesystem'"
+        assert config.vector_store.provider == "filesystem", (
+            "vector_store provider must be 'filesystem'"
+        )
 
         # Create backend using factory
         backend = BackendFactory.create(config, activated_repo_path)
@@ -229,9 +229,9 @@ def execute_query(conn, query):
         )
 
         # Verify provider is filesystem
-        assert (
-            config.vector_store.provider == "filesystem"
-        ), "vector_store.provider must be 'filesystem' to prevent Filesystem fallback"
+        assert config.vector_store.provider == "filesystem", (
+            "vector_store.provider must be 'filesystem' to prevent Filesystem fallback"
+        )
 
     def test_voyage_ai_configuration_in_activated_repo(
         self, activated_repo_manager, temp_data_dir
@@ -261,12 +261,12 @@ def execute_query(conn, query):
             config_data = yaml.safe_load(f)
 
         # Verify embedding provider
-        assert (
-            config_data["embedding_provider"] == "voyage-ai"
-        ), "Server mode must use VoyageAI embedding provider"
+        assert config_data["embedding_provider"] == "voyage-ai", (
+            "Server mode must use VoyageAI embedding provider"
+        )
 
         # Verify voyage_ai configuration
         assert "voyage_ai" in config_data, "Config must contain voyage_ai section"
-        assert (
-            config_data["voyage_ai"]["model"] == "voyage-code-3"
-        ), "VoyageAI model must be voyage-code-3 (production default)"
+        assert config_data["voyage_ai"]["model"] == "voyage-code-3", (
+            "VoyageAI model must be voyage-code-3 (production default)"
+        )

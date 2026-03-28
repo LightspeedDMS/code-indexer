@@ -60,23 +60,23 @@ class TestDaemonDelegationPathFilterConversion(TestCase):
         buggy_conversion = list(exclude_path)[0] if exclude_path else None
 
         # This will be "*.md" (string), not ["*.md"] (list)
-        assert isinstance(
-            buggy_conversion, str
-        ), "Current conversion produces string (BUG confirmed)"
-        assert (
-            buggy_conversion == "*.md"
-        ), "Current conversion takes first element as string"
+        assert isinstance(buggy_conversion, str), (
+            "Current conversion produces string (BUG confirmed)"
+        )
+        assert buggy_conversion == "*.md", (
+            "Current conversion takes first element as string"
+        )
 
         # CORRECT conversion should be:
         correct_conversion = list(exclude_path) if exclude_path else None
 
         # This should be ["*.md"] (list)
-        assert isinstance(
-            correct_conversion, list
-        ), "Correct conversion should produce list"
-        assert correct_conversion == [
-            "*.md"
-        ], f"Correct conversion should be ['*.md'], got {correct_conversion}"
+        assert isinstance(correct_conversion, list), (
+            "Correct conversion should produce list"
+        )
+        assert correct_conversion == ["*.md"], (
+            f"Correct conversion should be ['*.md'], got {correct_conversion}"
+        )
 
         # This test documents the bug - the fix is to change:
         # FROM: exclude_path=list(exclude_path)[0] if exclude_path else None

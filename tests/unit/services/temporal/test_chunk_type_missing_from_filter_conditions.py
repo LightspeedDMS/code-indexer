@@ -70,9 +70,9 @@ def test_chunk_type_added_to_filter_conditions():
     )
 
     # Verify vector_store.search was called
-    assert (
-        vector_store_client.search.called
-    ), "Vector store search should have been called"
+    assert vector_store_client.search.called, (
+        "Vector store search should have been called"
+    )
 
     # Get the filter_conditions that were passed to the vector store
     call_args = vector_store_client.search.call_args

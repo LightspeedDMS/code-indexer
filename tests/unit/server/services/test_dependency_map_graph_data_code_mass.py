@@ -75,9 +75,9 @@ class TestGraphDataTotalFileCountField:
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) > 0, "Expected at least one node"
-        assert (
-            "total_file_count" in nodes[0]
-        ), f"Node missing 'total_file_count' field. Got keys: {list(nodes[0].keys())}"
+        assert "total_file_count" in nodes[0], (
+            f"Node missing 'total_file_count' field. Got keys: {list(nodes[0].keys())}"
+        )
 
     def test_total_file_count_is_integer(self, tmp_path):
         """AC1: total_file_count must be an integer, not None or string."""
@@ -170,9 +170,9 @@ class TestGraphDataFileCountAggregation:
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result["nodes"]
-        assert (
-            nodes[0]["total_file_count"] == 300
-        ), f"Expected total_file_count=300, got {nodes[0]['total_file_count']}"
+        assert nodes[0]["total_file_count"] == 300, (
+            f"Expected total_file_count=300, got {nodes[0]['total_file_count']}"
+        )
 
     def test_repo_missing_from_journal_contributes_zero(self, tmp_path):
         """AC2: Repo in domain but not in journal contributes 0 to the total."""
@@ -424,14 +424,14 @@ class TestGraphDataZeroFileCount:
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result["nodes"]
-        assert (
-            nodes[0]["total_file_count"] == 0
-        ), f"Expected total_file_count=0, got {nodes[0]['total_file_count']}"
+        assert nodes[0]["total_file_count"] == 0, (
+            f"Expected total_file_count=0, got {nodes[0]['total_file_count']}"
+        )
         # Verify it's a non-negative integer (not NaN, not negative)
         count = nodes[0]["total_file_count"]
-        assert (
-            isinstance(count, int) and count >= 0
-        ), f"total_file_count must be non-negative integer, got {count!r}"
+        assert isinstance(count, int) and count >= 0, (
+            f"total_file_count must be non-negative integer, got {count!r}"
+        )
 
     def test_existing_fields_still_present_with_journal(self, tmp_path):
         """Regression: Adding total_file_count must not remove existing node fields."""

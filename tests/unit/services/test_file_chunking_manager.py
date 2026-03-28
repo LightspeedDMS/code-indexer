@@ -1095,23 +1095,25 @@ class TestFileChunkingManagerValidation:
                 if "multimodal" in call[1].get("collection_name", "").lower()
             ]
 
-            assert (
-                len(multimodal_storage_calls) == 1
-            ), f"Expected exactly one storage call with collection_name containing 'multimodal', got {len(multimodal_storage_calls)}"
+            assert len(multimodal_storage_calls) == 1, (
+                f"Expected exactly one storage call with collection_name containing 'multimodal', got {len(multimodal_storage_calls)}"
+            )
 
             storage_call = multimodal_storage_calls[0]
 
             # Verify collection_name is voyage-multimodal-3, NOT using subdirectory
             collection_name = storage_call[1]["collection_name"]
-            assert (
-                "voyage-multimodal" in collection_name
-            ), f"Expected collection_name to contain 'voyage-multimodal', got: {collection_name}"
+            assert "voyage-multimodal" in collection_name, (
+                f"Expected collection_name to contain 'voyage-multimodal', got: {collection_name}"
+            )
 
             # Verify NO subdirectory parameter is used
             assert (
                 "subdirectory" not in storage_call[1]
                 or storage_call[1].get("subdirectory") is None
-            ), "Multimodal embeddings should NOT use subdirectory parameter - collection_name is the folder"
+            ), (
+                "Multimodal embeddings should NOT use subdirectory parameter - collection_name is the folder"
+            )
 
             # Verify the stored point contains image metadata
             stored_points = storage_call[1]["points"]
@@ -1156,12 +1158,12 @@ class TestFileChunkingManagerValidation:
             multimodal_client=mock_multimodal_client,  # INJECT VIA CONSTRUCTOR
         ) as manager:
             # Verify injection worked
-            assert hasattr(
-                manager, "multimodal_client"
-            ), "FileChunkingManager must accept and store multimodal_client parameter"
-            assert (
-                manager.multimodal_client is mock_multimodal_client
-            ), "Injected multimodal_client must be stored as instance attribute"
+            assert hasattr(manager, "multimodal_client"), (
+                "FileChunkingManager must accept and store multimodal_client parameter"
+            )
+            assert manager.multimodal_client is mock_multimodal_client, (
+                "Injected multimodal_client must be stored as instance attribute"
+            )
 
         # Also verify None is accepted (default case)
         with FileChunkingManager(
@@ -1173,12 +1175,12 @@ class TestFileChunkingManagerValidation:
             codebase_dir=tmp_path,
             # multimodal_client not passed - should default to None
         ) as manager:
-            assert hasattr(
-                manager, "multimodal_client"
-            ), "FileChunkingManager must have multimodal_client attribute even when not provided"
-            assert (
-                manager.multimodal_client is None
-            ), "multimodal_client should default to None when not provided"
+            assert hasattr(manager, "multimodal_client"), (
+                "FileChunkingManager must have multimodal_client attribute even when not provided"
+            )
+            assert manager.multimodal_client is None, (
+                "multimodal_client should default to None when not provided"
+            )
 
     def test_multimodal_image_path_dict_handling(self, tmp_path):
         """
@@ -1252,21 +1254,21 @@ class TestFileChunkingManagerValidation:
             assert result.success is True, f"Processing failed: {result.error}"
 
             # Verify multimodal client was called with correct image path
-            assert (
-                mock_multimodal_client.get_multimodal_embedding.called
-            ), "Multimodal client should have been called for chunk with images"
+            assert mock_multimodal_client.get_multimodal_embedding.called, (
+                "Multimodal client should have been called for chunk with images"
+            )
 
             # Check the call arguments (using keyword arguments)
             call_args = mock_multimodal_client.get_multimodal_embedding.call_args
             image_paths = call_args.kwargs["image_paths"]
 
             # Verify image path was correctly used as string and resolved
-            assert (
-                len(image_paths) == 1
-            ), f"Expected 1 image path, got {len(image_paths)}"
-            assert (
-                image_paths[0] == test_image
-            ), f"Expected {test_image}, got {image_paths[0]}"
+            assert len(image_paths) == 1, (
+                f"Expected 1 image path, got {len(image_paths)}"
+            )
+            assert image_paths[0] == test_image, (
+                f"Expected {test_image}, got {image_paths[0]}"
+            )
 
     def test_create_vector_point_preserves_images_field(self, tmp_path):
         """
@@ -1332,11 +1334,11 @@ class TestFileChunkingManagerValidation:
 
         # 2. BUG DETECTION: payload should contain images field
         #    This will FAIL because _create_vector_point() doesn't copy images field
-        assert (
-            "images" in vector_point["payload"]
-        ), "BUG: _create_vector_point() does NOT copy images field from chunk to payload"
+        assert "images" in vector_point["payload"], (
+            "BUG: _create_vector_point() does NOT copy images field from chunk to payload"
+        )
 
         # 3. Verify images field preserves original structure
-        assert (
-            vector_point["payload"]["images"] == test_images
-        ), f"Expected images={test_images}, got {vector_point['payload'].get('images')}"
+        assert vector_point["payload"]["images"] == test_images, (
+            f"Expected images={test_images}, got {vector_point['payload'].get('images')}"
+        )

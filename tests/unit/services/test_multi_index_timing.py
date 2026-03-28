@@ -81,19 +81,19 @@ class TestMultiIndexTiming:
         assert "code_index_ms" in timing, "Should have code_index_ms"
         assert "has_multimodal" in timing, "Should have has_multimodal flag"
         assert timing["has_multimodal"] is False, "has_multimodal should be False"
-        assert (
-            "multimodal_index_ms" not in timing
-        ), "Should not have multimodal_index_ms when no multimodal"
-        assert (
-            "parallel_multi_index_ms" not in timing
-        ), "Should not have parallel_multi_index_ms for single index"
-        assert (
-            "merge_deduplicate_ms" not in timing
-        ), "Should not have merge timing for single index"
+        assert "multimodal_index_ms" not in timing, (
+            "Should not have multimodal_index_ms when no multimodal"
+        )
+        assert "parallel_multi_index_ms" not in timing, (
+            "Should not have parallel_multi_index_ms for single index"
+        )
+        assert "merge_deduplicate_ms" not in timing, (
+            "Should not have merge timing for single index"
+        )
         assert "code_timed_out" in timing, "Should have code_timed_out flag"
-        assert (
-            timing["code_timed_out"] is False
-        ), "code_timed_out should be False on success"
+        assert timing["code_timed_out"] is False, (
+            "code_timed_out should be False on success"
+        )
 
     def test_multi_index_timing_structure(
         self, service, mock_vector_store, mock_project_root
@@ -129,9 +129,9 @@ class TestMultiIndexTiming:
             )
 
         # Verify timing structure for multi-index
-        assert (
-            "parallel_multi_index_ms" in timing
-        ), "Should have parallel_multi_index_ms"
+        assert "parallel_multi_index_ms" in timing, (
+            "Should have parallel_multi_index_ms"
+        )
         assert "code_index_ms" in timing, "Should have code_index_ms"
         assert "multimodal_index_ms" in timing, "Should have multimodal_index_ms"
         assert "merge_deduplicate_ms" in timing, "Should have merge_deduplicate_ms"
@@ -139,12 +139,12 @@ class TestMultiIndexTiming:
         assert timing["has_multimodal"] is True, "has_multimodal should be True"
         assert "code_timed_out" in timing, "Should have code_timed_out flag"
         assert "multimodal_timed_out" in timing, "Should have multimodal_timed_out flag"
-        assert (
-            timing["code_timed_out"] is False
-        ), "code_timed_out should be False on success"
-        assert (
-            timing["multimodal_timed_out"] is False
-        ), "multimodal_timed_out should be False on success"
+        assert timing["code_timed_out"] is False, (
+            "code_timed_out should be False on success"
+        )
+        assert timing["multimodal_timed_out"] is False, (
+            "multimodal_timed_out should be False on success"
+        )
 
     def test_parallel_timing_is_max_not_sum(
         self, service, mock_vector_store, mock_project_root
@@ -193,25 +193,25 @@ class TestMultiIndexTiming:
         parallel_time = timing["parallel_multi_index_ms"]
 
         # Individual times should be wall-clock elapsed (approx sleep time)
-        assert (
-            code_time >= 20 and code_time < 40
-        ), f"code_index_ms {code_time}ms should be ~23ms (sleep time)"
-        assert (
-            multimodal_time >= 38 and multimodal_time < 60
-        ), f"multimodal_index_ms {multimodal_time}ms should be ~41ms (sleep time)"
+        assert code_time >= 20 and code_time < 40, (
+            f"code_index_ms {code_time}ms should be ~23ms (sleep time)"
+        )
+        assert multimodal_time >= 38 and multimodal_time < 60, (
+            f"multimodal_index_ms {multimodal_time}ms should be ~41ms (sleep time)"
+        )
 
         # Parallel time should be close to max individual time (~41ms), not sum
         # Expected: parallel_time ≈ max(code_time, multimodal_time) + small overhead
-        assert (
-            parallel_time >= 40
-        ), f"Parallel time {parallel_time}ms should be >= 40ms (approx max simulated time)"
-        assert (
-            parallel_time < 70
-        ), f"Parallel time {parallel_time}ms should be < 70ms (not sum)"
+        assert parallel_time >= 40, (
+            f"Parallel time {parallel_time}ms should be >= 40ms (approx max simulated time)"
+        )
+        assert parallel_time < 70, (
+            f"Parallel time {parallel_time}ms should be < 70ms (not sum)"
+        )
         # Key invariant: parallel time >= max(individual times)
-        assert (
-            parallel_time >= max(code_time, multimodal_time) - 5
-        ), f"Parallel time {parallel_time}ms must be >= max individual time {max(code_time, multimodal_time)}ms"
+        assert parallel_time >= max(code_time, multimodal_time) - 5, (
+            f"Parallel time {parallel_time}ms must be >= max individual time {max(code_time, multimodal_time)}ms"
+        )
 
     def test_merge_deduplicate_timing_captured(
         self, service, mock_vector_store, mock_project_root
@@ -256,16 +256,16 @@ class TestMultiIndexTiming:
             )
 
         # Verify merge timing exists and is reasonable
-        assert (
-            "merge_deduplicate_ms" in timing
-        ), "Should capture merge/deduplicate timing"
-        assert (
-            timing["merge_deduplicate_ms"] >= 0
-        ), "Merge timing should be non-negative"
+        assert "merge_deduplicate_ms" in timing, (
+            "Should capture merge/deduplicate timing"
+        )
+        assert timing["merge_deduplicate_ms"] >= 0, (
+            "Merge timing should be non-negative"
+        )
         # Merge should be relatively fast (<50ms typically)
-        assert (
-            timing["merge_deduplicate_ms"] < 100
-        ), "Merge timing should be reasonable (<100ms)"
+        assert timing["merge_deduplicate_ms"] < 100, (
+            "Merge timing should be reasonable (<100ms)"
+        )
 
     def test_timeout_flags_set_on_code_timeout(
         self, service, mock_vector_store, mock_project_root
@@ -299,12 +299,12 @@ class TestMultiIndexTiming:
             )
 
         # Verify timeout flag is set for code index
-        assert (
-            timing["code_timed_out"] is True
-        ), "code_timed_out should be True when code query times out"
-        assert (
-            timing["multimodal_timed_out"] is False
-        ), "multimodal_timed_out should be False (multimodal succeeded)"
+        assert timing["code_timed_out"] is True, (
+            "code_timed_out should be True when code query times out"
+        )
+        assert timing["multimodal_timed_out"] is False, (
+            "multimodal_timed_out should be False (multimodal succeeded)"
+        )
         # Should still return results from multimodal index
         assert len(results) > 0, "Should return partial results from multimodal index"
 
@@ -340,12 +340,12 @@ class TestMultiIndexTiming:
             )
 
         # Verify timeout flag is set for multimodal index
-        assert (
-            timing["code_timed_out"] is False
-        ), "code_timed_out should be False (code succeeded)"
-        assert (
-            timing["multimodal_timed_out"] is True
-        ), "multimodal_timed_out should be True when multimodal query times out"
+        assert timing["code_timed_out"] is False, (
+            "code_timed_out should be False (code succeeded)"
+        )
+        assert timing["multimodal_timed_out"] is True, (
+            "multimodal_timed_out should be True when multimodal query times out"
+        )
         # Should still return results from code index
         assert len(results) > 0, "Should return partial results from code index"
 
@@ -386,13 +386,13 @@ class TestMultiIndexTiming:
         assert "code_index_ms" in timing, "Should have code_index_ms"
         assert "multimodal_index_ms" in timing, "Should have multimodal_index_ms"
         assert timing["code_index_ms"] >= 0, "code_index_ms should be non-negative"
-        assert (
-            timing["multimodal_index_ms"] >= 0
-        ), "multimodal_index_ms should be non-negative"
+        assert timing["multimodal_index_ms"] >= 0, (
+            "multimodal_index_ms should be non-negative"
+        )
         # Both should be numeric (wall-clock measurements)
-        assert isinstance(
-            timing["code_index_ms"], (int, float)
-        ), "code_index_ms should be numeric"
-        assert isinstance(
-            timing["multimodal_index_ms"], (int, float)
-        ), "multimodal_index_ms should be numeric"
+        assert isinstance(timing["code_index_ms"], (int, float)), (
+            "code_index_ms should be numeric"
+        )
+        assert isinstance(timing["multimodal_index_ms"], (int, float)), (
+            "multimodal_index_ms should be numeric"
+        )

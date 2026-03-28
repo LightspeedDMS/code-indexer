@@ -289,9 +289,9 @@ class TestBGMExecuteJobRunningStatus:
         with tracker._lock:
             job = tracker._active_jobs.get(job_id)
 
-        assert (
-            job is not None
-        ), f"Job {job_id!r} should be in tracker._active_jobs while running"
+        assert job is not None, (
+            f"Job {job_id!r} should be in tracker._active_jobs while running"
+        )
         assert job.status == "running", f"Expected status='running', got {job.status!r}"
 
     def test_execute_job_continues_when_tracker_update_status_raises(
@@ -489,9 +489,9 @@ class TestBGMExecuteJobCompletionCallbacks:
         db_job = tracker.get_job(job_id)
         assert db_job is not None
         assert db_job.status == "failed"
-        assert "boom" in (
-            db_job.error or ""
-        ), f"Expected error to contain 'boom', got {db_job.error!r}"
+        assert "boom" in (db_job.error or ""), (
+            f"Expected error to contain 'boom', got {db_job.error!r}"
+        )
 
     def test_execute_job_continues_when_tracker_fail_job_raises(self, db_path, tracker):
         """
@@ -571,9 +571,9 @@ class TestBGMTrackerLifecycleIntegration:
 
         job = tracker.get_job(job_id)
         assert job is not None, f"Job {job_id!r} not found in tracker after completion"
-        assert (
-            job.status == "completed"
-        ), f"Expected status='completed', got {job.status!r}"
+        assert job.status == "completed", (
+            f"Expected status='completed', got {job.status!r}"
+        )
 
     def test_full_lifecycle_failure_tracker_reflects_failed_state(self, bgm, tracker):
         """
@@ -600,9 +600,9 @@ class TestBGMTrackerLifecycleIntegration:
         job = tracker.get_job(job_id)
         assert job is not None, f"Job {job_id!r} not found in tracker after failure"
         assert job.status == "failed", f"Expected status='failed', got {job.status!r}"
-        assert (
-            job.error is not None and len(job.error) > 0
-        ), "Failed job must have a non-empty error message in tracker"
+        assert job.error is not None and len(job.error) > 0, (
+            "Failed job must have a non-empty error message in tracker"
+        )
 
 
 # ---------------------------------------------------------------------------

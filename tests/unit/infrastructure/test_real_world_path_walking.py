@@ -150,17 +150,17 @@ class TestRealWorldPathWalking:
             )
             parent_config = self.project_root / ".code-indexer" / "config.json"
 
-            assert (
-                config_path == expected_micro_config
-            ), f"Expected {expected_micro_config}, got {config_path}. Parent config at {parent_config}"
+            assert config_path == expected_micro_config, (
+                f"Expected {expected_micro_config}, got {config_path}. Parent config at {parent_config}"
+            )
 
             # Load and verify it's the microservice config
             config_manager = ConfigManager(config_path)
             config = config_manager.load()
 
-            assert (
-                config.project_ports.filesystem_port == 7333
-            ), f"Should load microservice config (port 7333), got {config.project_ports.filesystem_port}"
+            assert config.project_ports.filesystem_port == 7333, (
+                f"Should load microservice config (port 7333), got {config.project_ports.filesystem_port}"
+            )
 
         finally:
             os.chdir(original_cwd)
@@ -182,15 +182,15 @@ class TestRealWorldPathWalking:
             expected_micro_config = (
                 self.microservice_dir / ".code-indexer" / "config.json"
             )
-            assert (
-                config_manager.config_path == expected_micro_config
-            ), f"Expected {expected_micro_config}, got {config_manager.config_path}"
+            assert config_manager.config_path == expected_micro_config, (
+                f"Expected {expected_micro_config}, got {config_manager.config_path}"
+            )
 
             # Load and verify
             config = config_manager.load()
-            assert (
-                config.project_ports.filesystem_port == 7333
-            ), "Should find microservice config from deeply nested directory"
+            assert config.project_ports.filesystem_port == 7333, (
+                "Should find microservice config from deeply nested directory"
+            )
 
         finally:
             os.chdir(original_cwd)
@@ -214,23 +214,23 @@ class TestRealWorldPathWalking:
                     config_locations.append((i, path, config_path))
 
             # Should find microservice config first (index 0), then parent config (index 1)
-            assert (
-                len(config_locations) >= 2
-            ), "Should find both microservice and parent configs"
+            assert len(config_locations) >= 2, (
+                "Should find both microservice and parent configs"
+            )
 
             micro_index, micro_path, micro_config = config_locations[0]
             parent_index, parent_path, parent_config = config_locations[1]
 
-            assert (
-                micro_index == 0
-            ), "Microservice config should be found first (index 0)"
+            assert micro_index == 0, (
+                "Microservice config should be found first (index 0)"
+            )
             assert parent_index == 1, "Parent config should be found second (index 1)"
 
             # find_config_path should return the first one (microservice)
             found_config = ConfigManager.find_config_path()
-            assert (
-                found_config == micro_config
-            ), f"Should find microservice config first, got {found_config}"
+            assert found_config == micro_config, (
+                f"Should find microservice config first, got {found_config}"
+            )
 
         finally:
             os.chdir(original_cwd)
@@ -259,9 +259,9 @@ class TestRealWorldPathWalking:
             expected_config = self.microservice_dir / ".code-indexer" / "config.json"
 
             for test_dir_str, found_config in configs_found.items():
-                assert (
-                    found_config == expected_config
-                ), f"From {test_dir_str}, expected {expected_config}, got {found_config}"
+                assert found_config == expected_config, (
+                    f"From {test_dir_str}, expected {expected_config}, got {found_config}"
+                )
 
         finally:
             os.chdir(original_cwd)
@@ -293,14 +293,14 @@ class TestRealWorldPathWalking:
             )
 
             # These should be the same since config is in current directory
-            assert (
-                expected_hash == current_dir_hash
-            ), "DockerManager should use same directory as config discovery"
+            assert expected_hash == current_dir_hash, (
+                "DockerManager should use same directory as config discovery"
+            )
 
             # Verify this is the microservice directory, not parent
-            assert (
-                config_dir == self.microservice_dir
-            ), f"Config directory should be microservice dir {self.microservice_dir}, got {config_dir}"
+            assert config_dir == self.microservice_dir, (
+                f"Config directory should be microservice dir {self.microservice_dir}, got {config_dir}"
+            )
 
         finally:
             os.chdir(original_cwd)

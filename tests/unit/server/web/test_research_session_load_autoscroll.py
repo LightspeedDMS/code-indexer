@@ -91,14 +91,14 @@ class TestResearchSessionLoadAutoScroll:
         )
 
         # Verify hx-on::before-request exists (already tested in other tests, but verify again)
-        assert (
-            "hx-on::before-request=" in html
-        ), "Session items must have hx-on::before-request handler"
+        assert "hx-on::before-request=" in html, (
+            "Session items must have hx-on::before-request handler"
+        )
 
         # Verify it sets the forceScrollOnNextSwap flag
-        assert (
-            "window.forceScrollOnNextSwap = true" in html
-        ), "hx-on::before-request must set window.forceScrollOnNextSwap = true"
+        assert "window.forceScrollOnNextSwap = true" in html, (
+            "hx-on::before-request must set window.forceScrollOnNextSwap = true"
+        )
 
     def test_force_scroll_flag_after_active_class_code(
         self, jinja_env, sample_sessions
@@ -147,9 +147,9 @@ class TestResearchSessionLoadAutoScroll:
         # Verify order: remove < add < update < forceScroll
         assert remove_pos < add_pos, "Must remove active BEFORE adding active"
         assert add_pos < update_pos, "Must add active BEFORE updating hidden field"
-        assert (
-            update_pos < force_scroll_pos
-        ), "Must set forceScrollOnNextSwap AFTER all other operations"
+        assert update_pos < force_scroll_pos, (
+            "Must set forceScrollOnNextSwap AFTER all other operations"
+        )
 
     def test_main_page_after_swap_checks_force_scroll_flag(self, jinja_env):
         """
@@ -227,18 +227,18 @@ class TestResearchSessionLoadAutoScroll:
         has_force_scroll = "forceScrollOnNextSwap" in after_swap_section
         has_auto_scroll = "autoScrollEnabled" in after_swap_section
 
-        assert (
-            has_force_scroll
-        ), "afterSwap handler must reference forceScrollOnNextSwap in condition"
-        assert (
-            has_auto_scroll
-        ), "afterSwap handler must reference autoScrollEnabled in condition"
+        assert has_force_scroll, (
+            "afterSwap handler must reference forceScrollOnNextSwap in condition"
+        )
+        assert has_auto_scroll, (
+            "afterSwap handler must reference autoScrollEnabled in condition"
+        )
 
         # Verify OR logic exists between them
         # Look for the pattern with OR operator
-        assert (
-            "||" in after_swap_section or " or " in after_swap_section.lower()
-        ), "afterSwap handler must use OR logic to check both flags"
+        assert "||" in after_swap_section or " or " in after_swap_section.lower(), (
+            "afterSwap handler must use OR logic to check both flags"
+        )
 
         # More specific check: verify the conditional pattern
         # Should have: (forceScrollOnNextSwap || autoScrollEnabled) or similar
@@ -246,9 +246,9 @@ class TestResearchSessionLoadAutoScroll:
         auto_idx = after_swap_section.find("autoScrollEnabled")
 
         # Both should be in the same conditional region
-        assert (
-            abs(force_idx - auto_idx) < 200
-        ), "forceScrollOnNextSwap and autoScrollEnabled should be in same conditional"
+        assert abs(force_idx - auto_idx) < 200, (
+            "forceScrollOnNextSwap and autoScrollEnabled should be in same conditional"
+        )
 
     def test_multiple_sessions_all_set_force_scroll_flag(self, jinja_env):
         """
@@ -275,9 +275,9 @@ class TestResearchSessionLoadAutoScroll:
         # Should be one per session
         flag_set_count = html.count("window.forceScrollOnNextSwap = true")
 
-        assert (
-            flag_set_count == len(many_sessions)
-        ), f"Expected {len(many_sessions)} forceScrollOnNextSwap flags, found {flag_set_count}"
+        assert flag_set_count == len(many_sessions), (
+            f"Expected {len(many_sessions)} forceScrollOnNextSwap flags, found {flag_set_count}"
+        )
 
     def test_scroll_to_bottom_called_in_after_swap(self, jinja_env):
         """
@@ -297,6 +297,6 @@ class TestResearchSessionLoadAutoScroll:
         after_swap_section = html[after_swap_start : after_swap_start + 1500]
 
         # Verify scrollToBottom() is called
-        assert (
-            "scrollToBottom()" in after_swap_section
-        ), "afterSwap handler must call scrollToBottom() function"
+        assert "scrollToBottom()" in after_swap_section, (
+            "afterSwap handler must call scrollToBottom() function"
+        )

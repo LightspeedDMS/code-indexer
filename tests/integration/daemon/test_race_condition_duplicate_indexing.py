@@ -190,9 +190,9 @@ class TestRaceConditionDuplicateIndexing:
             f"Race condition detected! Expected 1 'started' status, got {started_count}. "
             f"Multiple indexing threads may have started!"
         )
-        assert (
-            already_running_count == 9
-        ), f"Expected 9 'already_running' statuses, got {already_running_count}."
+        assert already_running_count == 9, (
+            f"Expected 9 'already_running' statuses, got {already_running_count}."
+        )
 
         # Verify only ONE indexing thread exists
         with service.indexing_lock_internal:
@@ -237,18 +237,18 @@ class TestRaceConditionDuplicateIndexing:
         # Verify state is cleaned up
         with service.indexing_lock_internal:
             assert service.indexing_thread is None, "indexing_thread should be None"
-            assert (
-                service.indexing_project_path is None
-            ), "indexing_project_path should be None"
+            assert service.indexing_project_path is None, (
+                "indexing_project_path should be None"
+            )
 
         # Verify new indexing can start
         response2 = service.exposed_index(
             project_path=str(project_path),
             callback=None,
         )
-        assert (
-            response2["status"] == "started"
-        ), "New indexing should be allowed after cleanup"
+        assert response2["status"] == "started", (
+            "New indexing should be allowed after cleanup"
+        )
 
         # Wait for second indexing to complete
         if service.indexing_thread:

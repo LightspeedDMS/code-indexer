@@ -76,9 +76,9 @@ class TestReferencesCompactOutput:
 
                 # Verify no separate "Symbol:" line follows
                 symbol_lines = [line for line in lines if "Symbol:" in line]
-                assert (
-                    len(symbol_lines) == 0
-                ), "Should NOT have separate 'Symbol:' lines"
+                assert len(symbol_lines) == 0, (
+                    "Should NOT have separate 'Symbol:' lines"
+                )
 
     def test_references_uses_extract_display_name_helper(self):
         """Test that _extract_display_name() correctly formats SCIP symbols."""

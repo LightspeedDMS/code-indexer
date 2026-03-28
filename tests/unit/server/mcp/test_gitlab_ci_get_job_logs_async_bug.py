@@ -79,9 +79,9 @@ class TestGitLabCIGetJobLogsAsyncBug:
 
             # Assert
             # 1. Verify response is a dict (not a coroutine)
-            assert isinstance(
-                response, dict
-            ), f"Expected dict response, got {type(response)}"
+            assert isinstance(response, dict), (
+                f"Expected dict response, got {type(response)}"
+            )
 
             # 2. Verify response is JSON serializable (would fail if coroutine)
             try:

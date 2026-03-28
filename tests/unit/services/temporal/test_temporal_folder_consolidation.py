@@ -78,14 +78,14 @@ def test_temporal_directory_consolidation(temp_git_repo):
     wrong_temporal_dir = index_dir / "temporal"
 
     # ASSERTION 1: temporal_dir should point to collection directory
-    assert (
-        temporal_indexer.temporal_dir == expected_temporal_dir
-    ), f"temporal_dir should be {expected_temporal_dir}, got {temporal_indexer.temporal_dir}"
+    assert temporal_indexer.temporal_dir == expected_temporal_dir, (
+        f"temporal_dir should be {expected_temporal_dir}, got {temporal_indexer.temporal_dir}"
+    )
 
     # ASSERTION 2: The collection directory should be created (happens in __init__)
-    assert (
-        expected_temporal_dir.exists()
-    ), f"Collection directory should exist at {expected_temporal_dir}"
+    assert expected_temporal_dir.exists(), (
+        f"Collection directory should exist at {expected_temporal_dir}"
+    )
 
     # ASSERTION 3: The old temporal/ directory should NOT be created
     assert not wrong_temporal_dir.exists(), (
@@ -179,9 +179,9 @@ def test_reconciliation_uses_collection_path(temp_git_repo):
 
     # Verify the old wrong path doesn't exist
     wrong_temporal_dir = index_dir / "temporal"
-    assert (
-        not wrong_temporal_dir.exists()
-    ), f"Old temporal directory should not exist: {wrong_temporal_dir}"
+    assert not wrong_temporal_dir.exists(), (
+        f"Old temporal directory should not exist: {wrong_temporal_dir}"
+    )
 
 
 def test_clear_command_metadata_paths(temp_git_repo):

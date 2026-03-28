@@ -97,9 +97,9 @@ def test_prefers_serialized_concurrent_files_over_rpyc_proxy():
     display_text = render_buffer.getvalue()
 
     # ASSERTION 1: Display should show FRESH files (from serialized concurrent_files)
-    assert (
-        "fresh_file1.py" in display_text or "fresh_file2.py" in display_text
-    ), f"Display should show FRESH serialized files, not stale RPyC data. Got: {display_text}"
+    assert "fresh_file1.py" in display_text or "fresh_file2.py" in display_text, (
+        f"Display should show FRESH serialized files, not stale RPyC data. Got: {display_text}"
+    )
 
     # ASSERTION 2: Display should NOT show stale files (from RPyC proxy)
     assert (
@@ -159,9 +159,9 @@ def test_no_fallback_when_concurrent_files_empty():
     display_text = render_buffer.getvalue()
 
     # CRITICAL: Display should NOT show proxy data (no fallback)
-    assert (
-        "proxy_file1.py" not in display_text
-    ), f"Display must NOT fallback to RPyC proxy. Got: {display_text}"
+    assert "proxy_file1.py" not in display_text, (
+        f"Display must NOT fallback to RPyC proxy. Got: {display_text}"
+    )
 
     # CRITICAL: RPyC proxy method should NOT be called (no fallback)
     mock_slot_tracker.get_concurrent_files_data.assert_not_called()
@@ -219,6 +219,6 @@ def test_real_slot_tracker_still_works_for_direct_mode():
     display_text = render_buffer.getvalue()
 
     # Verify slot tracker data appears (via set_slot_tracker mechanism)
-    assert (
-        "direct_file0.py" in display_text or "direct_file1.py" in display_text
-    ), f"Display should work with CleanSlotTracker in standalone mode. Got: {display_text}"
+    assert "direct_file0.py" in display_text or "direct_file1.py" in display_text, (
+        f"Display should work with CleanSlotTracker in standalone mode. Got: {display_text}"
+    )

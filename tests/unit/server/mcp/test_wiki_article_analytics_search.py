@@ -344,9 +344,9 @@ class TestSearchQueryFilter:
         assert call_kwargs is not None
         # Use .kwargs for keyword arguments (the handler passes all params as kwargs)
         all_params = call_kwargs.kwargs
-        assert (
-            all_params.get("search_mode") == "semantic"
-        ), f"Expected search_mode=semantic, got: {all_params}"
+        assert all_params.get("search_mode") == "semantic", (
+            f"Expected search_mode=semantic, got: {all_params}"
+        )
 
     def test_search_mode_fts_passed_through(
         self, mock_grm_wiki_enabled, multi_article_cache, mock_user
@@ -385,6 +385,6 @@ class TestSearchQueryFilter:
         assert call_kwargs is not None
         # Use .kwargs for keyword arguments (the handler passes all params as kwargs)
         all_params = call_kwargs.kwargs
-        assert (
-            all_params.get("search_mode") == "fts"
-        ), f"Expected search_mode=fts, got: {all_params}"
+        assert all_params.get("search_mode") == "fts", (
+            f"Expected search_mode=fts, got: {all_params}"
+        )

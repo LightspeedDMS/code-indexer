@@ -234,22 +234,22 @@ class TestBug83AppInitialization:
         )
 
         # Assert: Service should store config values
-        assert hasattr(
-            service, "reference_limit"
-        ), "Service should have reference_limit"
+        assert hasattr(service, "reference_limit"), (
+            "Service should have reference_limit"
+        )
         assert service.reference_limit == CUSTOM_SCIP_REFERENCE_LIMIT
 
-        assert hasattr(
-            service, "dependency_depth"
-        ), "Service should have dependency_depth"
+        assert hasattr(service, "dependency_depth"), (
+            "Service should have dependency_depth"
+        )
         assert service.dependency_depth == CUSTOM_SCIP_DEPENDENCY_DEPTH
 
-        assert hasattr(
-            service, "callchain_max_depth"
-        ), "Service should have callchain_max_depth"
+        assert hasattr(service, "callchain_max_depth"), (
+            "Service should have callchain_max_depth"
+        )
         assert service.callchain_max_depth == CUSTOM_SCIP_CALLCHAIN_MAX_DEPTH
 
-        assert hasattr(
-            service, "callchain_limit"
-        ), "Service should have callchain_limit"
+        assert hasattr(service, "callchain_limit"), (
+            "Service should have callchain_limit"
+        )
         assert service.callchain_limit == CUSTOM_SCIP_CALLCHAIN_LIMIT

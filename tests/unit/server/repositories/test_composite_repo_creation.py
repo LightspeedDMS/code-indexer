@@ -126,12 +126,12 @@ class TestCompositeRepositoryCreation:
 
         # Assert
         composite_path = os.path.join(self.activated_repos_dir, username, user_alias)
-        assert os.path.exists(
-            composite_path
-        ), f"Composite directory should exist at {composite_path}"
-        assert os.path.isdir(
-            composite_path
-        ), f"Composite path should be a directory: {composite_path}"
+        assert os.path.exists(composite_path), (
+            f"Composite directory should exist at {composite_path}"
+        )
+        assert os.path.isdir(composite_path), (
+            f"Composite path should be a directory: {composite_path}"
+        )
         assert result["success"] is True, "Activation should succeed"
 
     def test_acceptance_2_proxy_initializer_creates_config_with_proxy_mode(self):
@@ -198,18 +198,18 @@ class TestCompositeRepositoryCreation:
 
         for alias in golden_repo_aliases:
             subrepo_path = os.path.join(composite_path, alias)
-            assert os.path.exists(
-                subrepo_path
-            ), f"Subdirectory should exist for {alias} at {subrepo_path}"
-            assert os.path.isdir(
-                subrepo_path
-            ), f"Subrepo path should be a directory: {subrepo_path}"
+            assert os.path.exists(subrepo_path), (
+                f"Subdirectory should exist for {alias} at {subrepo_path}"
+            )
+            assert os.path.isdir(subrepo_path), (
+                f"Subrepo path should be a directory: {subrepo_path}"
+            )
 
             # Verify it's a git repository (CoW clone preserves git structure)
             git_dir = os.path.join(subrepo_path, ".git")
-            assert os.path.exists(
-                git_dir
-            ), f"Git directory should exist for {alias} at {git_dir}"
+            assert os.path.exists(git_dir), (
+                f"Git directory should exist for {alias} at {git_dir}"
+            )
 
         assert result["success"] is True
 
@@ -247,16 +247,16 @@ class TestCompositeRepositoryCreation:
             config_data = json.load(f)
 
         discovered_repos = config_data.get("discovered_repos", [])
-        assert len(discovered_repos) == len(
-            golden_repo_aliases
-        ), f"Should discover {len(golden_repo_aliases)} repositories"
+        assert len(discovered_repos) == len(golden_repo_aliases), (
+            f"Should discover {len(golden_repo_aliases)} repositories"
+        )
 
         # Verify all aliases are discovered (order may vary)
         discovered_aliases = set(discovered_repos)
         expected_aliases = set(golden_repo_aliases)
-        assert (
-            discovered_aliases == expected_aliases
-        ), f"Discovered repos {discovered_aliases} should match expected {expected_aliases}"
+        assert discovered_aliases == expected_aliases, (
+            f"Discovered repos {discovered_aliases} should match expected {expected_aliases}"
+        )
 
         assert result["success"] is True
 
@@ -298,12 +298,12 @@ class TestCompositeRepositoryCreation:
                 actual_subdirs.add(item)
 
         # Verify they match
-        assert (
-            discovered_repos == actual_subdirs
-        ), f"Discovered repos {discovered_repos} should match actual subdirs {actual_subdirs}"
-        assert discovered_repos == set(
-            golden_repo_aliases
-        ), "Discovered repos should match input golden repo aliases"
+        assert discovered_repos == actual_subdirs, (
+            f"Discovered repos {discovered_repos} should match actual subdirs {actual_subdirs}"
+        )
+        assert discovered_repos == set(golden_repo_aliases), (
+            "Discovered repos should match input golden repo aliases"
+        )
 
         assert result["success"] is True
 
@@ -336,30 +336,30 @@ class TestCompositeRepositoryCreation:
             code_indexer_dir = os.path.join(subrepo_path, ".code-indexer")
 
             # Verify .code-indexer directory exists
-            assert os.path.exists(
-                code_indexer_dir
-            ), f".code-indexer should exist for {alias}"
-            assert os.path.isdir(
-                code_indexer_dir
-            ), f".code-indexer should be directory for {alias}"
+            assert os.path.exists(code_indexer_dir), (
+                f".code-indexer should exist for {alias}"
+            )
+            assert os.path.isdir(code_indexer_dir), (
+                f".code-indexer should be directory for {alias}"
+            )
 
             # Verify config.json exists
             config_file = os.path.join(code_indexer_dir, "config.json")
-            assert os.path.exists(
-                config_file
-            ), f"config.json should exist for {alias} at {config_file}"
+            assert os.path.exists(config_file), (
+                f"config.json should exist for {alias} at {config_file}"
+            )
 
             # Verify config content is preserved
             with open(config_file, "r") as f:
                 subrepo_config = json.load(f)
 
             # Original repos are NOT proxy mode
-            assert (
-                subrepo_config.get("proxy_mode") is False
-            ), f"Subrepo {alias} should NOT have proxy_mode=True"
-            assert (
-                "embedding_provider" in subrepo_config
-            ), f"Config should retain embedding_provider for {alias}"
+            assert subrepo_config.get("proxy_mode") is False, (
+                f"Subrepo {alias} should NOT have proxy_mode=True"
+            )
+            assert "embedding_provider" in subrepo_config, (
+                f"Config should retain embedding_provider for {alias}"
+            )
 
         assert result["success"] is True
 
@@ -443,18 +443,18 @@ class TestCompositeRepositoryCreation:
         metadata_path = os.path.join(
             self.activated_repos_dir, username, f"{user_alias}_metadata.json"
         )
-        assert os.path.exists(
-            metadata_path
-        ), f"Metadata file should exist at {metadata_path}"
+        assert os.path.exists(metadata_path), (
+            f"Metadata file should exist at {metadata_path}"
+        )
 
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
 
         assert metadata["user_alias"] == user_alias
         assert metadata["is_composite"] is True, "Metadata should mark as composite"
-        assert (
-            metadata["golden_repo_aliases"] == golden_repo_aliases
-        ), "Should store original alias list"
+        assert metadata["golden_repo_aliases"] == golden_repo_aliases, (
+            "Should store original alias list"
+        )
         assert "activated_at" in metadata, "Should have activation timestamp"
 
         assert result["success"] is True

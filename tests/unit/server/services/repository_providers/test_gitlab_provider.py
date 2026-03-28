@@ -407,12 +407,12 @@ class TestGitLabProviderSortingOrder:
             provider.discover_repositories(page=1, page_size=50)
 
         # Verify sorting parameters are correct for last activity descending
-        assert (
-            captured_params.get("order_by") == "last_activity_at"
-        ), f"Expected order_by='last_activity_at', got '{captured_params.get('order_by')}'"
-        assert (
-            captured_params.get("sort") == "desc"
-        ), f"Expected sort='desc', got '{captured_params.get('sort')}'"
+        assert captured_params.get("order_by") == "last_activity_at", (
+            f"Expected order_by='last_activity_at', got '{captured_params.get('order_by')}'"
+        )
+        assert captured_params.get("sort") == "desc", (
+            f"Expected sort='desc', got '{captured_params.get('sort')}'"
+        )
 
 
 class TestGitLabProviderErrorHandling:
@@ -553,9 +553,9 @@ class TestGitLabProviderServerSideSearch:
 
         # Verify search parameter is included in API request
         assert "search" in captured_params, "search parameter not passed to API request"
-        assert (
-            captured_params["search"] == "myproject"
-        ), f"Expected search='myproject', got '{captured_params.get('search')}'"
+        assert captured_params["search"] == "myproject", (
+            f"Expected search='myproject', got '{captured_params.get('search')}'"
+        )
 
     @pytest.mark.asyncio
     async def test_no_client_side_filtering_when_search_provided(self):
@@ -665,9 +665,9 @@ class TestGitLabProviderServerSideSearch:
         ):
             provider.discover_repositories(page=1, page_size=50, search=None)
 
-        assert (
-            "search" not in captured_params_none
-        ), "search parameter should not be in API request when search=None"
+        assert "search" not in captured_params_none, (
+            "search parameter should not be in API request when search=None"
+        )
 
         # Test with search=""
         captured_params_empty = {}
@@ -686,9 +686,9 @@ class TestGitLabProviderServerSideSearch:
         ):
             provider.discover_repositories(page=1, page_size=50, search="")
 
-        assert (
-            "search" not in captured_params_empty
-        ), "search parameter should not be in API request when search=''"
+        assert "search" not in captured_params_empty, (
+            "search parameter should not be in API request when search=''"
+        )
 
     @pytest.mark.asyncio
     async def test_search_with_indexed_repo_exclusion(self):
@@ -749,7 +749,7 @@ class TestGitLabProviderServerSideSearch:
             result = provider.discover_repositories(page=1, page_size=50, search="data")
 
         # Only non-indexed repo should be returned
-        assert (
-            len(result.repositories) == 1
-        ), f"Expected 1 repo (indexed one excluded), got {len(result.repositories)}"
+        assert len(result.repositories) == 1, (
+            f"Expected 1 repo (indexed one excluded), got {len(result.repositories)}"
+        )
         assert result.repositories[0].name == "group/data-services"

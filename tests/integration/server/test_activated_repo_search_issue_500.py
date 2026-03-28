@@ -273,21 +273,21 @@ def execute_query(conn, query):
 
         # Verify .code-indexer/ directory exists
         code_indexer_dir = activated_repo_path / ".code-indexer"
-        assert (
-            code_indexer_dir.exists()
-        ), "FAILURE: .code-indexer/ directory NOT copied!"
+        assert code_indexer_dir.exists(), (
+            "FAILURE: .code-indexer/ directory NOT copied!"
+        )
 
         # Verify critical files/dirs were copied
-        assert (
-            code_indexer_dir / "config.json"
-        ).exists(), "config.json must be copied from golden repo"
+        assert (code_indexer_dir / "config.json").exists(), (
+            "config.json must be copied from golden repo"
+        )
 
-        assert (
-            code_indexer_dir / "index"
-        ).exists(), "index/ directory must be copied from golden repo"
+        assert (code_indexer_dir / "index").exists(), (
+            "index/ directory must be copied from golden repo"
+        )
 
         # Verify metadata.json exists (created by cidx init or cidx fix-config)
         metadata_file = code_indexer_dir / "metadata.json"
-        assert (
-            metadata_file.exists()
-        ), "metadata.json missing - should be created by cidx init or cidx fix-config"
+        assert metadata_file.exists(), (
+            "metadata.json missing - should be created by cidx init or cidx fix-config"
+        )

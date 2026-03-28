@@ -236,9 +236,9 @@ class TestOnRepoAddedTriggersRefresh:
 
         # Must use "cidx-meta-global" not "cidx-meta" or repo_name
         call_args = mock_refresh_scheduler.trigger_refresh_for_repo.call_args
-        assert (
-            call_args[0][0] == "cidx-meta-global"
-        ), f"Expected trigger with 'cidx-meta-global', got {call_args[0][0]!r}"
+        assert call_args[0][0] == "cidx-meta-global", (
+            f"Expected trigger with 'cidx-meta-global', got {call_args[0][0]!r}"
+        )
 
     def test_on_repo_added_trigger_refresh_failure_does_not_crash(
         self, temp_golden_repos_dir
@@ -459,6 +459,6 @@ class TestOnRepoRemovedTriggersRefresh:
         )
 
         call_args = mock_refresh_scheduler.trigger_refresh_for_repo.call_args
-        assert (
-            call_args[0][0] == "cidx-meta-global"
-        ), f"Expected trigger with 'cidx-meta-global', got {call_args[0][0]!r}"
+        assert call_args[0][0] == "cidx-meta-global", (
+            f"Expected trigger with 'cidx-meta-global', got {call_args[0][0]!r}"
+        )

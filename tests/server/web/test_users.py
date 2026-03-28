@@ -34,9 +34,9 @@ class TestUserListDisplay:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_users_page_renders(self, authenticated_client: TestClient):
         """
@@ -49,9 +49,9 @@ class TestUserListDisplay:
         response = authenticated_client.get("/admin/users")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Users - CIDX Admin" in response.text
-        ), "Page title should be 'Users - CIDX Admin'"
+        assert "Users - CIDX Admin" in response.text, (
+            "Page title should be 'Users - CIDX Admin'"
+        )
 
     def test_users_list_shows_users(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -82,9 +82,9 @@ class TestUserListDisplay:
         assert "actions" in text_lower, "Table should have Actions column"
 
         # Check that admin user appears in list
-        assert (
-            admin_user["username"].lower() in text_lower
-        ), "Admin user should appear in the list"
+        assert admin_user["username"].lower() in text_lower, (
+            "Admin user should appear in the list"
+        )
 
     def test_users_list_has_create_button(self, authenticated_client: TestClient):
         """
@@ -98,9 +98,9 @@ class TestUserListDisplay:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "create user" in text_lower or "create-user" in text_lower
-        ), "Page should have a Create User button"
+        assert "create user" in text_lower or "create-user" in text_lower, (
+            "Page should have a Create User button"
+        )
 
 
 # =============================================================================
@@ -137,9 +137,9 @@ class TestCreateUserForm:
             "confirm" in text_lower
             or 'name="confirm_password"' in response.text.lower()
         ), "Form should have confirm password field"
-        assert (
-            "role" in text_lower or "<select" in text_lower
-        ), "Form should have role dropdown"
+        assert "role" in text_lower or "<select" in text_lower, (
+            "Form should have role dropdown"
+        )
 
     def test_create_user_success(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -177,9 +177,9 @@ class TestCreateUserForm:
         text_lower = response.text.lower()
 
         # Should show success message
-        assert (
-            "success" in text_lower or "created" in text_lower
-        ), "Should show success message after creating user"
+        assert "success" in text_lower or "created" in text_lower, (
+            "Should show success message after creating user"
+        )
 
         # New user should appear in list
         assert "newuser" in text_lower, "New user should appear in the list"
@@ -311,9 +311,9 @@ class TestEditUserRole:
         text_lower = response.text.lower()
 
         # Should show success message
-        assert (
-            "success" in text_lower or "updated" in text_lower
-        ), "Should show success message after updating role"
+        assert "success" in text_lower or "updated" in text_lower, (
+            "Should show success message after updating role"
+        )
 
     def test_cannot_demote_self(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -348,9 +348,9 @@ class TestEditUserRole:
         text_lower = response.text.lower()
 
         # Should show error about demoting self
-        assert (
-            "error" in text_lower or "cannot" in text_lower or "own" in text_lower
-        ), "Should show error when trying to demote own account"
+        assert "error" in text_lower or "cannot" in text_lower or "own" in text_lower, (
+            "Should show error when trying to demote own account"
+        )
 
 
 # =============================================================================
@@ -441,9 +441,9 @@ class TestDeleteUser:
         csrf_token = web_infrastructure.extract_csrf_token(users_page.text)
 
         # Verify user exists initially
-        assert (
-            "deleteuser" in users_page.text.lower()
-        ), "User should exist before deletion"
+        assert "deleteuser" in users_page.text.lower(), (
+            "User should exist before deletion"
+        )
 
         # Delete user
         response = client.post(
@@ -458,9 +458,9 @@ class TestDeleteUser:
         text_lower = response.text.lower()
 
         # Should show success message
-        assert (
-            "success" in text_lower or "deleted" in text_lower
-        ), "Should show success message after deleting user"
+        assert "success" in text_lower or "deleted" in text_lower, (
+            "Should show success message after deleting user"
+        )
 
         # User should no longer appear in the table rows
         # The username may still appear in success message, but not in <td> cells
@@ -468,9 +468,9 @@ class TestDeleteUser:
 
         # Check that deleteuser doesn't appear as a table cell value (data row)
         td_pattern = r"<td>deleteuser</td>"
-        assert not re.search(
-            td_pattern, text_lower
-        ), "Deleted user should not appear in the table rows"
+        assert not re.search(td_pattern, text_lower), (
+            "Deleted user should not appear in the table rows"
+        )
 
     def test_cannot_delete_self(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -504,14 +504,14 @@ class TestDeleteUser:
         text_lower = response.text.lower()
 
         # Should show error about deleting self
-        assert (
-            "error" in text_lower or "cannot" in text_lower or "own" in text_lower
-        ), "Should show error when trying to delete own account"
+        assert "error" in text_lower or "cannot" in text_lower or "own" in text_lower, (
+            "Should show error when trying to delete own account"
+        )
 
         # User should still appear in list
-        assert (
-            admin_user["username"].lower() in text_lower
-        ), "Admin user should still appear in the list"
+        assert admin_user["username"].lower() in text_lower, (
+            "Admin user should still appear in the list"
+        )
 
 
 # =============================================================================
@@ -534,13 +534,13 @@ class TestUsersPartial:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
         # Should contain user-related content (table)
-        assert (
-            "<table" in response.text.lower() or "<tr" in response.text.lower()
-        ), "Users partial should contain table content"
+        assert "<table" in response.text.lower() or "<tr" in response.text.lower(), (
+            "Users partial should contain table content"
+        )
 
     def test_partials_require_auth(self, web_client: TestClient):
         """

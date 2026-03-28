@@ -255,9 +255,9 @@ class TestBundleCreation:
             # Format: (mode << 16) | file_type
             unix_mode = info.external_attr >> 16
             # Check if executable bit is set (0o111 = executable for user/group/other)
-            assert (
-                unix_mode & 0o111
-            ), f"Expected executable bit, got mode {oct(unix_mode)}"
+            assert unix_mode & 0o111, (
+                f"Expected executable bit, got mode {oct(unix_mode)}"
+            )
 
 
 class TestCLI:

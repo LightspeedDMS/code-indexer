@@ -132,9 +132,9 @@ def test_hnsw_search_uses_hnsw_distances(store_with_vectors):
 
     # Scores should be sorted descending
     scores = [r["score"] for r in results]
-    assert scores == sorted(
-        scores, reverse=True
-    ), "Results should be sorted by score descending"
+    assert scores == sorted(scores, reverse=True), (
+        "Results should be sorted by score descending"
+    )
 
 
 def test_hnsw_search_reduces_json_reads(store_with_vectors):
@@ -255,9 +255,9 @@ def test_hnsw_search_with_filter_conditions(store_with_vectors):
 
     # All results should be python
     for result in results:
-        assert (
-            result["payload"]["language"] == "python"
-        ), f"Filter should only return python results, got: {result['payload']['language']}"
+        assert result["payload"]["language"] == "python", (
+            f"Filter should only return python results, got: {result['payload']['language']}"
+        )
 
     # Results should not exceed limit
     assert len(results) <= limit
@@ -345,5 +345,5 @@ def test_hnsw_search_no_filter_max_json_reads_equals_limit(store_with_vectors):
     assert json_reads == limit, (
         f"With no filters and limit={limit}, should read exactly {limit} JSON files "
         f"(one per result), but read {json_reads}. "
-        f"Candidates fetched: limit*2={limit*2}, total vectors: 50"
+        f"Candidates fetched: limit*2={limit * 2}, total vectors: 50"
     )

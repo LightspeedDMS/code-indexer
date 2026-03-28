@@ -60,17 +60,17 @@ class TestNodeMetricsBackendProtocol:
             "close",
         ]
         for method in required_methods:
-            assert hasattr(
-                NodeMetricsBackend, method
-            ), f"Protocol missing method: {method}"
+            assert hasattr(NodeMetricsBackend, method), (
+                f"Protocol missing method: {method}"
+            )
 
     def test_protocol_close_method_present(self) -> None:
         """NodeMetricsBackend Protocol has a close() method, consistent with other Protocols."""
         from code_indexer.server.storage.protocols import NodeMetricsBackend
 
-        assert hasattr(
-            NodeMetricsBackend, "close"
-        ), "NodeMetricsBackend Protocol must define close() like all other Protocols"
+        assert hasattr(NodeMetricsBackend, "close"), (
+            "NodeMetricsBackend Protocol must define close() like all other Protocols"
+        )
 
     def test_sqlite_backend_satisfies_protocol_including_close(
         self, sqlite_backend

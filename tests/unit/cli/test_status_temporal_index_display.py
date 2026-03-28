@@ -154,9 +154,9 @@ def test_temporal_index_section_appears_when_exists(
     component_names = [call_args[0][0] for call_args in add_row_calls]
 
     # Verify Temporal Index row WAS added
-    assert (
-        "Temporal Index" in component_names
-    ), f"Temporal Index should be present when temporal collection exists, got: {component_names}"
+    assert "Temporal Index" in component_names, (
+        f"Temporal Index should be present when temporal collection exists, got: {component_names}"
+    )
 
 
 @patch("code_indexer.cli.Table")
@@ -225,22 +225,22 @@ def test_temporal_metadata_extracted_correctly(
     component, status, details = temporal_row[0], temporal_row[1], temporal_row[2]
 
     assert component == "Temporal Index"
-    assert (
-        "✅" in status or status == "✅ Available"
-    ), f"Status should be available, got: {status}"
+    assert "✅" in status or status == "✅ Available", (
+        f"Status should be available, got: {status}"
+    )
 
     # Details should contain: commits, files, vectors, branches
     assert "150" in details, f"Should show 150 commits, got: {details}"
-    assert (
-        "2,500" in details or "2500" in details
-    ), f"Should show 2500 files, got: {details}"
-    assert (
-        "3,500" in details or "3500" in details
-    ), f"Should show 3500 vectors, got: {details}"
+    assert "2,500" in details or "2500" in details, (
+        f"Should show 2500 files, got: {details}"
+    )
+    assert "3,500" in details or "3500" in details, (
+        f"Should show 3500 vectors, got: {details}"
+    )
     assert "main" in details, f"Should show main branch, got: {details}"
-    assert (
-        "feature/temporal-search" in details
-    ), f"Should show feature branch, got: {details}"
+    assert "feature/temporal-search" in details, (
+        f"Should show feature branch, got: {details}"
+    )
 
 
 @patch("code_indexer.cli.Table")
@@ -297,6 +297,6 @@ def test_temporal_index_not_shown_when_missing(
     component_names = [call_args[0][0] for call_args in add_row_calls]
 
     # Verify Temporal Index row NOT added
-    assert (
-        "Temporal Index" not in component_names
-    ), f"Temporal Index should NOT be shown when temporal collection doesn't exist, got: {component_names}"
+    assert "Temporal Index" not in component_names, (
+        f"Temporal Index should NOT be shown when temporal collection doesn't exist, got: {component_names}"
+    )

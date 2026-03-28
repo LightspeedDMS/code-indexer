@@ -70,9 +70,9 @@ class TestStory1CLICleanupE2E:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
             # Should fail with "No such option" error
-            assert (
-                result.returncode != 0
-            ), f"Command should fail for deprecated option: {options}"
+            assert result.returncode != 0, (
+                f"Command should fail for deprecated option: {options}"
+            )
             assert (
                 "No such option" in result.stderr or "No such option" in result.stdout
             ), f"Should show 'No such option' error for: {options}"
@@ -99,9 +99,9 @@ class TestStory1CLICleanupE2E:
         ]
 
         for mention in deprecated_mentions:
-            assert (
-                mention not in help_text
-            ), f"Deprecated reference '{mention}' found in query help text"
+            assert mention not in help_text, (
+                f"Deprecated reference '{mention}' found in query help text"
+            )
 
     def test_e2e_query_help_contains_no_semantic_examples(self):
         """E2E test: Verify query help contains no examples using deprecated semantic options."""
@@ -123,9 +123,9 @@ class TestStory1CLICleanupE2E:
         ]
 
         for example in deprecated_examples:
-            assert (
-                example not in help_text
-            ), f"Deprecated example '{example}' found in query help text"
+            assert example not in help_text, (
+                f"Deprecated example '{example}' found in query help text"
+            )
 
     def test_e2e_main_help_contains_no_semantic_references(self):
         """E2E test: Verify main CLI help contains no deprecated semantic references."""
@@ -150,9 +150,9 @@ class TestStory1CLICleanupE2E:
         ]
 
         for reference in deprecated_references:
-            assert (
-                reference not in help_text
-            ), f"Deprecated reference '{reference}' found in main help text"
+            assert reference not in help_text, (
+                f"Deprecated reference '{reference}' found in main help text"
+            )
 
     def test_e2e_debug_files_are_removed(self):
         """E2E test: Verify debug files from failed C# implementation are removed."""
@@ -164,9 +164,9 @@ class TestStory1CLICleanupE2E:
         ]
 
         for debug_file in debug_files:
-            assert not os.path.exists(
-                debug_file
-            ), f"Debug file {debug_file} should be removed from filesystem"
+            assert not os.path.exists(debug_file), (
+                f"Debug file {debug_file} should be removed from filesystem"
+            )
 
     def test_e2e_query_command_still_functional(self):
         """E2E test: Verify query command still works with valid options after cleanup."""
@@ -203,9 +203,9 @@ class TestStory1CLICleanupE2E:
             project_root / "debug" / "test_async_api_no_auth.py",
         ]
         for debug_file in debug_files:
-            assert not os.path.exists(
-                debug_file
-            ), f"Debug file {debug_file} not removed"
+            assert not os.path.exists(debug_file), (
+                f"Debug file {debug_file} not removed"
+            )
 
         # 2. Deprecated options removed
         cmd = [
@@ -225,9 +225,9 @@ class TestStory1CLICleanupE2E:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, "Query help should work"
         help_text = result.stdout.lower()
-        assert (
-            "--semantic-type" not in help_text
-        ), "Help should not mention --semantic-type"
+        assert "--semantic-type" not in help_text, (
+            "Help should not mention --semantic-type"
+        )
 
         # 4. Core functionality preserved
         cmd = ["python3", "-m", "code_indexer.cli", "query", "--quiet", "test"]

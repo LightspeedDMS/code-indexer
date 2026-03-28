@@ -1025,7 +1025,9 @@ Additional integration tests verify backward compatibility on every release.
         assert any(
             a.type == "incomplete_domain" and a.domain == "needs-overview"
             for a in health_report.anomalies
-        ), f"Precondition failed: expected incomplete_domain anomaly, got: {health_report.anomalies}"
+        ), (
+            f"Precondition failed: expected incomplete_domain anomaly, got: {health_report.anomalies}"
+        )
 
         # Noop analyzer: writes the same broken content back (>0 bytes, no ## Overview)
         noop_analyzer = self._make_noop_analyzer(broken_content)
@@ -1033,13 +1035,13 @@ Additional integration tests verify backward compatibility on every release.
         result = executor.execute(tmp_path, health_report)
 
         # Bug A fix: domain should NOT be in fixed list -- anomaly still present
-        assert not any(
-            "needs-overview" in f for f in result.fixed
-        ), f"Bug A: domain was incorrectly marked as fixed. fixed={result.fixed}"
+        assert not any("needs-overview" in f for f in result.fixed), (
+            f"Bug A: domain was incorrectly marked as fixed. fixed={result.fixed}"
+        )
         # Domain should be in errors list
-        assert any(
-            "needs-overview" in e for e in result.errors
-        ), f"Bug A: domain should be in errors but errors={result.errors}"
+        assert any("needs-overview" in e for e in result.errors), (
+            f"Bug A: domain should be in errors but errors={result.errors}"
+        )
 
     def test_noop_analyzer_after_max_retries_reports_error(self, tmp_path):
         """
@@ -1062,9 +1064,9 @@ Additional integration tests verify backward compatibility on every release.
 
         detector = _get_health_detector()
         health_report = detector.detect(tmp_path)
-        assert any(
-            a.type == "incomplete_domain" for a in health_report.anomalies
-        ), "Precondition: stubborn-domain must have incomplete_domain anomaly"
+        assert any(a.type == "incomplete_domain" for a in health_report.anomalies), (
+            "Precondition: stubborn-domain must have incomplete_domain anomaly"
+        )
 
         call_count = [0]
 
@@ -1086,12 +1088,12 @@ Additional integration tests verify backward compatibility on every release.
             f"Expected {DepMapRepairExecutor.MAX_DOMAIN_RETRIES} attempts, "
             f"got {call_count[0]}"
         )
-        assert any(
-            "stubborn-domain" in e for e in result.errors
-        ), f"Expected error for stubborn-domain, errors={result.errors}"
-        assert not any(
-            "stubborn-domain" in f for f in result.fixed
-        ), f"stubborn-domain should not be fixed, fixed={result.fixed}"
+        assert any("stubborn-domain" in e for e in result.errors), (
+            f"Expected error for stubborn-domain, errors={result.errors}"
+        )
+        assert not any("stubborn-domain" in f for f in result.fixed), (
+            f"stubborn-domain should not be fixed, fixed={result.fixed}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1180,13 +1182,13 @@ Additional integration tests verify backward compatibility on every release.
         result = executor.execute(tmp_path, health_report)
 
         # Domain must be in fixed list
-        assert any(
-            "fixable-domain" in f for f in result.fixed
-        ), f"Bug A positive: fixable-domain should be fixed. fixed={result.fixed}, errors={result.errors}"
+        assert any("fixable-domain" in f for f in result.fixed), (
+            f"Bug A positive: fixable-domain should be fixed. fixed={result.fixed}, errors={result.errors}"
+        )
         # Domain must NOT be in errors
-        assert not any(
-            "fixable-domain" in e for e in result.errors
-        ), f"fixable-domain should not be in errors. errors={result.errors}"
+        assert not any("fixable-domain" in e for e in result.errors), (
+            f"fixable-domain should not be in errors. errors={result.errors}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1285,9 +1287,9 @@ Additional integration tests verify backward compatibility on every release.
         executor.execute(tmp_path, health_report)
 
         # Bug B fix: file must NOT exist when analyzer is called
-        assert (
-            len(file_existed_when_analyzer_called) > 0
-        ), "Analyzer was never called -- check test setup"
+        assert len(file_existed_when_analyzer_called) > 0, (
+            "Analyzer was never called -- check test setup"
+        )
         assert not any(file_existed_when_analyzer_called), (
             "Bug B: broken domain file was NOT deleted before calling the analyzer. "
             f"file_existed_when_analyzer_called={file_existed_when_analyzer_called}"
@@ -1331,9 +1333,9 @@ Additional integration tests verify backward compatibility on every release.
         result = executor.execute(tmp_path, health_report)
 
         # Must succeed: analyzer called once, domain in fixed list
-        assert (
-            analyzer_calls[0] == 1
-        ), f"Expected 1 analyzer call, got {analyzer_calls[0]}"
-        assert any(
-            "absent-domain" in f for f in result.fixed
-        ), f"absent-domain should be fixed. fixed={result.fixed}"
+        assert analyzer_calls[0] == 1, (
+            f"Expected 1 analyzer call, got {analyzer_calls[0]}"
+        )
+        assert any("absent-domain" in f for f in result.fixed), (
+            f"absent-domain should be fixed. fixed={result.fixed}"
+        )

@@ -151,9 +151,9 @@ class TestBranchChangeVisibility:
         print(
             f"\n=== INDEX OUTPUT ===\n{result.stdout}\n{result.stderr}\n=== END ===\n"
         )
-        assert (
-            result.returncode == 0
-        ), f"Index after branch change failed: {result.stderr}"
+        assert result.returncode == 0, (
+            f"Index after branch change failed: {result.stderr}"
+        )
 
         # Step 4: CRITICAL TEST - Verify files remain visible
         result = subprocess.run(
@@ -164,15 +164,15 @@ class TestBranchChangeVisibility:
         )
 
         # THIS IS THE BUG - Currently this assertion FAILS
-        assert (
-            result.returncode == 0
-        ), f"Query after branch change failed: {result.stderr}"
-        assert (
-            "No results found" not in result.stdout
-        ), "BUG: All files hidden after branch change!"
-        assert (
-            len(result.stdout.strip()) > 0
-        ), "BUG: Index completely unusable after branch change!"
+        assert result.returncode == 0, (
+            f"Query after branch change failed: {result.stderr}"
+        )
+        assert "No results found" not in result.stdout, (
+            "BUG: All files hidden after branch change!"
+        )
+        assert len(result.stdout.strip()) > 0, (
+            "BUG: Index completely unusable after branch change!"
+        )
 
         # Additional verification: Check that we can find files that exist in feature branch
         result = subprocess.run(
@@ -181,9 +181,9 @@ class TestBranchChangeVisibility:
             capture_output=True,
             text=True,
         )
-        assert (
-            "feature_function" in result.stdout or "file4.py" in result.stdout
-        ), "Should find files from feature branch"
+        assert "feature_function" in result.stdout or "file4.py" in result.stdout, (
+            "Should find files from feature branch"
+        )
 
         # Cleanup
         subprocess.run(["cidx", "stop"], cwd=repo_dir, check=False)
@@ -233,9 +233,9 @@ class TestBranchChangeVisibility:
             text=True,
         )
         assert result.returncode == 0, f"Query failed: {result.stderr}"
-        assert (
-            "No results found" not in result.stdout
-        ), "BUG: --reconcile also hides all files!"
+        assert "No results found" not in result.stdout, (
+            "BUG: --reconcile also hides all files!"
+        )
 
         # Cleanup
         subprocess.run(["cidx", "stop"], cwd=repo_dir, check=False)

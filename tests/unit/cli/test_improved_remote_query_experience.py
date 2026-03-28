@@ -60,9 +60,9 @@ class TestImprovedRemoteQueryExperience:
                     print(f"Output: {result.output}")
 
                     # After fix: Should provide clear, educational error message
-                    assert (
-                        result.exit_code != 0
-                    ), "Should fail when git repository missing"
+                    assert result.exit_code != 0, (
+                        "Should fail when git repository missing"
+                    )
 
                     output_lower = result.output.lower()
 
@@ -81,7 +81,9 @@ class TestImprovedRemoteQueryExperience:
                             "failed to load config",
                             "no configuration found",
                         ]
-                    ), f"Should not show configuration-related errors for git repository issues: {result.output}"
+                    ), (
+                        f"Should not show configuration-related errors for git repository issues: {result.output}"
+                    )
 
                     # Note: Technical tracebacks may be shown but shouldn't prevent clear user guidance
 
@@ -131,9 +133,9 @@ class TestImprovedRemoteQueryExperience:
                     # Should show help successfully
                     assert result.exit_code == 0, "Help should display successfully"
                     # Should show remote mode documentation
-                    assert (
-                        "remote mode" in result.output.lower()
-                    ), f"Should mention remote mode in help: {result.output}"
+                    assert "remote mode" in result.output.lower(), (
+                        f"Should mention remote mode in help: {result.output}"
+                    )
 
             finally:
                 os.chdir(original_cwd)
@@ -194,9 +196,9 @@ class TestImprovedRemoteQueryExperience:
                         print(f"Git repository query - Output: {result.output}")
 
                         # Should succeed with repository linking
-                        assert (
-                            result.exit_code == 0
-                        ), f"Repository linking should succeed: {result.output}"
+                        assert result.exit_code == 0, (
+                            f"Repository linking should succeed: {result.output}"
+                        )
 
                         # Should attempt remote query execution
                         mock_remote_query.assert_called_once()

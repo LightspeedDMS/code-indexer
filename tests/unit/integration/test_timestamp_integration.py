@@ -320,14 +320,14 @@ class TestTimestampIntegrationWorkflow:
             for point, project_type in [(non_git_point, "non-git"), (git_point, "git")]:
                 payload = point["payload"]
 
-                assert (
-                    "file_last_modified" in payload
-                ), f"{project_type} missing file_last_modified"
+                assert "file_last_modified" in payload, (
+                    f"{project_type} missing file_last_modified"
+                )
                 assert payload["file_last_modified"] == expected_mtime
 
-                assert (
-                    "indexed_timestamp" in payload
-                ), f"{project_type} missing indexed_timestamp"
+                assert "indexed_timestamp" in payload, (
+                    f"{project_type} missing indexed_timestamp"
+                )
                 assert isinstance(payload["indexed_timestamp"], float)
 
     def test_timestamp_collection_performance_acceptable_in_integration(
@@ -385,9 +385,9 @@ class TestTimestampIntegrationWorkflow:
                 total_time = time.time() - start_time
 
                 # Performance should be acceptable - less than 1 second for 10 files
-                assert (
-                    total_time < 1.0
-                ), f"Timestamp collection too slow: {total_time}s for 10 files"
+                assert total_time < 1.0, (
+                    f"Timestamp collection too slow: {total_time}s for 10 files"
+                )
 
         finally:
             # Cleanup test files

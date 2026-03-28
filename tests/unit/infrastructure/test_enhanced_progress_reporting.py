@@ -43,10 +43,10 @@ def function_{i}():
 
 class TestClass_{i}:
     '''Test class {i}'''
-    
+
     def method_1(self):
         return "Method implementation with enough content for chunking"
-    
+
     def method_2(self):
         return "Another method with substantial content for testing"
 """
@@ -163,50 +163,50 @@ class TestClass_{i}:
                 # Verify format matches expected pattern
                 # Expected: "X/Y files (Z%) | files/s | KB/s | threads | filename"
                 parts = info.split("|")
-                assert (
-                    len(parts) >= 5
-                ), f"Expected at least 5 parts in progress info with KB/s, got: {info}"
+                assert len(parts) >= 5, (
+                    f"Expected at least 5 parts in progress info with KB/s, got: {info}"
+                )
 
                 # Check file progress part
-                assert (
-                    "files" in parts[0]
-                ), f"Expected 'files' in first part: {parts[0]}"
-                assert (
-                    "(" in parts[0] and "%)" in parts[0]
-                ), f"Expected percentage in first part: {parts[0]}"
+                assert "files" in parts[0], (
+                    f"Expected 'files' in first part: {parts[0]}"
+                )
+                assert "(" in parts[0] and "%)" in parts[0], (
+                    f"Expected percentage in first part: {parts[0]}"
+                )
 
                 # Check files per second part
-                assert (
-                    "files/s" in parts[1]
-                ), f"Expected 'files/s' in second part: {parts[1]}"
+                assert "files/s" in parts[1], (
+                    f"Expected 'files/s' in second part: {parts[1]}"
+                )
 
                 # Check KB/s part (Story 3 addition)
                 assert "KB/s" in parts[2], f"Expected 'KB/s' in third part: {parts[2]}"
 
                 # Check thread count part
-                assert (
-                    "threads" in parts[3]
-                ), f"Expected 'threads' in fourth part: {parts[3]}"
+                assert "threads" in parts[3], (
+                    f"Expected 'threads' in fourth part: {parts[3]}"
+                )
 
                 # Check filename part exists
-                assert (
-                    len(parts[4].strip()) > 0
-                ), f"Expected filename in fifth part: {parts[4]}"
+                assert len(parts[4].strip()) > 0, (
+                    f"Expected filename in fifth part: {parts[4]}"
+                )
 
                 break
 
         assert thread_info_found, "No progress calls contained thread information"
 
         # Verify we captured some thread counts
-        assert (
-            len(thread_counts_seen) > 0
-        ), f"Expected to see thread counts, but saw: {thread_counts_seen}"
+        assert len(thread_counts_seen) > 0, (
+            f"Expected to see thread counts, but saw: {thread_counts_seen}"
+        )
 
         # The thread count should be related to our configured count
         # In high-throughput processing, actual active threads can vary as workers complete tasks
-        assert any(
-            count <= thread_count for count in thread_counts_seen
-        ), f"Expected to see thread counts <= {thread_count}, but saw: {thread_counts_seen}"
+        assert any(count <= thread_count for count in thread_counts_seen), (
+            f"Expected to see thread counts <= {thread_count}, but saw: {thread_counts_seen}"
+        )
 
     @pytest.mark.unit
     def test_real_time_file_completion_indicators(self):
@@ -319,9 +319,9 @@ class TestClass_{i}:
         )
 
         # Verify we captured files per second values
-        assert (
-            len(files_per_sec_values) > 0
-        ), "Expected to capture files per second values"
+        assert len(files_per_sec_values) > 0, (
+            "Expected to capture files per second values"
+        )
 
         # Verify the values are reasonable for parallel processing
         max_files_per_sec = max(files_per_sec_values)
@@ -391,9 +391,9 @@ class TestClass_{i}:
         )
 
         # Verify we captured thread utilization data
-        assert (
-            len(thread_utilization_over_time) >= 2
-        ), "Expected to capture thread utilization over multiple progress updates"
+        assert len(thread_utilization_over_time) >= 2, (
+            "Expected to capture thread utilization over multiple progress updates"
+        )
 
         # Extract unique thread counts seen
         unique_thread_counts = {
@@ -409,9 +409,9 @@ class TestClass_{i}:
 
         # Thread counts should be reasonable (between 0 and 8)
         # 0 is valid when processing is complete or starting up
-        assert all(
-            0 <= count <= 8 for count in unique_thread_counts
-        ), f"Expected thread counts between 0-8, but saw: {unique_thread_counts}"
+        assert all(0 <= count <= 8 for count in unique_thread_counts), (
+            f"Expected thread counts between 0-8, but saw: {unique_thread_counts}"
+        )
 
         # As processing progresses, thread utilization typically decreases
         # (fewer files left to process) and eventually reaches 0 when complete

@@ -239,12 +239,12 @@ class TestHNSWIncrementalMethods:
         )
 
         # CRITICAL: Verify mappings are cleaned up
-        assert (
-            delete_id not in id_to_label
-        ), "Deleted point_id should be removed from id_to_label"
-        assert (
-            delete_label not in label_to_id
-        ), "Deleted label should be removed from label_to_id"
+        assert delete_id not in id_to_label, (
+            "Deleted point_id should be removed from id_to_label"
+        )
+        assert delete_label not in label_to_id, (
+            "Deleted label should be removed from label_to_id"
+        )
 
         # Verify remaining mappings are still correct
         assert len(id_to_label) == 4
@@ -268,12 +268,12 @@ class TestHNSWIncrementalMethods:
         index_reloaded, id_to_label_reloaded, label_to_id_reloaded, _ = (
             hnsw_manager.load_for_incremental_update(temp_collection_path)
         )
-        assert (
-            delete_id not in id_to_label_reloaded
-        ), "Deleted point_id should not be in persisted id_to_label"
-        assert (
-            delete_label not in label_to_id_reloaded
-        ), "Deleted label should not be in persisted label_to_id"
+        assert delete_id not in id_to_label_reloaded, (
+            "Deleted point_id should not be in persisted id_to_label"
+        )
+        assert delete_label not in label_to_id_reloaded, (
+            "Deleted label should not be in persisted label_to_id"
+        )
         assert len(id_to_label_reloaded) == 4
         assert len(label_to_id_reloaded) == 4
 

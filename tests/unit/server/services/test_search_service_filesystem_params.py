@@ -122,10 +122,10 @@ class TestSearchServiceFilesystemParameters:
         )
 
         # Verify correct values
-        assert (
-            search_call_params["query"] == "authentication logic"
-        ), f"Expected query='authentication logic', got query='{search_call_params['query']}'"
+        assert search_call_params["query"] == "authentication logic", (
+            f"Expected query='authentication logic', got query='{search_call_params['query']}'"
+        )
 
-        assert (
-            search_call_params["embedding_provider"] is mock_embedding_service
-        ), "Expected embedding_provider to be the EmbeddingProviderFactory instance"
+        assert search_call_params["embedding_provider"] is mock_embedding_service, (
+            "Expected embedding_provider to be the EmbeddingProviderFactory instance"
+        )

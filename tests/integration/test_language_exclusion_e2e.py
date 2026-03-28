@@ -135,15 +135,15 @@ def test_exclude_javascript_returns_only_non_js_files(test_codebase):
 
         # Verify no JavaScript files in output
         output = query_result.output
-        assert (
-            ".js" not in output or "app.js" not in output
-        ), "Should not contain JavaScript files"
+        assert ".js" not in output or "app.js" not in output, (
+            "Should not contain JavaScript files"
+        )
         assert "utils.js" not in output, "Should not contain JavaScript utility files"
 
         # Should contain other languages
-        assert any(
-            ext in output for ext in [".py", ".ts", ".java"]
-        ), "Should contain non-JavaScript files"
+        assert any(ext in output for ext in [".py", ".ts", ".java"]), (
+            "Should contain non-JavaScript files"
+        )
 
 
 @pytest.mark.slow
@@ -180,17 +180,17 @@ def test_exclude_multiple_languages(test_codebase):
         output = query_result.output
 
         # Verify no JS or TS files in output
-        assert (
-            ".js" not in output or "app.js" not in output
-        ), "Should not contain JavaScript files"
-        assert (
-            ".ts" not in output or "component.ts" not in output
-        ), "Should not contain TypeScript files"
+        assert ".js" not in output or "app.js" not in output, (
+            "Should not contain JavaScript files"
+        )
+        assert ".ts" not in output or "component.ts" not in output, (
+            "Should not contain TypeScript files"
+        )
 
         # Should contain Python or Java
-        assert any(
-            ext in output for ext in [".py", ".java"]
-        ), "Should contain Python or Java files"
+        assert any(ext in output for ext in [".py", ".java"]), (
+            "Should contain Python or Java files"
+        )
 
 
 @pytest.mark.slow
@@ -228,12 +228,12 @@ def test_exclude_with_include_language_filter(test_codebase):
 
         # Verify only Python files in output
         if output.strip():  # If there are results
-            assert (
-                ".py" in output or "python" in output.lower()
-            ), "Should contain Python files"
-            assert (
-                ".js" not in output or "app.js" not in output
-            ), "Should not contain JavaScript files"
+            assert ".py" in output or "python" in output.lower(), (
+                "Should contain Python files"
+            )
+            assert ".js" not in output or "app.js" not in output, (
+                "Should not contain JavaScript files"
+            )
 
 
 @pytest.mark.slow
@@ -271,9 +271,9 @@ def test_exclude_with_path_filter(test_codebase):
 
         # Verify path filter worked and JS is excluded
         if output.strip():  # If there are results
-            assert (
-                "python_code" in output
-            ), "Should contain files from python_code directory"
-            assert (
-                ".js" not in output or "app.js" not in output
-            ), "Should not contain JavaScript files"
+            assert "python_code" in output, (
+                "Should contain files from python_code directory"
+            )
+            assert ".js" not in output or "app.js" not in output, (
+                "Should not contain JavaScript files"
+            )

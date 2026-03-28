@@ -127,9 +127,9 @@ class TestFileDeletionDuringIndexing:
 
         # CRITICAL ASSERTION: skipped_files tracking works
         assert hasattr(stats, "skipped_files"), "Stats should track skipped_files"
-        assert (
-            stats.skipped_files == EXPECTED_SKIPPED_FILES
-        ), f"Expected {EXPECTED_SKIPPED_FILES} skipped file, got {stats.skipped_files}"
+        assert stats.skipped_files == EXPECTED_SKIPPED_FILES, (
+            f"Expected {EXPECTED_SKIPPED_FILES} skipped file, got {stats.skipped_files}"
+        )
 
         # Verify hash results excluded the deleted file
         # Total attempted = 10 files

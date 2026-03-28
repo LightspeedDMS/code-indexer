@@ -191,9 +191,9 @@ class TestReverseCoWRestore:
         with patch("subprocess.run", side_effect=_make_subprocess_mock(cp_calls)):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(cp_calls) == 0
-        ), f"No cp --reflink expected for repos with existing masters, got: {cp_calls}"
+        assert len(cp_calls) == 0, (
+            f"No cp --reflink expected for repos with existing masters, got: {cp_calls}"
+        )
 
     def test_reconcile_restores_missing_master_via_reverse_cow(
         self, scheduler, golden_repos_dir, mock_registry
@@ -227,18 +227,18 @@ class TestReverseCoWRestore:
         ):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(captured_cp_calls) == 1
-        ), f"Expected 1 cp --reflink call, got {len(captured_cp_calls)}: {captured_cp_calls}"
+        assert len(captured_cp_calls) == 1, (
+            f"Expected 1 cp --reflink call, got {len(captured_cp_calls)}: {captured_cp_calls}"
+        )
         cp_cmd = captured_cp_calls[0]
         assert "--reflink=auto" in cp_cmd, f"Expected --reflink=auto in: {cp_cmd}"
         assert "-a" in cp_cmd, f"Expected -a in: {cp_cmd}"
-        assert (
-            str(v2) in cp_cmd
-        ), f"Expected latest versioned dir {v2} as source in: {cp_cmd}"
-        assert (
-            str(master_path) in cp_cmd
-        ), f"Expected master path {master_path} as destination in: {cp_cmd}"
+        assert str(v2) in cp_cmd, (
+            f"Expected latest versioned dir {v2} as source in: {cp_cmd}"
+        )
+        assert str(master_path) in cp_cmd, (
+            f"Expected master path {master_path} as destination in: {cp_cmd}"
+        )
 
     def test_reconcile_uses_latest_versioned_snapshot_as_source(
         self, scheduler, golden_repos_dir, mock_registry
@@ -272,12 +272,12 @@ class TestReverseCoWRestore:
 
         assert len(captured_cp_calls) == 1
         cp_cmd = captured_cp_calls[0]
-        assert (
-            str(v_latest) in cp_cmd
-        ), f"Expected LATEST versioned dir {v_latest} in cp cmd: {cp_cmd}"
-        assert (
-            str(v_old) not in cp_cmd
-        ), f"Old versioned dir {v_old} should not be in cp cmd: {cp_cmd}"
+        assert str(v_latest) in cp_cmd, (
+            f"Expected LATEST versioned dir {v_latest} in cp cmd: {cp_cmd}"
+        )
+        assert str(v_old) not in cp_cmd, (
+            f"Old versioned dir {v_old} should not be in cp cmd: {cp_cmd}"
+        )
 
     def test_reconcile_runs_fix_config_on_restored_master(
         self, scheduler, golden_repos_dir, mock_registry
@@ -312,16 +312,16 @@ class TestReverseCoWRestore:
         with patch("subprocess.run", side_effect=mock_subprocess_run):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(fix_config_calls) >= 1
-        ), "cidx fix-config --force must be called after reverse CoW clone"
+        assert len(fix_config_calls) >= 1, (
+            "cidx fix-config --force must be called after reverse CoW clone"
+        )
         fix_call = fix_config_calls[0]
-        assert (
-            "--force" in fix_call["cmd"]
-        ), f"Expected --force in fix-config cmd: {fix_call['cmd']}"
-        assert (
-            str(master_path) in fix_call["cwd"]
-        ), f"fix-config must run in master dir {master_path}, got: {fix_call['cwd']}"
+        assert "--force" in fix_call["cmd"], (
+            f"Expected --force in fix-config cmd: {fix_call['cmd']}"
+        )
+        assert str(master_path) in fix_call["cwd"], (
+            f"fix-config must run in master dir {master_path}, got: {fix_call['cwd']}"
+        )
 
     def test_reconcile_skips_repo_with_no_versioned_copies(
         self, scheduler, golden_repos_dir, mock_registry
@@ -341,9 +341,9 @@ class TestReverseCoWRestore:
         with patch("subprocess.run", side_effect=_make_subprocess_mock(cp_calls)):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(cp_calls) == 0
-        ), f"Expected no cp calls for orphan repo, got: {cp_calls}"
+        assert len(cp_calls) == 0, (
+            f"Expected no cp calls for orphan repo, got: {cp_calls}"
+        )
 
     def test_reconcile_skips_local_repos(
         self, scheduler, golden_repos_dir, mock_registry
@@ -363,9 +363,9 @@ class TestReverseCoWRestore:
         with patch("subprocess.run", side_effect=_make_subprocess_mock(cp_calls)):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(cp_calls) == 0
-        ), f"Local repos must not trigger reverse CoW: {cp_calls}"
+        assert len(cp_calls) == 0, (
+            f"Local repos must not trigger reverse CoW: {cp_calls}"
+        )
 
     def test_reconcile_handles_multiple_repos_missing_masters(
         self, scheduler, golden_repos_dir, mock_registry
@@ -393,9 +393,9 @@ class TestReverseCoWRestore:
         with patch("subprocess.run", side_effect=_make_subprocess_mock(cp_calls)):
             scheduler.reconcile_golden_repos()
 
-        assert len(cp_calls) == len(
-            repo_names
-        ), f"Expected {len(repo_names)} cp calls, got {len(cp_calls)}"
+        assert len(cp_calls) == len(repo_names), (
+            f"Expected {len(repo_names)} cp calls, got {len(cp_calls)}"
+        )
 
     def test_reconcile_does_not_restore_repos_with_existing_masters(
         self, scheduler, golden_repos_dir, mock_registry
@@ -424,12 +424,12 @@ class TestReverseCoWRestore:
         with patch("subprocess.run", side_effect=_make_subprocess_mock(cp_calls)):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(cp_calls) == 1
-        ), f"Expected 1 cp call (only for no-master), got {len(cp_calls)}: {cp_calls}"
-        assert "no-master" in " ".join(
-            cp_calls[0]
-        ), f"cp call should reference no-master, got: {cp_calls[0]}"
+        assert len(cp_calls) == 1, (
+            f"Expected 1 cp call (only for no-master), got {len(cp_calls)}: {cp_calls}"
+        )
+        assert "no-master" in " ".join(cp_calls[0]), (
+            f"cp call should reference no-master, got: {cp_calls[0]}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -604,9 +604,9 @@ class TestReconciliationFailureResilience:
             scheduler.reconcile_golden_repos()
 
         # All 3 attempted: 2 succeed, 1 fails mid-cp
-        assert (
-            len(cp_calls) >= 2
-        ), f"Expected at least 2 cp attempts, got {len(cp_calls)}"
+        assert len(cp_calls) >= 2, (
+            f"Expected at least 2 cp attempts, got {len(cp_calls)}"
+        )
 
         # Marker file must be created (overall reconciliation completed)
         marker = golden_repos_dir / ".reconciliation_complete_v1"

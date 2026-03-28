@@ -334,9 +334,9 @@ def format_date(date):
 
         # Verify milestones
         assert any(p <= 10 for p in progress_updates), "Should report early progress"
-        assert any(
-            20 <= p <= 40 for p in progress_updates
-        ), "Should report mid progress"
+        assert any(20 <= p <= 40 for p in progress_updates), (
+            "Should report mid progress"
+        )
         assert any(p >= 90 for p in progress_updates), "Should report near completion"
 
     def test_e2e_composite_with_proxy_config_manager_refresh(self):
@@ -410,9 +410,9 @@ def format_date(date):
                 text=True,
             )
             assert result.returncode == 0, f"Git log should work for {alias}"
-            assert (
-                len(result.stdout.strip()) > 0
-            ), f"Should have commit history for {alias}"
+            assert len(result.stdout.strip()) > 0, (
+                f"Should have commit history for {alias}"
+            )
 
             # Verify git status works
             result = subprocess.run(

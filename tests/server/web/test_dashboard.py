@@ -31,9 +31,9 @@ class TestDashboardAccess:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_dashboard_renders(self, authenticated_client: TestClient):
         """
@@ -46,9 +46,9 @@ class TestDashboardAccess:
         response = authenticated_client.get("/admin/")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Dashboard - CIDX Admin" in response.text
-        ), "Page title should be 'Dashboard - CIDX Admin'"
+        assert "Dashboard - CIDX Admin" in response.text, (
+            "Page title should be 'Dashboard - CIDX Admin'"
+        )
 
     def test_dashboard_nav_highlighted(self, authenticated_client: TestClient):
         """
@@ -62,9 +62,9 @@ class TestDashboardAccess:
 
         assert response.status_code == 200
         # The dashboard should have aria-current="page" attribute
-        assert (
-            'aria-current="page"' in response.text
-        ), "Dashboard should be highlighted with aria-current attribute"
+        assert 'aria-current="page"' in response.text, (
+            "Dashboard should be highlighted with aria-current attribute"
+        )
 
 
 # =============================================================================
@@ -86,9 +86,9 @@ class TestSystemHealthDisplay:
         response = authenticated_client.get("/admin/")
 
         assert response.status_code == 200
-        assert (
-            "System Health" in response.text
-        ), "Dashboard should contain 'System Health' section"
+        assert "System Health" in response.text, (
+            "Dashboard should contain 'System Health' section"
+        )
 
     def test_dashboard_shows_health_status(self, authenticated_client: TestClient):
         """
@@ -103,13 +103,13 @@ class TestSystemHealthDisplay:
         assert response.status_code == 200
         # Check for health status indicators
         text_lower = response.text.lower()
-        assert (
-            "server" in text_lower or "api" in text_lower
-        ), "Dashboard should show server status"
+        assert "server" in text_lower or "api" in text_lower, (
+            "Dashboard should show server status"
+        )
         # Check for status indicator classes
-        assert (
-            "status-indicator" in response.text or "status-" in response.text
-        ), "Dashboard should have status indicator elements"
+        assert "status-indicator" in response.text or "status-" in response.text, (
+            "Dashboard should have status indicator elements"
+        )
 
 
 # =============================================================================
@@ -134,9 +134,9 @@ class TestJobStatistics:
         text_lower = response.text.lower()
         assert "jobs" in text_lower, "Dashboard should contain 'Jobs' section"
         # Should have job-related count displays
-        assert (
-            "running" in text_lower or "queued" in text_lower
-        ), "Dashboard should show job status counts"
+        assert "running" in text_lower or "queued" in text_lower, (
+            "Dashboard should show job status counts"
+        )
 
     def test_job_counts_link_to_jobs_page(self, authenticated_client: TestClient):
         """
@@ -149,9 +149,9 @@ class TestJobStatistics:
         response = authenticated_client.get("/admin/")
 
         assert response.status_code == 200
-        assert (
-            "/admin/jobs" in response.text
-        ), "Dashboard should have links to jobs page"
+        assert "/admin/jobs" in response.text, (
+            "Dashboard should have links to jobs page"
+        )
 
 
 # =============================================================================
@@ -174,9 +174,9 @@ class TestRepositoryStatistics:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "repositories" in text_lower or "repos" in text_lower
-        ), "Dashboard should contain 'Repositories' section"
+        assert "repositories" in text_lower or "repos" in text_lower, (
+            "Dashboard should contain 'Repositories' section"
+        )
 
     def test_repo_counts_link_to_management_pages(
         self, authenticated_client: TestClient
@@ -217,9 +217,9 @@ class TestAutoRefresh:
         assert response.status_code == 200
         # Check for auto-refresh toggle element
         text_lower = response.text.lower()
-        assert (
-            "auto-refresh" in text_lower or "autorefresh" in text_lower
-        ), "Dashboard should have auto-refresh toggle"
+        assert "auto-refresh" in text_lower or "autorefresh" in text_lower, (
+            "Dashboard should have auto-refresh toggle"
+        )
 
 
 # =============================================================================
@@ -245,9 +245,9 @@ class TestManualRefresh:
         text_lower = response.text.lower()
         assert "refresh" in text_lower, "Dashboard should have refresh button"
         # Should use htmx for refresh
-        assert (
-            "hx-get" in response.text or "hx-post" in response.text
-        ), "Refresh should use htmx attributes"
+        assert "hx-get" in response.text or "hx-post" in response.text, (
+            "Refresh should use htmx attributes"
+        )
 
 
 # =============================================================================
@@ -270,9 +270,9 @@ class TestRecentActivity:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "recent" in text_lower or "activity" in text_lower
-        ), "Dashboard should contain 'Recent Activity' section"
+        assert "recent" in text_lower or "activity" in text_lower, (
+            "Dashboard should contain 'Recent Activity' section"
+        )
 
 
 # =============================================================================
@@ -295,9 +295,9 @@ class TestRecentActivityNoDropdown:
 
         assert response.status_code == 200
         # Should NOT have recent-filter dropdown
-        assert (
-            'id="recent-filter"' not in response.text
-        ), "Recent Activity should not have a time range dropdown"
+        assert 'id="recent-filter"' not in response.text, (
+            "Recent Activity should not have a time range dropdown"
+        )
 
     def test_recent_activity_plain_header(self, authenticated_client: TestClient):
         """
@@ -339,9 +339,9 @@ class TestRecentActivityNoDropdown:
         response = authenticated_client.get("/admin/")
 
         assert response.status_code == 200
-        assert (
-            "updateRecentActivity" not in response.text
-        ), "updateRecentActivity() function should be removed"
+        assert "updateRecentActivity" not in response.text, (
+            "updateRecentActivity() function should be removed"
+        )
 
     def test_other_dropdowns_still_exist(self, authenticated_client: TestClient):
         """
@@ -356,17 +356,17 @@ class TestRecentActivityNoDropdown:
 
         assert response.status_code == 200
         # Job Statistics dropdown should still exist
-        assert (
-            'id="time-filter"' in response.text
-        ), "Job Statistics time filter dropdown should still exist"
+        assert 'id="time-filter"' in response.text, (
+            "Job Statistics time filter dropdown should still exist"
+        )
         # API Activity dropdown should still exist
-        assert (
-            'id="api-filter"' in response.text
-        ), "API Activity time filter dropdown should still exist"
+        assert 'id="api-filter"' in response.text, (
+            "API Activity time filter dropdown should still exist"
+        )
         # Recent Activity dropdown should NOT exist
-        assert (
-            'id="recent-filter"' not in response.text
-        ), "Recent Activity dropdown should be removed"
+        assert 'id="recent-filter"' not in response.text, (
+            "Recent Activity dropdown should be removed"
+        )
 
 
 # =============================================================================
@@ -389,14 +389,14 @@ class TestDashboardPartials:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
         # Should contain health-related content
         text_lower = response.text.lower()
-        assert (
-            "health" in text_lower or "status" in text_lower
-        ), "Health partial should contain health-related content"
+        assert "health" in text_lower or "status" in text_lower, (
+            "Health partial should contain health-related content"
+        )
 
     def test_dashboard_partial_stats(self, authenticated_client: TestClient):
         """
@@ -410,9 +410,9 @@ class TestDashboardPartials:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
 
     def test_partials_require_auth(self, web_client: TestClient):
         """

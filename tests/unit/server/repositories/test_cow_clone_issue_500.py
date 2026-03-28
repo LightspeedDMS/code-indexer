@@ -193,9 +193,9 @@ def authenticate_user(username, password):
 
         # Verify config.json exists
         config_file = code_indexer_dir / "config.json"
-        assert (
-            config_file.exists()
-        ), ".code-indexer/config.json must exist (copied from golden repo)"
+        assert config_file.exists(), (
+            ".code-indexer/config.json must exist (copied from golden repo)"
+        )
 
     def test_cow_clone_copies_indexes(self, activated_repo_manager, temp_data_dir):
         """

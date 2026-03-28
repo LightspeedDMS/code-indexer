@@ -449,9 +449,9 @@ class TestParameterValidation:
                 )
 
             data = json.loads(response["content"][0]["text"])
-            assert (
-                data["success"] is True
-            ), f"Engine {engine} should be accepted, got: {data}"
+            assert data["success"] is True, (
+                f"Engine {engine} should be accepted, got: {data}"
+            )
 
     @pytest.mark.asyncio
     async def test_invalid_mode_returns_error(self, power_user, mock_delegation_config):

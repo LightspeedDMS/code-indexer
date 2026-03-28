@@ -791,7 +791,9 @@ class TestDeleteUserEndpoint:
                 "at least one admin",
                 "system requires admin",
             ]
-        ), f"Error message should explain admin protection, got: {response_data['detail']}"
+        ), (
+            f"Error message should explain admin protection, got: {response_data['detail']}"
+        )
 
         # Verify delete_user was NOT called
         mock_app_user_manager.delete_user.assert_not_called()
@@ -1151,9 +1153,9 @@ class TestPasswordComplexityValidation:
         ]
 
         for password in strong_passwords:
-            assert validate_password_complexity(
-                password
-            ), f"Password '{password}' should be valid"
+            assert validate_password_complexity(password), (
+                f"Password '{password}' should be valid"
+            )
 
     def test_validate_weak_password_returns_false(self):
         """Test that weak passwords fail validation."""
@@ -1175,9 +1177,9 @@ class TestPasswordComplexityValidation:
         ]
 
         for password in weak_passwords:
-            assert not validate_password_complexity(
-                password
-            ), f"Password '{password}' should be invalid"
+            assert not validate_password_complexity(password), (
+                f"Password '{password}' should be invalid"
+            )
 
     def test_get_password_requirements_returns_dict(self):
         """Test that password requirements are properly documented."""

@@ -174,9 +174,9 @@ class TestStatusCommandMultimodal:
 
         # Explicitly ensure multimodal collection does NOT exist
         multimodal_collection = index_dir / VOYAGE_MULTIMODAL_MODEL
-        assert (
-            not multimodal_collection.exists()
-        ), "Multimodal collection should not exist for this test"
+        assert not multimodal_collection.exists(), (
+            "Multimodal collection should not exist for this test"
+        )
 
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=temp_project):
@@ -266,9 +266,9 @@ class TestReadmeTemplateMultimodal:
 
                 # README is created in current directory (which is project_root after isolated_filesystem)
                 readme_path = Path(".code-indexer") / "README.md"
-                assert (
-                    readme_path.exists()
-                ), f"README.md was not created at {readme_path.absolute()}"
+                assert readme_path.exists(), (
+                    f"README.md was not created at {readme_path.absolute()}"
+                )
 
                 readme_content = readme_path.read_text()
                 assert "voyage-multimodal-3" in readme_content

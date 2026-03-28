@@ -121,12 +121,12 @@ class TestSSHSkipBehaviorIntegration:
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
 
-        assert (
-            result.returncode == 0
-        ), f"pytest failed: {result.stdout}\n{result.stderr}"
-        assert (
-            "SKIPPED" in result.stdout or "skipped" in result.stdout.lower()
-        ), f"Test should have been skipped:\n{result.stdout}"
+        assert result.returncode == 0, (
+            f"pytest failed: {result.stdout}\n{result.stderr}"
+        )
+        assert "SKIPPED" in result.stdout or "skipped" in result.stdout.lower(), (
+            f"Test should have been skipped:\n{result.stdout}"
+        )
 
     def test_marked_test_runs_when_env_var_not_set(self):
         """Verify tests with skipif for CIDX_SKIP_SSH_TESTS run when env var is NOT set."""
@@ -151,9 +151,9 @@ class TestSSHSkipBehaviorIntegration:
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
 
-        assert (
-            result.returncode == 0
-        ), f"pytest failed: {result.stdout}\n{result.stderr}"
+        assert result.returncode == 0, (
+            f"pytest failed: {result.stdout}\n{result.stderr}"
+        )
         assert "PASSED" in result.stdout, f"Test should have passed:\n{result.stdout}"
 
 

@@ -156,12 +156,12 @@ class TestActivatedRepoConfigCreation:
             config_data = yaml.safe_load(f)
 
         # Verify vector_store configuration
-        assert (
-            "vector_store" in config_data
-        ), "config.json must contain 'vector_store' section"
-        assert (
-            config_data["vector_store"]["provider"] == "filesystem"
-        ), "vector_store provider must be 'filesystem' to avoid defaulting to Filesystem"
+        assert "vector_store" in config_data, (
+            "config.json must contain 'vector_store' section"
+        )
+        assert config_data["vector_store"]["provider"] == "filesystem", (
+            "vector_store provider must be 'filesystem' to avoid defaulting to Filesystem"
+        )
 
     def test_config_yml_contains_voyage_ai_configuration(
         self, activated_repo_manager, temp_data_dir
@@ -192,20 +192,20 @@ class TestActivatedRepoConfigCreation:
             config_data = yaml.safe_load(f)
 
         # Verify embedding provider configuration
-        assert (
-            "embedding_provider" in config_data
-        ), "config.json must contain 'embedding_provider' field"
-        assert (
-            config_data["embedding_provider"] == "voyage-ai"
-        ), "embedding_provider must be 'voyage-ai' for server mode"
+        assert "embedding_provider" in config_data, (
+            "config.json must contain 'embedding_provider' field"
+        )
+        assert config_data["embedding_provider"] == "voyage-ai", (
+            "embedding_provider must be 'voyage-ai' for server mode"
+        )
 
         # Verify voyage_ai section exists
-        assert (
-            "voyage_ai" in config_data
-        ), "config.json must contain 'voyage_ai' configuration section"
-        assert (
-            config_data["voyage_ai"]["model"] == "voyage-code-3"
-        ), "voyage_ai model must be 'voyage-code-3' (production default)"
+        assert "voyage_ai" in config_data, (
+            "config.json must contain 'voyage_ai' configuration section"
+        )
+        assert config_data["voyage_ai"]["model"] == "voyage-code-3", (
+            "voyage_ai model must be 'voyage-code-3' (production default)"
+        )
 
     def test_config_yml_has_correct_yaml_structure(
         self, activated_repo_manager, temp_data_dir
@@ -233,9 +233,9 @@ class TestActivatedRepoConfigCreation:
         with open(config_yml_path, "r") as f:
             config_data = yaml.safe_load(f)
 
-        assert isinstance(
-            config_data, dict
-        ), "config.json must be a valid JSON dictionary"
+        assert isinstance(config_data, dict), (
+            "config.json must be a valid JSON dictionary"
+        )
 
         # Verify expected keys are present
         expected_keys = ["vector_store", "embedding_provider", "voyage_ai"]
@@ -324,9 +324,9 @@ class TestActivatedRepoConfigCreation:
 
         # Verify config.json does NOT exist yet
         config_yml_path = repo_dir / ".code-indexer" / "config.json"
-        assert (
-            not config_yml_path.exists()
-        ), "Test setup: config.json should not exist initially"
+        assert not config_yml_path.exists(), (
+            "Test setup: config.json should not exist initially"
+        )
 
         # TODO: Implement migration function that adds config.json to existing repos
         # This will be implemented as part of the fix

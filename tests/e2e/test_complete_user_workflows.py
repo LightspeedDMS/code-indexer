@@ -133,9 +133,9 @@ class TestCompleteUserWorkflows:
         )
 
         # Should not be 403 (forbidden) - admin should be able to create golden repos
-        assert (
-            response.status_code != 403
-        ), "Admin should be able to create golden repos"
+        assert response.status_code != 403, (
+            "Admin should be able to create golden repos"
+        )
 
         # Step 4: List golden repositories
         response = main_server.make_api_request(
@@ -165,9 +165,9 @@ class TestCompleteUserWorkflows:
 
         # Step 1: Power user login
         power_login = auth_helper.login_user("poweruser", "password")
-        assert power_login[
-            "success"
-        ], f"Power user login failed: {power_login.get('error')}"
+        assert power_login["success"], (
+            f"Power user login failed: {power_login.get('error')}"
+        )
 
         power_token = power_login["token"]
         power_headers = auth_helper.create_auth_headers(power_token)
@@ -178,9 +178,9 @@ class TestCompleteUserWorkflows:
         )
 
         # Power user should NOT have access to admin endpoints
-        assert (
-            response.status_code == 403
-        ), "Power user should not access admin endpoints"
+        assert response.status_code == 403, (
+            "Power user should not access admin endpoints"
+        )
 
         # Step 3: List available repositories
         response = main_server.make_api_request(
@@ -199,9 +199,9 @@ class TestCompleteUserWorkflows:
             json_data=activation_data,
         )
 
-        assert (
-            response.status_code != 403
-        ), "Power user should be able to activate repos"
+        assert response.status_code != 403, (
+            "Power user should be able to activate repos"
+        )
 
         # Step 5: Perform semantic search
         search_query = {
@@ -227,9 +227,9 @@ class TestCompleteUserWorkflows:
 
         # Step 1: Normal user login
         user_login = auth_helper.login_user("normaluser", "password")
-        assert user_login[
-            "success"
-        ], f"Normal user login failed: {user_login.get('error')}"
+        assert user_login["success"], (
+            f"Normal user login failed: {user_login.get('error')}"
+        )
 
         user_token = user_login["token"]
         user_headers = auth_helper.create_auth_headers(user_token)
@@ -239,9 +239,9 @@ class TestCompleteUserWorkflows:
             "GET", "/api/admin/users", headers=user_headers
         )
 
-        assert (
-            response.status_code == 403
-        ), "Normal user should not access admin endpoints"
+        assert response.status_code == 403, (
+            "Normal user should not access admin endpoints"
+        )
 
         # Step 3: Try to activate repository (should be forbidden)
         activation_data = {"goldenRepoName": "test_repo", "alias": "my_repo"}
@@ -396,9 +396,9 @@ class TestCompleteUserWorkflows:
         successful_logins = sum(
             1 for result in login_results.values() if result["success"]
         )
-        assert (
-            successful_logins >= 2
-        ), f"Expected at least 2 successful logins, got {successful_logins}"
+        assert successful_logins >= 2, (
+            f"Expected at least 2 successful logins, got {successful_logins}"
+        )
 
         # Perform concurrent searches
         search_query = {"query": "function definition", "limit": 5}
@@ -437,9 +437,9 @@ class TestCompleteUserWorkflows:
         # Verify server info
         server_info = main_server.get_server_info()
         assert server_info["running"], "Server should report as running"
-        assert (
-            server_info["health_status"] is not None
-        ), "Health status should be available"
+        assert server_info["health_status"] is not None, (
+            "Health status should be available"
+        )
 
         # Verify container environment (if started)
         if test_environment["containers_started"]:
@@ -458,9 +458,9 @@ class TestCompleteUserWorkflows:
         auth_helper.login_user("poweruser", "password")
 
         # Verify sessions exist
-        assert (
-            auth_helper.get_active_sessions_count() >= 1
-        ), "Should have active sessions"
+        assert auth_helper.get_active_sessions_count() >= 1, (
+            "Should have active sessions"
+        )
 
         # Test selective logout
         if admin_login["success"]:
@@ -470,9 +470,9 @@ class TestCompleteUserWorkflows:
 
         # Test cleanup all
         auth_helper.logout_all_users()
-        assert (
-            auth_helper.get_active_sessions_count() == 0
-        ), "All sessions should be cleared"
+        assert auth_helper.get_active_sessions_count() == 0, (
+            "All sessions should be cleared"
+        )
 
         print("✅ Cleanup and isolation test completed successfully")
 

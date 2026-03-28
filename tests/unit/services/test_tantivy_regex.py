@@ -187,9 +187,9 @@ class TestTantivyRegex:
             snippet_lines=0,
         )
 
-        assert (
-            len(results_sensitive) > 0
-        ), "Should find lowercase 'def' with case-sensitive search"
+        assert len(results_sensitive) > 0, (
+            "Should find lowercase 'def' with case-sensitive search"
+        )
         # Both should find the same results since 'def' is lowercase in source
         assert len(results_sensitive) == len(results_insensitive)
 

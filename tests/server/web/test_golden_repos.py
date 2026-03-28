@@ -35,9 +35,9 @@ class TestGoldenRepoListDisplay:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_golden_repos_page_renders(self, authenticated_client: TestClient):
         """
@@ -50,9 +50,9 @@ class TestGoldenRepoListDisplay:
         response = authenticated_client.get("/admin/golden-repos")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Golden Repositories - CIDX Admin" in response.text
-        ), "Page title should be 'Golden Repositories - CIDX Admin'"
+        assert "Golden Repositories - CIDX Admin" in response.text, (
+            "Page title should be 'Golden Repositories - CIDX Admin'"
+        )
 
     def test_golden_repos_empty_state(self, authenticated_client: TestClient):
         """
@@ -67,9 +67,9 @@ class TestGoldenRepoListDisplay:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "no golden repositories" in text_lower
-        ), "Should show 'No golden repositories' message when empty"
+        assert "no golden repositories" in text_lower, (
+            "Should show 'No golden repositories' message when empty"
+        )
 
     def test_golden_repos_table_columns(self, authenticated_client: TestClient):
         """
@@ -88,13 +88,13 @@ class TestGoldenRepoListDisplay:
         assert "<table" in text_lower, "Page should contain a golden repos table"
         assert "name" in text_lower, "Table should have Name column"
         # Path or URL should be present
-        assert (
-            "path" in text_lower or "url" in text_lower
-        ), "Table should have Path/URL column"
+        assert "path" in text_lower or "url" in text_lower, (
+            "Table should have Path/URL column"
+        )
         assert "status" in text_lower, "Table should have Status column"
-        assert (
-            "last indexed" in text_lower or "indexed" in text_lower
-        ), "Table should have Last Indexed column"
+        assert "last indexed" in text_lower or "indexed" in text_lower, (
+            "Table should have Last Indexed column"
+        )
         assert "actions" in text_lower, "Table should have Actions column"
 
     def test_golden_repos_has_add_button(self, authenticated_client: TestClient):
@@ -109,9 +109,9 @@ class TestGoldenRepoListDisplay:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "add repository" in text_lower or "add-repository" in text_lower
-        ), "Page should have an Add Repository button"
+        assert "add repository" in text_lower or "add-repository" in text_lower, (
+            "Page should have an Add Repository button"
+        )
 
 
 # =============================================================================
@@ -137,9 +137,9 @@ class TestRepoStatusDisplay:
         # Even with no repos, the template should be ready for status display
         text = response.text
         # Check that page has proper structure for showing status
-        assert (
-            "<table" in text.lower() or "status" in text.lower()
-        ), "Page should have structure for status display"
+        assert "<table" in text.lower() or "status" in text.lower(), (
+            "Page should have structure for status display"
+        )
 
 
 # =============================================================================
@@ -164,9 +164,9 @@ class TestAddRepoForm:
         text = response.text
 
         # Form should have necessary fields
-        assert (
-            'name="repo_name"' in text.lower() or 'name="alias"' in text.lower()
-        ), "Form should have name/alias field"
+        assert 'name="repo_name"' in text.lower() or 'name="alias"' in text.lower(), (
+            "Form should have name/alias field"
+        )
         assert (
             'name="repo_url"' in text.lower()
             or 'name="path"' in text.lower()
@@ -447,9 +447,9 @@ class TestGoldenReposPartial:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
 
     def test_partials_require_auth(self, web_client: TestClient):
         """
@@ -460,13 +460,12 @@ class TestGoldenReposPartial:
         Then I am redirected to login
         """
         response = web_client.get("/admin/partials/golden-repos-list")
-        assert (
-            response.status_code
-            in [
-                302,
-                303,
-            ]
-        ), f"Golden repos partial should redirect unauthenticated, got {response.status_code}"
+        assert response.status_code in [
+            302,
+            303,
+        ], (
+            f"Golden repos partial should redirect unauthenticated, got {response.status_code}"
+        )
 
 
 # =============================================================================
@@ -550,9 +549,9 @@ class TestSCIPBadgeDetection:
         assert test_repo is not None, "Should find test-scip-repo in results"
 
         # THIS IS THE FAILING ASSERTION - will fail until routes.py is fixed
-        assert (
-            test_repo["has_scip"] is True
-        ), "has_scip should be True when .scip.db files exist"
+        assert test_repo["has_scip"] is True, (
+            "has_scip should be True when .scip.db files exist"
+        )
 
     def test_has_scip_false_with_no_scip_files(
         self, web_infrastructure: WebTestInfrastructure
@@ -606,9 +605,9 @@ class TestSCIPBadgeDetection:
         assert test_repo is not None, "Should find test-no-scip-repo in results"
 
         # Verify has_scip is False
-        assert (
-            test_repo["has_scip"] is False
-        ), "has_scip should be False when no SCIP files exist"
+        assert test_repo["has_scip"] is False, (
+            "has_scip should be False when no SCIP files exist"
+        )
 
 
 # =============================================================================

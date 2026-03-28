@@ -110,9 +110,9 @@ class TestSymbolReferencesETL:
             cursor.execute("SELECT COUNT(*) FROM symbol_references")
             ref_count = cursor.fetchone()[0]
 
-            assert (
-                ref_count > 0
-            ), "symbol_references table should have entries after indexing"
+            assert ref_count > 0, (
+                "symbol_references table should have entries after indexing"
+            )
 
             # Verify columns are populated correctly
             cursor.execute(

@@ -31,9 +31,9 @@ class TestMarkdownImageIndexing:
         extractor = ImageExtractorFactory.get_extractor(".md")
 
         assert extractor is not None, "Factory returned None for .md extension"
-        assert isinstance(
-            extractor, MarkdownImageExtractor
-        ), f"Expected MarkdownImageExtractor, got {type(extractor)}"
+        assert isinstance(extractor, MarkdownImageExtractor), (
+            f"Expected MarkdownImageExtractor, got {type(extractor)}"
+        )
 
     def test_extract_images_from_api_reference(self, multimodal_repo_path):
         """Verify api-reference.md image extraction."""

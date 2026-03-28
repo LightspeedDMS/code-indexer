@@ -301,14 +301,14 @@ class TestWorkerExceptionHandling:
                 )
 
         # Verify slot was acquired
-        assert (
-            mock_slot_tracker.acquire_slot.called
-        ), "Expected acquire_slot to be called"
+        assert mock_slot_tracker.acquire_slot.called, (
+            "Expected acquire_slot to be called"
+        )
 
         # Verify slot was released exactly once (in finally block)
-        assert (
-            mock_slot_tracker.release_slot.call_count == 1
-        ), f"Expected release_slot to be called once, got {mock_slot_tracker.release_slot.call_count}"
+        assert mock_slot_tracker.release_slot.call_count == 1, (
+            f"Expected release_slot to be called once, got {mock_slot_tracker.release_slot.call_count}"
+        )
 
         # Verify correct slot ID was released
         if slot_id_captured:
@@ -387,9 +387,9 @@ class TestWorkerExceptionHandling:
 
             # Verify at least one error message contains the commit hash
             commit_hash_short = self.test_commit.hash[:7]  # "abc1234"
-            assert any(
-                commit_hash_short in msg for msg in error_messages
-            ), f"Expected commit hash '{commit_hash_short}' in error messages: {error_messages}"
+            assert any(commit_hash_short in msg for msg in error_messages), (
+                f"Expected commit hash '{commit_hash_short}' in error messages: {error_messages}"
+            )
 
             # Verify error message is descriptive (contains "CRITICAL" or "Failed")
             assert any(

@@ -59,12 +59,12 @@ def test_manual_trigger_route_auto_detects_repo_root(
         # Bug #87 fix: repo_root should be read from app.state and passed
         assert "repo_root" in init_kwargs, "repo_root parameter is missing"
         assert init_kwargs["repo_root"] is not None, "repo_root should not be None"
-        assert isinstance(
-            init_kwargs["repo_root"], str
-        ), "repo_root should be a string path"
-        assert init_kwargs["repo_root"] == str(
-            repo_root_path
-        ), f"repo_root should match app.state value: {repo_root_path}"
+        assert isinstance(init_kwargs["repo_root"], str), (
+            "repo_root should be a string path"
+        )
+        assert init_kwargs["repo_root"] == str(repo_root_path), (
+            f"repo_root should match app.state value: {repo_root_path}"
+        )
 
 
 def test_manual_trigger_route_auto_detects_github_repo(
@@ -110,15 +110,15 @@ def test_manual_trigger_route_auto_detects_github_repo(
 
         # Bug #87 fix: github_repo should be read from app.state
         assert "github_repo" in init_kwargs, "github_repo parameter is missing"
-        assert (
-            init_kwargs["github_repo"] == "test-owner/test-repo"
-        ), "github_repo should match app.state value"
-        assert isinstance(
-            init_kwargs["github_repo"], str
-        ), "github_repo should be a string"
-        assert (
-            "/" in init_kwargs["github_repo"]
-        ), "github_repo should be in 'owner/repo' format"
+        assert init_kwargs["github_repo"] == "test-owner/test-repo", (
+            "github_repo should match app.state value"
+        )
+        assert isinstance(init_kwargs["github_repo"], str), (
+            "github_repo should be a string"
+        )
+        assert "/" in init_kwargs["github_repo"], (
+            "github_repo should be in 'owner/repo' format"
+        )
 
 
 def test_manual_trigger_route_does_not_use_environment_variable(
@@ -171,12 +171,12 @@ def test_manual_trigger_route_does_not_use_environment_variable(
                 init_kwargs = mock_service_class.call_args[1]
 
                 # github_repo should be from app.state, NOT from env var
-                assert (
-                    init_kwargs["github_repo"] == "correct-owner/correct-repo"
-                ), "github_repo should come from app.state, not GITHUB_REPOSITORY env var"
-                assert (
-                    init_kwargs["github_repo"] != "wrong-owner/wrong-repo"
-                ), "github_repo should NOT come from GITHUB_REPOSITORY env var"
+                assert init_kwargs["github_repo"] == "correct-owner/correct-repo", (
+                    "github_repo should come from app.state, not GITHUB_REPOSITORY env var"
+                )
+                assert init_kwargs["github_repo"] != "wrong-owner/wrong-repo", (
+                    "github_repo should NOT come from GITHUB_REPOSITORY env var"
+                )
     finally:
         # Restore original environment variable
         if old_env is None:

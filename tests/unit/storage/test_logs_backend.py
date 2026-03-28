@@ -56,9 +56,9 @@ class TestLogsBackendProtocol:
 
         assert "insert_log" in protocol_methods, "LogsBackend must have insert_log()"
         assert "query_logs" in protocol_methods, "LogsBackend must have query_logs()"
-        assert (
-            "cleanup_old_logs" in protocol_methods
-        ), "LogsBackend must have cleanup_old_logs()"
+        assert "cleanup_old_logs" in protocol_methods, (
+            "LogsBackend must have cleanup_old_logs()"
+        )
         assert "close" in protocol_methods, "LogsBackend must have close()"
 
 
@@ -557,7 +557,7 @@ class TestBackendRegistryLogsField:
 
         fields = {f.name for f in dataclasses.fields(BackendRegistry)}
         assert "logs" in fields, (
-            "BackendRegistry must have a 'logs' field. " f"Current fields: {fields}"
+            f"BackendRegistry must have a 'logs' field. Current fields: {fields}"
         )
 
     def test_storage_factory_creates_logs_backend_sqlite_mode(self, tmp_path):
@@ -571,9 +571,9 @@ class TestBackendRegistryLogsField:
         registry = StorageFactory._create_sqlite_backends(data_dir)
 
         assert hasattr(registry, "logs"), "BackendRegistry must have .logs attribute"
-        assert isinstance(
-            registry.logs, LogsBackend
-        ), f"registry.logs must satisfy LogsBackend protocol, got {type(registry.logs)}"
+        assert isinstance(registry.logs, LogsBackend), (
+            f"registry.logs must satisfy LogsBackend protocol, got {type(registry.logs)}"
+        )
 
     def test_storage_factory_logs_backend_is_functional(self, tmp_path):
         """The logs backend from StorageFactory must be able to insert and query logs."""
@@ -641,9 +641,9 @@ class TestSQLiteLogHandlerNodeId:
         from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 
         handler = SQLiteLogHandler(db_path)
-        assert hasattr(
-            handler, "set_node_id"
-        ), "SQLiteLogHandler must have set_node_id() method"
+        assert hasattr(handler, "set_node_id"), (
+            "SQLiteLogHandler must have set_node_id() method"
+        )
         assert callable(handler.set_node_id), "set_node_id must be callable"
         handler.close()
 
@@ -652,9 +652,9 @@ class TestSQLiteLogHandlerNodeId:
         from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 
         handler = SQLiteLogHandler(db_path)
-        assert (
-            handler._node_id is None
-        ), "_node_id must default to None (standalone mode)"
+        assert handler._node_id is None, (
+            "_node_id must default to None (standalone mode)"
+        )
         handler.close()
 
     def test_set_node_id_stores_value(self, db_path):
@@ -700,9 +700,9 @@ class TestSQLiteLogHandlerNodeId:
             offset=0,
         )
 
-        assert (
-            total == 1
-        ), f"Expected 1 record with node_id='node-emit-test', got {total}"
+        assert total == 1, (
+            f"Expected 1 record with node_id='node-emit-test', got {total}"
+        )
         assert results[0]["node_id"] == "node-emit-test"
         assert results[0]["message"] == "Node ID emission test"
 

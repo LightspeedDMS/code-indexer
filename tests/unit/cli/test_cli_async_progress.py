@@ -23,11 +23,11 @@ class TestCLIAsyncProgress:
 
         # Verify async method exists on RichLiveProgressManager
         mgr = RichLiveProgressManager(Console())
-        assert hasattr(
-            mgr, "async_handle_progress_update"
-        ), "RichLiveProgressManager must have async_handle_progress_update method"
+        assert hasattr(mgr, "async_handle_progress_update"), (
+            "RichLiveProgressManager must have async_handle_progress_update method"
+        )
 
         # Verify the method is callable
-        assert callable(
-            mgr.async_handle_progress_update
-        ), "async_handle_progress_update must be callable"
+        assert callable(mgr.async_handle_progress_update), (
+            "async_handle_progress_update must be callable"
+        )

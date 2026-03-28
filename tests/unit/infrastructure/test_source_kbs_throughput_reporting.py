@@ -243,28 +243,28 @@ def function_{i}():
                 # Expected format: "X/Y files (Z%) | A.B files/s | C.D KB/s | E threads | filename"
                 parts = info.split("|")
 
-                assert (
-                    len(parts) >= 5
-                ), f"Expected at least 5 parts in progress format with KB/s, got {len(parts)}: {info}"
+                assert len(parts) >= 5, (
+                    f"Expected at least 5 parts in progress format with KB/s, got {len(parts)}: {info}"
+                )
 
                 # Verify each part contains expected content
-                assert (
-                    "files" in parts[0] and "(" in parts[0] and "%)" in parts[0]
-                ), f"Expected 'X/Y files (Z%)' in first part: {parts[0]}"
+                assert "files" in parts[0] and "(" in parts[0] and "%)" in parts[0], (
+                    f"Expected 'X/Y files (Z%)' in first part: {parts[0]}"
+                )
 
-                assert (
-                    "files/s" in parts[1]
-                ), f"Expected 'files/s' in second part: {parts[1]}"
+                assert "files/s" in parts[1], (
+                    f"Expected 'files/s' in second part: {parts[1]}"
+                )
 
                 assert "KB/s" in parts[2], f"Expected 'KB/s' in third part: {parts[2]}"
 
-                assert (
-                    "threads" in parts[3]
-                ), f"Expected 'threads' in fourth part: {parts[3]}"
+                assert "threads" in parts[3], (
+                    f"Expected 'threads' in fourth part: {parts[3]}"
+                )
 
-                assert (
-                    len(parts[4].strip()) > 0
-                ), f"Expected filename in fifth part: {parts[4]}"
+                assert len(parts[4].strip()) > 0, (
+                    f"Expected filename in fifth part: {parts[4]}"
+                )
 
                 break
 
@@ -405,9 +405,9 @@ def function_{i}():
         # All KB/s values should be reasonable (no negative or extremely high values)
         for kbs in all_kbs_values:
             assert kbs >= 0, f"KB/s should not be negative: {kbs}"
-            assert (
-                kbs < 1000000
-            ), f"KB/s suspiciously high (possible threading issue): {kbs}"
+            assert kbs < 1000000, (
+                f"KB/s suspiciously high (possible threading issue): {kbs}"
+            )
 
         # Verify final processing stats are consistent
         assert stats.files_processed > 0, "Should have processed files successfully"

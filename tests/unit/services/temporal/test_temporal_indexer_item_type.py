@@ -118,6 +118,6 @@ class TestTemporalIndexerItemType:
             import re
 
             files_count_pattern = re.search(r"\d+/\d+\s+files", info)
-            assert (
-                files_count_pattern is None
-            ), f"Progress should show 'commits' not 'files' in count: {info}"
+            assert files_count_pattern is None, (
+                f"Progress should show 'commits' not 'files' in count: {info}"
+            )

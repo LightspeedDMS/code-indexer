@@ -185,12 +185,12 @@ class TestSyncProjectTriggersPerUserRefresh:
         alice_alias = "langfuse_MyProject_alice_example.com-global"
         bob_alias = "langfuse_MyProject_bob_example.com-global"
 
-        assert (
-            alice_alias in trigger_aliases
-        ), f"Expected '{alice_alias}' in trigger calls, got: {trigger_aliases}"
-        assert (
-            bob_alias in trigger_aliases
-        ), f"Expected '{bob_alias}' in trigger calls, got: {trigger_aliases}"
+        assert alice_alias in trigger_aliases, (
+            f"Expected '{alice_alias}' in trigger calls, got: {trigger_aliases}"
+        )
+        assert bob_alias in trigger_aliases, (
+            f"Expected '{bob_alias}' in trigger calls, got: {trigger_aliases}"
+        )
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
     def test_no_refresh_when_no_traces_written(
@@ -249,9 +249,9 @@ class TestSyncProjectTriggersPerUserRefresh:
             for i in range(len(mock_scheduler.trigger_refresh_for_repo.call_args_list))
         ]
         expected_alias = "langfuse_TestProject_no_user-global"
-        assert (
-            expected_alias in trigger_aliases
-        ), f"Expected '{expected_alias}' in trigger calls, got: {trigger_aliases}"
+        assert expected_alias in trigger_aliases, (
+            f"Expected '{expected_alias}' in trigger calls, got: {trigger_aliases}"
+        )
 
 
 class TestSyncProjectAcquiresPerUserWriteLock:

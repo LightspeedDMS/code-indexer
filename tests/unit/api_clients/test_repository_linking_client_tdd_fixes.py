@@ -53,7 +53,9 @@ class TestRepositoryLinkingClientTDDFixes:
                     "connect",  # Matches "cannot connect to server" error messages
                     "connection",
                 ]
-            ), f"Error message should contain authentication or connection-related terms, but got: {error_str}"
+            ), (
+                f"Error message should contain authentication or connection-related terms, but got: {error_str}"
+            )
         finally:
             client.close()
 
@@ -76,17 +78,17 @@ class TestRepositoryLinkingClientTDDFixes:
 
         try:
             # This assertion will FAIL initially because _credentials doesn't exist
-            assert hasattr(
-                client1, "_credentials"
-            ), "Client should have _credentials attribute"
-            assert hasattr(
-                client2, "_credentials"
-            ), "Client should have _credentials attribute"
+            assert hasattr(client1, "_credentials"), (
+                "Client should have _credentials attribute"
+            )
+            assert hasattr(client2, "_credentials"), (
+                "Client should have _credentials attribute"
+            )
 
             # This will also fail due to missing attribute
-            assert (
-                client1._credentials == client2._credentials
-            ), "Both clients should have same credentials"
+            assert client1._credentials == client2._credentials, (
+                "Both clients should have same credentials"
+            )
 
         except AttributeError as e:
             pytest.fail(f"Clients should have accessible credentials attribute: {e}")
@@ -118,7 +120,9 @@ class TestRepositoryLinkingClientTDDFixes:
                 "authentication" in error_msg
                 or "connection" in error_msg
                 or "connect" in error_msg
-            ), f"Error should indicate authentication or connection issue, got: {error_msg}"
+            ), (
+                f"Error should indicate authentication or connection issue, got: {error_msg}"
+            )
         except NetworkError:
             # This would be acceptable - network error is properly classified
             pass
@@ -144,23 +148,23 @@ class TestRepositoryLinkingClientTDDFixes:
 
         try:
             # These assertions will FAIL due to missing _credentials attribute
-            assert hasattr(
-                client1, "_credentials"
-            ), "Client1 should have accessible credentials"
-            assert hasattr(
-                client2, "_credentials"
-            ), "Client2 should have accessible credentials"
+            assert hasattr(client1, "_credentials"), (
+                "Client1 should have accessible credentials"
+            )
+            assert hasattr(client2, "_credentials"), (
+                "Client2 should have accessible credentials"
+            )
 
             # This should show they have different credentials
-            assert (
-                client1._credentials != client2._credentials
-            ), "Clients should have different credentials"
-            assert (
-                client1._credentials == credentials1
-            ), "Client1 should have its specific credentials"
-            assert (
-                client2._credentials == credentials2
-            ), "Client2 should have its specific credentials"
+            assert client1._credentials != client2._credentials, (
+                "Clients should have different credentials"
+            )
+            assert client1._credentials == credentials1, (
+                "Client1 should have its specific credentials"
+            )
+            assert client2._credentials == credentials2, (
+                "Client2 should have its specific credentials"
+            )
 
         except AttributeError as e:
             pytest.fail(

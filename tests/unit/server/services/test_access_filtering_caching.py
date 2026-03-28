@@ -90,9 +90,9 @@ class TestRepoAliasesCacheHit:
 
         # Second call - must hit cache (no additional DB query)
         result2 = service._get_all_repo_aliases()
-        assert (
-            call_count[0] == 1
-        ), f"Expected 1 DB call total (cache hit on 2nd call), got {call_count[0]}"
+        assert call_count[0] == 1, (
+            f"Expected 1 DB call total (cache hit on 2nd call), got {call_count[0]}"
+        )
         assert result1 == result2
 
     def test_cached_result_contains_all_repo_aliases(self, service):
@@ -156,18 +156,18 @@ class TestRepoAliasesTTLExpiry:
         # Third call after TTL expiry (t=61, TTL=60)
         with patch("time.monotonic", return_value=61.0):
             service._get_all_repo_aliases()
-        assert (
-            call_count[0] == 2
-        ), f"After TTL expiry: expected 2 DB calls, got {call_count[0]}"
+        assert call_count[0] == 2, (
+            f"After TTL expiry: expected 2 DB calls, got {call_count[0]}"
+        )
 
     def test_default_ttl_is_60_seconds(self, service):
         """
         AC1: The default TTL is 60 seconds.
         Verifies the service has a REPO_ALIASES_CACHE_TTL attribute of 60.
         """
-        assert hasattr(
-            service, "REPO_ALIASES_CACHE_TTL"
-        ), "AccessFilteringService must have REPO_ALIASES_CACHE_TTL attribute"
+        assert hasattr(service, "REPO_ALIASES_CACHE_TTL"), (
+            "AccessFilteringService must have REPO_ALIASES_CACHE_TTL attribute"
+        )
         assert service.REPO_ALIASES_CACHE_TTL == 60
 
 
@@ -183,9 +183,9 @@ class TestRepoAliasesCacheInvalidation:
         """
         AC2: AccessFilteringService must have a public invalidate_repo_aliases_cache() method.
         """
-        assert hasattr(
-            service, "invalidate_repo_aliases_cache"
-        ), "AccessFilteringService must have invalidate_repo_aliases_cache() method"
+        assert hasattr(service, "invalidate_repo_aliases_cache"), (
+            "AccessFilteringService must have invalidate_repo_aliases_cache() method"
+        )
         assert callable(service.invalidate_repo_aliases_cache)
 
     def test_after_invalidation_next_call_queries_db(
@@ -213,9 +213,9 @@ class TestRepoAliasesCacheInvalidation:
 
         # Next call must re-query DB
         service._get_all_repo_aliases()
-        assert (
-            call_count[0] == 2
-        ), f"After invalidation: expected 2 DB calls, got {call_count[0]}"
+        assert call_count[0] == 2, (
+            f"After invalidation: expected 2 DB calls, got {call_count[0]}"
+        )
 
     def test_invalidation_reflects_new_repo_grants(self, service, group_access_manager):
         """
@@ -233,9 +233,9 @@ class TestRepoAliasesCacheInvalidation:
 
         # Next call re-queries DB (cache was auto-invalidated by callback)
         aliases_after = service._get_all_repo_aliases()
-        assert (
-            "repo-new" in aliases_after
-        ), "After grant, new repo must appear in aliases (auto-invalidated by callback)"
+        assert "repo-new" in aliases_after, (
+            "After grant, new repo must appear in aliases (auto-invalidated by callback)"
+        )
 
     def test_invalidation_reflects_revoked_repos(self, service, group_access_manager):
         """
@@ -253,9 +253,9 @@ class TestRepoAliasesCacheInvalidation:
 
         # Next call re-queries DB (cache was auto-invalidated by callback)
         aliases_after = service._get_all_repo_aliases()
-        assert (
-            "repo-c" not in aliases_after
-        ), "After revoke, removed repo must not appear in aliases (auto-invalidated by callback)"
+        assert "repo-c" not in aliases_after, (
+            "After revoke, removed repo must not appear in aliases (auto-invalidated by callback)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -278,9 +278,9 @@ class TestGroupAccessManagerCallbackPattern:
 
         # Populate the cache
         svc._get_all_repo_aliases()
-        assert (
-            svc._repo_aliases_cache is not None
-        ), "Cache must be populated after first call"
+        assert svc._repo_aliases_cache is not None, (
+            "Cache must be populated after first call"
+        )
 
         # Trigger grant_repo_access - callback should invalidate the cache automatically
         users = group_access_manager.get_group_by_name("users")
@@ -313,18 +313,18 @@ class TestGroupAccessManagerCallbackPattern:
             "repo-new", users.id, "system:test"
         )
         assert result is True
-        assert (
-            call_count[0] == 1
-        ), f"Expected callback called once after new grant, got {call_count[0]}"
+        assert call_count[0] == 1, (
+            f"Expected callback called once after new grant, got {call_count[0]}"
+        )
 
         # Second grant of same repo - INSERT OR IGNORE, no change, callback must NOT fire again
         result2 = group_access_manager.grant_repo_access(
             "repo-new", users.id, "system:test"
         )
         assert result2 is False
-        assert (
-            call_count[0] == 1
-        ), f"Expected callback count to stay at 1 (no duplicate fire), got {call_count[0]}"
+        assert call_count[0] == 1, (
+            f"Expected callback count to stay at 1 (no duplicate fire), got {call_count[0]}"
+        )
 
     def test_revoke_repo_access_triggers_callback(self, group_access_manager):
         """
@@ -344,13 +344,13 @@ class TestGroupAccessManagerCallbackPattern:
         # Revoke repo-c (exists in admins from fixture) - callback must fire
         result = group_access_manager.revoke_repo_access("repo-c", admins.id)
         assert result is True
-        assert (
-            call_count[0] == 1
-        ), f"Expected callback called once after revoke, got {call_count[0]}"
+        assert call_count[0] == 1, (
+            f"Expected callback called once after revoke, got {call_count[0]}"
+        )
 
         # Revoke same repo again - already gone, callback must NOT fire again
         result2 = group_access_manager.revoke_repo_access("repo-c", admins.id)
         assert result2 is False
-        assert (
-            call_count[0] == 1
-        ), f"Expected callback count to stay at 1 (no duplicate fire), got {call_count[0]}"
+        assert call_count[0] == 1, (
+            f"Expected callback count to stay at 1 (no duplicate fire), got {call_count[0]}"
+        )

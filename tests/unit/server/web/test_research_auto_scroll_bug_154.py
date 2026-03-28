@@ -49,9 +49,9 @@ class TestResearchAssistantAutoScroll:
         """Test: autoScrollEnabled variable must exist to track scroll state."""
         script = self._extract_scroll_script(research_assistant_page_content)
         assert script is not None, "Must have scroll behavior script"
-        assert (
-            "autoScrollEnabled" in script
-        ), "Must have autoScrollEnabled variable to track whether to auto-scroll"
+        assert "autoScrollEnabled" in script, (
+            "Must have autoScrollEnabled variable to track whether to auto-scroll"
+        )
 
     def test_auto_scroll_enabled_defaults_to_true(
         self, research_assistant_page_content
@@ -69,25 +69,25 @@ class TestResearchAssistantAutoScroll:
         """Test: isAtBottom() function must exist to check scroll position."""
         script = self._extract_scroll_script(research_assistant_page_content)
         assert script is not None, "Must have scroll behavior script"
-        assert (
-            "isAtBottom" in script
-        ), "Must have isAtBottom() function to check if user is at bottom of chat"
+        assert "isAtBottom" in script, (
+            "Must have isAtBottom() function to check if user is at bottom of chat"
+        )
 
     def test_scroll_threshold_exists(self, research_assistant_page_content):
         """Test: SCROLL_THRESHOLD constant must exist for bottom detection."""
         script = self._extract_scroll_script(research_assistant_page_content)
         assert script is not None, "Must have scroll behavior script"
-        assert (
-            "SCROLL_THRESHOLD" in script or "threshold" in script
-        ), "Must have scroll threshold constant for bottom detection tolerance"
+        assert "SCROLL_THRESHOLD" in script or "threshold" in script, (
+            "Must have scroll threshold constant for bottom detection tolerance"
+        )
 
     def test_scroll_event_listener_exists(self, research_assistant_page_content):
         """Test: scroll event listener must exist on chatMessages element."""
         script = self._extract_scroll_script(research_assistant_page_content)
         assert script is not None, "Must have scroll behavior script"
-        assert (
-            "'scroll'" in script or '"scroll"' in script
-        ), "Must have scroll event listener to update autoScrollEnabled state"
+        assert "'scroll'" in script or '"scroll"' in script, (
+            "Must have scroll event listener to update autoScrollEnabled state"
+        )
 
     def test_scroll_listener_updates_auto_scroll_enabled(
         self, research_assistant_page_content
@@ -97,9 +97,9 @@ class TestResearchAssistantAutoScroll:
         assert script is not None, "Must have scroll behavior script"
 
         # The scroll listener should update autoScrollEnabled
-        assert (
-            "'scroll'" in script or '"scroll"' in script
-        ), "Must have scroll event listener"
+        assert "'scroll'" in script or '"scroll"' in script, (
+            "Must have scroll event listener"
+        )
 
         # Look for the pattern where autoScrollEnabled is updated in scroll handler
         lines = script.split("\n")
@@ -116,9 +116,9 @@ class TestResearchAssistantAutoScroll:
                         break
 
         assert found_scroll_listener, "Must have scroll event listener"
-        assert (
-            found_update
-        ), "Scroll event listener must update autoScrollEnabled based on isAtBottom()"
+        assert found_update, (
+            "Scroll event listener must update autoScrollEnabled based on isAtBottom()"
+        )
 
     def test_afterswap_checks_auto_scroll_enabled(
         self, research_assistant_page_content
@@ -149,12 +149,12 @@ class TestResearchAssistantAutoScroll:
         afterswap_text = "\n".join(afterswap_code)
 
         # The afterSwap handler must check autoScrollEnabled before scrolling
-        assert (
-            "autoScrollEnabled" in afterswap_text
-        ), "afterSwap handler must check autoScrollEnabled state before scrolling"
-        assert (
-            "scrollToBottom" in afterswap_text
-        ), "afterSwap handler must call scrollToBottom() when autoScrollEnabled is true"
+        assert "autoScrollEnabled" in afterswap_text, (
+            "afterSwap handler must check autoScrollEnabled state before scrolling"
+        )
+        assert "scrollToBottom" in afterswap_text, (
+            "afterSwap handler must call scrollToBottom() when autoScrollEnabled is true"
+        )
 
     def test_send_form_always_scrolls(self, research_assistant_page_content):
         """Test: Send form submission must ALWAYS scroll to bottom and re-enable auto-scroll."""
@@ -162,9 +162,9 @@ class TestResearchAssistantAutoScroll:
         assert script is not None, "Must have scroll behavior script"
 
         # Must have beforeRequest handler for send form
-        assert (
-            "htmx:beforeRequest" in script or "beforeRequest" in script
-        ), "Must have htmx:beforeRequest handler to handle send form submission"
+        assert "htmx:beforeRequest" in script or "beforeRequest" in script, (
+            "Must have htmx:beforeRequest handler to handle send form submission"
+        )
 
         # Parse to find the send form handler
         lines = script.split("\n")
@@ -182,25 +182,25 @@ class TestResearchAssistantAutoScroll:
                         or "autoScrollEnabled=true" in context
                     ), "Send form handler must set autoScrollEnabled = true"
                     # Must call scrollToBottom
-                    assert (
-                        "scrollToBottom" in context
-                    ), "Send form handler must call scrollToBottom()"
+                    assert "scrollToBottom" in context, (
+                        "Send form handler must call scrollToBottom()"
+                    )
                     break
 
-        assert (
-            found_send_handler
-        ), "Must have htmx:beforeRequest handler that detects send form and scrolls"
+        assert found_send_handler, (
+            "Must have htmx:beforeRequest handler that detects send form and scrolls"
+        )
 
     def test_scrolltop_and_scrollheight_used_for_scrolling(
         self, research_assistant_page_content
     ):
         """Test: Scroll implementation must use scrollTop = scrollHeight."""
-        assert (
-            "scrollTop" in research_assistant_page_content
-        ), "Must use scrollTop for scrolling"
-        assert (
-            "scrollHeight" in research_assistant_page_content
-        ), "Must use scrollHeight to scroll to bottom"
+        assert "scrollTop" in research_assistant_page_content, (
+            "Must use scrollTop for scrolling"
+        )
+        assert "scrollHeight" in research_assistant_page_content, (
+            "Must use scrollHeight to scroll to bottom"
+        )
 
     def test_chat_messages_container_has_overflow_y(
         self, research_assistant_page_content
@@ -214,9 +214,9 @@ class TestResearchAssistantAutoScroll:
 
         # Check for .chat-messages class with overflow-y
         assert ".chat-messages" in style_content, "Must have .chat-messages CSS class"
-        assert (
-            "overflow-y" in style_content
-        ), "chat-messages must have overflow-y for scrolling"
+        assert "overflow-y" in style_content, (
+            "chat-messages must have overflow-y for scrolling"
+        )
 
     def test_chat_messages_element_exists_in_html(
         self, research_assistant_page_content
@@ -230,9 +230,9 @@ class TestResearchAssistantAutoScroll:
 
         # Verify it's the target for HTMX swaps
         assert "class" in chat_messages.attrs, "chat-messages must have class attribute"
-        assert "chat-messages" in chat_messages.get(
-            "class", []
-        ), "Element must have chat-messages class"
+        assert "chat-messages" in chat_messages.get("class", []), (
+            "Element must have chat-messages class"
+        )
 
     def test_initial_scroll_to_bottom_on_load(self, research_assistant_page_content):
         """Test: Page must scroll to bottom on initial load."""
@@ -260,6 +260,6 @@ class TestResearchAssistantAutoScroll:
                 found_initial_scroll = True
                 break
 
-        assert (
-            found_initial_scroll
-        ), "Must call scrollToBottom() on page load (outside event handlers)"
+        assert found_initial_scroll, (
+            "Must call scrollToBottom() on page load (outside event handlers)"
+        )

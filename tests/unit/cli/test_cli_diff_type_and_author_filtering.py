@@ -49,17 +49,17 @@ class TestCLIDiffTypeAndAuthorFiltering(unittest.TestCase):
         source = inspect.getsource(query_command.callback)
 
         # Verify that temporal_service.query_temporal is called with diff_types parameter
-        assert (
-            "query_temporal(" in source
-        ), "query_temporal call not found in query command"
-        assert (
-            "diff_types=" in source
-        ), "diff_types parameter not passed to query_temporal"
+        assert "query_temporal(" in source, (
+            "query_temporal call not found in query command"
+        )
+        assert "diff_types=" in source, (
+            "diff_types parameter not passed to query_temporal"
+        )
 
         # Verify the parameter transformation (tuple to list)
-        assert (
-            "list(diff_types)" in source or "diff_types" in source
-        ), "diff_types not properly transformed"
+        assert "list(diff_types)" in source or "diff_types" in source, (
+            "diff_types not properly transformed"
+        )
 
     def test_cli_passes_author_to_temporal_service(self):
         """Verify CLI passes author parameter to temporal service."""
@@ -71,9 +71,9 @@ class TestCLIDiffTypeAndAuthorFiltering(unittest.TestCase):
         source = inspect.getsource(query_command.callback)
 
         # Verify that temporal_service.query_temporal is called with author parameter
-        assert (
-            "query_temporal(" in source
-        ), "query_temporal call not found in query command"
+        assert "query_temporal(" in source, (
+            "query_temporal call not found in query command"
+        )
         assert "author=" in source, "author parameter not passed to query_temporal"
 
     def test_cli_handles_multiple_diff_types(self):

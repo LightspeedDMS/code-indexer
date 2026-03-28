@@ -27,15 +27,15 @@ class TestCORSMiddleware:
             },
         )
 
-        assert (
-            response.status_code == 200
-        ), "OPTIONS preflight request must return 200 OK"
-        assert (
-            "access-control-allow-origin" in response.headers
-        ), "Missing Access-Control-Allow-Origin header"
-        assert (
-            response.headers["access-control-allow-origin"] == "https://claude.ai"
-        ), "CORS must allow claude.ai origin"
+        assert response.status_code == 200, (
+            "OPTIONS preflight request must return 200 OK"
+        )
+        assert "access-control-allow-origin" in response.headers, (
+            "Missing Access-Control-Allow-Origin header"
+        )
+        assert response.headers["access-control-allow-origin"] == "https://claude.ai", (
+            "CORS must allow claude.ai origin"
+        )
 
     def test_cors_allows_credentials(self, client):
         """Test that CORS allows credentials for OAuth flows."""
@@ -48,12 +48,12 @@ class TestCORSMiddleware:
         )
 
         assert response.status_code == 200
-        assert (
-            "access-control-allow-credentials" in response.headers
-        ), "Missing Access-Control-Allow-Credentials header"
-        assert (
-            response.headers["access-control-allow-credentials"] == "true"
-        ), "CORS must allow credentials for OAuth"
+        assert "access-control-allow-credentials" in response.headers, (
+            "Missing Access-Control-Allow-Credentials header"
+        )
+        assert response.headers["access-control-allow-credentials"] == "true", (
+            "CORS must allow credentials for OAuth"
+        )
 
     def test_cors_allows_all_anthropic_origins(self, client):
         """Test that CORS allows all Anthropic-related origins."""
@@ -74,9 +74,9 @@ class TestCORSMiddleware:
             )
 
             assert response.status_code == 200, f"Failed for origin {origin}"
-            assert (
-                response.headers.get("access-control-allow-origin") == origin
-            ), f"CORS must allow {origin}"
+            assert response.headers.get("access-control-allow-origin") == origin, (
+                f"CORS must allow {origin}"
+            )
 
     def test_cors_applies_to_actual_requests(self, client):
         """Test that actual OAuth requests include CORS headers, not just OPTIONS."""
@@ -88,9 +88,9 @@ class TestCORSMiddleware:
         )
 
         assert response.status_code == 200
-        assert (
-            "access-control-allow-origin" in response.headers
-        ), "Actual requests must include CORS headers, not just OPTIONS"
+        assert "access-control-allow-origin" in response.headers, (
+            "Actual requests must include CORS headers, not just OPTIONS"
+        )
         assert response.headers["access-control-allow-origin"] == "https://claude.ai"
 
     def test_cors_applies_to_token_endpoint(self, client):
@@ -108,7 +108,7 @@ class TestCORSMiddleware:
         )
 
         # May return 400/401 due to invalid request, but CORS headers must be present
-        assert (
-            "access-control-allow-origin" in response.headers
-        ), "Token endpoint must include CORS headers even on error responses"
+        assert "access-control-allow-origin" in response.headers, (
+            "Token endpoint must include CORS headers even on error responses"
+        )
         assert response.headers["access-control-allow-origin"] == "https://claude.ai"

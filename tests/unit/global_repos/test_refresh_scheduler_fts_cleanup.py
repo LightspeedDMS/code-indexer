@@ -249,14 +249,14 @@ class TestRefreshSchedulerFtsCleanup:
         )
 
         # cidx index --fts must still have been called (via run_with_popen_progress)
-        assert (
-            len(tantivy_state_at_cidx_index) >= 1
-        ), "cidx index --fts (via run_with_popen_progress) was not called when tantivy_index was absent."
+        assert len(tantivy_state_at_cidx_index) >= 1, (
+            "cidx index --fts (via run_with_popen_progress) was not called when tantivy_index was absent."
+        )
 
         # tantivy_index must still not exist at cidx index time (it was never there)
-        assert (
-            tantivy_state_at_cidx_index[0] is False
-        ), "tantivy_index should not exist in a fresh snapshot that never had one."
+        assert tantivy_state_at_cidx_index[0] is False, (
+            "tantivy_index should not exist in a fresh snapshot that never had one."
+        )
 
     def test_tantivy_cleanup_happens_before_cidx_fix_config(
         self,
@@ -325,9 +325,9 @@ class TestRefreshSchedulerFtsCleanup:
                     )
 
         # Verify cow_clone happened
-        assert (
-            "cow_clone" in call_sequence
-        ), "CoW clone step was not recorded in call sequence."
+        assert "cow_clone" in call_sequence, (
+            "CoW clone step was not recorded in call sequence."
+        )
 
         # Verify fix-config happened with tantivy PRESENT (Story #229: no deletion)
         fix_config_entries = [e for e in call_sequence if e.startswith("fix-config:")]

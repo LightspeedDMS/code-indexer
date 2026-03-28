@@ -84,21 +84,21 @@ class TestResearchSessionsListEventBubbling:
         assert 'class="delete-btn"' in html, "Delete button must exist"
 
         # Verify delete button has onclick with event.stopPropagation()
-        assert (
-            'onclick="event.stopPropagation()"' in html
-        ), "Delete button must have onclick='event.stopPropagation()' to prevent bubbling"
+        assert 'onclick="event.stopPropagation()"' in html, (
+            "Delete button must have onclick='event.stopPropagation()' to prevent bubbling"
+        )
 
         # Verify it's on the button with hx-delete
         # The pattern should be: <button ... hx-delete="..." ... onclick="event.stopPropagation()" ...>
-        assert (
-            'hx-delete="/admin/research/sessions/' in html
-        ), "Delete button must have hx-delete"
+        assert 'hx-delete="/admin/research/sessions/' in html, (
+            "Delete button must have hx-delete"
+        )
 
         # More specific check: ensure stopPropagation is on delete button
         delete_btn_section = html.split('class="delete-btn"')[1].split("</button>")[0]
-        assert (
-            'onclick="event.stopPropagation()"' in delete_btn_section
-        ), "event.stopPropagation() must be on delete button specifically"
+        assert 'onclick="event.stopPropagation()"' in delete_btn_section, (
+            "event.stopPropagation() must be on delete button specifically"
+        )
 
     def test_rename_button_has_stop_propagation(self, jinja_env, sample_sessions):
         """
@@ -117,30 +117,30 @@ class TestResearchSessionsListEventBubbling:
 
         # Verify rename button has onclick with event.stopPropagation()
         # Pattern: onclick="event.stopPropagation(); renameSession(...)"
-        assert (
-            "event.stopPropagation()" in html
-        ), "Rename button must call event.stopPropagation() in onclick handler"
+        assert "event.stopPropagation()" in html, (
+            "Rename button must call event.stopPropagation() in onclick handler"
+        )
 
         # Verify it comes BEFORE renameSession call
         rename_btn_section = html.split('class="rename-btn"')[1].split("</button>")[0]
-        assert (
-            "onclick=" in rename_btn_section
-        ), "Rename button must have onclick handler"
+        assert "onclick=" in rename_btn_section, (
+            "Rename button must have onclick handler"
+        )
 
         onclick_content = rename_btn_section.split('onclick="')[1].split('"')[0]
-        assert (
-            "event.stopPropagation()" in onclick_content
-        ), "event.stopPropagation() must be in rename button's onclick"
-        assert (
-            "renameSession" in onclick_content
-        ), "onclick must call renameSession function"
+        assert "event.stopPropagation()" in onclick_content, (
+            "event.stopPropagation() must be in rename button's onclick"
+        )
+        assert "renameSession" in onclick_content, (
+            "onclick must call renameSession function"
+        )
 
         # Verify order: stopPropagation comes BEFORE renameSession
         stop_idx = onclick_content.index("event.stopPropagation()")
         rename_idx = onclick_content.index("renameSession")
-        assert (
-            stop_idx < rename_idx
-        ), "event.stopPropagation() must be called BEFORE renameSession()"
+        assert stop_idx < rename_idx, (
+            "event.stopPropagation() must be called BEFORE renameSession()"
+        )
 
     def test_template_renders_with_session_data(self, jinja_env, sample_sessions):
         """
@@ -184,12 +184,12 @@ class TestResearchSessionsListEventBubbling:
 
         # Count buttons (should be 2 per session: rename + delete)
         num_sessions = len(sample_sessions)
-        assert (
-            html.count('class="delete-btn"') == num_sessions
-        ), f"Must have {num_sessions} delete buttons (one per session)"
-        assert (
-            html.count('class="rename-btn"') == num_sessions
-        ), f"Must have {num_sessions} rename buttons (one per session)"
+        assert html.count('class="delete-btn"') == num_sessions, (
+            f"Must have {num_sessions} delete buttons (one per session)"
+        )
+        assert html.count('class="rename-btn"') == num_sessions, (
+            f"Must have {num_sessions} rename buttons (one per session)"
+        )
 
     def test_session_item_has_hx_get_attribute(self, jinja_env, sample_sessions):
         """
@@ -203,14 +203,14 @@ class TestResearchSessionsListEventBubbling:
         )
 
         # Verify session-item has hx-get
-        assert (
-            'hx-get="/admin/research/sessions/' in html
-        ), "Session items must have hx-get to load messages"
+        assert 'hx-get="/admin/research/sessions/' in html, (
+            "Session items must have hx-get to load messages"
+        )
 
         # Verify it targets chat-messages
-        assert (
-            'hx-target="#chat-messages"' in html
-        ), "Session item hx-get must target #chat-messages"
+        assert 'hx-target="#chat-messages"' in html, (
+            "Session item hx-get must target #chat-messages"
+        )
 
     def test_rename_function_receives_correct_parameters(
         self, jinja_env, sample_sessions
@@ -228,9 +228,9 @@ class TestResearchSessionsListEventBubbling:
         # Verify renameSession is called with session data
         for session in sample_sessions:
             expected_call = f"renameSession('{session['id']}', '{session['name']}')"
-            assert (
-                expected_call in html
-            ), f"renameSession must be called with correct parameters for {session['name']}"
+            assert expected_call in html, (
+                f"renameSession must be called with correct parameters for {session['name']}"
+            )
 
     def test_delete_button_has_hx_confirm(self, jinja_env, sample_sessions):
         """
@@ -245,9 +245,9 @@ class TestResearchSessionsListEventBubbling:
 
         # Verify hx-confirm exists on delete button
         delete_btn_section = html.split('class="delete-btn"')[1].split("</button>")[0]
-        assert (
-            "hx-confirm=" in delete_btn_section
-        ), "Delete button must have hx-confirm for user confirmation"
+        assert "hx-confirm=" in delete_btn_section, (
+            "Delete button must have hx-confirm for user confirmation"
+        )
 
     def test_delete_button_passes_active_session_id(self, jinja_env, sample_sessions):
         """
@@ -263,12 +263,12 @@ class TestResearchSessionsListEventBubbling:
 
         # Verify hx-vals contains active_session_id
         delete_btn_section = html.split('class="delete-btn"')[1].split("</button>")[0]
-        assert (
-            "hx-vals=" in delete_btn_section
-        ), "Delete button must have hx-vals to pass active_session_id"
-        assert (
-            "active_session_id" in delete_btn_section
-        ), "hx-vals must include active_session_id"
+        assert "hx-vals=" in delete_btn_section, (
+            "Delete button must have hx-vals to pass active_session_id"
+        )
+        assert "active_session_id" in delete_btn_section, (
+            "hx-vals must include active_session_id"
+        )
 
     def test_empty_sessions_list_renders_correctly(self, jinja_env):
         """
@@ -280,14 +280,14 @@ class TestResearchSessionsListEventBubbling:
         html = template.render(sessions=[], active_session_id=None)
 
         # Should render sessions-list container
-        assert (
-            'class="sessions-list"' in html
-        ), "Sessions list container must exist even when empty"
+        assert 'class="sessions-list"' in html, (
+            "Sessions list container must exist even when empty"
+        )
 
         # Should not have any session-item divs
-        assert (
-            'class="session-item' not in html
-        ), "Should not have session items when list is empty"
+        assert 'class="session-item' not in html, (
+            "Should not have session items when list is empty"
+        )
 
     def test_rename_session_javascript_function_exists(
         self, jinja_env, sample_sessions
@@ -306,14 +306,14 @@ class TestResearchSessionsListEventBubbling:
         assert "<script>" in html, "Template must contain script tag"
 
         # Verify function definition
-        assert (
-            "function renameSession(" in html
-        ), "renameSession function must be defined"
+        assert "function renameSession(" in html, (
+            "renameSession function must be defined"
+        )
 
         # Verify function parameters
-        assert (
-            "renameSession(sessionId, currentName)" in html
-        ), "renameSession must accept sessionId and currentName parameters"
+        assert "renameSession(sessionId, currentName)" in html, (
+            "renameSession must accept sessionId and currentName parameters"
+        )
 
         # Verify function uses prompt
         assert "prompt(" in html, "renameSession must use prompt to get new name"
@@ -347,6 +347,6 @@ class TestResearchSessionsListEventBubbling:
         # (one on delete button, one on rename button)
         # Total: 5 sessions * 2 buttons = 10 occurrences
         stop_propagation_count = html.count("event.stopPropagation()")
-        assert (
-            stop_propagation_count == len(many_sessions) * 2
-        ), f"Expected {len(many_sessions) * 2} event.stopPropagation() calls, found {stop_propagation_count}"
+        assert stop_propagation_count == len(many_sessions) * 2, (
+            f"Expected {len(many_sessions) * 2} event.stopPropagation() calls, found {stop_propagation_count}"
+        )

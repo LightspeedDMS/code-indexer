@@ -141,12 +141,12 @@ class TestSubprocessEnvironment:
             # Env should be empty (we mocked os.environ to empty)
             # Our code should NOT add GITHUB_TOKEN/GH_TOKEN when _github_token is None
             env = call_kwargs.get("env", {})
-            assert (
-                "GITHUB_TOKEN" not in env
-            ), "GITHUB_TOKEN should not be added when token is None"
-            assert (
-                "GH_TOKEN" not in env
-            ), "GH_TOKEN should not be added when token is None"
+            assert "GITHUB_TOKEN" not in env, (
+                "GITHUB_TOKEN should not be added when token is None"
+            )
+            assert "GH_TOKEN" not in env, (
+                "GH_TOKEN should not be added when token is None"
+            )
 
 
 class TestSessionFolderSymlinks:

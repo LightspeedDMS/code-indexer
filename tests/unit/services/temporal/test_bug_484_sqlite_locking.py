@@ -85,9 +85,9 @@ class TestBug484SqliteLocking:
         )
         # All writes should have succeeded
         expected_total = num_threads * writes_per_thread
-        assert (
-            len(results) == expected_total
-        ), f"Expected {expected_total} successful writes, got {len(results)}"
+        assert len(results) == expected_total, (
+            f"Expected {expected_total} successful writes, got {len(results)}"
+        )
 
     def test_wal_mode_enabled_on_connection(self):
         """

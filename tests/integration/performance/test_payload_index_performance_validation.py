@@ -38,9 +38,9 @@ class TestPayloadIndexPerformanceValidation:
         operation_time = end_time - start_time
 
         # Validate operation completed within reasonable time
-        assert (
-            operation_time < 1.0
-        ), f"Payload index operation took {operation_time}s, expected < 1.0s"
+        assert operation_time < 1.0, (
+            f"Payload index operation took {operation_time}s, expected < 1.0s"
+        )
         assert processed_payload["processed"] is True, "Payload processing failed"
 
     @pytest.mark.performance
@@ -67,6 +67,6 @@ class TestPayloadIndexPerformanceValidation:
 
         # Validate throughput meets performance requirements
         assert throughput > 50, f"Throughput {throughput} ops/s, expected > 50 ops/s"
-        assert (
-            processed_count == 100
-        ), f"Expected 100 operations, processed {processed_count}"
+        assert processed_count == 100, (
+            f"Expected 100 operations, processed {processed_count}"
+        )

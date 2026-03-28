@@ -122,25 +122,25 @@ class TestTemporalIndexerLanguageFilters:
             )
 
             # Verify a point was created
-            assert (
-                len(stored_points) == 1
-            ), f"Should have created one point, got {len(stored_points)}"
+            assert len(stored_points) == 1, (
+                f"Should have created one point, got {len(stored_points)}"
+            )
             payload = stored_points[0]["payload"]
 
             # Check that language and file_extension are present
             assert "language" in payload, "Payload should include 'language' field"
-            assert (
-                "file_extension" in payload
-            ), "Payload should include 'file_extension' field"
+            assert "file_extension" in payload, (
+                "Payload should include 'file_extension' field"
+            )
 
             # Check values are correct for Python file
             # FIXED: Both language and file_extension should NOT have dots to match regular indexing
-            assert (
-                payload["language"] == "py"
-            ), f"Expected language 'py' but got {payload.get('language')}"
-            assert (
-                payload["file_extension"] == "py"
-            ), f"Expected extension 'py' (without dot) but got {payload.get('file_extension')}"
+            assert payload["language"] == "py", (
+                f"Expected language 'py' but got {payload.get('language')}"
+            )
+            assert payload["file_extension"] == "py", (
+                f"Expected extension 'py' (without dot) but got {payload.get('file_extension')}"
+            )
 
     def test_temporal_payload_language_for_various_files(self, tmp_path):
         """Test language detection for various file types."""
@@ -262,17 +262,17 @@ class TestTemporalIndexerLanguageFilters:
                 )
 
                 # Verify the payload includes correct language and extension
-                assert (
-                    len(stored_points) > 0
-                ), f"Should have created points for {file_path}"
+                assert len(stored_points) > 0, (
+                    f"Should have created points for {file_path}"
+                )
                 payload = stored_points[-1]["payload"]  # Get the last point
 
-                assert (
-                    payload["language"] == expected_lang
-                ), f"For {file_path}: expected language '{expected_lang}' but got '{payload.get('language')}'"
-                assert (
-                    payload["file_extension"] == expected_ext
-                ), f"For {file_path}: expected extension '{expected_ext}' but got '{payload.get('file_extension')}'"
+                assert payload["language"] == expected_lang, (
+                    f"For {file_path}: expected language '{expected_lang}' but got '{payload.get('language')}'"
+                )
+                assert payload["file_extension"] == expected_ext, (
+                    f"For {file_path}: expected extension '{expected_ext}' but got '{payload.get('file_extension')}'"
+                )
 
 
 if __name__ == "__main__":

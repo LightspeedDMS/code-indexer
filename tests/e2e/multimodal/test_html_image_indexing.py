@@ -31,9 +31,9 @@ class TestHtmlImageIndexing:
         extractor = ImageExtractorFactory.get_extractor(".html")
 
         assert extractor is not None, "Factory returned None for .html extension"
-        assert isinstance(
-            extractor, HtmlImageExtractor
-        ), f"Expected HtmlImageExtractor, got {type(extractor)}"
+        assert isinstance(extractor, HtmlImageExtractor), (
+            f"Expected HtmlImageExtractor, got {type(extractor)}"
+        )
 
     def test_html_extractor_handles_img_src_attribute(self, multimodal_repo_path):
         """Verify HTML extractor correctly parses img src attributes."""
@@ -45,6 +45,6 @@ class TestHtmlImageIndexing:
 
         # Verify the image path is correctly resolved
         assert len(images) > 0, "Expected at least one image"
-        assert all(
-            not img.startswith("http") for img in images
-        ), "HTML extractor should filter out remote URLs"
+        assert all(not img.startswith("http") for img in images), (
+            "HTML extractor should filter out remote URLs"
+        )

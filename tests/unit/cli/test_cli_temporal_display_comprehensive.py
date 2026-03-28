@@ -97,9 +97,9 @@ class TestCLITemporalDisplayComprehensive(TestCase):
 
             # Verify content was printed (Story 2: pre-computed diffs in content)
             print_calls = [str(call) for call in mock_print.call_args_list]
-            assert any(
-                "def validate_token" in str(call) for call in print_calls
-            ), "Content should be displayed"
+            assert any("def validate_token" in str(call) for call in print_calls), (
+                "Content should be displayed"
+            )
 
     def test_display_file_chunk_match_without_diff_shows_content(self):
         """Test that file chunk without diff shows chunk content with line numbers."""
@@ -134,12 +134,12 @@ class TestCLITemporalDisplayComprehensive(TestCase):
             print_calls = [str(call) for call in mock_print.call_args_list]
 
             # Should show line numbers starting at line_start (10)
-            assert any(
-                "10" in str(call) for call in print_calls
-            ), "Line 10 should be displayed"
-            assert any(
-                "11" in str(call) for call in print_calls
-            ), "Line 11 should be displayed"
+            assert any("10" in str(call) for call in print_calls), (
+                "Line 10 should be displayed"
+            )
+            assert any("11" in str(call) for call in print_calls), (
+                "Line 11 should be displayed"
+            )
 
     def test_display_commit_message_match(self):
         """Test that commit message match displays correctly."""
@@ -175,14 +175,14 @@ class TestCLITemporalDisplayComprehensive(TestCase):
 
             # Verify output contains commit message marker
             print_calls = [str(call) for call in mock_print.call_args_list]
-            assert any(
-                "COMMIT MESSAGE MATCH" in str(call) for call in print_calls
-            ), "Commit message marker should be displayed"
+            assert any("COMMIT MESSAGE MATCH" in str(call) for call in print_calls), (
+                "Commit message marker should be displayed"
+            )
 
             # Verify files modified list
-            assert any(
-                "auth.py" in str(call) for call in print_calls
-            ), "Modified file should be listed"
+            assert any("auth.py" in str(call) for call in print_calls), (
+                "Modified file should be listed"
+            )
 
     def test_display_ordering_commit_messages_first(self):
         """Test that display_temporal_results shows commit messages before file chunks."""

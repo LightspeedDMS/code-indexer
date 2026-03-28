@@ -33,9 +33,9 @@ class TestConfigServiceNewFields:
 
             settings = service.get_all_settings()
 
-            assert (
-                "claude_cli" in settings
-            ), "get_all_settings should include claude_cli section"
+            assert "claude_cli" in settings, (
+                "get_all_settings should include claude_cli section"
+            )
 
     def test_config_service_exposes_max_concurrent_claude_cli(self):
         """
@@ -52,13 +52,13 @@ class TestConfigServiceNewFields:
 
             settings = service.get_all_settings()
 
-            assert (
-                "max_concurrent_claude_cli" in settings["claude_cli"]
-            ), "claude_cli section should include max_concurrent_claude_cli"
+            assert "max_concurrent_claude_cli" in settings["claude_cli"], (
+                "claude_cli section should include max_concurrent_claude_cli"
+            )
             # Story #24: Default changed from 4 to 2 for resource-constrained systems
-            assert (
-                settings["claude_cli"]["max_concurrent_claude_cli"] == 2
-            ), "max_concurrent_claude_cli should default to 2"
+            assert settings["claude_cli"]["max_concurrent_claude_cli"] == 2, (
+                "max_concurrent_claude_cli should default to 2"
+            )
 
     def test_config_service_exposes_description_refresh_interval_hours(self):
         """
@@ -73,12 +73,12 @@ class TestConfigServiceNewFields:
 
             settings = service.get_all_settings()
 
-            assert (
-                "description_refresh_interval_hours" in settings["claude_cli"]
-            ), "claude_cli section should include description_refresh_interval_hours"
-            assert (
-                settings["claude_cli"]["description_refresh_interval_hours"] == 24
-            ), "description_refresh_interval_hours should default to 24"
+            assert "description_refresh_interval_hours" in settings["claude_cli"], (
+                "claude_cli section should include description_refresh_interval_hours"
+            )
+            assert settings["claude_cli"]["description_refresh_interval_hours"] == 24, (
+                "description_refresh_interval_hours should default to 24"
+            )
 
     def test_config_service_shows_none_when_anthropic_api_key_not_set(self):
         """
@@ -93,9 +93,9 @@ class TestConfigServiceNewFields:
 
             settings = service.get_all_settings()
 
-            assert (
-                settings["claude_cli"]["anthropic_api_key"] is None
-            ), "anthropic_api_key should be None when not set"
+            assert settings["claude_cli"]["anthropic_api_key"] is None, (
+                "anthropic_api_key should be None when not set"
+            )
 
     def test_config_service_update_setting_accepts_claude_cli_category(self):
         """
@@ -112,16 +112,16 @@ class TestConfigServiceNewFields:
 
             # Verify it's updated
             settings = service.get_all_settings()
-            assert (
-                settings["claude_cli"]["max_concurrent_claude_cli"] == 8
-            ), "max_concurrent_claude_cli should be updated to 8"
+            assert settings["claude_cli"]["max_concurrent_claude_cli"] == 8, (
+                "max_concurrent_claude_cli should be updated to 8"
+            )
 
             # Verify it's persisted
             service2 = ConfigService(tmpdir)
             settings2 = service2.get_all_settings()
-            assert (
-                settings2["claude_cli"]["max_concurrent_claude_cli"] == 8
-            ), "max_concurrent_claude_cli should persist after reload"
+            assert settings2["claude_cli"]["max_concurrent_claude_cli"] == 8, (
+                "max_concurrent_claude_cli should persist after reload"
+            )
 
     def test_config_service_update_setting_validates_max_concurrent_claude_cli(self):
         """
@@ -137,9 +137,9 @@ class TestConfigServiceNewFields:
             with pytest.raises(ValueError) as exc_info:
                 service.update_setting("claude_cli", "max_concurrent_claude_cli", 0)
 
-            assert (
-                "max_concurrent_claude_cli" in str(exc_info.value).lower()
-            ), "Error should mention max_concurrent_claude_cli"
+            assert "max_concurrent_claude_cli" in str(exc_info.value).lower(), (
+                "Error should mention max_concurrent_claude_cli"
+            )
 
     def test_config_service_update_setting_validates_description_refresh_interval_hours(
         self,

@@ -90,9 +90,9 @@ class TestReindexRemovedFromDescriptionRefreshScheduler:
 
         # Verify the .md file was written (core functionality preserved)
         md_file = meta_dir / "test-repo.md"
-        assert (
-            md_file.exists()
-        ), "_update_description_file must still write the .md file"
+        assert md_file.exists(), (
+            "_update_description_file must still write the .md file"
+        )
         assert md_file.read_text() == content
 
         # Verify NO cidx calls were made

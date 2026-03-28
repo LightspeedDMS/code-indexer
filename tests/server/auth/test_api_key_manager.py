@@ -56,21 +56,21 @@ class TestApiKeyManager:
         raw_key, key_id = api_key_manager.generate_key(test_user.username)
 
         # Check prefix
-        assert raw_key.startswith(
-            "cidx_sk_"
-        ), f"Key should start with cidx_sk_, got: {raw_key}"
+        assert raw_key.startswith("cidx_sk_"), (
+            f"Key should start with cidx_sk_, got: {raw_key}"
+        )
 
         # Check total length (cidx_sk_ = 8 chars + 32 hex chars = 40 total)
         assert len(raw_key) == 40, f"Key should be 40 chars total, got: {len(raw_key)}"
 
         # Check hex portion (after prefix)
         hex_portion = raw_key[8:]
-        assert (
-            len(hex_portion) == 32
-        ), f"Hex portion should be 32 chars, got: {len(hex_portion)}"
-        assert re.match(
-            r"^[a-f0-9]{32}$", hex_portion
-        ), f"Hex portion should be lowercase hex, got: {hex_portion}"
+        assert len(hex_portion) == 32, (
+            f"Hex portion should be 32 chars, got: {len(hex_portion)}"
+        )
+        assert re.match(r"^[a-f0-9]{32}$", hex_portion), (
+            f"Hex portion should be lowercase hex, got: {hex_portion}"
+        )
 
     def test_generate_key_unique_each_call(self, api_key_manager, test_user):
         """Test that each call to generate_key returns a unique key."""
@@ -97,15 +97,15 @@ class TestApiKeyManager:
         stored_hash = key_entry["hash"]
 
         # Bcrypt hashes start with $2b$ (pwdlib uses BcryptHasher)
-        assert stored_hash.startswith(
-            "$2b$"
-        ), f"Hash should be bcrypt format, got: {stored_hash[:10]}"
+        assert stored_hash.startswith("$2b$"), (
+            f"Hash should be bcrypt format, got: {stored_hash[:10]}"
+        )
 
         # Verify the hash can validate the raw key
         password_manager = PasswordManager()
-        assert password_manager.verify_password(
-            raw_key, stored_hash
-        ), "Hash should verify against raw key"
+        assert password_manager.verify_password(raw_key, stored_hash), (
+            "Hash should verify against raw key"
+        )
 
     def test_add_api_key_to_user(self, api_key_manager, test_user, user_manager):
         """Test that API key is properly added to user's api_keys array."""
@@ -129,9 +129,9 @@ class TestApiKeyManager:
         assert "created_at" in key_entry, "Key entry should have created_at"
 
         # Validate values
-        assert (
-            key_entry["key_id"] == key_id
-        ), "Stored key_id should match returned key_id"
+        assert key_entry["key_id"] == key_id, (
+            "Stored key_id should match returned key_id"
+        )
         assert key_entry["name"] == "my-key", "Stored name should match provided name"
 
         # Validate created_at is ISO format timestamp
@@ -216,9 +216,9 @@ class TestApiKeyManager:
         try:
             uuid_obj = UUID(key_id)
             # Should be UUID4 version
-            assert (
-                uuid_obj.version == 4
-            ), f"key_id should be UUID4, got version {uuid_obj.version}"
+            assert uuid_obj.version == 4, (
+                f"key_id should be UUID4, got version {uuid_obj.version}"
+            )
         except ValueError as e:
             pytest.fail(f"key_id should be valid UUID: {e}")
 
@@ -275,9 +275,9 @@ class TestApiKeyManager:
 
         # Verify user1's key still exists
         users_data = user_manager._load_users()
-        assert (
-            len(users_data[user1.username]["api_keys"]) == 1
-        ), "user1 should still have their key"
+        assert len(users_data[user1.username]["api_keys"]) == 1, (
+            "user1 should still have their key"
+        )
 
     def test_delete_api_key_user_not_found(self, user_manager):
         """Test that delete_api_key returns False for non-existent user."""
@@ -317,17 +317,17 @@ class TestApiKeyManager:
         returned_key = keys[0]
 
         # Validate key_prefix is the safe fallback
-        assert (
-            returned_key["key_prefix"] == "cidx_sk_****..."
-        ), "Fallback key_prefix should be safe masked placeholder"
+        assert returned_key["key_prefix"] == "cidx_sk_****...", (
+            "Fallback key_prefix should be safe masked placeholder"
+        )
 
         # Critical: Verify no part of the bcrypt hash is exposed
-        assert stored_hash not in str(
-            returned_key
-        ), "Bcrypt hash should not be exposed in returned data"
-        assert (
-            "$2b$" not in returned_key["key_prefix"]
-        ), "Bcrypt hash format should not be exposed in key_prefix"
+        assert stored_hash not in str(returned_key), (
+            "Bcrypt hash should not be exposed in returned data"
+        )
+        assert "$2b$" not in returned_key["key_prefix"], (
+            "Bcrypt hash format should not be exposed in key_prefix"
+        )
 
         # Verify other fields are correct
         assert returned_key["key_id"] == key_id

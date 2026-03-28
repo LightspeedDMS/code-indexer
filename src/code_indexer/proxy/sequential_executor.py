@@ -189,11 +189,11 @@ class SequentialCommandExecutor:
             result: Execution result with success/failure counts
             command: Command that was executed
         """
-        print(f"\n{'='*50}")
+        print(f"\n{'=' * 50}")
         print(
             f"Summary: {result.success_count} succeeded, {result.failure_count} failed"
         )
-        print(f"{'='*50}")
+        print(f"{'=' * 50}")
 
         # If there were failures, show detailed error section
         if result.failure_count > 0:
@@ -210,9 +210,9 @@ class SequentialCommandExecutor:
         """
         failed_repos = result.get_failed_repositories()
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"ERRORS ENCOUNTERED ({len(failed_repos)} total)")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         for i, repo in enumerate(failed_repos, 1):
             if i > 1:

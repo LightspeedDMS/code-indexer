@@ -47,9 +47,9 @@ class TestSQLMigrationFiles:
         """At least 3 SQL migration files must exist."""
         migrations_dir = Path("src/code_indexer/server/storage/postgres/migrations/sql")
         sql_files = sorted(migrations_dir.glob("*.sql"))
-        assert (
-            len(sql_files) >= 3
-        ), f"Expected at least 3 SQL migration files, found {len(sql_files)}"
+        assert len(sql_files) >= 3, (
+            f"Expected at least 3 SQL migration files, found {len(sql_files)}"
+        )
 
     def test_initial_schema_exists(self):
         """001_initial_schema.sql must exist."""
@@ -63,6 +63,6 @@ class TestSQLMigrationFiles:
         migrations_dir = Path("src/code_indexer/server/storage/postgres/migrations/sql")
         for f in migrations_dir.glob("*.sql"):
             prefix = f.stem.split("_")[0]
-            assert (
-                prefix.isdigit()
-            ), f"Migration file {f.name} must start with numeric prefix"
+            assert prefix.isdigit(), (
+                f"Migration file {f.name} must start with numeric prefix"
+            )

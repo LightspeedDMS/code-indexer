@@ -42,9 +42,9 @@ class TestVectorQuantizer:
 
         assert path1 == path2, "Quantization must be deterministic"
         assert isinstance(path1, str), "Path must be string"
-        assert (
-            len(path1) == 32
-        ), "32 hex characters expected (64 dims * 2 bits / 4 bits per hex)"
+        assert len(path1) == 32, (
+            "32 hex characters expected (64 dims * 2 bits / 4 bits per hex)"
+        )
 
     def test_quantize_to_2bit_quartile_mapping(self):
         """GIVEN a float vector

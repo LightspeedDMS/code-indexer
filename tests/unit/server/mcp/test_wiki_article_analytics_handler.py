@@ -253,9 +253,9 @@ class TestRequiredFields:
             assert wiki_url.startswith("/wiki/"), f"Must start with /wiki/: {wiki_url}"
             assert "-global" not in wiki_url, f"Must not contain -global: {wiki_url}"
             assert not wiki_url.endswith(".md"), f"Must not end with .md: {wiki_url}"
-            assert (
-                "/wiki/sf-kb-wiki/" in wiki_url
-            ), f"Must contain /wiki/sf-kb-wiki/: {wiki_url}"
+            assert "/wiki/sf-kb-wiki/" in wiki_url, (
+                f"Must contain /wiki/sf-kb-wiki/: {wiki_url}"
+            )
 
     def test_response_includes_total_count(
         self, mock_grm_wiki_enabled, mock_wiki_cache, mock_user
@@ -306,9 +306,9 @@ class TestSorting:
         )
         data = json.loads(result["content"][0]["text"])
         view_counts = [a["real_views"] for a in data["articles"]]
-        assert view_counts == sorted(
-            view_counts, reverse=True
-        ), f"Default sort must be DESC by real_views, got: {view_counts}"
+        assert view_counts == sorted(view_counts, reverse=True), (
+            f"Default sort must be DESC by real_views, got: {view_counts}"
+        )
 
     def test_most_viewed_returns_descending(
         self, mock_grm_wiki_enabled, mock_wiki_cache, mock_user
@@ -322,9 +322,9 @@ class TestSorting:
         )
         data = json.loads(result["content"][0]["text"])
         view_counts = [a["real_views"] for a in data["articles"]]
-        assert view_counts == sorted(
-            view_counts, reverse=True
-        ), f"most_viewed must be DESC: {view_counts}"
+        assert view_counts == sorted(view_counts, reverse=True), (
+            f"most_viewed must be DESC: {view_counts}"
+        )
 
     def test_least_viewed_returns_ascending(
         self, mock_grm_wiki_enabled, mock_wiki_cache, mock_user
@@ -338,9 +338,9 @@ class TestSorting:
         )
         data = json.loads(result["content"][0]["text"])
         view_counts = [a["real_views"] for a in data["articles"]]
-        assert view_counts == sorted(
-            view_counts
-        ), f"least_viewed must be ASC: {view_counts}"
+        assert view_counts == sorted(view_counts), (
+            f"least_viewed must be ASC: {view_counts}"
+        )
 
     def test_tie_breaking_most_viewed_alphabetical(self, mock_user):
         """AC3: Ties in most_viewed sort must break alphabetically by path."""
@@ -460,9 +460,9 @@ class TestLimitParameter:
             mock_user,
         )
         data = json.loads(result["content"][0]["text"])
-        assert (
-            len(data["articles"]) <= 2
-        ), f"limit=2 must cap at 2, got {len(data['articles'])}"
+        assert len(data["articles"]) <= 2, (
+            f"limit=2 must cap at 2, got {len(data['articles'])}"
+        )
 
     def test_limit_default_is_20(self, mock_grm_wiki_enabled, mock_user):
         """AC1: Default limit is 20 - verified with 25 article records."""
@@ -492,9 +492,9 @@ class TestLimitParameter:
             )
 
         data = json.loads(result["content"][0]["text"])
-        assert (
-            len(data["articles"]) == 20
-        ), f"Default limit must be 20, got {len(data['articles'])}"
+        assert len(data["articles"]) == 20, (
+            f"Default limit must be 20, got {len(data['articles'])}"
+        )
 
     def test_limit_larger_than_available_returns_all(
         self, mock_grm_wiki_enabled, mock_wiki_cache, mock_user
@@ -567,9 +567,9 @@ class TestNonWikiEnabledRepo:
             )
 
         data = json.loads(result["content"][0]["text"])
-        assert (
-            data["success"] is True
-        ), "sf-kb-wiki-global must be recognized as wiki-enabled"
+        assert data["success"] is True, (
+            "sf-kb-wiki-global must be recognized as wiki-enabled"
+        )
 
     def test_alias_without_global_suffix_also_works(self, mock_user):
         """AC5: Alias without -global suffix also works for wiki check."""

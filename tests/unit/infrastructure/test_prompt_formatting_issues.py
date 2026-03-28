@@ -59,9 +59,9 @@ def test_prompt_should_not_have_excessive_blank_lines():
                 current_consecutive_empty = 0
 
         # Should have at most 2 consecutive empty lines
-        assert (
-            max_consecutive_empty <= 2
-        ), f"Prompt has {max_consecutive_empty} consecutive empty lines, should have at most 2"
+        assert max_consecutive_empty <= 2, (
+            f"Prompt has {max_consecutive_empty} consecutive empty lines, should have at most 2"
+        )
 
         # Count trailing empty lines
         trailing_empty_count = 0
@@ -72,9 +72,9 @@ def test_prompt_should_not_have_excessive_blank_lines():
                 break
 
         # Should have at most 1 trailing empty line
-        assert (
-            trailing_empty_count <= 1
-        ), f"Prompt has {trailing_empty_count} trailing empty lines, should have at most 1"
+        assert trailing_empty_count <= 1, (
+            f"Prompt has {trailing_empty_count} trailing empty lines, should have at most 1"
+        )
 
         # The last non-empty line should be meaningful content
         last_meaningful_line = None
@@ -161,17 +161,17 @@ build/
         ]
 
         for item in gitignored_items:
-            assert (
-                item not in prompt
-            ), f"Gitignored item '{item}' should not appear in project structure"
+            assert item not in prompt, (
+                f"Gitignored item '{item}' should not appear in project structure"
+            )
 
         # Check that legitimate files ARE included
         legitimate_items = ["main.py", "README.md"]
 
         for item in legitimate_items:
-            assert (
-                item in prompt
-            ), f"Legitimate file '{item}' should appear in project structure"
+            assert item in prompt, (
+                f"Legitimate file '{item}' should appear in project structure"
+            )
 
 
 def test_project_structure_respects_gitignore_patterns():
@@ -197,7 +197,7 @@ __pycache__/
 *.log
 logs/
 
-# Dependencies  
+# Dependencies
 node_modules/
 .pnp.*
 
@@ -278,15 +278,15 @@ Thumbs.db
 
         # Verify ignored items are not in prompt
         for item in ignored_files + ignored_dirs:
-            assert (
-                item not in prompt
-            ), f"Gitignored item '{item}' should not appear in project structure"
+            assert item not in prompt, (
+                f"Gitignored item '{item}' should not appear in project structure"
+            )
 
         # Verify included items ARE in prompt
         for item in included_files:
-            assert (
-                item in prompt
-            ), f"Non-ignored file '{item}' should appear in project structure"
+            assert item in prompt, (
+                f"Non-ignored file '{item}' should appear in project structure"
+            )
 
 
 def test_non_git_project_includes_all_files():
@@ -325,6 +325,6 @@ def test_non_git_project_includes_all_files():
         all_files = ["main.py", ".env", "debug.log"]
 
         for item in all_files:
-            assert (
-                item in prompt
-            ), f"In non-git project, file '{item}' should appear in project structure"
+            assert item in prompt, (
+                f"In non-git project, file '{item}' should appear in project structure"
+            )

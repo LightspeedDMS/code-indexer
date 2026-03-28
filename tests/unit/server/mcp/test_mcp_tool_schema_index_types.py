@@ -110,9 +110,9 @@ class TestTriggerReindexSchema:
         if "index_types" in properties:
             enum_values = properties["index_types"].get("items", {}).get("enum", [])
             if enum_values:
-                assert (
-                    "semantic_fts" not in enum_values
-                ), "trigger_reindex uses old 'semantic_fts' type"
+                assert "semantic_fts" not in enum_values, (
+                    "trigger_reindex uses old 'semantic_fts' type"
+                )
                 assert "semantic" in enum_values or not enum_values
 
 

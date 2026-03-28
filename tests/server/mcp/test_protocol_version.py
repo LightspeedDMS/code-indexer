@@ -74,6 +74,6 @@ class TestProtocolVersion:
 
         # Validate semantic versioning format (X.Y.Z or X.Y.Z-prerelease)
         semver_pattern = r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$"
-        assert re.match(
-            semver_pattern, version
-        ), f"Version '{version}' does not follow semantic versioning format"
+        assert re.match(semver_pattern, version), (
+            f"Version '{version}' does not follow semantic versioning format"
+        )

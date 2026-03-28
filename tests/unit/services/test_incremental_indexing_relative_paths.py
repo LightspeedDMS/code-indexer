@@ -109,9 +109,9 @@ class TestGitDeltaReturnsRelativePaths:
 
         assert len(delta.added) == 1
         added_path = delta.added[0]
-        assert (
-            not Path(added_path).is_absolute()
-        ), f"Expected relative path from git diff, got absolute: {added_path}"
+        assert not Path(added_path).is_absolute(), (
+            f"Expected relative path from git diff, got absolute: {added_path}"
+        )
         assert added_path == "src/foo.py"
 
 
@@ -232,17 +232,17 @@ class TestIncrementalIndexingConvertsRelativeToAbsolute:
             indexer, repo, initial_commit, second_commit
         )
 
-        assert (
-            len(captured_files) > 0
-        ), "No files were passed to process_files_high_throughput"
+        assert len(captured_files) > 0, (
+            "No files were passed to process_files_high_throughput"
+        )
 
         for f in captured_files:
-            assert Path(
-                f
-            ).is_absolute(), f"Expected absolute path passed to process_files_high_throughput, got: {f}"
-            assert str(f).startswith(
-                str(repo)
-            ), f"Expected path rooted at {repo}, got: {f}"
+            assert Path(f).is_absolute(), (
+                f"Expected absolute path passed to process_files_high_throughput, got: {f}"
+            )
+            assert str(f).startswith(str(repo)), (
+                f"Expected path rooted at {repo}, got: {f}"
+            )
 
     def test_relative_path_becomes_absolute_with_codebase_dir_prefix(self, tmp_path):
         """A relative path like 'src/module.py' becomes '{codebase_dir}/src/module.py'."""
@@ -258,14 +258,14 @@ class TestIncrementalIndexingConvertsRelativeToAbsolute:
             indexer, repo, initial_commit, second_commit
         )
 
-        assert (
-            len(captured_files) > 0
-        ), "No files were passed to process_files_high_throughput"
+        assert len(captured_files) > 0, (
+            "No files were passed to process_files_high_throughput"
+        )
         expected_absolute = repo / "src" / "module.py"
         file_paths = [Path(f) for f in captured_files]
-        assert (
-            expected_absolute in file_paths
-        ), f"Expected {expected_absolute} in files, got: {file_paths}"
+        assert expected_absolute in file_paths, (
+            f"Expected {expected_absolute} in files, got: {file_paths}"
+        )
 
 
 class TestResumePathConvertsRelativeToAbsolute:
@@ -338,17 +338,17 @@ class TestResumePathConvertsRelativeToAbsolute:
 
         captured_files = self._call_do_resume_interrupted(indexer, ["src/resume_me.py"])
 
-        assert (
-            len(captured_files) > 0
-        ), "No files were passed to process_files_high_throughput during resume"
+        assert len(captured_files) > 0, (
+            "No files were passed to process_files_high_throughput during resume"
+        )
 
         for f in captured_files:
-            assert Path(
-                f
-            ).is_absolute(), f"Expected absolute path during resume, got relative: {f}"
-            assert str(f).startswith(
-                str(repo)
-            ), f"Expected path rooted at {repo}, got: {f}"
+            assert Path(f).is_absolute(), (
+                f"Expected absolute path during resume, got relative: {f}"
+            )
+            assert str(f).startswith(str(repo)), (
+                f"Expected path rooted at {repo}, got: {f}"
+            )
 
     def test_resume_relative_path_resolves_to_codebase_dir(self, tmp_path):
         """Relative path 'a/b.py' in metadata resolves to '{codebase_dir}/a/b.py'."""
@@ -367,6 +367,6 @@ class TestResumePathConvertsRelativeToAbsolute:
         assert len(captured_files) > 0
         expected = repo / "a" / "b.py"
         file_paths = [Path(f) for f in captured_files]
-        assert (
-            expected in file_paths
-        ), f"Expected {expected} in files, got: {file_paths}"
+        assert expected in file_paths, (
+            f"Expected {expected} in files, got: {file_paths}"
+        )

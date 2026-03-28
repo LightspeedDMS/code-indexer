@@ -68,12 +68,12 @@ class TestDaemonMinScoreParameterExtraction:
 
             # CRITICAL ASSERTION: Should have score_threshold=0.8
             # BEFORE FIX: This will FAIL because score_threshold is None
-            assert (
-                "score_threshold" in call_kwargs
-            ), "vector_store.search should receive score_threshold parameter"
-            assert (
-                call_kwargs["score_threshold"] == 0.8
-            ), f"score_threshold should be 0.8 (from min_score), got {call_kwargs['score_threshold']}"
+            assert "score_threshold" in call_kwargs, (
+                "vector_store.search should receive score_threshold parameter"
+            )
+            assert call_kwargs["score_threshold"] == 0.8, (
+                f"score_threshold should be 0.8 (from min_score), got {call_kwargs['score_threshold']}"
+            )
 
     def test_daemon_filters_results_by_min_score(self):
         """Daemon should filter results below min_score threshold.
@@ -125,9 +125,9 @@ class TestDaemonMinScoreParameterExtraction:
 
             # Verify score_threshold=0.9 was passed to search
             call_kwargs = mock_vector_store.search.call_args[1]
-            assert (
-                call_kwargs["score_threshold"] == 0.9
-            ), f"Vector store should receive score_threshold=0.9, got {call_kwargs.get('score_threshold')}"
+            assert call_kwargs["score_threshold"] == 0.9, (
+                f"Vector store should receive score_threshold=0.9, got {call_kwargs.get('score_threshold')}"
+            )
 
     def test_daemon_min_score_none_returns_all_results(self):
         """Daemon should return all results when min_score=None.
@@ -170,9 +170,9 @@ class TestDaemonMinScoreParameterExtraction:
 
             # Verify score_threshold=None was passed to search
             call_kwargs = mock_vector_store.search.call_args[1]
-            assert (
-                call_kwargs["score_threshold"] is None
-            ), f"Vector store should receive score_threshold=None when min_score not provided, got {call_kwargs.get('score_threshold')}"
+            assert call_kwargs["score_threshold"] is None, (
+                f"Vector store should receive score_threshold=None when min_score not provided, got {call_kwargs.get('score_threshold')}"
+            )
 
     def test_daemon_min_score_zero_passes_zero(self):
         """Daemon should pass min_score=0.0 correctly (edge case).
@@ -216,6 +216,6 @@ class TestDaemonMinScoreParameterExtraction:
 
             # Verify score_threshold=0.0 was passed (not None)
             call_kwargs = mock_vector_store.search.call_args[1]
-            assert (
-                call_kwargs["score_threshold"] == 0.0
-            ), f"Vector store should receive score_threshold=0.0, got {call_kwargs.get('score_threshold')}"
+            assert call_kwargs["score_threshold"] == 0.0, (
+                f"Vector store should receive score_threshold=0.0, got {call_kwargs.get('score_threshold')}"
+            )

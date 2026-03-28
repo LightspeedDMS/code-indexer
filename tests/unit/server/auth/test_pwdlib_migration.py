@@ -265,9 +265,9 @@ class TestNoPasblibImportsRemain:
         source = inspect.getsource(pm_module)
 
         # Should not contain passlib imports
-        assert (
-            "from passlib" not in source
-        ), "PasswordManager still imports from passlib"
+        assert "from passlib" not in source, (
+            "PasswordManager still imports from passlib"
+        )
         assert "import passlib" not in source, "PasswordManager still imports passlib"
 
     def test_password_manager_imports_pwdlib(self):
@@ -279,9 +279,9 @@ class TestNoPasblibImportsRemain:
         source = inspect.getsource(pm_module)
 
         # Should import pwdlib
-        assert (
-            "from pwdlib" in source or "import pwdlib" in source
-        ), "PasswordManager should import pwdlib"
+        assert "from pwdlib" in source or "import pwdlib" in source, (
+            "PasswordManager should import pwdlib"
+        )
 
     def test_test_data_factory_does_not_import_passlib(self):
         """Test that TestDataFactory does not import passlib."""
@@ -292,9 +292,9 @@ class TestNoPasblibImportsRemain:
         source = inspect.getsource(tdf_module)
 
         # Should not contain passlib imports
-        assert (
-            "from passlib" not in source
-        ), "TestDataFactory still imports from passlib"
+        assert "from passlib" not in source, (
+            "TestDataFactory still imports from passlib"
+        )
         assert "import passlib" not in source, "TestDataFactory still imports passlib"
 
     def test_test_data_factory_imports_pwdlib(self):
@@ -306,6 +306,6 @@ class TestNoPasblibImportsRemain:
         source = inspect.getsource(tdf_module)
 
         # Should import pwdlib
-        assert (
-            "from pwdlib" in source or "import pwdlib" in source
-        ), "TestDataFactory should import pwdlib"
+        assert "from pwdlib" in source or "import pwdlib" in source, (
+            "TestDataFactory should import pwdlib"
+        )

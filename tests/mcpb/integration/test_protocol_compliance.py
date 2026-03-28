@@ -25,9 +25,9 @@ class TestJsonRpcCompliance:
         request = {"jsonrpc": "2.0", "method": "tools/list", "id": 1}
         response = await bridge.process_request(request)
 
-        assert (
-            response["jsonrpc"] == "2.0"
-        ), "Response must include jsonrpc: '2.0' field"
+        assert response["jsonrpc"] == "2.0", (
+            "Response must include jsonrpc: '2.0' field"
+        )
 
     @pytest.mark.asyncio
     async def test_jsonrpc_id_field_preserved(self, bridge_config, test_server):
@@ -71,9 +71,9 @@ class TestJsonRpcCompliance:
         has_result = "result" in response
         has_error = "error" in response
 
-        assert (
-            has_result != has_error
-        ), "Response must have exactly one of 'result' or 'error'"
+        assert has_result != has_error, (
+            "Response must have exactly one of 'result' or 'error'"
+        )
 
     @pytest.mark.asyncio
     async def test_jsonrpc_error_code_structure(self, bridge_config):
@@ -88,9 +88,9 @@ class TestJsonRpcCompliance:
         assert "code" in response["error"], "Error must have 'code' field"
         assert "message" in response["error"], "Error must have 'message' field"
         assert isinstance(response["error"]["code"], int), "Error code must be integer"
-        assert isinstance(
-            response["error"]["message"], str
-        ), "Error message must be string"
+        assert isinstance(response["error"]["message"], str), (
+            "Error message must be string"
+        )
 
     @pytest.mark.asyncio
     async def test_jsonrpc_parse_error_code(self, bridge_config):
@@ -111,9 +111,9 @@ class TestJsonRpcCompliance:
         request = {"jsonrpc": "2.0", "id": 1}
         response = await bridge.process_request(request)
 
-        assert (
-            response["error"]["code"] == -32600
-        ), "Invalid request code must be -32600"
+        assert response["error"]["code"] == -32600, (
+            "Invalid request code must be -32600"
+        )
 
     @pytest.mark.asyncio
     async def test_jsonrpc_method_not_found_code(self, bridge_config, test_server):
@@ -123,9 +123,9 @@ class TestJsonRpcCompliance:
         request = {"jsonrpc": "2.0", "method": "unknown/method", "id": 1}
         response = await bridge.process_request(request)
 
-        assert (
-            response["error"]["code"] == -32601
-        ), "Method not found code must be -32601"
+        assert response["error"]["code"] == -32601, (
+            "Method not found code must be -32601"
+        )
 
     @pytest.mark.asyncio
     async def test_jsonrpc_missing_version_field(self, bridge_config):
@@ -178,22 +178,22 @@ class TestMcpProtocolCompliance:
         for tool in tools:
             # Required MCP tool fields
             assert "name" in tool, f"Tool missing 'name': {tool}"
-            assert (
-                "description" in tool
-            ), f"Tool {tool.get('name')} missing 'description'"
-            assert (
-                "inputSchema" in tool
-            ), f"Tool {tool.get('name')} missing 'inputSchema'"
+            assert "description" in tool, (
+                f"Tool {tool.get('name')} missing 'description'"
+            )
+            assert "inputSchema" in tool, (
+                f"Tool {tool.get('name')} missing 'inputSchema'"
+            )
 
             # Validate inputSchema structure
             schema = tool["inputSchema"]
             assert "type" in schema, f"Tool {tool['name']} inputSchema missing 'type'"
-            assert (
-                schema["type"] == "object"
-            ), f"Tool {tool['name']} inputSchema type must be 'object'"
-            assert (
-                "properties" in schema
-            ), f"Tool {tool['name']} inputSchema missing 'properties'"
+            assert schema["type"] == "object", (
+                f"Tool {tool['name']} inputSchema type must be 'object'"
+            )
+            assert "properties" in schema, (
+                f"Tool {tool['name']} inputSchema missing 'properties'"
+            )
 
     @pytest.mark.asyncio
     async def test_mcp_tool_names_match_registry(self, bridge_config, test_server):
@@ -207,9 +207,9 @@ class TestMcpProtocolCompliance:
         actual_names = sorted([t["name"] for t in tools])
         expected_names = sorted(TOOL_REGISTRY.keys())
 
-        assert (
-            actual_names == expected_names
-        ), f"Tool names mismatch.\nExpected: {expected_names}\nGot: {actual_names}"
+        assert actual_names == expected_names, (
+            f"Tool names mismatch.\nExpected: {expected_names}\nGot: {actual_names}"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_tools_call_method(self, bridge_config, test_server):
@@ -227,9 +227,9 @@ class TestMcpProtocolCompliance:
         }
         response = await bridge.process_request(request)
 
-        assert (
-            "result" in response or "error" in response
-        ), "tools/call must return result or error"
+        assert "result" in response or "error" in response, (
+            "tools/call must return result or error"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_search_code_tool_parameters(self, bridge_config, test_server):
@@ -245,9 +245,9 @@ class TestMcpProtocolCompliance:
         assert search_code_tool is not None, "search_code tool must be present"
 
         param_count = len(search_code_tool["inputSchema"]["properties"])
-        assert (
-            param_count == 25
-        ), f"search_code must have 25 parameters, got {param_count}"
+        assert param_count == 25, (
+            f"search_code must have 25 parameters, got {param_count}"
+        )
 
     @pytest.mark.asyncio
     async def test_mcp_all_tools_accessible(self, bridge_config, test_server):
@@ -286,9 +286,9 @@ class TestMcpProtocolCompliance:
             "remove_golden_repo",
         }
 
-        assert (
-            tool_names == expected_tools
-        ), f"Tool names mismatch.\nMissing: {expected_tools - tool_names}\nExtra: {tool_names - expected_tools}"
+        assert tool_names == expected_tools, (
+            f"Tool names mismatch.\nMissing: {expected_tools - tool_names}\nExtra: {tool_names - expected_tools}"
+        )
 
 
 class TestErrorHandling:

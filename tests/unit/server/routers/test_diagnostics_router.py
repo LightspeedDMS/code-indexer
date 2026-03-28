@@ -107,9 +107,9 @@ class TestDiagnosticsPageEndpoint:
             html,
             re.IGNORECASE | re.DOTALL,
         )
-        assert (
-            diagnostics_nav is not None
-        ), "Diagnostics nav item should be marked as current page"
+        assert diagnostics_nav is not None, (
+            "Diagnostics nav item should be marked as current page"
+        )
 
 
 class TestRunAllDiagnosticsEndpoint:

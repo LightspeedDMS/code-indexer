@@ -91,9 +91,9 @@ class TestGetExistingContentHashes:
 
         result = store.get_existing_content_hashes("src/old.py", collection_name)
 
-        assert (
-            result == {}
-        ), "Vectors without content_hash must be excluded (graceful degradation for legacy)"
+        assert result == {}, (
+            "Vectors without content_hash must be excluded (graceful degradation for legacy)"
+        )
 
     def test_returns_multiple_chunks_for_file(self, tmp_path):
         """Returns all chunks when a file has multiple stored vectors.

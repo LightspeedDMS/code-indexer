@@ -83,9 +83,9 @@ class TestIssue1ThreadSlotMismatch:
 
         # This is the mismatch
         assert progress_manager_slots == 10, "CLI creates 10 slots (BUG)"
-        assert (
-            tracker_slots != progress_manager_slots
-        ), "Mismatch between tracker and display"
+        assert tracker_slots != progress_manager_slots, (
+            "Mismatch between tracker and display"
+        )
 
     def test_display_slot_count_matches_tracker_slot_count(self):
         """PASSING TEST (after fix): Display slots should match tracker slots."""
@@ -159,9 +159,9 @@ class TestIssue2ZeroRatesDisplay:
             files_per_second = 0.0
 
         # ASSERTION: Parser fails and defaults to 0.0
-        assert (
-            files_per_second == 0.0
-        ), f"Parser should fail on 'commits/s', got {files_per_second}"
+        assert files_per_second == 0.0, (
+            f"Parser should fail on 'commits/s', got {files_per_second}"
+        )
 
     def test_cli_parser_works_with_correct_format(self):
         """PASSING TEST (after fix): CLI parser should handle commits/s OR files/s."""
@@ -222,9 +222,9 @@ class TestIssue3KeyboardInterruptCleanup:
             cleanup_errors.append("ThreadPoolExecutor exit without cleanup")
 
         # ASSERTION: We caught the interrupt but didn't cleanup
-        assert (
-            len(cleanup_errors) > 0
-        ), "Should have cleanup errors without proper handling"
+        assert len(cleanup_errors) > 0, (
+            "Should have cleanup errors without proper handling"
+        )
 
     def test_executor_with_proper_cleanup(self):
         """PASSING TEST (after fix): Executor should cleanup on KeyboardInterrupt."""
@@ -280,9 +280,9 @@ class TestIssue3KeyboardInterruptCleanup:
                 tracker.release_slot(slot2)
 
         # ASSERTION: All slots should be available after cleanup
-        assert (
-            tracker.get_available_slot_count() == 4
-        ), "All slots should be available after cleanup"
+        assert tracker.get_available_slot_count() == 4, (
+            "All slots should be available after cleanup"
+        )
 
 
 class TestIntegratedTemporalDisplayFixes:

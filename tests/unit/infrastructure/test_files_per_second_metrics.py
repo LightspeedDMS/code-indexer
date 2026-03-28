@@ -51,10 +51,10 @@ def function_{i}():
 
 class TestClass_{i}:
     '''Test class {i}'''
-    
+
     def method_1(self):
         return "Method implementation with enough content for chunking"
-    
+
     def method_2(self):
         return "Another method with substantial content for testing"
 """
@@ -172,9 +172,9 @@ class TestClass_{i}:
         files_per_sec_calls = [
             call for call in progress_calls if "files/s" in call["info"]
         ]
-        assert (
-            len(files_per_sec_calls) > 0
-        ), "Expected at least one progress call with 'files/s'"
+        assert len(files_per_sec_calls) > 0, (
+            "Expected at least one progress call with 'files/s'"
+        )
 
         # Verify format: "X/Y files (Z%) | A.B files/s | KB/s | N threads | status"
         for call in files_per_sec_calls[:3]:  # Check first 3 calls
@@ -184,17 +184,17 @@ class TestClass_{i}:
 
             # Check files/s part (second part)
             files_part = parts[1].strip()
-            assert (
-                "files/s" in files_part
-            ), f"Expected 'files/s' in second part: {files_part}"
+            assert "files/s" in files_part, (
+                f"Expected 'files/s' in second part: {files_part}"
+            )
 
             # Extract numeric value before "files/s"
             files_str = files_part.replace("files/s", "").strip()
             try:
                 files_value = float(files_str)
-                assert (
-                    files_value >= 0.0
-                ), f"Expected non-negative files/s value: {files_value}"
+                assert files_value >= 0.0, (
+                    f"Expected non-negative files/s value: {files_value}"
+                )
             except ValueError:
                 pytest.fail(f"Could not parse files/s value from: {files_part}")
 
@@ -290,9 +290,9 @@ class TestClass_{i}:
 
             # Check files/s part (second part)
             files_part = parts[1].strip()
-            assert (
-                "files/s" in files_part
-            ), f"Expected 'files/s' in second part: {files_part}"
+            assert "files/s" in files_part, (
+                f"Expected 'files/s' in second part: {files_part}"
+            )
 
         # Verify files/s values are reasonable
         assert len(files_per_sec_values) > 0, "Expected to capture files/s values"
@@ -302,13 +302,13 @@ class TestClass_{i}:
 
         # Files/s should be reasonable for parallel processing
         # Values should be positive and not extremely high or low
-        assert (
-            avg_files_per_sec > 0.0
-        ), f"Average files/s ({avg_files_per_sec:.2f}) should be positive"
+        assert avg_files_per_sec > 0.0, (
+            f"Average files/s ({avg_files_per_sec:.2f}) should be positive"
+        )
 
-        assert (
-            max_files_per_sec > 0.0
-        ), f"Max files/s ({max_files_per_sec:.2f}) should be positive"
+        assert max_files_per_sec > 0.0, (
+            f"Max files/s ({max_files_per_sec:.2f}) should be positive"
+        )
 
         # Files/s should be reasonable - not extremely high (avoid calculation errors)
         # With 6 files and parallel processing, rates should be reasonable
@@ -408,12 +408,12 @@ class TestClass_{i}:
         )
 
         # Verify we captured files/s values for both thread counts
-        assert (
-            len(files_per_sec_values_4_threads) > 0
-        ), "Expected files/s values for 4 threads"
-        assert (
-            len(files_per_sec_values_8_threads) > 0
-        ), "Expected files/s values for 8 threads"
+        assert len(files_per_sec_values_4_threads) > 0, (
+            "Expected files/s values for 4 threads"
+        )
+        assert len(files_per_sec_values_8_threads) > 0, (
+            "Expected files/s values for 8 threads"
+        )
 
         # Calculate average files/s for each configuration
         avg_4_threads = sum(files_per_sec_values_4_threads) / len(
@@ -442,9 +442,9 @@ class TestClass_{i}:
             # This indicates 8 threads processed files very quickly
         else:
             # Both should show some activity
-            assert (
-                avg_4_threads > 0.0 or avg_8_threads > 0.0
-            ), "At least one configuration should show measurable files/s"
+            assert avg_4_threads > 0.0 or avg_8_threads > 0.0, (
+                "At least one configuration should show measurable files/s"
+            )
 
     def teardown_method(self):
         """Cleanup test environment."""

@@ -59,17 +59,17 @@ class TestFrozenSlotsMultipleTrackers:
             buggy_concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
         # BUG DEMONSTRATED: Client gets EMPTY data from wrong tracker
-        assert (
-            len(buggy_concurrent_files) == 0
-        ), "Buggy code gets stale data from wrong tracker"
+        assert len(buggy_concurrent_files) == 0, (
+            "Buggy code gets stale data from wrong tracker"
+        )
 
         # CORRECT BEHAVIOR: Client uses concurrent_files from kwargs directly
         correct_concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
         # FIX VERIFIED: Client gets FRESH data from kwargs
-        assert (
-            len(correct_concurrent_files) == 2
-        ), "Fixed code gets fresh data from kwargs"
+        assert len(correct_concurrent_files) == 2, (
+            "Fixed code gets fresh data from kwargs"
+        )
         assert correct_concurrent_files[0]["file_path"] == "/active/file1.py"
         assert correct_concurrent_files[1]["file_path"] == "/active/file2.py"
 

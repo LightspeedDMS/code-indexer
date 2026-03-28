@@ -630,7 +630,7 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
             elif ms < 1000:
                 time_str = f"{ms:.0f}ms"
             else:
-                time_str = f"{ms/1000:.2f}s"
+                time_str = f"{ms / 1000:.2f}s"
 
             console.print(f"  • {label:<30} {time_str:>10} ({percentage:>5.1f}%)")
 
@@ -647,7 +647,7 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
                         elif breakdown_ms < 1000:
                             breakdown_time_str = f"{breakdown_ms:.0f}ms"
                         else:
-                            breakdown_time_str = f"{breakdown_ms/1000:.2f}s"
+                            breakdown_time_str = f"{breakdown_ms / 1000:.2f}s"
 
                         breakdown_label = multi_index_breakdown_labels.get(
                             breakdown_key, breakdown_key
@@ -691,7 +691,7 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
                         elif breakdown_ms < 1000:
                             breakdown_time_str = f"{breakdown_ms:.0f}ms"
                         else:
-                            breakdown_time_str = f"{breakdown_ms/1000:.2f}s"
+                            breakdown_time_str = f"{breakdown_ms / 1000:.2f}s"
 
                         breakdown_label = parallel_breakdown_labels.get(
                             breakdown_key, breakdown_key
@@ -733,7 +733,7 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
                         elif breakdown_ms < 1000:
                             breakdown_time_str = f"{breakdown_ms:.0f}ms"
                         else:
-                            breakdown_time_str = f"{breakdown_ms/1000:.2f}s"
+                            breakdown_time_str = f"{breakdown_ms / 1000:.2f}s"
 
                         breakdown_label = search_breakdown_labels.get(
                             breakdown_key, breakdown_key
@@ -759,7 +759,7 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
     if total_ms < 1000:
         total_str = f"{total_ms:.0f}ms"
     else:
-        total_str = f"{total_ms/1000:.2f}s"
+        total_str = f"{total_ms / 1000:.2f}s"
     console.print(f"  {'Total query time':<30} {total_str:>10} (100.0%)")
     console.print()
 
@@ -4041,9 +4041,9 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
         # Initialize semantic watch handler
         if available_indexes["semantic"]:
             # Ensure all required variables are initialized
-            assert (
-                git_topology_service is not None
-            ), "git_topology_service not initialized"
+            assert git_topology_service is not None, (
+                "git_topology_service not initialized"
+            )
             assert watch_metadata is not None, "watch_metadata not initialized"
 
             # Get git state for metadata

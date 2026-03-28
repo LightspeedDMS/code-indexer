@@ -30,17 +30,17 @@ class TestFixedSizeChunker:
         assert len(chunks) == 3
 
         # First two chunks should be exactly 1000 characters
-        assert (
-            len(chunks[0]["text"]) == 1000
-        ), f"First chunk has {len(chunks[0]['text'])} chars, expected 1000"
-        assert (
-            len(chunks[1]["text"]) == 1000
-        ), f"Second chunk has {len(chunks[1]['text'])} chars, expected 1000"
+        assert len(chunks[0]["text"]) == 1000, (
+            f"First chunk has {len(chunks[0]['text'])} chars, expected 1000"
+        )
+        assert len(chunks[1]["text"]) == 1000, (
+            f"Second chunk has {len(chunks[1]['text'])} chars, expected 1000"
+        )
 
         # Last chunk should be remainder (2500 - 1700 = 800 characters)
-        assert (
-            len(chunks[2]["text"]) == 800
-        ), f"Last chunk has {len(chunks[2]['text'])} chars, expected 800"
+        assert len(chunks[2]["text"]) == 800, (
+            f"Last chunk has {len(chunks[2]['text'])} chars, expected 800"
+        )
 
     def test_fixed_overlap_exactly_150_characters(self, chunker):
         """Test that there's exactly 150 characters overlap between adjacent chunks."""
@@ -63,9 +63,9 @@ class TestFixedSizeChunker:
         first_chunk_ending = first_chunk[-150:]
         second_chunk_beginning = second_chunk[:150]
 
-        assert (
-            first_chunk_ending == second_chunk_beginning
-        ), "Overlap between chunks is not exactly 150 characters"
+        assert first_chunk_ending == second_chunk_beginning, (
+            "Overlap between chunks is not exactly 150 characters"
+        )
 
     def test_chunk_positioning_math_next_start_calculation(self, chunker):
         """Test that chunk positioning follows the pattern: next_start = current_start + 850."""
@@ -93,9 +93,9 @@ class TestFixedSizeChunker:
             expected_overlap = current_chunk[-150:]
             actual_overlap = next_chunk[:150]
 
-            assert (
-                expected_overlap == actual_overlap
-            ), f"Chunk {i} to {i+1} overlap doesn't match expected 850-character step pattern"
+            assert expected_overlap == actual_overlap, (
+                f"Chunk {i} to {i + 1} overlap doesn't match expected 850-character step pattern"
+            )
 
     def test_last_chunk_handling_remainder_text(self, chunker):
         """Test that the last chunk handles remainder text correctly."""
@@ -133,15 +133,15 @@ class TestFixedSizeChunker:
                     expected_chunks = 1 + full_additional_chunks
                     expected_last_size = 1000  # Full chunk
 
-            assert (
-                len(chunks) == expected_chunks
-            ), f"For {total_size} chars: expected {expected_chunks} chunks, got {len(chunks)}"
+            assert len(chunks) == expected_chunks, (
+                f"For {total_size} chars: expected {expected_chunks} chunks, got {len(chunks)}"
+            )
 
             # Last chunk size should match calculation
             actual_last_size = len(chunks[-1]["text"])
-            assert (
-                actual_last_size == expected_last_size
-            ), f"For {total_size} chars: expected last chunk {expected_last_size}, got {actual_last_size}"
+            assert actual_last_size == expected_last_size, (
+                f"For {total_size} chars: expected last chunk {expected_last_size}, got {actual_last_size}"
+            )
 
     def test_edge_case_empty_file(self, chunker):
         """Test handling of empty files."""
@@ -162,12 +162,12 @@ class TestFixedSizeChunker:
 
             chunks = chunker.chunk_text(text, file_path)
 
-            assert (
-                len(chunks) == 1
-            ), f"File with {size} chars should produce exactly 1 chunk"
-            assert (
-                len(chunks[0]["text"]) == size
-            ), f"Single chunk should have {size} chars"
+            assert len(chunks) == 1, (
+                f"File with {size} chars should produce exactly 1 chunk"
+            )
+            assert len(chunks[0]["text"]) == size, (
+                f"Single chunk should have {size} chars"
+            )
 
     def test_edge_case_very_large_file(self, chunker):
         """Test handling of very large files."""
@@ -180,15 +180,15 @@ class TestFixedSizeChunker:
 
         # All chunks except last should be exactly 1000 characters
         for i, chunk in enumerate(chunks[:-1]):
-            assert (
-                len(chunk["text"]) == 1000
-            ), f"Chunk {i} in large file should be exactly 1000 chars, got {len(chunk['text'])}"
+            assert len(chunk["text"]) == 1000, (
+                f"Chunk {i} in large file should be exactly 1000 chars, got {len(chunk['text'])}"
+            )
 
         # Verify total character coverage (accounting for overlaps)
         expected_chunks = 1 + ((large_size - 1000) + 849) // 850  # Ceiling division
-        assert (
-            len(chunks) == expected_chunks
-        ), f"Large file should produce {expected_chunks} chunks, got {len(chunks)}"
+        assert len(chunks) == expected_chunks, (
+            f"Large file should produce {expected_chunks} chunks, got {len(chunks)}"
+        )
 
     def test_line_number_calculation_accuracy(self, chunker):
         """Test that line numbers are calculated correctly."""
@@ -208,14 +208,14 @@ class TestFixedSizeChunker:
         for i, chunk in enumerate(chunks):
             assert "line_start" in chunk, f"Chunk {i} missing line_start"
             assert "line_end" in chunk, f"Chunk {i} missing line_end"
-            assert isinstance(
-                chunk["line_start"], int
-            ), f"Chunk {i} line_start not integer"
+            assert isinstance(chunk["line_start"], int), (
+                f"Chunk {i} line_start not integer"
+            )
             assert isinstance(chunk["line_end"], int), f"Chunk {i} line_end not integer"
             assert chunk["line_start"] > 0, f"Chunk {i} line_start should be 1-based"
-            assert (
-                chunk["line_end"] >= chunk["line_start"]
-            ), f"Chunk {i} line_end should be >= line_start"
+            assert chunk["line_end"] >= chunk["line_start"], (
+                f"Chunk {i} line_end should be >= line_start"
+            )
 
         # Verify line numbers are sequential (accounting for overlap)
         for i in range(len(chunks) - 1):
@@ -224,9 +224,9 @@ class TestFixedSizeChunker:
 
             # Due to character-based cutting, line numbers may overlap or have gaps
             # but they should be in reasonable proximity
-            assert (
-                abs(current_end - next_start) <= 10
-            ), f"Line numbers between chunks {i} and {i+1} too far apart: {current_end} to {next_start}"
+            assert abs(current_end - next_start) <= 10, (
+                f"Line numbers between chunks {i} and {i + 1} too far apart: {current_end} to {next_start}"
+            )
 
     def test_chunk_metadata_completeness(self, chunker):
         """Test that chunk metadata includes all required fields."""
@@ -252,23 +252,23 @@ class TestFixedSizeChunker:
 
             # Verify field types and values
             assert isinstance(chunk["text"], str), f"Chunk {i} text should be string"
-            assert isinstance(
-                chunk["chunk_index"], int
-            ), f"Chunk {i} chunk_index should be int"
-            assert isinstance(
-                chunk["total_chunks"], int
-            ), f"Chunk {i} total_chunks should be int"
+            assert isinstance(chunk["chunk_index"], int), (
+                f"Chunk {i} chunk_index should be int"
+            )
+            assert isinstance(chunk["total_chunks"], int), (
+                f"Chunk {i} total_chunks should be int"
+            )
             assert isinstance(chunk["size"], int), f"Chunk {i} size should be int"
             assert chunk["chunk_index"] == i, f"Chunk {i} has wrong chunk_index"
-            assert chunk["total_chunks"] == len(
-                chunks
-            ), f"Chunk {i} has wrong total_chunks"
-            assert chunk["size"] == len(
-                chunk["text"]
-            ), f"Chunk {i} size doesn't match text length"
-            assert (
-                chunk["file_extension"] == "py"
-            ), f"Chunk {i} has wrong file_extension"
+            assert chunk["total_chunks"] == len(chunks), (
+                f"Chunk {i} has wrong total_chunks"
+            )
+            assert chunk["size"] == len(chunk["text"]), (
+                f"Chunk {i} size doesn't match text length"
+            )
+            assert chunk["file_extension"] == "py", (
+                f"Chunk {i} has wrong file_extension"
+            )
 
     def test_no_boundary_detection_cuts_exact_positions(self, chunker):
         """Test that chunking cuts at exact character positions without boundary detection."""
@@ -311,17 +311,17 @@ class TestFixedSizeChunker:
             # All chunks except the last MUST be exactly 1000 characters
             for i in range(len(chunks) - 1):
                 chunk_size = len(chunks[i]["text"])
-                assert (
-                    chunk_size == 1000
-                ), f"For text size {size}, chunk {i} has {chunk_size} chars, expected exactly 1000"
+                assert chunk_size == 1000, (
+                    f"For text size {size}, chunk {i} has {chunk_size} chars, expected exactly 1000"
+                )
 
             # Only the last chunk may be different from 1000
             if len(chunks) > 1:
                 last_chunk_size = len(chunks[-1]["text"])
                 # Last chunk should be > 0 and <= 1000
-                assert (
-                    0 < last_chunk_size <= 1000
-                ), f"Last chunk size {last_chunk_size} should be between 1 and 1000"
+                assert 0 < last_chunk_size <= 1000, (
+                    f"Last chunk size {last_chunk_size} should be between 1 and 1000"
+                )
 
     def test_no_parsing_pure_arithmetic(self, chunker):
         """Test that implementation uses no string analysis, regex, or complexity."""
@@ -334,7 +334,7 @@ class TestFixedSizeChunker:
             if True:
                 # This comment spans
                 # multiple lines and has
-                "strings with \\"quotes\\" and 
+                "strings with \\"quotes\\" and
                 more strings"
                 return {"key": "value",
                        "another": "string"}
@@ -347,14 +347,14 @@ class TestFixedSizeChunker:
 
         # Should still follow exact character arithmetic regardless of syntax
         for i in range(len(chunks) - 1):
-            assert (
-                len(chunks[i]["text"]) == 1000
-            ), f"Even with complex syntax, chunk {i} should be exactly 1000 chars"
+            assert len(chunks[i]["text"]) == 1000, (
+                f"Even with complex syntax, chunk {i} should be exactly 1000 chars"
+            )
 
         # Overlap should still be exactly 150 characters
         if len(chunks) >= 2:
             overlap_expected = chunks[0]["text"][-150:]
             overlap_actual = chunks[1]["text"][:150]
-            assert (
-                overlap_expected == overlap_actual
-            ), "Complex syntax should not affect exact character overlap"
+            assert overlap_expected == overlap_actual, (
+                "Complex syntax should not affect exact character overlap"
+            )

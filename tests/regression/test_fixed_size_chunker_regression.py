@@ -65,13 +65,13 @@ import java.math.BigDecimal;
 
 /**
  * Customer Management Microservice
- * 
+ *
  * This service handles all customer-related operations including:
  * - Customer registration and profile management
  * - Customer search and filtering capabilities
  * - Customer data validation and integrity checks
  * - Integration with payment and order systems
- * 
+ *
  * @author Development Team
  * @version 1.0.0
  * @since 2024-01-01
@@ -83,13 +83,13 @@ public class CustomerMicroservice {
 
     @Autowired
     private CustomerRepository customerRepository;
-    
+
     @Autowired
     private CustomerValidator customerValidator;
-    
+
     @Autowired
     private NotificationService notificationService;
-    
+
     private static final String DEFAULT_SORT_FIELD = "lastName";
     private static final int MAX_PAGE_SIZE = 100;
     private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
@@ -100,7 +100,7 @@ public class CustomerMicroservice {
 
     /**
      * Retrieve all customers with pagination and optional filtering.
-     * 
+     *
      * @param page Page number (0-based)
      * @param size Number of items per page
      * @param sortBy Field to sort by
@@ -115,24 +115,24 @@ public class CustomerMicroservice {
             @RequestParam(defaultValue = DEFAULT_SORT_FIELD) String sortBy,
             @RequestParam(defaultValue = "asc") String sortDir,
             @RequestParam(required = false) String filter) {
-        
+
         try {
             // Validate pagination parameters
             if (page < 0) {
                 return ResponseEntity.badRequest()
                     .body(new PagedCustomerResponse("Invalid page number"));
             }
-            
+
             if (size <= 0 || size > MAX_PAGE_SIZE) {
                 return ResponseEntity.badRequest()
                     .body(new PagedCustomerResponse("Invalid page size"));
             }
-            
+
             // Create pageable request
-            Sort sort = Sort.by(sortDir.equalsIgnoreCase("desc") ? 
+            Sort sort = Sort.by(sortDir.equalsIgnoreCase("desc") ?
                 Sort.Direction.DESC : Sort.Direction.ASC, sortBy);
             Pageable pageable = PageRequest.of(page, size, sort);
-            
+
             // Apply filtering if provided
             Page<Customer> customerPage;
             if (filter != null && !filter.trim().isEmpty()) {
@@ -141,12 +141,12 @@ public class CustomerMicroservice {
             } else {
                 customerPage = customerRepository.findAll(pageable);
             }
-            
+
             // Convert to response DTOs
             List<CustomerDTO> customerDTOs = customerPage.getContent().stream()
                 .map(this::convertToDTO)
                 .collect(Collectors.toList());
-            
+
             PagedCustomerResponse response = new PagedCustomerResponse(
                 customerDTOs,
                 customerPage.getTotalElements(),
@@ -154,9 +154,9 @@ public class CustomerMicroservice {
                 page,
                 size
             );
-            
+
             return ResponseEntity.ok(response);
-            
+
         } catch (Exception e) {
             logger.error("Error retrieving customers", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -166,7 +166,7 @@ public class CustomerMicroservice {
 
     /**
      * Retrieve a specific customer by ID.
-     * 
+     *
      * @param id Customer ID
      * @return Customer details if found
      */
@@ -174,7 +174,7 @@ public class CustomerMicroservice {
     public ResponseEntity<CustomerResponse> getCustomer(@PathVariable Long id) {
         try {
             Optional<Customer> customerOpt = customerRepository.findById(id);
-            
+
             if (customerOpt.isPresent()) {
                 Customer customer = customerOpt.get();
                 CustomerDTO dto = convertToDTO(customer);
@@ -182,7 +182,7 @@ public class CustomerMicroservice {
             } else {
                 return ResponseEntity.notFound().build();
             }
-            
+
         } catch (Exception e) {
             logger.error("Error retrieving customer with ID: " + id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -192,14 +192,14 @@ public class CustomerMicroservice {
 
     /**
      * Create a new customer.
-     * 
+     *
      * @param request Customer creation request
      * @return Created customer details
      */
     @PostMapping
     public ResponseEntity<CustomerResponse> createCustomer(
             @Valid @RequestBody CreateCustomerRequest request) {
-        
+
         try {
             // Validate request
             ValidationResult validation = customerValidator.validateCreateRequest(request);
@@ -207,13 +207,13 @@ public class CustomerMicroservice {
                 return ResponseEntity.badRequest()
                     .body(new CustomerResponse(validation.getErrors()));
             }
-            
+
             // Check for duplicate email
             if (customerRepository.existsByEmail(request.getEmail())) {
                 return ResponseEntity.badRequest()
                     .body(new CustomerResponse("Email already exists"));
             }
-            
+
             // Create new customer entity
             Customer customer = new Customer();
             customer.setFirstName(request.getFirstName());
@@ -225,25 +225,25 @@ public class CustomerMicroservice {
             customer.setCreatedAt(LocalDateTime.now());
             customer.setUpdatedAt(LocalDateTime.now());
             customer.setStatus(CustomerStatus.ACTIVE);
-            
+
             // Save customer
             Customer savedCustomer = customerRepository.save(customer);
-            
+
             // Send welcome notification
             notificationService.sendWelcomeNotification(savedCustomer);
-            
+
             // Return success response
             CustomerDTO dto = convertToDTO(savedCustomer);
             return ResponseEntity.status(HttpStatus.CREATED)
                 .body(new CustomerResponse(dto));
-                
+
         } catch (Exception e) {
             logger.error("Error creating customer", e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new CustomerResponse("Internal server error"));
         }
     }
-    
+
     private CustomerDTO convertToDTO(Customer customer) {
         return CustomerDTO.builder()
             .id(customer.getId())
@@ -314,7 +314,7 @@ class DataProcessingService:
     \"\"\"
     Advanced data processing service that handles large-scale data operations
     with caching, async processing, and comprehensive error handling.
-    
+
     This service provides functionality for:
     - Batch data processing with parallel execution
     - Real-time data streaming and transformation
@@ -323,8 +323,8 @@ class DataProcessingService:
     - API integration with rate limiting and retry logic
     - Comprehensive monitoring and logging
     \"\"\"
-    
-    def __init__(self, database_url: str = DEFAULT_DATABASE_URL, 
+
+    def __init__(self, database_url: str = DEFAULT_DATABASE_URL,
                  redis_url: str = REDIS_URL):
         self.database_url = database_url
         self.redis_url = redis_url
@@ -339,37 +339,37 @@ class DataProcessingService:
             'cache_misses': 0,
             'start_time': datetime.now()
         }
-        
-    async def process_data_batch(self, data_items: List[Dict[str, Any]], 
+
+    async def process_data_batch(self, data_items: List[Dict[str, Any]],
                                batch_size: int = BATCH_SIZE) -> Dict[str, Any]:
         \"\"\"
         Process a batch of data items with parallel execution and error handling.
-        
+
         Args:
             data_items: List of data items to process
             batch_size: Size of each processing batch
-            
+
         Returns:
             Dictionary containing processing results and statistics
         \"\"\"
         try:
             results = []
             failed_items = []
-            
+
             # Split data into batches
-            batches = [data_items[i:i + batch_size] 
+            batches = [data_items[i:i + batch_size]
                       for i in range(0, len(data_items), batch_size)]
-            
+
             # Process batches concurrently
             async with aiohttp.ClientSession() as session:
                 tasks = []
                 for batch_idx, batch in enumerate(batches):
                     task = self._process_single_batch(session, batch, batch_idx)
                     tasks.append(task)
-                
+
                 # Wait for all batches to complete
                 batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-                
+
                 # Collect results and handle exceptions
                 for batch_idx, batch_result in enumerate(batch_results):
                     if isinstance(batch_result, Exception):
@@ -377,11 +377,11 @@ class DataProcessingService:
                         failed_items.extend(batches[batch_idx])
                     else:
                         results.extend(batch_result)
-            
+
             # Update statistics
             self.stats['processed_items'] += len(results)
             self.stats['failed_items'] += len(failed_items)
-            
+
             return {
                 'success': True,
                 'processed_count': len(results),
@@ -390,7 +390,7 @@ class DataProcessingService:
                 'failed_items': failed_items,
                 'processing_time': (datetime.now() - self.stats['start_time']).total_seconds()
             }
-            
+
         except Exception as e:
             logger.error(f"Critical error in batch processing: {e}")
             return {
@@ -399,13 +399,13 @@ class DataProcessingService:
                 'processed_count': 0,
                 'failed_count': len(data_items)
             }
-    
+
     @lru_cache(maxsize=1000)
-    def calculate_complex_metrics(self, data_key: str, 
+    def calculate_complex_metrics(self, data_key: str,
                                 algorithm: str = 'standard') -> Dict[str, float]:
         \"\"\"
         Calculate complex metrics for data analysis with caching.
-        
+
         This method performs computationally expensive calculations
         and caches results for improved performance.
         \"\"\"
@@ -417,16 +417,16 @@ class DataProcessingService:
                 'percentile_95': np.random.gamma(2, 50),
                 'correlation_score': np.random.uniform(-1, 1)
             }
-            
+
             if algorithm == 'advanced':
                 base_metrics.update({
                     'entropy': np.random.exponential(2),
                     'kurtosis': np.random.normal(0, 0.5),
                     'skewness': np.random.laplace(0, 1)
                 })
-            
+
             return base_metrics
-            
+
         except Exception as e:
             logger.error(f"Error calculating metrics for {data_key}: {e}")
             return {}
@@ -726,9 +726,9 @@ class DataProcessingService:
                 # Final chunk can be different but should be reasonable
                 if len(chunks) > 1:
                     final_size = sizes[-1]
-                    assert (
-                        1 <= final_size <= 1000
-                    ), f"Final chunk size unreasonable in {file_type}: {final_size} chars"
+                    assert 1 <= final_size <= 1000, (
+                        f"Final chunk size unreasonable in {file_type}: {final_size} chars"
+                    )
 
                 print(
                     f"Size consistency regression test ({file_type}): "
@@ -762,9 +762,9 @@ class DataProcessingService:
 
                 # Basic validations
                 assert line_start > 0, f"Chunk {i} has invalid line_start: {line_start}"
-                assert (
-                    line_end >= line_start
-                ), f"Chunk {i} has line_end < line_start: {line_end} < {line_start}"
+                assert line_end >= line_start, (
+                    f"Chunk {i} has line_end < line_start: {line_end} < {line_start}"
+                )
                 assert (
                     line_end <= total_lines + 1
                 ), (  # Allow for off-by-one due to chunking boundaries
@@ -779,7 +779,7 @@ class DataProcessingService:
                     assert (
                         line_gap <= 50
                     ), (  # Allow reasonable gap due to character-based chunking
-                        f"Large line number gap between chunks {i-1} and {i}: "
+                        f"Large line number gap between chunks {i - 1} and {i}: "
                         f"{prev_line_end} to {line_start} (gap: {line_gap})"
                     )
 

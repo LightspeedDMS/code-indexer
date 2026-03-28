@@ -89,9 +89,9 @@ class TestBackwardCompatibility:
             if original == loaded:
                 exact_matches += 1
 
-        assert (
-            exact_matches == expected_count
-        ), f"Only {exact_matches}/{expected_count} tools have exact description matches"
+        assert exact_matches == expected_count, (
+            f"Only {exact_matches}/{expected_count} tools have exact description matches"
+        )
 
     def test_whitespace_preserved_exactly(self, temp_docs_dir):
         """Whitespace (newlines, spaces, tabs) should be preserved exactly."""

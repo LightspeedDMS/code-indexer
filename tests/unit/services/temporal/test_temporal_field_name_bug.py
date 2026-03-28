@@ -167,10 +167,11 @@ class TestTemporalFieldNameBug:
 
                         # This assertion will FAIL with current code (proving bug exists)
                         # and will PASS after fix
-                        assert (
-                            "path" in payload
-                        ), f"Payload missing 'path' field: {payload.keys()}"
-                        assert (
-                            "file_path" not in payload
-                            or payload.get("path") == payload.get("file_path")
-                        ), "Payload should use 'path' not 'file_path' for git-aware storage"
+                        assert "path" in payload, (
+                            f"Payload missing 'path' field: {payload.keys()}"
+                        )
+                        assert "file_path" not in payload or payload.get(
+                            "path"
+                        ) == payload.get("file_path"), (
+                            "Payload should use 'path' not 'file_path' for git-aware storage"
+                        )

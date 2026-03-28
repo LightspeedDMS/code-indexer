@@ -53,15 +53,15 @@ class TestTwelveThreadsIntegration:
                 vector_store_client=Mock(),
             )
 
-            assert not hasattr(
-                processor, "slot_tracker"
-            ), "slot_tracker should not be an instance variable"
+            assert not hasattr(processor, "slot_tracker"), (
+                "slot_tracker should not be an instance variable"
+            )
 
         # Test the slot tracker functionality directly (what the process method creates)
         slot_tracker = CleanSlotTracker(max_slots=14)  # 12 threads + 2
-        assert (
-            slot_tracker.max_slots == 14
-        ), f"SlotTracker should support 14 concurrent slots (12+2), got {slot_tracker.max_slots}"
+        assert slot_tracker.max_slots == 14, (
+            f"SlotTracker should support 14 concurrent slots (12+2), got {slot_tracker.max_slots}"
+        )
 
         # Create 12 test files worth of file data
         test_files_data = []
@@ -78,22 +78,22 @@ class TestTwelveThreadsIntegration:
         for file_data in test_files_data:
             slot_id = slot_tracker.acquire_slot(file_data)
             slot_ids.append(slot_id)
-            assert (
-                slot_id is not None
-            ), f"Should be able to acquire slot for {file_data.filename}"
+            assert slot_id is not None, (
+                f"Should be able to acquire slot for {file_data.filename}"
+            )
 
         # Verify all 12 files can be displayed simultaneously
         concurrent_files = slot_tracker.get_concurrent_files_data()
-        assert (
-            len(concurrent_files) == 12
-        ), f"Should display all 12 concurrent files, got {len(concurrent_files)}"
+        assert len(concurrent_files) == 12, (
+            f"Should display all 12 concurrent files, got {len(concurrent_files)}"
+        )
 
         # Verify all files are present
         displayed_paths = {cf["file_path"] for cf in concurrent_files}
         expected_paths = {f"test_file_{i}.py" for i in range(1, 13)}
-        assert (
-            displayed_paths == expected_paths
-        ), f"All test files should be displayed. Missing: {expected_paths - displayed_paths}"
+        assert displayed_paths == expected_paths, (
+            f"All test files should be displayed. Missing: {expected_paths - displayed_paths}"
+        )
 
         print("✅ SUCCESS: 12 threads configuration works correctly!")
         print(
@@ -134,9 +134,9 @@ class TestTwelveThreadsIntegration:
             # Test file display capacity - acquire slots for all files
             for file_data in test_files_data:
                 slot_id = slot_tracker.acquire_slot(file_data)
-                assert (
-                    slot_id is not None
-                ), f"Thread count {thread_count}: Should be able to acquire slot for {file_data.filename}"
+                assert slot_id is not None, (
+                    f"Thread count {thread_count}: Should be able to acquire slot for {file_data.filename}"
+                )
 
             concurrent_files = slot_tracker.get_concurrent_files_data()
             assert len(concurrent_files) == thread_count, (

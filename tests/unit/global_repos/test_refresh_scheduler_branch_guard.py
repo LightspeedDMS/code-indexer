@@ -190,9 +190,9 @@ class TestBranchGuardWrongBranch:
             scheduler._execute_refresh(alias_name)
 
         # Must have called git checkout main
-        assert (
-            len(checkout_calls) == 1
-        ), f"Expected 1 'git checkout main' call, got {len(checkout_calls)}"
+        assert len(checkout_calls) == 1, (
+            f"Expected 1 'git checkout main' call, got {len(checkout_calls)}"
+        )
         assert checkout_calls[0] == ["git", "checkout", "main"]
 
 
@@ -267,9 +267,9 @@ class TestBranchGuardCorrectBranch:
             scheduler._execute_refresh(alias_name)
 
         # No checkout calls should have been made
-        assert (
-            len(checkout_calls) == 0
-        ), f"Expected no 'git checkout' calls, got: {checkout_calls}"
+        assert len(checkout_calls) == 0, (
+            f"Expected no 'git checkout' calls, got: {checkout_calls}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +357,9 @@ class TestBranchGuardCheckoutFailure:
             scheduler._execute_refresh(alias_name)
 
         # Refresh must continue despite checkout failure
-        assert (
-            update_called
-        ), "updater.has_changes() must still be called after failed checkout"
+        assert update_called, (
+            "updater.has_changes() must still be called after failed checkout"
+        )
 
         # An error/warning must have been logged about the checkout failure
         error_messages = [
@@ -443,9 +443,9 @@ class TestBranchGuardDefaultBranch:
             scheduler._execute_refresh(alias_name)
 
         # Must have called git checkout main (the default fallback)
-        assert (
-            len(checkout_calls) == 1
-        ), f"Expected 1 checkout call, got {len(checkout_calls)}: {checkout_calls}"
+        assert len(checkout_calls) == 1, (
+            f"Expected 1 checkout call, got {len(checkout_calls)}: {checkout_calls}"
+        )
         assert checkout_calls[0] == [
             "git",
             "checkout",

@@ -132,12 +132,12 @@ class TestRebuildFromVectorsVisibleFiles:
 
         hnsw_info = metadata.get("hnsw_index", {})
         assert hnsw_info.get("filtered") is True, "Expected filtered=True in metadata"
-        assert (
-            hnsw_info.get("visible_count") == 3
-        ), f"Expected visible_count=3, got {hnsw_info.get('visible_count')}"
-        assert (
-            hnsw_info.get("total_on_disk") == 5
-        ), f"Expected total_on_disk=5, got {hnsw_info.get('total_on_disk')}"
+        assert hnsw_info.get("visible_count") == 3, (
+            f"Expected visible_count=3, got {hnsw_info.get('visible_count')}"
+        )
+        assert hnsw_info.get("total_on_disk") == 5, (
+            f"Expected total_on_disk=5, got {hnsw_info.get('total_on_disk')}"
+        )
 
     def test_rebuild_without_visible_files_does_not_write_filtered_metadata(
         self, tmp_path: Path
@@ -159,9 +159,9 @@ class TestRebuildFromVectorsVisibleFiles:
 
         hnsw_info = metadata.get("hnsw_index", {})
         # filtered should be absent or False
-        assert not hnsw_info.get(
-            "filtered", False
-        ), "Expected filtered to be absent or False for non-filtered rebuild"
+        assert not hnsw_info.get("filtered", False), (
+            "Expected filtered to be absent or False for non-filtered rebuild"
+        )
 
     def test_rebuild_with_visible_files_only_queryable_vectors_are_in_index(
         self, tmp_path: Path
@@ -209,9 +209,9 @@ class TestRebuildFromVectorsVisibleFiles:
         query_vec = query_vec / np.linalg.norm(query_vec)
 
         result_ids, _ = manager.query(index, query_vec, collection_path, k=10)
-        assert (
-            len(result_ids) <= 3
-        ), f"Expected at most 3 results (only visible files), got {len(result_ids)}"
+        assert len(result_ids) <= 3, (
+            f"Expected at most 3 results (only visible files), got {len(result_ids)}"
+        )
 
 
 class TestIsStaleFilteredMetadata:
@@ -257,9 +257,9 @@ class TestIsStaleFilteredMetadata:
         manager = HNSWIndexManager(vector_dim=128, space="cosine")
         result = manager.is_stale(collection_path)
 
-        assert (
-            result is False
-        ), "is_stale() should return False when filtered=True and HNSW count matches visible_count"
+        assert result is False, (
+            "is_stale() should return False when filtered=True and HNSW count matches visible_count"
+        )
 
     def test_is_stale_returns_true_when_filtered_but_visible_count_mismatches(
         self, tmp_path: Path
@@ -300,9 +300,9 @@ class TestIsStaleFilteredMetadata:
         manager = HNSWIndexManager(vector_dim=128, space="cosine")
         result = manager.is_stale(collection_path)
 
-        assert (
-            result is True
-        ), "is_stale() should return True when filtered=True but HNSW count != visible_count"
+        assert result is True, (
+            "is_stale() should return True when filtered=True but HNSW count != visible_count"
+        )
 
     def test_is_stale_without_filtered_metadata_uses_disk_count(self, tmp_path: Path):
         """is_stale() without filtered metadata compares HNSW count against disk count."""
@@ -339,9 +339,9 @@ class TestIsStaleFilteredMetadata:
         manager = HNSWIndexManager(vector_dim=128, space="cosine")
         result = manager.is_stale(collection_path)
 
-        assert (
-            result is False
-        ), "is_stale() should return False when HNSW count matches disk count (no filtered)"
+        assert result is False, (
+            "is_stale() should return False when HNSW count matches disk count (no filtered)"
+        )
 
     def test_is_stale_without_filtered_returns_false_on_disk_count_mismatch(
         self, tmp_path: Path
@@ -397,12 +397,12 @@ class TestBranchIsolationDidFilteredRebuildFlag:
         """_branch_isolation_did_filtered_rebuild defaults to False on initialization."""
         store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
 
-        assert hasattr(
-            store, "_branch_isolation_did_filtered_rebuild"
-        ), "FilesystemVectorStore should have _branch_isolation_did_filtered_rebuild attribute"
-        assert (
-            store._branch_isolation_did_filtered_rebuild is False
-        ), "Flag should default to False"
+        assert hasattr(store, "_branch_isolation_did_filtered_rebuild"), (
+            "FilesystemVectorStore should have _branch_isolation_did_filtered_rebuild attribute"
+        )
+        assert store._branch_isolation_did_filtered_rebuild is False, (
+            "Flag should default to False"
+        )
 
     def test_end_indexing_skips_rebuild_when_flag_is_true(self, tmp_path: Path):
         """end_indexing() skips HNSW rebuild when _branch_isolation_did_filtered_rebuild=True.
@@ -425,9 +425,9 @@ class TestBranchIsolationDidFilteredRebuildFlag:
         visible_files = {"file_0.py", "file_1.py"}
         store.rebuild_hnsw_filtered("test_collection", visible_files=visible_files)
 
-        assert (
-            store._branch_isolation_did_filtered_rebuild is True
-        ), "Flag should be True after rebuild_hnsw_filtered()"
+        assert store._branch_isolation_did_filtered_rebuild is True, (
+            "Flag should be True after rebuild_hnsw_filtered()"
+        )
 
         # Check HNSW metadata before calling end_indexing
         meta_file = collection_path / "collection_meta.json"
@@ -440,9 +440,9 @@ class TestBranchIsolationDidFilteredRebuildFlag:
         store.end_indexing("test_collection")
 
         # After end_indexing, flag should be reset
-        assert (
-            store._branch_isolation_did_filtered_rebuild is False
-        ), "Flag should be reset to False after end_indexing()"
+        assert store._branch_isolation_did_filtered_rebuild is False, (
+            "Flag should be reset to False after end_indexing()"
+        )
 
         # The rebuild_uuid should NOT have changed (no new rebuild happened)
         with open(meta_file) as f:
@@ -465,9 +465,9 @@ class TestBranchIsolationDidFilteredRebuildFlag:
         store.end_indexing("test_collection")
 
         # Flag should be reset to False
-        assert (
-            store._branch_isolation_did_filtered_rebuild is False
-        ), "Flag should be reset to False after end_indexing()"
+        assert store._branch_isolation_did_filtered_rebuild is False, (
+            "Flag should be reset to False after end_indexing()"
+        )
 
 
 class TestBug306CurrentBranchInMetadata:
@@ -503,9 +503,9 @@ class TestBug306CurrentBranchInMetadata:
             metadata = json.load(f)
 
         hnsw_info = metadata.get("hnsw_index", {})
-        assert (
-            hnsw_info.get("current_branch") == "master"
-        ), f"Expected current_branch='master' in metadata, got {hnsw_info.get('current_branch')!r}"
+        assert hnsw_info.get("current_branch") == "master", (
+            f"Expected current_branch='master' in metadata, got {hnsw_info.get('current_branch')!r}"
+        )
 
     def test_rebuild_from_vectors_without_current_branch_does_not_store_branch(
         self, tmp_path: Path
@@ -526,9 +526,9 @@ class TestBug306CurrentBranchInMetadata:
             metadata = json.load(f)
 
         hnsw_info = metadata.get("hnsw_index", {})
-        assert (
-            "current_branch" not in hnsw_info
-        ), "current_branch should NOT be stored when not provided"
+        assert "current_branch" not in hnsw_info, (
+            "current_branch should NOT be stored when not provided"
+        )
 
     def test_rebuild_from_vectors_current_branch_not_stored_for_unfiltered_rebuild(
         self, tmp_path: Path
@@ -550,9 +550,9 @@ class TestBug306CurrentBranchInMetadata:
             metadata = json.load(f)
 
         hnsw_info = metadata.get("hnsw_index", {})
-        assert (
-            "current_branch" not in hnsw_info
-        ), "current_branch should NOT be stored for non-filtered rebuild"
+        assert "current_branch" not in hnsw_info, (
+            "current_branch should NOT be stored for non-filtered rebuild"
+        )
 
 
 class TestBug306RebuildFromVectorsHiddenBranchesFilter:
@@ -608,9 +608,9 @@ class TestBug306RebuildFromVectorsHiddenBranchesFilter:
         manager = HNSWIndexManager(vector_dim=128, space="cosine")
         count = manager.rebuild_from_vectors(collection_path, current_branch="master")
 
-        assert (
-            count == 3
-        ), f"Expected 3 visible vectors (hidden_branches doesn't include 'master'), got {count}"
+        assert count == 3, (
+            f"Expected 3 visible vectors (hidden_branches doesn't include 'master'), got {count}"
+        )
 
     def test_rebuild_with_current_branch_includes_vectors_hidden_for_other_branches(
         self, tmp_path: Path
@@ -638,9 +638,9 @@ class TestBug306RebuildFromVectorsHiddenBranchesFilter:
         count = manager.rebuild_from_vectors(collection_path, current_branch="master")
 
         # All 5 should be visible on master (none hidden for master)
-        assert (
-            count == 5
-        ), f"Expected 5 vectors visible on master (only hidden for development), got {count}"
+        assert count == 5, (
+            f"Expected 5 vectors visible on master (only hidden for development), got {count}"
+        )
 
     def test_rebuild_with_current_branch_all_hidden_returns_zero(self, tmp_path: Path):
         """rebuild_from_vectors() with current_branch returns 0 when all vectors hidden."""
@@ -682,9 +682,9 @@ class TestBug306RebuildFromVectorsHiddenBranchesFilter:
         )
 
         # visible_files takes precedence (only 2 included)
-        assert (
-            count == 2
-        ), f"Expected 2 (visible_files takes precedence over current_branch), got {count}"
+        assert count == 2, (
+            f"Expected 2 (visible_files takes precedence over current_branch), got {count}"
+        )
 
 
 class TestBug306QueryTimeRebuildBranchAware:
@@ -797,12 +797,12 @@ class TestBug306QueryTimeRebuildBranchAware:
         with open(meta_file) as f:
             updated_meta = json.load(f)
         hnsw_info = updated_meta.get("hnsw_index", {})
-        assert (
-            hnsw_info.get("is_stale") is False
-        ), "HNSW should no longer be stale after rebuild"
-        assert (
-            hnsw_info.get("vector_count") == 3
-        ), f"Expected vector_count=3 in metadata, got {hnsw_info.get('vector_count')}"
+        assert hnsw_info.get("is_stale") is False, (
+            "HNSW should no longer be stale after rebuild"
+        )
+        assert hnsw_info.get("vector_count") == 3, (
+            f"Expected vector_count=3 in metadata, got {hnsw_info.get('vector_count')}"
+        )
 
 
 class TestRebuildHnswFiltered:
@@ -811,9 +811,9 @@ class TestRebuildHnswFiltered:
     def test_rebuild_hnsw_filtered_exists_on_store(self, tmp_path: Path):
         """FilesystemVectorStore has rebuild_hnsw_filtered() method."""
         store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
-        assert hasattr(
-            store, "rebuild_hnsw_filtered"
-        ), "FilesystemVectorStore should have rebuild_hnsw_filtered() method"
+        assert hasattr(store, "rebuild_hnsw_filtered"), (
+            "FilesystemVectorStore should have rebuild_hnsw_filtered() method"
+        )
 
     def test_rebuild_hnsw_filtered_produces_filtered_metadata(self, tmp_path: Path):
         """rebuild_hnsw_filtered() calls rebuild with visible_files and produces filtered metadata."""
@@ -835,12 +835,12 @@ class TestRebuildHnswFiltered:
 
         hnsw_info = metadata.get("hnsw_index", {})
         assert hnsw_info.get("filtered") is True, "Expected filtered=True in metadata"
-        assert (
-            hnsw_info.get("visible_count") == 2
-        ), f"Expected visible_count=2, got {hnsw_info.get('visible_count')}"
-        assert (
-            hnsw_info.get("total_on_disk") == 5
-        ), f"Expected total_on_disk=5, got {hnsw_info.get('total_on_disk')}"
+        assert hnsw_info.get("visible_count") == 2, (
+            f"Expected visible_count=2, got {hnsw_info.get('visible_count')}"
+        )
+        assert hnsw_info.get("total_on_disk") == 5, (
+            f"Expected total_on_disk=5, got {hnsw_info.get('total_on_disk')}"
+        )
 
     def test_rebuild_hnsw_filtered_sets_flag_on_store(self, tmp_path: Path):
         """rebuild_hnsw_filtered() sets _branch_isolation_did_filtered_rebuild=True."""
@@ -853,9 +853,9 @@ class TestRebuildHnswFiltered:
 
         store.rebuild_hnsw_filtered("test_collection", visible_files={"file_0.py"})
 
-        assert (
-            store._branch_isolation_did_filtered_rebuild is True
-        ), "rebuild_hnsw_filtered() should set _branch_isolation_did_filtered_rebuild=True"
+        assert store._branch_isolation_did_filtered_rebuild is True, (
+            "rebuild_hnsw_filtered() should set _branch_isolation_did_filtered_rebuild=True"
+        )
 
     def test_rebuild_hnsw_filtered_invalidates_hnsw_cache_if_present(
         self, tmp_path: Path

@@ -43,14 +43,14 @@ class TestTemporalStorageOptimization:
         )
 
         # Verify: NO chunk_text field (pointer-based storage)
-        assert (
-            "chunk_text" not in vector_data
-        ), "Added files should NOT store chunk_text"
+        assert "chunk_text" not in vector_data, (
+            "Added files should NOT store chunk_text"
+        )
 
         # Verify: content removed from payload (not stored twice)
-        assert (
-            "content" not in vector_data["payload"]
-        ), "Content should be removed from payload"
+        assert "content" not in vector_data["payload"], (
+            "Content should be removed from payload"
+        )
 
         # Verify: reconstruct_from_git marker preserved
         assert vector_data["payload"]["reconstruct_from_git"] is True

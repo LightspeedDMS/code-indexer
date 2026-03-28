@@ -97,6 +97,6 @@ class TestParentCommitTracking:
         deleted_diff = [d for d in diffs if d.diff_type == "deleted"][0]
 
         # Verify parent commit is tracked
-        assert (
-            deleted_diff.parent_commit_hash == temp_repo["first_commit"]
-        ), "Deleted file should track parent commit hash"
+        assert deleted_diff.parent_commit_hash == temp_repo["first_commit"], (
+            "Deleted file should track parent commit hash"
+        )

@@ -38,9 +38,9 @@ class TestHashPhaseCallbacksIncludeConcurrentFiles:
                 )
                 break
 
-        assert (
-            hash_init_section is not None
-        ), "Could not find hash initialization section"
+        assert hash_init_section is not None, (
+            "Could not find hash initialization section"
+        )
 
         # CRITICAL CHECK: Must use hash_slot_tracker.get_concurrent_files_data()
         # NOT just concurrent_files=[]
@@ -73,9 +73,9 @@ class TestHashPhaseCallbacksIncludeConcurrentFiles:
                 )
                 break
 
-        assert (
-            hash_complete_section is not None
-        ), "Could not find hash completion section"
+        assert hash_complete_section is not None, (
+            "Could not find hash completion section"
+        )
 
         # CRITICAL CHECK: Must use hash_slot_tracker.get_concurrent_files_data()
         assert (
@@ -108,15 +108,15 @@ class TestHashPhaseCallbacksIncludeConcurrentFiles:
                 )
                 break
 
-        assert (
-            final_complete_section is not None
-        ), "Could not find final completion section with info=final_info_msg"
+        assert final_complete_section is not None, (
+            "Could not find final completion section with info=final_info_msg"
+        )
 
         # CRITICAL CHECK: Must include concurrent_files parameter
         # For completion, it should be empty list [] (no active files)
-        assert (
-            "concurrent_files=" in final_complete_section
-        ), f"Final completion callback must include concurrent_files parameter. Section:\n{final_complete_section}"
+        assert "concurrent_files=" in final_complete_section, (
+            f"Final completion callback must include concurrent_files parameter. Section:\n{final_complete_section}"
+        )
 
 
 class TestDaemonCallbacksFilterSlotTracker:
@@ -142,20 +142,19 @@ class TestDaemonCallbacksFilterSlotTracker:
                 callback_section = "\n".join(lines[i : min(len(lines), i + 30)])
                 break
 
-        assert (
-            callback_section is not None
-        ), "Could not find correlated_callback function"
+        assert callback_section is not None, (
+            "Could not find correlated_callback function"
+        )
 
         # CRITICAL CHECK: The callback must create filtered_kwargs WITHOUT slot_tracker
         # Look for pattern: filtered_kwargs = { ... } (excluding slot_tracker)
         # The function should NOT pass **cb_kwargs directly to client callback
-        assert (
-            "filtered_kwargs" in callback_section
-            or (
-                "slot_tracker" not in callback_section
-                and "**cb_kwargs" not in callback_section
-            )
-        ), f"Daemon correlated_callback must filter out slot_tracker. Section:\n{callback_section}"
+        assert "filtered_kwargs" in callback_section or (
+            "slot_tracker" not in callback_section
+            and "**cb_kwargs" not in callback_section
+        ), (
+            f"Daemon correlated_callback must filter out slot_tracker. Section:\n{callback_section}"
+        )
 
     def test_correlated_callback_removes_slot_tracker(self):
         """Daemon's correlated_callback must filter out slot_tracker parameter."""
@@ -184,9 +183,9 @@ class TestDaemonCallbacksFilterSlotTracker:
             }
 
             # Verify slot_tracker is NOT in filtered_kwargs
-            assert (
-                "slot_tracker" not in filtered_kwargs
-            ), "slot_tracker must be filtered out in daemon callbacks"
+            assert "slot_tracker" not in filtered_kwargs, (
+                "slot_tracker must be filtered out in daemon callbacks"
+            )
 
             # Call client callback with filtered kwargs
             client_callback(current, total, file_path, info, **filtered_kwargs)
@@ -206,14 +205,14 @@ class TestDaemonCallbacksFilterSlotTracker:
         call_kwargs = client_callback.call_args[1]
 
         # CRITICAL: slot_tracker must NOT be passed to client
-        assert (
-            "slot_tracker" not in call_kwargs
-        ), "slot_tracker leaked to client callback (RPyC proxy issue)"
+        assert "slot_tracker" not in call_kwargs, (
+            "slot_tracker leaked to client callback (RPyC proxy issue)"
+        )
 
         # Verify concurrent_files_json is present
-        assert (
-            "concurrent_files_json" in call_kwargs
-        ), "concurrent_files_json must be present in daemon callbacks"
+        assert "concurrent_files_json" in call_kwargs, (
+            "concurrent_files_json must be present in daemon callbacks"
+        )
 
     def test_daemon_callback_serializes_concurrent_files(self):
         """Daemon callbacks must serialize concurrent_files as JSON."""
@@ -229,9 +228,9 @@ class TestDaemonCallbacksFilterSlotTracker:
             # Verify JSON serialization works (no RPyC proxies)
             try:
                 deserialized = json.loads(concurrent_files_json)
-                assert isinstance(
-                    deserialized, list
-                ), "concurrent_files must deserialize to a list"
+                assert isinstance(deserialized, list), (
+                    "concurrent_files must deserialize to a list"
+                )
             except (TypeError, ValueError) as e:
                 pytest.fail(f"concurrent_files not JSON-serializable: {e}")
 
@@ -287,9 +286,9 @@ class TestMultiThreadedDisplayNoFallback:
                 display_section = "\n".join(lines[i : min(len(lines), i + 50)])
                 break
 
-        assert (
-            display_section is not None
-        ), "Could not find get_integrated_display method"
+        assert display_section is not None, (
+            "Could not find get_integrated_display method"
+        )
 
         # CRITICAL CHECK: The method must NOT call slot_tracker.get_concurrent_files_data()
         # Look for the fallback pattern that should be REMOVED
@@ -319,13 +318,15 @@ class TestMultiThreadedDisplayNoFallback:
                 )
                 break
 
-        assert (
-            concurrent_files_section is not None
-        ), "Could not find concurrent_files handling section"
+        assert concurrent_files_section is not None, (
+            "Could not find concurrent_files handling section"
+        )
 
         # CRITICAL CHECK: Must use self._concurrent_files or [] only
         # Should NOT have: elif slot_tracker is not None: fresh_concurrent_files = slot_tracker.get_concurrent_files_data()
         assert not (
             "elif slot_tracker is not None:" in concurrent_files_section
             and "get_concurrent_files_data()" in concurrent_files_section
-        ), f"Concurrent files handling must NOT fallback to slot_tracker. Section:\n{concurrent_files_section}"
+        ), (
+            f"Concurrent files handling must NOT fallback to slot_tracker. Section:\n{concurrent_files_section}"
+        )

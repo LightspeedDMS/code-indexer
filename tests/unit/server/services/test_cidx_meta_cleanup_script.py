@@ -90,9 +90,9 @@ class TestCleanupScriptExists:
 
     def test_script_is_executable(self):
         """AC4: cidx-meta-cleanup.sh must be executable (chmod +x)."""
-        assert os.access(
-            str(_SCRIPT_PATH), os.X_OK
-        ), f"cidx-meta-cleanup.sh must be executable. Run: chmod +x {_SCRIPT_PATH}"
+        assert os.access(str(_SCRIPT_PATH), os.X_OK), (
+            f"cidx-meta-cleanup.sh must be executable. Run: chmod +x {_SCRIPT_PATH}"
+        )
 
 
 class TestCleanupScriptAllowedDeletions:
@@ -110,9 +110,9 @@ class TestCleanupScriptAllowedDeletions:
             f"Script must exit 0 when deleting inside cidx-meta. "
             f"stdout: {result.stdout!r}, stderr: {result.stderr!r}"
         )
-        assert (
-            not target.exists()
-        ), "Target file must be deleted after successful invocation"
+        assert not target.exists(), (
+            "Target file must be deleted after successful invocation"
+        )
 
     def test_deletes_nested_file_inside_cidx_meta(self, temp_cidx_meta):
         """AC4: Nested file inside cidx-meta subdirectory is deleted with exit code 0."""
@@ -219,9 +219,9 @@ class TestCleanupScriptBlockedDeletions:
         tmp_path, cidx_meta = temp_cidx_meta
         # dependency-map is a directory inside cidx-meta
         directory_target = cidx_meta / "dependency-map"
-        assert (
-            directory_target.is_dir()
-        ), "Test setup: dependency-map must be a directory"
+        assert directory_target.is_dir(), (
+            "Test setup: dependency-map must be a directory"
+        )
 
         result = _run_script(directory_target, cidx_meta_base=cidx_meta)
 
@@ -229,6 +229,6 @@ class TestCleanupScriptBlockedDeletions:
             f"MEDIUM-3: Script must exit 1 when target is a directory, not a regular file. "
             f"stdout: {result.stdout!r}, stderr: {result.stderr!r}"
         )
-        assert (
-            directory_target.exists()
-        ), "Directory inside cidx-meta must NOT be deleted by the cleanup script"
+        assert directory_target.exists(), (
+            "Directory inside cidx-meta must NOT be deleted by the cleanup script"
+        )

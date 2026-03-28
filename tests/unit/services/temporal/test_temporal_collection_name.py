@@ -23,9 +23,9 @@ def test_temporal_indexer_collection_name_hardcoded():
     from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 
     # ASSERTION 1: TemporalIndexer must have temporal collection name constant
-    assert hasattr(
-        TemporalIndexer, "TEMPORAL_COLLECTION_NAME"
-    ), "TemporalIndexer must define TEMPORAL_COLLECTION_NAME constant"
+    assert hasattr(TemporalIndexer, "TEMPORAL_COLLECTION_NAME"), (
+        "TemporalIndexer must define TEMPORAL_COLLECTION_NAME constant"
+    )
 
     # ASSERTION 2: TemporalSearchService must use same collection name
     indexer_collection = TemporalIndexer.TEMPORAL_COLLECTION_NAME
@@ -38,9 +38,9 @@ def test_temporal_indexer_collection_name_hardcoded():
     )
 
     # ASSERTION 3: Must contain 'temporal' to distinguish from HEAD collection
-    assert (
-        "temporal" in indexer_collection.lower()
-    ), f"Collection name must contain 'temporal', got: {indexer_collection}"
+    assert "temporal" in indexer_collection.lower(), (
+        f"Collection name must contain 'temporal', got: {indexer_collection}"
+    )
 
 
 def test_temporal_search_service_collection_name():
@@ -51,11 +51,11 @@ def test_temporal_search_service_collection_name():
 
     # Check that search service has collection name configuration
     # This will fail until we add the constant
-    assert hasattr(
-        TemporalSearchService, "TEMPORAL_COLLECTION_NAME"
-    ), "TemporalSearchService should define TEMPORAL_COLLECTION_NAME constant"
+    assert hasattr(TemporalSearchService, "TEMPORAL_COLLECTION_NAME"), (
+        "TemporalSearchService should define TEMPORAL_COLLECTION_NAME constant"
+    )
 
     # Verify it matches what indexer uses
-    assert (
-        TemporalSearchService.TEMPORAL_COLLECTION_NAME == "code-indexer-temporal"
-    ), "Search service collection name must be 'code-indexer-temporal'"
+    assert TemporalSearchService.TEMPORAL_COLLECTION_NAME == "code-indexer-temporal", (
+        "Search service collection name must be 'code-indexer-temporal'"
+    )

@@ -59,9 +59,9 @@ def test_claude_plan_summary_uses_left_aligned_formatting():
     ]
 
     for pattern in problematic_patterns:
-        assert (
-            pattern not in summary
-        ), f"Summary should not contain centered header pattern '{pattern}'"
+        assert pattern not in summary, (
+            f"Summary should not contain centered header pattern '{pattern}'"
+        )
 
     # Verify the summary contains expected content without centered formatting
     assert "Claude used 2 tools during analysis" in summary
@@ -72,9 +72,9 @@ def test_claude_plan_summary_uses_left_aligned_formatting():
     lines = summary.split("\n")
     for line in lines:
         # No line should start with markdown header syntax
-        assert not line.strip().startswith(
-            "#"
-        ), f"Line should not start with # (markdown header): {line}"
+        assert not line.strip().startswith("#"), (
+            f"Line should not start with # (markdown header): {line}"
+        )
 
 
 def test_status_display_manager_format_summary_avoids_centering():
@@ -126,9 +126,9 @@ Operation Breakdown:
             leading_spaces = len(line) - len(line.lstrip())
             # Reasonable indentation for bullet points and structure is fine,
             # but excessive indentation (>10 spaces) suggests centering
-            assert (
-                leading_spaces <= 10
-            ), f"Line appears to be over-indented (possibly centered): '{line}'"
+            assert leading_spaces <= 10, (
+                f"Line appears to be over-indented (possibly centered): '{line}'"
+            )
 
     # Verify key content is present and properly formatted
     assert "🤖 Claude's Problem-Solving Approach" in output
@@ -228,6 +228,6 @@ The `authenticate_user()` function [located here](file:///src/auth.py:45) handle
     # At least 70% of content should be left-aligned
     if content_lines:
         left_alignment_ratio = left_aligned_lines / len(content_lines)
-        assert (
-            left_alignment_ratio >= 0.7
-        ), f"Too much content appears centered. Left-aligned ratio: {left_alignment_ratio}"
+        assert left_alignment_ratio >= 0.7, (
+            f"Too much content appears centered. Left-aligned ratio: {left_alignment_ratio}"
+        )

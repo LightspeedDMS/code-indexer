@@ -128,9 +128,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"AC5: No temporal command issued. All commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert (
-            "--all-branches" in temporal_cmd
-        ), f"AC5: all_branches=True must produce '--all-branches'. Got: {temporal_cmd}"
+        assert "--all-branches" in temporal_cmd, (
+            f"AC5: all_branches=True must produce '--all-branches'. Got: {temporal_cmd}"
+        )
 
     def test_all_branches_false_omits_flag(self, tmp_path):
         """AC5: all_branches=False must NOT produce --all-branches."""
@@ -145,9 +145,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert (
-            "--all-branches" not in temporal_cmd
-        ), f"AC5: all_branches=False must NOT produce '--all-branches'. Got: {temporal_cmd}"
+        assert "--all-branches" not in temporal_cmd, (
+            f"AC5: all_branches=False must NOT produce '--all-branches'. Got: {temporal_cmd}"
+        )
 
     def test_scheduler_temporal_no_clear_flag(self, tmp_path):
         """
@@ -165,9 +165,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert (
-            "--clear" not in temporal_cmd
-        ), f"AC5: scheduled refresh must NOT include '--clear'. Got: {temporal_cmd}"
+        assert "--clear" not in temporal_cmd, (
+            f"AC5: scheduled refresh must NOT include '--clear'. Got: {temporal_cmd}"
+        )
 
     def test_scheduler_applies_max_commits(self, tmp_path):
         """AC5: max_commits from temporal_options is applied by the scheduler."""
@@ -182,9 +182,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert (
-            "--max-commits" in temporal_cmd
-        ), f"Missing --max-commits. Got: {temporal_cmd}"
+        assert "--max-commits" in temporal_cmd, (
+            f"Missing --max-commits. Got: {temporal_cmd}"
+        )
         idx = temporal_cmd.index("--max-commits")
         assert temporal_cmd[idx + 1] == "200"
 
@@ -201,9 +201,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert (
-            "--diff-context" in temporal_cmd
-        ), f"Missing --diff-context. Got: {temporal_cmd}"
+        assert "--diff-context" in temporal_cmd, (
+            f"Missing --diff-context. Got: {temporal_cmd}"
+        )
         idx = temporal_cmd.index("--diff-context")
         assert temporal_cmd[idx + 1] == "3"
 
@@ -232,6 +232,6 @@ class TestRefreshSchedulerTemporalAllBranches:
             f"Got: {temporal_cmd}"
         )
         idx = temporal_cmd.index("--diff-context")
-        assert (
-            temporal_cmd[idx + 1] == "0"
-        ), f"diff_context=0 must produce '--diff-context 0'. Got value: {temporal_cmd[idx + 1]}"
+        assert temporal_cmd[idx + 1] == "0", (
+            f"diff_context=0 must produce '--diff-context 0'. Got value: {temporal_cmd[idx + 1]}"
+        )

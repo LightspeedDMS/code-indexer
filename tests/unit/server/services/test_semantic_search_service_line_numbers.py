@@ -185,6 +185,6 @@ class TestSemanticSearchServiceLineNumbers:
         ], f"Expected distinct line_start values [10, 50, 100], got {line_starts}"
 
         # Verify they are NOT all zero (the bug we're fixing)
-        assert not all(
-            ls == 0 for ls in line_starts
-        ), "BUG: All line_start values are 0 - indicates wrong payload key used"
+        assert not all(ls == 0 for ls in line_starts), (
+            "BUG: All line_start values are 0 - indicates wrong payload key used"
+        )

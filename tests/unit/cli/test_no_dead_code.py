@@ -6,6 +6,6 @@ def test_no_perform_complete_system_wipe_function():
     from src.code_indexer import cli
 
     # This function should not exist - it was dead code
-    assert not hasattr(
-        cli, "_perform_complete_system_wipe"
-    ), "_perform_complete_system_wipe is dead code and should be removed"
+    assert not hasattr(cli, "_perform_complete_system_wipe"), (
+        "_perform_complete_system_wipe is dead code and should be removed"
+    )

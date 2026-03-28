@@ -27,9 +27,9 @@ class TestUnsupportedFormatSkip:
         unsupported_results = [
             r for r in all_results if r.skip_reason == "unsupported_format"
         ]
-        assert (
-            len(unsupported_results) >= 1
-        ), f"Expected at least 1 unsupported format, got {len(unsupported_results)}"
+        assert len(unsupported_results) >= 1, (
+            f"Expected at least 1 unsupported format, got {len(unsupported_results)}"
+        )
 
         # Verify BMP detected as unsupported
         bmp_results = [r for r in unsupported_results if "unsupported.bmp" in r.path]
@@ -70,8 +70,8 @@ class TestUnsupportedFormatSkip:
             )
             if image_path.endswith(".bmp"):
                 assert not result.is_valid, "BMP should be invalid"
-                assert (
-                    result.skip_reason == "unsupported_format"
-                ), "BMP should have unsupported_format reason"
+                assert result.skip_reason == "unsupported_format", (
+                    "BMP should have unsupported_format reason"
+                )
             elif image_path.endswith(".png"):
                 assert result.is_valid, "PNG should be valid"

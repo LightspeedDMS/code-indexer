@@ -175,15 +175,15 @@ class TestListRepositoriesWithGlobalRepos:
 
                 for repo in repos:
                     if repo.get("user_alias", "").endswith("-global"):
-                        assert (
-                            repo["is_global"] is True
-                        ), f"Global repo {repo['user_alias']} missing is_global=True"
+                        assert repo["is_global"] is True, (
+                            f"Global repo {repo['user_alias']} missing is_global=True"
+                        )
 
                 for repo in repos:
                     if not repo.get("user_alias", "").endswith("-global"):
-                        assert (
-                            repo.get("is_global") is not True
-                        ), "Activated repo should not have is_global=True"
+                        assert repo.get("is_global") is not True, (
+                            "Activated repo should not have is_global=True"
+                        )
 
     def test_global_repos_include_metadata(self, mock_user, mock_global_registry_data):
         """Test that global repos include repo name, last update time."""
@@ -205,16 +205,16 @@ class TestListRepositoriesWithGlobalRepos:
 
                 for repo in repos:
                     if repo.get("is_global") is True:
-                        assert (
-                            "golden_repo_alias" in repo
-                        ), "Global repo missing golden_repo_alias"
+                        assert "golden_repo_alias" in repo, (
+                            "Global repo missing golden_repo_alias"
+                        )
                         assert "user_alias" in repo, "Global repo missing user_alias"
-                        assert (
-                            "last_refresh" in repo
-                        ), "Global repo missing last_refresh"
-                        assert (
-                            "index_path" not in repo
-                        ), "Global repo should not have index_path"
+                        assert "last_refresh" in repo, (
+                            "Global repo missing last_refresh"
+                        )
+                        assert "index_path" not in repo, (
+                            "Global repo should not have index_path"
+                        )
                         assert repo["user_alias"].endswith("-global")
 
     def test_empty_global_registry_handled_gracefully(
@@ -240,9 +240,9 @@ class TestListRepositoriesWithGlobalRepos:
 
                 repos = response_data["repositories"]
                 assert len(repos) == 2
-                assert all(
-                    repo.get("is_global") is not True for repo in repos
-                ), "Should not have any global repos"
+                assert all(repo.get("is_global") is not True for repo in repos), (
+                    "Should not have any global repos"
+                )
 
     def test_only_global_repos_no_activated_repos(
         self, mock_user, mock_global_registry_data
@@ -265,9 +265,9 @@ class TestListRepositoriesWithGlobalRepos:
                 repos = response_data["repositories"]
 
                 assert len(repos) == 3
-                assert all(
-                    repo["is_global"] is True for repo in repos
-                ), "All repos should be global"
+                assert all(repo["is_global"] is True for repo in repos), (
+                    "All repos should be global"
+                )
 
     def test_global_registry_error_does_not_break_activated_list(self, mock_user):
         """Test that global registry errors don't prevent listing activated repos."""
@@ -297,9 +297,9 @@ class TestListRepositoriesWithGlobalRepos:
                 repos = response_data["repositories"]
 
                 assert len(repos) >= 1
-                assert any(
-                    repo.get("user_alias") == "my-project" for repo in repos
-                ), "Activated repo should still be listed despite global registry error"
+                assert any(repo.get("user_alias") == "my-project" for repo in repos), (
+                    "Activated repo should still be listed despite global registry error"
+                )
 
     def test_golden_repos_dir_from_environment(self, mock_user, tmp_path):
         """Test that golden_repos_dir is loaded from app.state."""

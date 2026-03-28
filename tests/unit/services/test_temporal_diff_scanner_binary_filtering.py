@@ -131,13 +131,12 @@ class TestTemporalDiffScannerBinaryFiltering:
     ) -> None:
         """All production binary extensions must be rejected."""
         scanner, config = self._make_scanner(tmp_path)
-        assert (
-            ext not in config.file_extensions
-        ), f"{ext} should not be in file_extensions"
+        assert ext not in config.file_extensions, (
+            f"{ext} should not be in file_extensions"
+        )
         result = scanner._should_include_file(f"lib/file.{ext}")
         assert result is False, (
-            f"temporal _should_include_file must reject .{ext} — "
-            f"not in file_extensions"
+            f"temporal _should_include_file must reject .{ext} — not in file_extensions"
         )
 
     # -----------------------------------------------------------------
@@ -228,9 +227,9 @@ class TestTemporalDiffScannerBinaryFiltering:
 
         # Source files must be present
         source_diffs = [p for p in diff_paths if p.endswith((".java", ".kt"))]
-        assert (
-            len(source_diffs) >= 2
-        ), f"Expected at least 2 source file diffs, got {len(source_diffs)}: {source_diffs}"
+        assert len(source_diffs) >= 2, (
+            f"Expected at least 2 source file diffs, got {len(source_diffs)}: {source_diffs}"
+        )
 
         # Binary files must NOT be present
         binary_diffs = [p for p in diff_paths if p.endswith((".jar", ".zip", ".exe"))]

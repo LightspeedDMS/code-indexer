@@ -283,10 +283,10 @@ class TestWebRoutesPopulateViewsUsesWikiConfig:
                 handler_source = inspect.getsource(toggle_route.endpoint)
 
                 # The handler MUST fetch wiki_config from config_service
-                assert (
-                    "wiki_config" in handler_source
-                ), "wiki-toggle handler must reference wiki_config"
+                assert "wiki_config" in handler_source, (
+                    "wiki-toggle handler must reference wiki_config"
+                )
                 # The handler MUST pass it to populate_views_from_front_matter
-                assert (
-                    "populate_views_from_front_matter" in handler_source
-                ), "wiki-toggle handler must call populate_views_from_front_matter"
+                assert "populate_views_from_front_matter" in handler_source, (
+                    "wiki-toggle handler must call populate_views_from_front_matter"
+                )

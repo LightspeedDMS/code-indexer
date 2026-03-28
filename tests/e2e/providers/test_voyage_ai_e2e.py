@@ -118,12 +118,12 @@ def test_voyage_ai_shared_container_full_workflow():
         # Verify VoyageAI provider is configured and Voyage shows "Not needed"
         status_lower = result.stdout.lower()
         if "voyage" in status_lower:
-            assert (
-                "not needed" in status_lower
-            ), f"Voyage should show 'Not needed' status: {result.stdout}"
-        assert (
-            "voyage" in status_lower or "voyage-ai" in status_lower
-        ), f"VoyageAI should be in status: {result.stdout}"
+            assert "not needed" in status_lower, (
+                f"Voyage should show 'Not needed' status: {result.stdout}"
+            )
+        assert "voyage" in status_lower or "voyage-ai" in status_lower, (
+            f"VoyageAI should be in status: {result.stdout}"
+        )
 
         # Step 3: Start services (should be fast with shared containers)
         result = subprocess.run(
@@ -228,9 +228,9 @@ def test_voyage_ai_shared_container_service_validation():
             text=True,
             timeout=60,
         )
-        assert (
-            result.returncode == 0
-        ), f"Index failed, indicating service issues: {result.stderr}"
+        assert result.returncode == 0, (
+            f"Index failed, indicating service issues: {result.stderr}"
+        )
 
         # Step 5: Validate that containers can be restarted (idempotent start)
         result = subprocess.run(

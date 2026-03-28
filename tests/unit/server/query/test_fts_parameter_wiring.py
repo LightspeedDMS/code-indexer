@@ -88,35 +88,35 @@ class TestFTSParameterWiring:
             call_kwargs = mock_perform_search.call_args[1]
 
             # These assertions will FAIL until we wire the parameters through
-            assert (
-                "case_sensitive" in call_kwargs
-            ), "case_sensitive parameter not passed to _perform_search"
-            assert (
-                call_kwargs["case_sensitive"] is True
-            ), "case_sensitive value not preserved"
+            assert "case_sensitive" in call_kwargs, (
+                "case_sensitive parameter not passed to _perform_search"
+            )
+            assert call_kwargs["case_sensitive"] is True, (
+                "case_sensitive value not preserved"
+            )
 
-            assert (
-                "fuzzy" in call_kwargs
-            ), "fuzzy parameter not passed to _perform_search"
+            assert "fuzzy" in call_kwargs, (
+                "fuzzy parameter not passed to _perform_search"
+            )
             assert call_kwargs["fuzzy"] is True, "fuzzy value not preserved"
 
-            assert (
-                "edit_distance" in call_kwargs
-            ), "edit_distance parameter not passed to _perform_search"
-            assert (
-                call_kwargs["edit_distance"] == 2
-            ), "edit_distance value not preserved"
+            assert "edit_distance" in call_kwargs, (
+                "edit_distance parameter not passed to _perform_search"
+            )
+            assert call_kwargs["edit_distance"] == 2, (
+                "edit_distance value not preserved"
+            )
 
-            assert (
-                "snippet_lines" in call_kwargs
-            ), "snippet_lines parameter not passed to _perform_search"
-            assert (
-                call_kwargs["snippet_lines"] == 10
-            ), "snippet_lines value not preserved"
+            assert "snippet_lines" in call_kwargs, (
+                "snippet_lines parameter not passed to _perform_search"
+            )
+            assert call_kwargs["snippet_lines"] == 10, (
+                "snippet_lines value not preserved"
+            )
 
-            assert (
-                "regex" in call_kwargs
-            ), "regex parameter not passed to _perform_search"
+            assert "regex" in call_kwargs, (
+                "regex parameter not passed to _perform_search"
+            )
             assert call_kwargs["regex"] is False, "regex value not preserved"
 
     def test_fts_parameters_passed_to_search_single_repository(self, query_manager):
@@ -168,35 +168,35 @@ class TestFTSParameterWiring:
             call_kwargs = mock_search_single.call_args[1]
 
             # These assertions will FAIL until we wire the parameters through
-            assert (
-                "case_sensitive" in call_kwargs
-            ), "case_sensitive parameter not passed to _search_single_repository"
-            assert (
-                call_kwargs["case_sensitive"] is True
-            ), "case_sensitive value not preserved"
+            assert "case_sensitive" in call_kwargs, (
+                "case_sensitive parameter not passed to _search_single_repository"
+            )
+            assert call_kwargs["case_sensitive"] is True, (
+                "case_sensitive value not preserved"
+            )
 
-            assert (
-                "fuzzy" in call_kwargs
-            ), "fuzzy parameter not passed to _search_single_repository"
+            assert "fuzzy" in call_kwargs, (
+                "fuzzy parameter not passed to _search_single_repository"
+            )
             assert call_kwargs["fuzzy"] is True, "fuzzy value not preserved"
 
-            assert (
-                "edit_distance" in call_kwargs
-            ), "edit_distance parameter not passed to _search_single_repository"
-            assert (
-                call_kwargs["edit_distance"] == 2
-            ), "edit_distance value not preserved"
+            assert "edit_distance" in call_kwargs, (
+                "edit_distance parameter not passed to _search_single_repository"
+            )
+            assert call_kwargs["edit_distance"] == 2, (
+                "edit_distance value not preserved"
+            )
 
-            assert (
-                "snippet_lines" in call_kwargs
-            ), "snippet_lines parameter not passed to _search_single_repository"
-            assert (
-                call_kwargs["snippet_lines"] == 10
-            ), "snippet_lines value not preserved"
+            assert "snippet_lines" in call_kwargs, (
+                "snippet_lines parameter not passed to _search_single_repository"
+            )
+            assert call_kwargs["snippet_lines"] == 10, (
+                "snippet_lines value not preserved"
+            )
 
-            assert (
-                "regex" in call_kwargs
-            ), "regex parameter not passed to _search_single_repository"
+            assert "regex" in call_kwargs, (
+                "regex parameter not passed to _search_single_repository"
+            )
             assert call_kwargs["regex"] is False, "regex value not preserved"
 
     def test_fts_parameter_defaults(self, query_manager):

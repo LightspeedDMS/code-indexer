@@ -211,30 +211,30 @@ class TestPromptTemplateVariablesPreserved:
 
     def test_hostname_variable_preserved(self, prompt_content):
         """AC8: {hostname} template variable must be preserved."""
-        assert (
-            "{hostname}" in prompt_content
-        ), "{hostname} template variable must remain in prompt for runtime substitution"
+        assert "{hostname}" in prompt_content, (
+            "{hostname} template variable must remain in prompt for runtime substitution"
+        )
 
     def test_server_version_variable_preserved(self, prompt_content):
         """AC8: {server_version} template variable must be preserved."""
-        assert (
-            "{server_version}" in prompt_content
-        ), "{server_version} template variable must remain in prompt"
+        assert "{server_version}" in prompt_content, (
+            "{server_version} template variable must remain in prompt"
+        )
 
     def test_server_data_dir_variable_preserved(self, prompt_content):
         """AC8: {server_data_dir} template variable must be preserved."""
-        assert (
-            "{server_data_dir}" in prompt_content
-        ), "{server_data_dir} template variable must remain in prompt"
+        assert "{server_data_dir}" in prompt_content, (
+            "{server_data_dir} template variable must remain in prompt"
+        )
 
     def test_golden_repos_dir_variable_preserved(self, prompt_content):
         """AC8: {golden_repos_dir} template variable must be preserved."""
-        assert (
-            "{golden_repos_dir}" in prompt_content
-        ), "{golden_repos_dir} template variable must remain in prompt"
+        assert "{golden_repos_dir}" in prompt_content, (
+            "{golden_repos_dir} template variable must remain in prompt"
+        )
 
     def test_db_path_variable_preserved(self, prompt_content):
         """AC8: {db_path} template variable must be preserved."""
-        assert (
-            "{db_path}" in prompt_content
-        ), "{db_path} template variable must remain in prompt"
+        assert "{db_path}" in prompt_content, (
+            "{db_path} template variable must remain in prompt"
+        )

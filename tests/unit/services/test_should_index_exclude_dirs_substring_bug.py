@@ -45,17 +45,17 @@ class TestExcludeDirsSubstringBug:
         """src/rebuild/manager.kt must NOT be excluded by 'build'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("src/rebuild/manager.kt")
-        assert (
-            result is True
-        ), "Substring bug: 'build' in 'src/rebuild/manager.kt' is True"
+        assert result is True, (
+            "Substring bug: 'build' in 'src/rebuild/manager.kt' is True"
+        )
 
     def test_build_config_file_not_excluded(self, tmp_path: Path) -> None:
         """src/BuildConfig.java must NOT be excluded by 'build'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("src/BuildConfig.java")
-        assert (
-            result is True
-        ), "Substring bug: 'build' matches filename BuildConfig.java"
+        assert result is True, (
+            "Substring bug: 'build' matches filename BuildConfig.java"
+        )
 
     # -----------------------------------------------------------------
     # "dist" substring false positives
@@ -66,25 +66,25 @@ class TestExcludeDirsSubstringBug:
         indexer = self._make_indexer(tmp_path)
         assert "dist" in indexer.config.exclude_dirs
         result = indexer._should_index_file("src/distributed/ClusterManager.java")
-        assert (
-            result is True
-        ), "Substring bug: 'dist' in 'src/distributed/ClusterManager.java' is True"
+        assert result is True, (
+            "Substring bug: 'dist' in 'src/distributed/ClusterManager.java' is True"
+        )
 
     def test_distribution_module_not_excluded_by_dist(self, tmp_path: Path) -> None:
         """code/distribution/PackageService.kt must NOT be excluded by 'dist'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("code/distribution/PackageService.kt")
-        assert (
-            result is True
-        ), "Substring bug: 'dist' in 'code/distribution/PackageService.kt' is True"
+        assert result is True, (
+            "Substring bug: 'dist' in 'code/distribution/PackageService.kt' is True"
+        )
 
     def test_redis_dist_lock_file_not_excluded(self, tmp_path: Path) -> None:
         """src/redis_dist_lock.py must NOT be excluded by 'dist'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("src/redis_dist_lock.py")
-        assert (
-            result is True
-        ), "Substring bug: 'dist' in 'src/redis_dist_lock.py' is True"
+        assert result is True, (
+            "Substring bug: 'dist' in 'src/redis_dist_lock.py' is True"
+        )
 
     # -----------------------------------------------------------------
     # "target" substring false positives
@@ -95,17 +95,17 @@ class TestExcludeDirsSubstringBug:
         indexer = self._make_indexer(tmp_path)
         assert "target" in indexer.config.exclude_dirs
         result = indexer._should_index_file("src/deploy/target_host.py")
-        assert (
-            result is True
-        ), "Substring bug: 'target' in 'src/deploy/target_host.py' is True"
+        assert result is True, (
+            "Substring bug: 'target' in 'src/deploy/target_host.py' is True"
+        )
 
     def test_retarget_module_not_excluded(self, tmp_path: Path) -> None:
         """src/retarget/linker.rs must NOT be excluded by 'target'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("src/retarget/linker.rs")
-        assert (
-            result is True
-        ), "Substring bug: 'target' in 'src/retarget/linker.rs' is True"
+        assert result is True, (
+            "Substring bug: 'target' in 'src/retarget/linker.rs' is True"
+        )
 
     # -----------------------------------------------------------------
     # "bin" substring false positives
@@ -122,9 +122,9 @@ class TestExcludeDirsSubstringBug:
         """src/binary_parser/reader.java must NOT be excluded by 'bin'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("src/binary_parser/reader.java")
-        assert (
-            result is True
-        ), "Substring bug: 'bin' in 'src/binary_parser/reader.java' is True"
+        assert result is True, (
+            "Substring bug: 'bin' in 'src/binary_parser/reader.java' is True"
+        )
 
     def test_bindings_module_not_excluded_by_bin(self, tmp_path: Path) -> None:
         """src/bindings/ffi.rs must NOT be excluded by 'bin'."""
@@ -141,9 +141,9 @@ class TestExcludeDirsSubstringBug:
         indexer = self._make_indexer(tmp_path)
         assert "obj" in indexer.config.exclude_dirs
         result = indexer._should_index_file("src/object_mapper/serializer.java")
-        assert (
-            result is True
-        ), "Substring bug: 'obj' in 'src/object_mapper/serializer.java' is True"
+        assert result is True, (
+            "Substring bug: 'obj' in 'src/object_mapper/serializer.java' is True"
+        )
 
     def test_objective_module_not_excluded_by_obj(self, tmp_path: Path) -> None:
         """src/objective/goal.kt must NOT be excluded by 'obj'."""
@@ -160,9 +160,9 @@ class TestExcludeDirsSubstringBug:
         indexer = self._make_indexer(tmp_path)
         assert "coverage" in indexer.config.exclude_dirs
         result = indexer._should_index_file("src/coverage_report/generator.py")
-        assert (
-            result is True
-        ), "Substring bug: 'coverage' in 'src/coverage_report/generator.py' is True"
+        assert result is True, (
+            "Substring bug: 'coverage' in 'src/coverage_report/generator.py' is True"
+        )
 
     # -----------------------------------------------------------------
     # ".git" substring false positives
@@ -182,9 +182,9 @@ class TestExcludeDirsSubstringBug:
         """src/gitignore_parser.py must NOT be excluded by '.git'."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file("src/gitignore_parser.py")
-        assert (
-            result is True
-        ), "Substring bug: '.git' in 'src/gitignore_parser.py' is True"
+        assert result is True, (
+            "Substring bug: '.git' in 'src/gitignore_parser.py' is True"
+        )
 
     # -----------------------------------------------------------------
     # "venv" substring false positives
@@ -278,6 +278,6 @@ class TestExcludeDirsSubstringBug:
         """Parametrized: legitimate source files must not be excluded by substring match."""
         indexer = self._make_indexer(tmp_path)
         result = indexer._should_index_file(path)
-        assert (
-            result is True
-        ), f"Substring bug ({description}): '{path}' wrongly excluded"
+        assert result is True, (
+            f"Substring bug ({description}): '{path}' wrongly excluded"
+        )

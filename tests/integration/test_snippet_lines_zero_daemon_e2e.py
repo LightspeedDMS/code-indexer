@@ -101,17 +101,17 @@ class TestSnippetLinesZeroDaemonE2E:
         # - Code snippets with line numbers
         # - The actual code content
 
-        assert (
-            "Context:" not in output
-        ), "snippet_lines=0 should not show 'Context:' header"
+        assert "Context:" not in output, (
+            "snippet_lines=0 should not show 'Context:' header"
+        )
 
         # We should still see file paths and metadata
         assert "test.py" in output, "Should show file path"
 
         # Check that we don't see the actual code content
-        assert (
-            "VoyageClient" not in output or "Context:" not in output
-        ), "snippet_lines=0 should not display code content under 'Context:' section"
+        assert "VoyageClient" not in output or "Context:" not in output, (
+            "snippet_lines=0 should not display code content under 'Context:' section"
+        )
 
     def test_standalone_mode_fts_query_with_snippet_lines_zero(self, tmp_path):
         """Test that standalone mode respects --snippet-lines 0 for FTS queries.
@@ -163,9 +163,9 @@ client = VoyageClient()
         output = result.stdout
 
         # Standalone mode should also NOT show context
-        assert (
-            "Context:" not in output
-        ), "snippet_lines=0 in standalone should not show 'Context:' header"
+        assert "Context:" not in output, (
+            "snippet_lines=0 in standalone should not show 'Context:' header"
+        )
 
         # Should show file path
         assert "test.py" in output, "Should show file path"
@@ -255,13 +255,13 @@ result = client.embed(["test"])
         standalone_output = standalone_result.stdout
 
         # Both should NOT show context
-        assert (
-            "Context:" not in daemon_output
-        ), "Daemon mode should not show context with snippet_lines=0"
+        assert "Context:" not in daemon_output, (
+            "Daemon mode should not show context with snippet_lines=0"
+        )
 
-        assert (
-            "Context:" not in standalone_output
-        ), "Standalone mode should not show context with snippet_lines=0"
+        assert "Context:" not in standalone_output, (
+            "Standalone mode should not show context with snippet_lines=0"
+        )
 
         # Key assertion: Both should have same behavior regarding snippet display
         daemon_has_code = "VoyageClient" in daemon_output
@@ -269,4 +269,6 @@ result = client.embed(["test"])
 
         # If standalone doesn't show code, daemon shouldn't either
         if not standalone_has_code:
-            assert not daemon_has_code, "Daemon mode showing code content when standalone mode doesn't - UX PARITY VIOLATION"
+            assert not daemon_has_code, (
+                "Daemon mode showing code content when standalone mode doesn't - UX PARITY VIOLATION"
+            )

@@ -55,12 +55,12 @@ class TestPayloadCacheBackendProtocol:
         protocol_methods = dir(PayloadCacheBackend)
 
         assert "store" in protocol_methods, "PayloadCacheBackend must have store()"
-        assert (
-            "retrieve" in protocol_methods
-        ), "PayloadCacheBackend must have retrieve()"
-        assert (
-            "cleanup_expired" in protocol_methods
-        ), "PayloadCacheBackend must have cleanup_expired()"
+        assert "retrieve" in protocol_methods, (
+            "PayloadCacheBackend must have retrieve()"
+        )
+        assert "cleanup_expired" in protocol_methods, (
+            "PayloadCacheBackend must have cleanup_expired()"
+        )
         assert "close" in protocol_methods, "PayloadCacheBackend must have close()"
 
 
@@ -325,9 +325,9 @@ class TestBackendRegistryPayloadCacheField:
 
         registry = StorageFactory._create_sqlite_backends(data_dir)
 
-        assert hasattr(
-            registry, "payload_cache"
-        ), "BackendRegistry must have .payload_cache attribute"
+        assert hasattr(registry, "payload_cache"), (
+            "BackendRegistry must have .payload_cache attribute"
+        )
         assert isinstance(registry.payload_cache, PayloadCacheBackend), (
             f"registry.payload_cache must satisfy PayloadCacheBackend protocol, "
             f"got {type(registry.payload_cache)}"

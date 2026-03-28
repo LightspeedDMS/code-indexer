@@ -103,9 +103,9 @@ class TestSecurityHardeningCommandFlags:
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1, "subprocess.run must have been called"
 
-        assert (
-            "--disallowedTools" in calls[0]
-        ), f"Command must include --disallowedTools flag. Got cmd: {calls[0]}"
+        assert "--disallowedTools" in calls[0], (
+            f"Command must include --disallowedTools flag. Got cmd: {calls[0]}"
+        )
 
     def test_disallowed_tools_blocks_all_required_tools(self, research_service):
         """
@@ -119,9 +119,9 @@ class TestSecurityHardeningCommandFlags:
         disallowed_value = calls[0][disallowed_idx + 1]
 
         for tool in ("WebFetch", "WebSearch", "Agent", "Skill", "NotebookEdit"):
-            assert (
-                tool in disallowed_value
-            ), f"{tool} must be disallowed. Got disallowedTools: {disallowed_value!r}"
+            assert tool in disallowed_value, (
+                f"{tool} must be disallowed. Got disallowedTools: {disallowed_value!r}"
+            )
 
     # ------------------------------------------------------------------
     # AC5: --tools allowlist flag
@@ -132,9 +132,9 @@ class TestSecurityHardeningCommandFlags:
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1
 
-        assert (
-            "--tools" in calls[0]
-        ), f"Command must include --tools flag. Got cmd: {calls[0]}"
+        assert "--tools" in calls[0], (
+            f"Command must include --tools flag. Got cmd: {calls[0]}"
+        )
 
     def test_tools_flag_includes_required_tools(self, research_service):
         """AC2/AC3: --tools must include Bash, Read, Write, Edit, Glob, Grep, TodoWrite."""
@@ -145,9 +145,9 @@ class TestSecurityHardeningCommandFlags:
         tools_value = calls[0][tools_idx + 1]
 
         for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite"):
-            assert (
-                tool in tools_value
-            ), f"{tool} must be in --tools value. Got: {tools_value!r}"
+            assert tool in tools_value, (
+                f"{tool} must be in --tools value. Got: {tools_value!r}"
+            )
 
     # ------------------------------------------------------------------
     # AC1/AC2/AC3: --settings permission JSON structure
@@ -158,9 +158,9 @@ class TestSecurityHardeningCommandFlags:
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1
 
-        assert (
-            "--settings" in calls[0]
-        ), f"Command must include --settings flag. Got cmd: {calls[0]}"
+        assert "--settings" in calls[0], (
+            f"Command must include --settings flag. Got cmd: {calls[0]}"
+        )
 
     def test_settings_is_valid_json_with_permissions(self, research_service):
         """AC1: --settings value must be valid JSON with permissions.allow and .deny."""
@@ -169,16 +169,16 @@ class TestSecurityHardeningCommandFlags:
 
         settings = self._get_settings(calls[0])
 
-        assert (
-            "permissions" in settings
-        ), f"Settings must have 'permissions' key. Got keys: {list(settings.keys())}"
+        assert "permissions" in settings, (
+            f"Settings must have 'permissions' key. Got keys: {list(settings.keys())}"
+        )
         perms = settings["permissions"]
-        assert (
-            "allow" in perms
-        ), f"permissions must have 'allow'. Got: {list(perms.keys())}"
-        assert (
-            "deny" in perms
-        ), f"permissions must have 'deny'. Got: {list(perms.keys())}"
+        assert "allow" in perms, (
+            f"permissions must have 'allow'. Got: {list(perms.keys())}"
+        )
+        assert "deny" in perms, (
+            f"permissions must have 'deny'. Got: {list(perms.keys())}"
+        )
 
     def test_settings_deny_blocks_write_edit_webfetch_websearch(self, research_service):
         """
@@ -191,9 +191,9 @@ class TestSecurityHardeningCommandFlags:
         deny_list = self._get_settings(calls[0])["permissions"]["deny"]
 
         for entry in ("Write", "Edit", "WebFetch", "WebSearch"):
-            assert (
-                entry in deny_list
-            ), f"'{entry}' must be in deny list. Got deny: {deny_list}"
+            assert entry in deny_list, (
+                f"'{entry}' must be in deny list. Got deny: {deny_list}"
+            )
 
     def test_settings_allow_includes_cidx_meta_write_and_edit(self, research_service):
         """
@@ -376,9 +376,9 @@ class TestSecurityHardeningCommandFlags:
         allow_list = self._get_settings(calls[0])["permissions"]["allow"]
 
         for tool in ("Read", "Glob", "Grep", "TodoWrite"):
-            assert (
-                tool in allow_list
-            ), f"'{tool}' must be in allow list (unscoped). Got: {allow_list}"
+            assert tool in allow_list, (
+                f"'{tool}' must be in allow list (unscoped). Got: {allow_list}"
+            )
 
     # ------------------------------------------------------------------
     # AC8: Existing session logic preserved
@@ -389,9 +389,9 @@ class TestSecurityHardeningCommandFlags:
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1
 
-        assert (
-            "--session-id" in calls[0]
-        ), f"--session-id must still be in first-message command. Got: {calls[0]}"
+        assert "--session-id" in calls[0], (
+            f"--session-id must still be in first-message command. Got: {calls[0]}"
+        )
 
     def test_resume_flag_present_for_subsequent_message(self, research_service):
         """AC8: --resume must still be present for subsequent messages."""
@@ -400,9 +400,9 @@ class TestSecurityHardeningCommandFlags:
         )
         assert len(calls) >= 1
 
-        assert (
-            "--resume" in calls[0]
-        ), f"--resume must still be in subsequent-message command. Got: {calls[0]}"
+        assert "--resume" in calls[0], (
+            f"--resume must still be in subsequent-message command. Got: {calls[0]}"
+        )
 
     def test_model_and_skip_permissions_still_present(self, research_service):
         """AC8: --model and --dangerously-skip-permissions must still be present."""
@@ -411,9 +411,9 @@ class TestSecurityHardeningCommandFlags:
         cmd = calls[0]
 
         assert "--model" in cmd, f"--model must still be in command. Got: {cmd}"
-        assert (
-            "--dangerously-skip-permissions" in cmd
-        ), f"--dangerously-skip-permissions must still be in command. Got: {cmd}"
+        assert "--dangerously-skip-permissions" in cmd, (
+            f"--dangerously-skip-permissions must still be in command. Got: {cmd}"
+        )
 
     def test_security_flags_present_on_subsequent_message(self, research_service):
         """AC1/AC5: Security flags must be present for subsequent messages too."""
@@ -423,6 +423,6 @@ class TestSecurityHardeningCommandFlags:
         assert len(calls) >= 1
 
         for flag in ("--tools", "--disallowedTools", "--settings"):
-            assert (
-                flag in calls[0]
-            ), f"{flag} must be present in subsequent-message command. Got: {calls[0]}"
+            assert flag in calls[0], (
+                f"{flag} must be present in subsequent-message command. Got: {calls[0]}"
+            )

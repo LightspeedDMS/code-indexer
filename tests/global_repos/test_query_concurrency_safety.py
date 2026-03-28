@@ -102,15 +102,15 @@ class TestQueryTrackerIntegrationInHandlers:
                     await search_code(params, mock_user)
 
                     # Verify ref count tracking was called
-                    assert (
-                        len(increment_calls) >= 1
-                    ), "QueryTracker.increment_ref should be called during global repo search"
-                    assert (
-                        len(decrement_calls) >= 1
-                    ), "QueryTracker.decrement_ref should be called after search completes"
-                    assert (
-                        query_tracker.get_ref_count(test_index_path) == 0
-                    ), "Ref count should be 0 after search completes"
+                    assert len(increment_calls) >= 1, (
+                        "QueryTracker.increment_ref should be called during global repo search"
+                    )
+                    assert len(decrement_calls) >= 1, (
+                        "QueryTracker.decrement_ref should be called after search completes"
+                    )
+                    assert query_tracker.get_ref_count(test_index_path) == 0, (
+                        "Ref count should be 0 after search completes"
+                    )
 
     @pytest.mark.asyncio
     async def test_search_code_decrements_ref_on_exception(self, mock_user, tmp_path):
@@ -167,9 +167,9 @@ class TestQueryTrackerIntegrationInHandlers:
                     await search_code(params, mock_user)
 
                     # Ref count should be 0 after exception (decremented in finally)
-                    assert (
-                        query_tracker.get_ref_count(test_index_path) == 0
-                    ), "Ref count should be 0 even after exception"
+                    assert query_tracker.get_ref_count(test_index_path) == 0, (
+                        "Ref count should be 0 even after exception"
+                    )
 
 
 class TestCleanupManagerIntegrationInRemoval:
@@ -249,9 +249,9 @@ class TestCleanupManagerIntegrationInRemoval:
             time.sleep(0.3)  # Give cleanup manager time to check
 
             # Path should still exist (waiting for query)
-            assert (
-                test_path.exists()
-            ), "Path should not be deleted while query is active"
+            assert test_path.exists(), (
+                "Path should not be deleted while query is active"
+            )
 
             # Complete the "query"
             query_tracker.decrement_ref(str(test_path))
@@ -260,9 +260,9 @@ class TestCleanupManagerIntegrationInRemoval:
             time.sleep(0.3)
 
             # Now path should be deleted
-            assert (
-                not test_path.exists()
-            ), "Path should be deleted after query completes"
+            assert not test_path.exists(), (
+                "Path should be deleted after query completes"
+            )
         finally:
             cleanup_manager.stop()
 
@@ -481,9 +481,9 @@ class TestEndToEndConcurrencySafety:
             time.sleep(0.3)
 
             # Now should be deleted
-            assert (
-                not test_index.exists()
-            ), "Index should be deleted after query completes"
+            assert not test_index.exists(), (
+                "Index should be deleted after query completes"
+            )
 
         finally:
             cleanup_manager.stop()

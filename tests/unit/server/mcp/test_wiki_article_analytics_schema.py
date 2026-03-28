@@ -166,9 +166,9 @@ class TestHandlerRegistry:
         """AC6: HANDLER_REGISTRY must have wiki_article_analytics key."""
         from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 
-        assert (
-            "wiki_article_analytics" in HANDLER_REGISTRY
-        ), "HANDLER_REGISTRY must contain 'wiki_article_analytics' entry"
+        assert "wiki_article_analytics" in HANDLER_REGISTRY, (
+            "HANDLER_REGISTRY must contain 'wiki_article_analytics' entry"
+        )
 
     def test_handler_registry_entry_is_callable(self):
         """AC6: The registered handler must be callable."""
@@ -181,6 +181,6 @@ class TestHandlerRegistry:
         """AC6: handle_wiki_article_analytics function must exist in handlers module."""
         from code_indexer.server.mcp import handlers
 
-        assert hasattr(
-            handlers, "handle_wiki_article_analytics"
-        ), "handlers module must have handle_wiki_article_analytics function"
+        assert hasattr(handlers, "handle_wiki_article_analytics"), (
+            "handlers module must have handle_wiki_article_analytics function"
+        )

@@ -82,9 +82,9 @@ class TestDaemonModeDetection:
         temp_store.upsert_points(collection_name, new_point, watch_mode=True)
 
         # Verify: cache_entry.hnsw_index should be updated (not None)
-        assert (
-            cache_entry.hnsw_index is not None
-        ), "Cache HNSW index should remain loaded"
+        assert cache_entry.hnsw_index is not None, (
+            "Cache HNSW index should remain loaded"
+        )
 
         # Verify: should NOT have called invalidate() (index still exists)
         # If invalidate was called, hnsw_index would be None
@@ -208,9 +208,9 @@ class TestDaemonCacheInMemoryUpdates:
         temp_store.upsert_points(collection_name, new_point, watch_mode=True)
 
         # Verify: invalidate() should NOT have been called
-        assert (
-            len(invalidate_called) == 0
-        ), "Cache should not be invalidated during watch update"
+        assert len(invalidate_called) == 0, (
+            "Cache should not be invalidated during watch update"
+        )
 
         # Verify: cache still has index loaded (warm cache)
         assert cache_entry.hnsw_index is not None, "Cache should remain warm"
@@ -254,9 +254,9 @@ class TestConcurrentQuerySupport:
 
         # Verify: cache was updated (functional verification)
         assert cache_entry.hnsw_index is not None, "Cache should remain loaded"
-        assert (
-            cache_entry.hnsw_index.get_current_count() == 6
-        ), "Cache should have 6 vectors"
+        assert cache_entry.hnsw_index.get_current_count() == 6, (
+            "Cache should have 6 vectors"
+        )
 
     def test_query_waits_for_write_completion(
         self, temp_store: FilesystemVectorStore, cache_entry: CacheEntry, sample_points

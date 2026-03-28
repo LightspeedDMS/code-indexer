@@ -31,9 +31,9 @@ class TestServerTimeEndpoint:
         """Test AC2: Endpoint returns valid JSON response."""
         response = client.get("/api/server-time")
         assert response.status_code == 200
-        assert (
-            response.headers["content-type"] == "application/json"
-        ), "Response must be JSON"
+        assert response.headers["content-type"] == "application/json", (
+            "Response must be JSON"
+        )
 
         # Should not raise exception
         data = response.json()
@@ -79,9 +79,9 @@ class TestServerTimeEndpoint:
         server_time = datetime.fromisoformat(data["timestamp"].replace("Z", "+00:00"))
 
         # Server time should be between before and after
-        assert (
-            before <= server_time <= after
-        ), "Server time must be current (within request window)"
+        assert before <= server_time <= after, (
+            "Server time must be current (within request window)"
+        )
 
         # Additional check: within 2 seconds of request time
         diff = abs((server_time - before).total_seconds())
@@ -93,9 +93,9 @@ class TestServerTimeEndpoint:
         response = client.get("/api/server-time")
 
         # Should succeed without 401 Unauthorized
-        assert (
-            response.status_code == 200
-        ), "Endpoint must not require authentication for time sync"
+        assert response.status_code == 200, (
+            "Endpoint must not require authentication for time sync"
+        )
 
     def test_server_time_consistent_format(self, client):
         """Test AC8: Multiple calls return consistent format."""

@@ -228,9 +228,9 @@ class TestClassifyBranchType:
         )
 
         for name in ["feature/my-feature", "feat/something", "features/big-thing"]:
-            assert (
-                classify_branch_type(name) == "feature"
-            ), f"Expected 'feature' for {name}"
+            assert classify_branch_type(name) == "feature", (
+                f"Expected 'feature' for {name}"
+            )
 
     def test_release_branch_prefixes(self):
         """Release branches are classified as 'release'."""
@@ -239,9 +239,9 @@ class TestClassifyBranchType:
         )
 
         for name in ["release/1.0", "rel/2.3", "v1.0.0", "v2.1"]:
-            assert (
-                classify_branch_type(name) == "release"
-            ), f"Expected 'release' for {name}"
+            assert classify_branch_type(name) == "release", (
+                f"Expected 'release' for {name}"
+            )
 
     def test_hotfix_branch_prefixes(self):
         """Hotfix branches are classified as 'hotfix'."""
@@ -250,9 +250,9 @@ class TestClassifyBranchType:
         )
 
         for name in ["hotfix/urgent", "fix/crash", "patch/security", "bugfix/login"]:
-            assert (
-                classify_branch_type(name) == "hotfix"
-            ), f"Expected 'hotfix' for {name}"
+            assert classify_branch_type(name) == "hotfix", (
+                f"Expected 'hotfix' for {name}"
+            )
 
     def test_other_branches(self):
         """Unrecognized branches are classified as 'other'."""

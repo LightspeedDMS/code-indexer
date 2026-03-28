@@ -160,9 +160,9 @@ class TestTemporalUTF8DecodeBug:
 
             # Every subprocess.run with text=True MUST have errors='replace' or errors='ignore'
             for subprocess_call in text_true_calls:
-                assert (
-                    "errors=" in subprocess_call
-                ), f"{filename}: subprocess.run with text=True must include errors parameter:\n{subprocess_call}"
+                assert "errors=" in subprocess_call, (
+                    f"{filename}: subprocess.run with text=True must include errors parameter:\n{subprocess_call}"
+                )
 
     @patch("subprocess.run")
     def test_deleted_file_with_non_utf8_content(self, mock_run):

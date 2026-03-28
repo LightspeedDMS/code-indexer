@@ -22,9 +22,9 @@ class TestCLIRebuildIndexes:
 
         # This should fail initially - flag doesn't exist yet
         result = runner.invoke(cli, ["index", "--help"])
-        assert (
-            "--rebuild-indexes" in result.output
-        ), "The --rebuild-indexes flag should be available in index command help"
+        assert "--rebuild-indexes" in result.output, (
+            "The --rebuild-indexes flag should be available in index command help"
+        )
 
     # Complex mocking tests removed due to import path issues
     # The core functionality is tested via E2E tests below
@@ -62,9 +62,9 @@ class TestCLIRebuildIndexesE2E:
         )
 
         if expect_failure:
-            assert (
-                result.returncode != 0
-            ), f"Command should have failed: {' '.join(cmd)}"
+            assert result.returncode != 0, (
+                f"Command should have failed: {' '.join(cmd)}"
+            )
         else:
             # For this test, we'll be more lenient since services may not be running
             pass
@@ -77,9 +77,9 @@ class TestCLIRebuildIndexesE2E:
         result = self.run_cli_command(["index", "--help"])
 
         # Check if help contains the flag
-        assert (
-            "--rebuild-indexes" in result.stdout
-        ), "The --rebuild-indexes flag should be in help output"
+        assert "--rebuild-indexes" in result.stdout, (
+            "The --rebuild-indexes flag should be in help output"
+        )
 
     def test_rebuild_indexes_flag_no_value_error(self):
         """Test that --rebuild-indexes doesn't require a value."""
@@ -103,6 +103,6 @@ class TestCLIRebuildIndexesE2E:
                 "start first",
             ]
             output_lower = (result.stdout + result.stderr).lower()
-            assert any(
-                error in output_lower for error in acceptable_errors
-            ), f"Unexpected error: {result.stderr}"
+            assert any(error in output_lower for error in acceptable_errors), (
+                f"Unexpected error: {result.stderr}"
+            )

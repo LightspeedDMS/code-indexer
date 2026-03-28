@@ -300,10 +300,10 @@ def repo_with_files(tmp_path, monkeypatch):
     test_repo_path.mkdir()
     (test_repo_path / "src").mkdir()
     (test_repo_path / "src" / "main.py").write_text(
-        "def authenticate_user(username, password):\n" "    return True\n"
+        "def authenticate_user(username, password):\n    return True\n"
     )
     (test_repo_path / "src" / "utils.py").write_text(
-        "def helper_function():\n" "    pass\n"
+        "def helper_function():\n    pass\n"
     )
 
     # Register in global registry

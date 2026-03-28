@@ -51,15 +51,15 @@ class TestApiMetricsBackendProtocol:
 
         protocol_methods = dir(ApiMetricsBackend)
 
-        assert (
-            "insert_metric" in protocol_methods
-        ), "ApiMetricsBackend must have insert_metric()"
-        assert (
-            "get_metrics" in protocol_methods
-        ), "ApiMetricsBackend must have get_metrics()"
-        assert (
-            "cleanup_old" in protocol_methods
-        ), "ApiMetricsBackend must have cleanup_old()"
+        assert "insert_metric" in protocol_methods, (
+            "ApiMetricsBackend must have insert_metric()"
+        )
+        assert "get_metrics" in protocol_methods, (
+            "ApiMetricsBackend must have get_metrics()"
+        )
+        assert "cleanup_old" in protocol_methods, (
+            "ApiMetricsBackend must have cleanup_old()"
+        )
         assert "reset" in protocol_methods, "ApiMetricsBackend must have reset()"
         assert "close" in protocol_methods, "ApiMetricsBackend must have close()"
 
@@ -138,9 +138,9 @@ class TestApiMetricsSqliteBackend:
             "regex_searches",
             "other_api_calls",
         }
-        assert (
-            set(metrics.keys()) == required_keys
-        ), f"get_metrics() must return exactly {required_keys}, got {set(metrics.keys())}"
+        assert set(metrics.keys()) == required_keys, (
+            f"get_metrics() must return exactly {required_keys}, got {set(metrics.keys())}"
+        )
 
     def test_get_metrics_returns_zeros_when_empty(self, backend):
         """get_metrics() must return zeros when no metrics recorded."""
@@ -172,9 +172,9 @@ class TestApiMetricsSqliteBackend:
 
         # Window of 1 hour (3600 seconds) - should only see the recent one
         metrics = backend.get_metrics(window_seconds=3600)
-        assert (
-            metrics["semantic_searches"] == 1
-        ), f"Expected 1 semantic search in 1-hour window, got {metrics['semantic_searches']}"
+        assert metrics["semantic_searches"] == 1, (
+            f"Expected 1 semantic search in 1-hour window, got {metrics['semantic_searches']}"
+        )
 
     def test_cleanup_old_removes_records_beyond_max_age(self, backend):
         """cleanup_old(max_age_seconds) must delete records older than max_age."""
@@ -303,9 +303,9 @@ class TestBackendRegistryApiMetricsField:
 
         registry = StorageFactory._create_sqlite_backends(data_dir)
 
-        assert hasattr(
-            registry, "api_metrics"
-        ), "BackendRegistry must have .api_metrics attribute"
+        assert hasattr(registry, "api_metrics"), (
+            "BackendRegistry must have .api_metrics attribute"
+        )
         assert isinstance(registry.api_metrics, ApiMetricsBackend), (
             f"registry.api_metrics must satisfy ApiMetricsBackend protocol, "
             f"got {type(registry.api_metrics)}"
@@ -398,9 +398,9 @@ class TestApiMetricsPostgresBackendProtocolSatisfaction:
             "reset",
             "close",
         ]:
-            assert hasattr(
-                ApiMetricsPostgresBackend, method_name
-            ), f"ApiMetricsPostgresBackend must have method '{method_name}'"
+            assert hasattr(ApiMetricsPostgresBackend, method_name), (
+                f"ApiMetricsPostgresBackend must have method '{method_name}'"
+            )
 
     def test_postgres_backend_module_importable(self):
         """The postgres api_metrics_backend module must be importable without a live DB."""

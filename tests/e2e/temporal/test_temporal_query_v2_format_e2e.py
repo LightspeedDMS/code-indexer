@@ -111,17 +111,17 @@ class TestTemporalQueryV2FormatE2E:
         # Verify v2 format is used
         temporal_path = repo_dir / ".code-indexer" / "index" / "code-indexer-temporal"
         metadata_db_path = temporal_path / "temporal_metadata.db"
-        assert (
-            metadata_db_path.exists()
-        ), "temporal_metadata.db should exist (v2 format)"
+        assert metadata_db_path.exists(), (
+            "temporal_metadata.db should exist (v2 format)"
+        )
 
         # Verify vector files use v2 format (28-char filenames)
         vector_files = list(temporal_path.rglob("vector_*.json"))
         assert len(vector_files) > 0, "Should have indexed vector files"
         for vector_file in vector_files:
-            assert (
-                len(vector_file.name) == 28
-            ), f"V2 format should produce 28-char filenames, got {len(vector_file.name)}"
+            assert len(vector_file.name) == 28, (
+                f"V2 format should produce 28-char filenames, got {len(vector_file.name)}"
+            )
 
         # When: Querying with --time-range-all
         query_result = subprocess.run(
@@ -149,12 +149,12 @@ class TestTemporalQueryV2FormatE2E:
         # If results found, verify they contain file paths and commit info
         if query_result.returncode == 0:
             output = query_result.stdout
-            assert (
-                "auth.py" in output or "LongFileName" in output
-            ), f"Query results should contain file paths. Output: {output}"
-            assert (
-                "commit" in output.lower() or "hash" in output.lower()
-            ), f"Query results should contain commit info. Output: {output}"
+            assert "auth.py" in output or "LongFileName" in output, (
+                f"Query results should contain file paths. Output: {output}"
+            )
+            assert "commit" in output.lower() or "hash" in output.lower(), (
+                f"Query results should contain commit info. Output: {output}"
+            )
 
     def test_query_resolves_hash_prefixes_to_point_ids(self, git_repo_with_commits):
         """AC3: Query correctly resolves hash prefixes to point_ids using metadata store."""
@@ -243,6 +243,6 @@ class TestTemporalQueryV2FormatE2E:
         # If results found, verify long-path file is included
         if query_result.returncode == 0:
             output = query_result.stdout
-            assert (
-                "LongFileName" in output or "nested/directory" in output
-            ), f"Query results should include long-path file. Output: {output}"
+            assert "LongFileName" in output or "nested/directory" in output, (
+                f"Query results should include long-path file. Output: {output}"
+            )

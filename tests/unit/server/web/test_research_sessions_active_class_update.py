@@ -98,9 +98,9 @@ class TestResearchSessionsActiveClassUpdate:
         )
 
         # Verify hx-on::before-request exists
-        assert (
-            "hx-on::before-request=" in html
-        ), "Session items must have hx-on::before-request handler"
+        assert "hx-on::before-request=" in html, (
+            "Session items must have hx-on::before-request handler"
+        )
 
         # Verify it contains querySelectorAll for session items
         assert (
@@ -129,14 +129,14 @@ class TestResearchSessionsActiveClassUpdate:
         assert len(session_item_sections) > 1, "Must have session items"
 
         first_session = session_item_sections[1]
-        assert (
-            "hx-on::before-request=" in first_session
-        ), "Session item must have hx-on::before-request"
+        assert "hx-on::before-request=" in first_session, (
+            "Session item must have hx-on::before-request"
+        )
 
         # Verify it contains forEach to iterate
-        assert (
-            "forEach" in html
-        ), "hx-on::before-request must use forEach to iterate through sessions"
+        assert "forEach" in html, (
+            "hx-on::before-request must use forEach to iterate through sessions"
+        )
 
         # Verify it removes active class
         assert (
@@ -161,7 +161,9 @@ class TestResearchSessionsActiveClassUpdate:
         assert (
             "this.classList.add('active')" in html
             or 'this.classList.add("active")' in html
-        ), "hx-on::before-request must call this.classList.add('active') to mark clicked session"
+        ), (
+            "hx-on::before-request must call this.classList.add('active') to mark clicked session"
+        )
 
     def test_hx_on_before_request_updates_hidden_field(
         self, jinja_env, sample_sessions
@@ -178,13 +180,13 @@ class TestResearchSessionsActiveClassUpdate:
         )
 
         # Verify hidden field update is still present
-        assert (
-            "getElementById('active-session-id')" in html
-        ), "hx-on::before-request must still update active-session-id hidden field"
+        assert "getElementById('active-session-id')" in html, (
+            "hx-on::before-request must still update active-session-id hidden field"
+        )
 
-        assert (
-            ".value = " in html
-        ), "hx-on::before-request must still set the value of hidden field"
+        assert ".value = " in html, (
+            "hx-on::before-request must still set the value of hidden field"
+        )
 
     def test_correct_execution_order_in_hx_on_before_request(
         self, jinja_env, sample_sessions
@@ -227,12 +229,12 @@ class TestResearchSessionsActiveClassUpdate:
         assert update_pos != -1, "Must update hidden field"
 
         # Verify order: remove < add < update
-        assert (
-            remove_pos < add_pos
-        ), "Must remove active from all sessions BEFORE adding to clicked session"
-        assert (
-            add_pos < update_pos
-        ), "Must add active to clicked session BEFORE updating hidden field"
+        assert remove_pos < add_pos, (
+            "Must remove active from all sessions BEFORE adding to clicked session"
+        )
+        assert add_pos < update_pos, (
+            "Must add active to clicked session BEFORE updating hidden field"
+        )
 
     def test_all_sessions_have_updated_handler(self, jinja_env, sample_sessions):
         """
@@ -248,21 +250,21 @@ class TestResearchSessionsActiveClassUpdate:
 
         # Count session items
         session_count = html.count('class="session-item')
-        assert session_count == len(
-            sample_sessions
-        ), f"Must render {len(sample_sessions)} session items"
+        assert session_count == len(sample_sessions), (
+            f"Must render {len(sample_sessions)} session items"
+        )
 
         # Count hx-on::before-request occurrences
         handler_count = html.count("hx-on::before-request=")
-        assert handler_count == len(
-            sample_sessions
-        ), "Each session item must have hx-on::before-request handler"
+        assert handler_count == len(sample_sessions), (
+            "Each session item must have hx-on::before-request handler"
+        )
 
         # Each handler should contain class manipulation code
         # Count querySelectorAll occurrences (one per handler)
         query_count = html.count("querySelectorAll('.session-item')") + html.count(
             'querySelectorAll(".session-item")'
         )
-        assert query_count == len(
-            sample_sessions
-        ), "Each handler must contain querySelectorAll for class manipulation"
+        assert query_count == len(sample_sessions), (
+            "Each handler must contain querySelectorAll for class manipulation"
+        )

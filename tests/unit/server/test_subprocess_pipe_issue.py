@@ -87,18 +87,18 @@ class TestSubprocessPipeIssue:
         print(f"Process without pipes poll result: {poll_result}")
 
         # This should still be running
-        assert (
-            poll_result is None
-        ), f"Process without pipes died with code: {poll_result}"
+        assert poll_result is None, (
+            f"Process without pipes died with code: {poll_result}"
+        )
 
         # Wait a bit longer to be sure
         time.sleep(5)
         poll_result = process_without_pipes.poll()
         print(f"Process without pipes poll result after 8 seconds: {poll_result}")
 
-        assert (
-            poll_result is None
-        ), f"Process without pipes died after 8 seconds with code: {poll_result}"
+        assert poll_result is None, (
+            f"Process without pipes died after 8 seconds with code: {poll_result}"
+        )
 
         # Clean up
         process_without_pipes.terminate()
@@ -148,18 +148,18 @@ class TestSubprocessPipeIssue:
         poll_result = process_devnull.poll()
         print(f"Process with devnull poll result: {poll_result}")
 
-        assert (
-            poll_result is None
-        ), f"Process with devnull died with code: {poll_result}"
+        assert poll_result is None, (
+            f"Process with devnull died with code: {poll_result}"
+        )
 
         # Wait longer
         time.sleep(5)
         poll_result = process_devnull.poll()
         print(f"Process with devnull poll result after 8 seconds: {poll_result}")
 
-        assert (
-            poll_result is None
-        ), f"Process with devnull died after 8 seconds with code: {poll_result}"
+        assert poll_result is None, (
+            f"Process with devnull died after 8 seconds with code: {poll_result}"
+        )
 
         # Clean up
         process_devnull.terminate()

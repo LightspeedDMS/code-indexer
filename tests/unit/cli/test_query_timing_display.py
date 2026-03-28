@@ -34,20 +34,20 @@ class TestQueryTimingDisplay:
         result = output.getvalue()
 
         # Verify no multi-index display
-        assert (
-            "parallel" not in result.lower()
-        ), "Should not show parallel timing for single index"
-        assert (
-            "multimodal" not in result.lower()
-        ), "Should not show multimodal timing for single index"
-        assert (
-            "merge" not in result.lower()
-        ), "Should not show merge timing for single index"
+        assert "parallel" not in result.lower(), (
+            "Should not show parallel timing for single index"
+        )
+        assert "multimodal" not in result.lower(), (
+            "Should not show multimodal timing for single index"
+        )
+        assert "merge" not in result.lower(), (
+            "Should not show merge timing for single index"
+        )
 
         # Verify git filter timing is shown
-        assert (
-            "git" in result.lower() or "filter" in result.lower()
-        ), "Should show git-aware filtering"
+        assert "git" in result.lower() or "filter" in result.lower(), (
+            "Should show git-aware filtering"
+        )
 
     def test_display_multi_index_timing_with_parallel_breakdown(self):
         """Test timing display for multi-index (code + multimodal) query with parallel breakdown."""
@@ -75,21 +75,21 @@ class TestQueryTimingDisplay:
 
         # Verify parallel multi-index display
         assert "parallel" in result.lower(), "Should show parallel multi-index timing"
-        assert (
-            "voyage-code-3" in result.lower() or "code" in result.lower()
-        ), "Should show code index"
+        assert "voyage-code-3" in result.lower() or "code" in result.lower(), (
+            "Should show code index"
+        )
         assert (
             "voyage-multimodal-3" in result.lower() or "multimodal" in result.lower()
         ), "Should show multimodal index"
-        assert (
-            "merge" in result.lower() or "deduplicate" in result.lower()
-        ), "Should show merge/deduplicate timing"
+        assert "merge" in result.lower() or "deduplicate" in result.lower(), (
+            "Should show merge/deduplicate timing"
+        )
 
         # Verify individual timings are shown
         assert "23" in result or "23ms" in result, "Should show code index time (23ms)"
-        assert (
-            "41" in result or "41ms" in result
-        ), "Should show multimodal index time (41ms)"
+        assert "41" in result or "41ms" in result, (
+            "Should show multimodal index time (41ms)"
+        )
         assert "45" in result or "45ms" in result, "Should show parallel time (45ms)"
         assert "4" in result or "4ms" in result, "Should show merge time (4ms)"
 
@@ -119,19 +119,19 @@ class TestQueryTimingDisplay:
 
         # Verify timeout indication
         # The display should show multimodal timing with TIMEOUT indicator
-        assert (
-            "parallel" in result.lower()
-        ), "Should still show parallel timing structure"
+        assert "parallel" in result.lower(), (
+            "Should still show parallel timing structure"
+        )
         assert (
             "multimodal" in result.lower() or "voyage-multimodal-3" in result.lower()
         ), "Should show multimodal index"
-        assert (
-            "timeout" in result.lower()
-        ), "Should show TIMEOUT indicator for timed out index"
+        assert "timeout" in result.lower(), (
+            "Should show TIMEOUT indicator for timed out index"
+        )
         # Code index should NOT show timeout
-        assert (
-            result.lower().count("timeout") == 1
-        ), "Only multimodal should show timeout (code index did not timeout)"
+        assert result.lower().count("timeout") == 1, (
+            "Only multimodal should show timeout (code index did not timeout)"
+        )
 
     def test_display_empty_timing_info(self):
         """Test that empty timing info doesn't crash display."""
@@ -148,9 +148,9 @@ class TestQueryTimingDisplay:
         # Get output - should be empty or minimal
         result = output.getvalue()
         # Empty timing should result in no display (early return)
-        assert (
-            result == "" or len(result.strip()) == 0
-        ), "Empty timing should produce no output"
+        assert result == "" or len(result.strip()) == 0, (
+            "Empty timing should produce no output"
+        )
 
     def test_display_preserves_existing_timing_breakdown(self):
         """Test that multi-index timing display works correctly with multimodal query."""
@@ -178,12 +178,12 @@ class TestQueryTimingDisplay:
 
         # Verify multi-index timing is shown with proper breakdown
         assert "parallel" in result.lower(), "Should show parallel timing"
-        assert (
-            "23" in result or "23ms" in result
-        ), "Should show code index timing (23ms)"
-        assert (
-            "41" in result or "41ms" in result
-        ), "Should show multimodal index timing (41ms)"
+        assert "23" in result or "23ms" in result, (
+            "Should show code index timing (23ms)"
+        )
+        assert "41" in result or "41ms" in result, (
+            "Should show multimodal index timing (41ms)"
+        )
         assert "4" in result or "4ms" in result, "Should show merge timing (4ms)"
 
     def test_display_timing_format_consistency(self):
@@ -216,9 +216,9 @@ class TestQueryTimingDisplay:
         # Verify timing values are formatted
         # (should show "1.5s", "1.50s", or "1500ms" consistently)
         # Large times (>1000ms) should use seconds format
-        assert (
-            "s" in clean_result or "ms" in clean_result
-        ), "Should format timing values"
+        assert "s" in clean_result or "ms" in clean_result, (
+            "Should format timing values"
+        )
         # Verify large times use seconds (1.5s, 1.50s, 2s, 2.0s, 2.00s, etc.)
         assert (
             "1.5s" in clean_result

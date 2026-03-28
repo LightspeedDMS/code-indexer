@@ -242,9 +242,9 @@ class TestAdminReposCommandIntegration:
         # All should be available and follow same pattern
         for cmd in ["add", "list", "show", "refresh"]:
             cmd_result = runner.invoke(cli, ["admin", "repos", cmd, "--help"])
-            assert (
-                cmd_result.exit_code == 0
-            ), f"Command {cmd} should exist and show help"
+            assert cmd_result.exit_code == 0, (
+                f"Command {cmd} should exist and show help"
+            )
 
     def test_admin_repos_input_validation_patterns(self):
         """Test that input validation follows consistent patterns."""

@@ -33,9 +33,9 @@ class TestFixedSizeChunkerIntegration:
 
         # All chunks except last should be exactly 1000 characters
         for i, chunk in enumerate(chunks[:-1]):
-            assert (
-                len(chunk["text"]) == 1000
-            ), f"Java chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            assert len(chunk["text"]) == 1000, (
+                f"Java chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            )
 
         # Should have meaningful code content, not just imports
         meaningful_chunks = 0
@@ -60,9 +60,9 @@ class TestFixedSizeChunkerIntegration:
                 meaningful_chunks += 1
 
         # At least 70% of chunks should contain meaningful code
-        assert (
-            meaningful_chunks >= len(chunks) * 0.7
-        ), f"Only {meaningful_chunks}/{len(chunks)} chunks contain meaningful Java code"
+        assert meaningful_chunks >= len(chunks) * 0.7, (
+            f"Only {meaningful_chunks}/{len(chunks)} chunks contain meaningful Java code"
+        )
 
         # Verify metadata completeness
         for i, chunk in enumerate(chunks):
@@ -81,9 +81,9 @@ class TestFixedSizeChunkerIntegration:
 
         # All chunks except last should be exactly 1000 characters
         for i, chunk in enumerate(chunks[:-1]):
-            assert (
-                len(chunk["text"]) == 1000
-            ), f"JavaScript chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            assert len(chunk["text"]) == 1000, (
+                f"JavaScript chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            )
 
         # Should preserve React/ES6 patterns across chunk boundaries
         total_text = "".join(chunk["text"] for chunk in chunks)
@@ -109,9 +109,9 @@ class TestFixedSizeChunkerIntegration:
         )
 
         # Allow small variance due to overlap, but should be close
-        assert (
-            abs(pattern_counts_original - pattern_counts_reconstructed) <= 2
-        ), "JavaScript patterns not preserved during chunking reconstruction"
+        assert abs(pattern_counts_original - pattern_counts_reconstructed) <= 2, (
+            "JavaScript patterns not preserved during chunking reconstruction"
+        )
 
     def test_typescript_enterprise_app_chunking(self, chunker, test_files_dir):
         """Test chunking of a complex TypeScript enterprise application."""
@@ -122,9 +122,9 @@ class TestFixedSizeChunkerIntegration:
 
         # All chunks except last should be exactly 1000 characters
         for i, chunk in enumerate(chunks[:-1]):
-            assert (
-                len(chunk["text"]) == 1000
-            ), f"TypeScript chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            assert len(chunk["text"]) == 1000, (
+                f"TypeScript chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            )
 
         # Verify TypeScript-specific constructs are handled
         meaningful_ts_chunks = 0
@@ -149,9 +149,9 @@ class TestFixedSizeChunkerIntegration:
                 meaningful_ts_chunks += 1
 
         # Most chunks should contain meaningful TypeScript code
-        assert (
-            meaningful_ts_chunks >= len(chunks) * 0.6
-        ), f"Only {meaningful_ts_chunks}/{len(chunks)} chunks contain meaningful TypeScript code"
+        assert meaningful_ts_chunks >= len(chunks) * 0.6, (
+            f"Only {meaningful_ts_chunks}/{len(chunks)} chunks contain meaningful TypeScript code"
+        )
 
     def test_go_microservice_chunking(self, chunker, test_files_dir):
         """Test chunking of a Go microservice architecture file."""
@@ -162,9 +162,9 @@ class TestFixedSizeChunkerIntegration:
 
         # All chunks except last should be exactly 1000 characters
         for i, chunk in enumerate(chunks[:-1]):
-            assert (
-                len(chunk["text"]) == 1000
-            ), f"Go chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            assert len(chunk["text"]) == 1000, (
+                f"Go chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            )
 
         # Verify Go-specific constructs are preserved
         go_constructs = 0
@@ -188,9 +188,9 @@ class TestFixedSizeChunkerIntegration:
                 go_constructs += 1
 
         # Most chunks should contain Go code constructs
-        assert (
-            go_constructs >= len(chunks) * 0.5
-        ), f"Only {go_constructs}/{len(chunks)} chunks contain Go constructs"
+        assert go_constructs >= len(chunks) * 0.5, (
+            f"Only {go_constructs}/{len(chunks)} chunks contain Go constructs"
+        )
 
     def test_kotlin_android_app_chunking(self, chunker, test_files_dir):
         """Test chunking of a Kotlin Android application."""
@@ -201,9 +201,9 @@ class TestFixedSizeChunkerIntegration:
 
         # All chunks except last should be exactly 1000 characters
         for i, chunk in enumerate(chunks[:-1]):
-            assert (
-                len(chunk["text"]) == 1000
-            ), f"Kotlin chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            assert len(chunk["text"]) == 1000, (
+                f"Kotlin chunk {i} should be exactly 1000 chars, got {len(chunk['text'])}"
+            )
 
         # Verify Kotlin-specific features are handled
         kotlin_features = 0
@@ -220,15 +220,15 @@ class TestFixedSizeChunkerIntegration:
                     "data class",
                     "sealed",
                     "companion",
-                    "?." "!!",
+                    "?.!!",
                 ]
             ):
                 kotlin_features += 1
 
         # Most chunks should contain Kotlin features
-        assert (
-            kotlin_features >= len(chunks) * 0.5
-        ), f"Only {kotlin_features}/{len(chunks)} chunks contain Kotlin features"
+        assert kotlin_features >= len(chunks) * 0.5, (
+            f"Only {kotlin_features}/{len(chunks)} chunks contain Kotlin features"
+        )
 
     def test_chunk_metadata_accuracy_across_languages(self, chunker, test_files_dir):
         """Test that chunk metadata is accurate across different programming languages."""
@@ -270,7 +270,7 @@ class TestFixedSizeChunkerIntegration:
                     # but should be in reasonable proximity
                     line_gap = abs(chunk["line_start"] - prev_chunk["line_end"])
                     assert line_gap <= 20, (
-                        f"Line numbers gap too large between chunks {i-1} and {i}: "
+                        f"Line numbers gap too large between chunks {i - 1} and {i}: "
                         f"{prev_chunk['line_end']} to {chunk['line_start']}"
                     )
 
@@ -300,9 +300,9 @@ class TestFixedSizeChunkerIntegration:
                 current_ending = current_chunk[-150:]
                 next_beginning = next_chunk[:150]
 
-                assert (
-                    current_ending == next_beginning
-                ), f"Overlap mismatch in {file_path.name} between chunks {i} and {i+1}"
+                assert current_ending == next_beginning, (
+                    f"Overlap mismatch in {file_path.name} between chunks {i} and {i + 1}"
+                )
 
     def test_meaningful_code_blocks_not_fragments(self, chunker, test_files_dir):
         """Test that chunks contain meaningful code blocks, not just fragments."""
@@ -359,9 +359,9 @@ class TestFixedSizeChunkerIntegration:
             )
 
             # Much better than the old 76.5% under 300 chars, 52% under 100 chars
-            assert (
-                fragment_ratio < 0.2
-            ), f"Too many fragment chunks: {fragment_chunks}/{total_chunks} ({fragment_ratio:.2%})"
-            assert (
-                meaningful_ratio > 0.6
-            ), f"Too few meaningful chunks: {meaningful_chunks}/{total_chunks} ({meaningful_ratio:.2%})"
+            assert fragment_ratio < 0.2, (
+                f"Too many fragment chunks: {fragment_chunks}/{total_chunks} ({fragment_ratio:.2%})"
+            )
+            assert meaningful_ratio > 0.6, (
+                f"Too few meaningful chunks: {meaningful_chunks}/{total_chunks} ({meaningful_ratio:.2%})"
+            )

@@ -349,12 +349,12 @@ class TestSCIPGenerator:
         result = generator.generate()
 
         # Assert - Generation MUST fail when database build fails
-        assert (
-            result.failed_projects == 1
-        ), "Database build failure must mark generation as failed"
-        assert (
-            result.successful_projects == 0
-        ), "No projects should be marked successful when database fails"
+        assert result.failed_projects == 1, (
+            "Database build failure must mark generation as failed"
+        )
+        assert result.successful_projects == 0, (
+            "No projects should be marked successful when database fails"
+        )
         assert result.is_complete_failure(), "Overall result must be complete failure"
 
         # Verify the project result status is FAILED
@@ -445,9 +445,9 @@ class TestSCIPGenerator:
             count_v2 = cursor.fetchone()[0]
 
             # Should have exactly 2 symbols (new data only), not 3 (old + new)
-            assert (
-                count_v2 == 2
-            ), f"Database should have clean data (2 symbols), found {count_v2}. Stale data detected!"
+            assert count_v2 == 2, (
+                f"Database should have clean data (2 symbols), found {count_v2}. Stale data detected!"
+            )
 
 
 class TestSCIPRebuild:
@@ -885,7 +885,7 @@ class TestSCIPRebuild:
         # Assert - Rebuild MUST fail when database build fails
         assert len(rebuild_result) == 1
         assert "backend" in rebuild_result
-        assert (
-            rebuild_result["backend"].status == OverallStatus.FAILED
-        ), "Database build failure must mark rebuild as failed"
+        assert rebuild_result["backend"].status == OverallStatus.FAILED, (
+            "Database build failure must mark rebuild as failed"
+        )
         assert "Database build failed" in rebuild_result["backend"].error_message

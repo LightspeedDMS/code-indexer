@@ -229,9 +229,9 @@ class TestParallelVoyagePerformance:
         for result in results:
             successful = result["successful_embeddings"]
             total = result["chunks_processed"]
-            assert (
-                successful == total
-            ), f"Not all embeddings successful with {result['thread_count']} threads: {successful}/{total}"
+            assert successful == total, (
+                f"Not all embeddings successful with {result['thread_count']} threads: {successful}/{total}"
+            )
 
         # Performance assertions
         min_improvement_threshold = 1.5  # Minimum 1.5x improvement expected
@@ -269,9 +269,9 @@ class TestParallelVoyagePerformance:
             total = result["chunks_processed"]
 
             # All thread counts must complete all tasks successfully
-            assert (
-                successful == total
-            ), f"{threads} threads completed only {successful}/{total} embeddings"
+            assert successful == total, (
+                f"{threads} threads completed only {successful}/{total} embeddings"
+            )
 
             # Performance expectations vary by thread count
             if threads <= 4:

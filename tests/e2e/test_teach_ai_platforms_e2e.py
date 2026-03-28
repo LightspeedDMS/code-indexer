@@ -105,9 +105,9 @@ class TestTeachAiGemini:
         # styleguide.md should be created in .gemini subdirectory (Gemini convention)
         gemini_dir = tmp_path / ".gemini"
         styleguide_path = gemini_dir / "styleguide.md"
-        assert (
-            styleguide_path.exists()
-        ), "styleguide.md was not created in .gemini subdirectory"
+        assert styleguide_path.exists(), (
+            "styleguide.md was not created in .gemini subdirectory"
+        )
 
         # Content should match template
         content = styleguide_path.read_text()
@@ -168,9 +168,9 @@ class TestTeachAiGemini:
 
         # No .gemini directory should be created
         gemini_dir = tmp_path / ".gemini"
-        assert (
-            not gemini_dir.exists()
-        ), ".gemini directory was created in show-only mode"
+        assert not gemini_dir.exists(), (
+            ".gemini directory was created in show-only mode"
+        )
 
 
 class TestTeachAiOpenCode:
@@ -262,9 +262,9 @@ class TestTeachAiQ:
         # cidx.md should be created in .amazonq/rules/ subdirectory (Q convention)
         q_dir = tmp_path / ".amazonq" / "rules"
         cidx_md_path = q_dir / "cidx.md"
-        assert (
-            cidx_md_path.exists()
-        ), "cidx.md was not created in .amazonq/rules/ subdirectory"
+        assert cidx_md_path.exists(), (
+            "cidx.md was not created in .amazonq/rules/ subdirectory"
+        )
 
         # Content should match template
         content = cidx_md_path.read_text()
@@ -328,9 +328,9 @@ class TestTeachAiJunie:
         # guidelines.md should be created in .junie subdirectory (Junie convention)
         junie_dir = tmp_path / ".junie"
         guidelines_path = junie_dir / "guidelines.md"
-        assert (
-            guidelines_path.exists()
-        ), "guidelines.md was not created in .junie subdirectory"
+        assert guidelines_path.exists(), (
+            "guidelines.md was not created in .junie subdirectory"
+        )
 
         # Content should match template
         content = guidelines_path.read_text()

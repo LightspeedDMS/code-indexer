@@ -147,9 +147,9 @@ class TestCancellationHandling:
             )
 
             # Verify test ran quickly (mocking worked)
-            assert (
-                test_duration < 5.0
-            ), f"Test took {test_duration:.3f}s - mocking failed, still processing real content"
+            assert test_duration < 5.0, (
+                f"Test took {test_duration:.3f}s - mocking failed, still processing real content"
+            )
 
             # CANCELLATION LOGIC INVESTIGATION:
             # If cancellation is working, we should see:
@@ -266,9 +266,9 @@ class TestCancellationHandling:
             )
 
             # Verify test ran quickly (mocking worked)
-            assert (
-                test_duration < 3.0
-            ), f"Test took {test_duration:.3f}s - mocking failed, still processing real content"
+            assert test_duration < 3.0, (
+                f"Test took {test_duration:.3f}s - mocking failed, still processing real content"
+            )
 
             # Verify all files were processed when not cancelled
             assert stats.files_processed == len(self.test_files), (
@@ -277,9 +277,9 @@ class TestCancellationHandling:
             )
 
             # Verify chunks were created (mocked)
-            assert (
-                stats.chunks_created >= 0
-            ), "Should have created some chunks or zero in mock"
+            assert stats.chunks_created >= 0, (
+                "Should have created some chunks or zero in mock"
+            )
 
             print("✅ Complete processing test passed:")
             print(f"   Files to process: {len(self.test_files)}")

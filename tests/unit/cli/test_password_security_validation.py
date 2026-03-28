@@ -91,17 +91,17 @@ class TestPasswordSecurityValidation:
                 if "password" in line.lower():
                     # If it's getting password input, should use getpass
                     if "input(" in line and "getpass" not in line:
-                        assert (
-                            False
-                        ), f"Using input() for password - security violation: {line}"
+                        assert False, (
+                            f"Using input() for password - security violation: {line}"
+                        )
                     if (
                         "click.prompt" in line
                         and "hide_input=True" not in line
                         and "password" not in line
                     ):
-                        assert (
-                            False
-                        ), f"Using click.prompt without hide_input for password: {line}"
+                        assert False, (
+                            f"Using click.prompt without hide_input for password: {line}"
+                        )
 
     def test_passwords_cleared_from_memory(self):
         """Test that password variables are cleared after use."""

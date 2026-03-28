@@ -108,12 +108,12 @@ def test_add_golden_repo_result_contains_alias(managers, temp_dirs):
 
     # CRITICAL: Verify result contains alias field for dashboard display
     assert job.result is not None, "Job result is None"
-    assert (
-        "alias" in job.result
-    ), "Job result missing 'alias' field - dashboard will show 'Unknown'"
-    assert (
-        job.result["alias"] == "test-repo"
-    ), f"Expected alias 'test-repo', got '{job.result['alias']}'"
+    assert "alias" in job.result, (
+        "Job result missing 'alias' field - dashboard will show 'Unknown'"
+    )
+    assert job.result["alias"] == "test-repo", (
+        f"Expected alias 'test-repo', got '{job.result['alias']}'"
+    )
 
 
 def test_refresh_golden_repo_result_contains_alias(temp_dirs):
@@ -189,10 +189,10 @@ def test_refresh_golden_repo_result_contains_alias(temp_dirs):
 
     # CRITICAL: Verify result contains alias field for dashboard display
     assert result is not None, "Result is None"
-    assert (
-        "alias" in result
-    ), "Result missing 'alias' field - dashboard will show 'Unknown'"
-    assert (
-        result["alias"] == alias_name
-    ), f"Expected alias '{alias_name}', got '{result['alias']}'"
+    assert "alias" in result, (
+        "Result missing 'alias' field - dashboard will show 'Unknown'"
+    )
+    assert result["alias"] == alias_name, (
+        f"Expected alias '{alias_name}', got '{result['alias']}'"
+    )
     assert result["success"] is True, f"Expected success=True, got: {result}"

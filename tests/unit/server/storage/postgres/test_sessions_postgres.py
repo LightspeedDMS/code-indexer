@@ -72,9 +72,9 @@ class TestSessionsPostgresProtocolConformance:
         backend = _make_backend()
         for method_name in required_methods:
             assert hasattr(backend, method_name), f"Missing method: {method_name}"
-            assert callable(
-                getattr(backend, method_name)
-            ), f"Not callable: {method_name}"
+            assert callable(getattr(backend, method_name)), (
+                f"Not callable: {method_name}"
+            )
 
 
 # ---------------------------------------------------------------------------

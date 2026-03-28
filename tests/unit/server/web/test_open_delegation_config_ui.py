@@ -80,24 +80,24 @@ class TestClaudeDelegationConfigNewFields:
         from code_indexer.server.config.delegation_config import ClaudeDelegationConfig
 
         config = ClaudeDelegationConfig()
-        assert hasattr(
-            config, "delegation_default_engine"
-        ), "ClaudeDelegationConfig must have delegation_default_engine field"
-        assert (
-            config.delegation_default_engine == "claude-code"
-        ), f"Expected 'claude-code', got '{config.delegation_default_engine}'"
+        assert hasattr(config, "delegation_default_engine"), (
+            "ClaudeDelegationConfig must have delegation_default_engine field"
+        )
+        assert config.delegation_default_engine == "claude-code", (
+            f"Expected 'claude-code', got '{config.delegation_default_engine}'"
+        )
 
     def test_delegation_default_mode_field_exists_with_correct_default(self):
         """AC4: delegation_default_mode field defaults to 'single'."""
         from code_indexer.server.config.delegation_config import ClaudeDelegationConfig
 
         config = ClaudeDelegationConfig()
-        assert hasattr(
-            config, "delegation_default_mode"
-        ), "ClaudeDelegationConfig must have delegation_default_mode field"
-        assert (
-            config.delegation_default_mode == "single"
-        ), f"Expected 'single', got '{config.delegation_default_mode}'"
+        assert hasattr(config, "delegation_default_mode"), (
+            "ClaudeDelegationConfig must have delegation_default_mode field"
+        )
+        assert config.delegation_default_mode == "single", (
+            f"Expected 'single', got '{config.delegation_default_mode}'"
+        )
 
     def test_guardrails_enabled_field_exists_with_correct_default(self):
         """AC2 pre-condition: guardrails_enabled defaults to True."""
@@ -147,9 +147,9 @@ class TestConfigServiceDelegationSettings:
         service = ConfigService(server_dir_path=str(tmp_path))
         settings = service._get_delegation_settings()
 
-        assert (
-            "delegation_guardrails_repo" in settings
-        ), "_get_delegation_settings must include delegation_guardrails_repo"
+        assert "delegation_guardrails_repo" in settings, (
+            "_get_delegation_settings must include delegation_guardrails_repo"
+        )
 
     def test_get_delegation_settings_includes_guardrails_enabled(self, tmp_path):
         """AC2 + AC5: _get_delegation_settings includes guardrails_enabled."""
@@ -158,9 +158,9 @@ class TestConfigServiceDelegationSettings:
         service = ConfigService(server_dir_path=str(tmp_path))
         settings = service._get_delegation_settings()
 
-        assert (
-            "guardrails_enabled" in settings
-        ), "_get_delegation_settings must include guardrails_enabled"
+        assert "guardrails_enabled" in settings, (
+            "_get_delegation_settings must include guardrails_enabled"
+        )
 
     def test_get_delegation_settings_includes_delegation_default_engine(self, tmp_path):
         """AC3 + AC5: _get_delegation_settings includes delegation_default_engine."""
@@ -169,9 +169,9 @@ class TestConfigServiceDelegationSettings:
         service = ConfigService(server_dir_path=str(tmp_path))
         settings = service._get_delegation_settings()
 
-        assert (
-            "delegation_default_engine" in settings
-        ), "_get_delegation_settings must include delegation_default_engine"
+        assert "delegation_default_engine" in settings, (
+            "_get_delegation_settings must include delegation_default_engine"
+        )
 
     def test_get_delegation_settings_includes_delegation_default_mode(self, tmp_path):
         """AC4 + AC5: _get_delegation_settings includes delegation_default_mode."""
@@ -180,9 +180,9 @@ class TestConfigServiceDelegationSettings:
         service = ConfigService(server_dir_path=str(tmp_path))
         settings = service._get_delegation_settings()
 
-        assert (
-            "delegation_default_mode" in settings
-        ), "_get_delegation_settings must include delegation_default_mode"
+        assert "delegation_default_mode" in settings, (
+            "_get_delegation_settings must include delegation_default_mode"
+        )
 
     def test_get_delegation_settings_returns_correct_defaults(self, tmp_path):
         """AC5: Default values are correct when no config file exists."""
@@ -298,12 +298,12 @@ class TestClaudeDelegationConfigPersistence:
         loaded = manager.load_config()
 
         assert loaded is not None
-        assert (
-            loaded.delegation_default_engine == "claude-code"
-        ), "Missing delegation_default_engine should default to 'claude-code'"
-        assert (
-            loaded.delegation_default_mode == "single"
-        ), "Missing delegation_default_mode should default to 'single'"
+        assert loaded.delegation_default_engine == "claude-code", (
+            "Missing delegation_default_engine should default to 'claude-code'"
+        )
+        assert loaded.delegation_default_mode == "single", (
+            "Missing delegation_default_mode should default to 'single'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -469,9 +469,9 @@ class TestHandlerReadsDefaultsFromConfig:
         # Success proves config-sourced mode='single' passed validation and
         # the job was created. If mode defaulted to an invalid value, the
         # handler would return success=False with a validation error.
-        assert (
-            data.get("success") is True
-        ), f"Expected success=True (mode resolved from config), got: {data}"
-        assert (
-            data.get("job_id") == "job-mode-test-456"
-        ), f"Expected job_id from server response, got: {data}"
+        assert data.get("success") is True, (
+            f"Expected success=True (mode resolved from config), got: {data}"
+        )
+        assert data.get("job_id") == "job-mode-test-456", (
+            f"Expected job_id from server response, got: {data}"
+        )

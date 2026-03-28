@@ -69,9 +69,9 @@ class TestDependencyMapTrackingPostgresBackend:
             "close",
         }
         for method in required:
-            assert hasattr(
-                DependencyMapTrackingPostgresBackend, method
-            ), f"Missing method: {method}"
+            assert hasattr(DependencyMapTrackingPostgresBackend, method), (
+                f"Missing method: {method}"
+            )
 
     def test_update_tracking_uses_percent_s(self) -> None:
         """update_tracking must use %s placeholders."""
@@ -188,9 +188,9 @@ class TestGitCredentialsPostgresBackend:
             "close",
         }
         for method in required:
-            assert hasattr(
-                GitCredentialsPostgresBackend, method
-            ), f"Missing method: {method}"
+            assert hasattr(GitCredentialsPostgresBackend, method), (
+                f"Missing method: {method}"
+            )
 
     def test_upsert_credential_uses_percent_s(self) -> None:
         """upsert_credential must use %s placeholders."""
@@ -303,9 +303,9 @@ class TestRepoCategoryPostgresBackend:
             "close",
         }
         for method in required:
-            assert hasattr(
-                RepoCategoryPostgresBackend, method
-            ), f"Missing method: {method}"
+            assert hasattr(RepoCategoryPostgresBackend, method), (
+                f"Missing method: {method}"
+            )
 
     def test_create_category_uses_returning(self) -> None:
         """create_category must use RETURNING id (PostgreSQL idiom)."""

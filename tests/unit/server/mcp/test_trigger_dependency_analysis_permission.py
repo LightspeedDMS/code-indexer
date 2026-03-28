@@ -25,9 +25,9 @@ def test_trigger_dependency_analysis_has_manage_golden_repos_permission():
     content = tool_doc_path.read_text()
 
     # Assert - check YAML frontmatter has correct permission
-    assert (
-        "required_permission: manage_golden_repos" in content
-    ), "Tool doc must specify 'manage_golden_repos' permission (not 'manage_repos' which doesn't exist)"
+    assert "required_permission: manage_golden_repos" in content, (
+        "Tool doc must specify 'manage_golden_repos' permission (not 'manage_repos' which doesn't exist)"
+    )
 
     # Also check that manage_repos is NOT present in frontmatter
     lines = content.split("\n")
@@ -37,12 +37,12 @@ def test_trigger_dependency_analysis_has_manage_golden_repos_permission():
             in_frontmatter = not in_frontmatter
             continue
         if in_frontmatter and "required_permission:" in line:
-            assert (
-                "manage_golden_repos" in line
-            ), f"Required permission line must contain 'manage_golden_repos', got: {line}"
-            assert (
-                "manage_repos" not in line or "manage_golden_repos" in line
-            ), f"Required permission should not use non-existent 'manage_repos', got: {line}"
+            assert "manage_golden_repos" in line, (
+                f"Required permission line must contain 'manage_golden_repos', got: {line}"
+            )
+            assert "manage_repos" not in line or "manage_golden_repos" in line, (
+                f"Required permission should not use non-existent 'manage_repos', got: {line}"
+            )
 
 
 def test_trigger_dependency_analysis_doc_mentions_correct_permission():
@@ -64,6 +64,6 @@ def test_trigger_dependency_analysis_doc_mentions_correct_permission():
 
     # Assert - check documentation text mentions correct permission
     # Line 67 should say manage_golden_repos, not manage_repos
-    assert (
-        "manage_golden_repos" in content
-    ), "Tool doc body should mention 'manage_golden_repos' permission"
+    assert "manage_golden_repos" in content, (
+        "Tool doc body should mention 'manage_golden_repos' permission"
+    )

@@ -214,9 +214,9 @@ class TestCreateVectorPointIncludesContentHash:
             chunk, [0.1] * 16, metadata, file_path
         )
 
-        assert (
-            "content_hash" in vector_point["payload"]
-        ), "_create_vector_point must add content_hash to payload (Story #470)"
+        assert "content_hash" in vector_point["payload"], (
+            "_create_vector_point must add content_hash to payload (Story #470)"
+        )
 
     def test_content_hash_is_sha256_of_chunk_text(self, tmp_path):
         """content_hash must be SHA-256 hex digest of the chunk text."""

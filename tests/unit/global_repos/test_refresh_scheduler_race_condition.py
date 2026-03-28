@@ -240,21 +240,21 @@ class TestReconcileAcquiresWriteLock:
         acquire_calls = [(op, alias) for op, alias, _ in lock_calls if op == "acquire"]
         release_calls = [(op, alias) for op, alias, _ in lock_calls if op == "release"]
 
-        assert (
-            len(acquire_calls) >= 1
-        ), f"Expected at least 1 acquire call, got: {lock_calls}"
-        assert (
-            len(release_calls) >= 1
-        ), f"Expected at least 1 release call after acquire, got: {lock_calls}"
+        assert len(acquire_calls) >= 1, (
+            f"Expected at least 1 acquire call, got: {lock_calls}"
+        )
+        assert len(release_calls) >= 1, (
+            f"Expected at least 1 release call after acquire, got: {lock_calls}"
+        )
 
         # Verify acquire precedes release for the same alias
         for acq_op, acq_alias in acquire_calls:
             matching_releases = [
                 (op, alias) for op, alias in release_calls if alias == acq_alias
             ]
-            assert (
-                len(matching_releases) >= 1
-            ), f"Lock acquired for {acq_alias} but never released. Calls: {lock_calls}"
+            assert len(matching_releases) >= 1, (
+                f"Lock acquired for {acq_alias} but never released. Calls: {lock_calls}"
+            )
 
     def test_reconcile_releases_lock_even_on_restore_exception(
         self, scheduler, golden_repos_dir, mock_registry
@@ -445,9 +445,9 @@ class TestReconcileAcquiresWriteLock:
         ):
             scheduler.reconcile_golden_repos()
 
-        assert (
-            len(lock_visible_during_restore) >= 1
-        ), "checking_restore must have been called at least once"
+        assert len(lock_visible_during_restore) >= 1, (
+            "checking_restore must have been called at least once"
+        )
         assert all(lock_visible_during_restore), (
             f"Write lock must be visible (True) during _restore_master_from_versioned. "
             f"Got: {lock_visible_during_restore}"
@@ -504,13 +504,13 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
                 # No snapshot/index creation
                 mock_create_index.assert_not_called()
 
-                assert (
-                    result["success"] is True
-                ), f"Result must be success=True when skipping locked git repo. Got: {result}"
+                assert result["success"] is True, (
+                    f"Result must be success=True when skipping locked git repo. Got: {result}"
+                )
                 message = result.get("message", "")
-                assert (
-                    "skip" in message.lower() or "lock" in message.lower()
-                ), f"Result message must indicate skip due to write lock. Got: '{message}'"
+                assert "skip" in message.lower() or "lock" in message.lower(), (
+                    f"Result message must indicate skip due to write lock. Got: '{message}'"
+                )
         finally:
             scheduler.release_write_lock("test-repo", owner_name="reconciliation")
 
@@ -530,9 +530,9 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
         scheduler = scheduler_with_real_registry
 
         # Ensure no lock is held
-        assert not scheduler.is_write_locked(
-            "test-repo"
-        ), "Write lock must NOT be held before this test"
+        assert not scheduler.is_write_locked("test-repo"), (
+            "Write lock must NOT be held before this test"
+        )
 
         with (
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
@@ -613,9 +613,9 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
             ):
                 result = scheduler._execute_refresh("test-repo-global")
 
-                assert (
-                    result.get("success") is True
-                ), f"Skipped refresh must return success=True, got: {result}"
+                assert result.get("success") is True, (
+                    f"Skipped refresh must return success=True, got: {result}"
+                )
                 assert result.get("alias") == "test-repo-global" or "test-repo" in str(
                     result
                 ), f"Result must include alias info: {result}"
@@ -748,13 +748,13 @@ class TestBothFixesInteraction:
         ):
             reconcile_scheduler.reconcile_golden_repos()
 
-        assert (
-            len(refresh_was_skipped) >= 1
-        ), "race_condition_restore must have been called (master was missing)"
+        assert len(refresh_was_skipped) >= 1, (
+            "race_condition_restore must have been called (master was missing)"
+        )
         assert all(refresh_was_skipped), (
             f"Refresh must have been SKIPPED while reconciliation held the write lock. "
             f"Got skip results: {refresh_was_skipped}"
         )
-        assert (
-            len(git_pull_was_called) == 0
-        ), "GitPullUpdater must NOT have been called during reconciliation lock hold"
+        assert len(git_pull_was_called) == 0, (
+            "GitPullUpdater must NOT have been called during reconciliation lock hold"
+        )

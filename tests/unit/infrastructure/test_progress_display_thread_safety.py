@@ -73,12 +73,12 @@ class TestRichLiveProgressManagerThreadSafety:
 
         # With proper thread safety, we should have NO errors and consistent state
         # This validates that the thread safety implementation is working correctly
-        assert (
-            len(errors) == 0
-        ), f"Thread safety implementation should prevent errors, but found: {errors}"
-        assert (
-            is_active == has_live_component
-        ), f"State should be consistent: is_active={is_active}, has_live_component={has_live_component}"
+        assert len(errors) == 0, (
+            f"Thread safety implementation should prevent errors, but found: {errors}"
+        )
+        assert is_active == has_live_component, (
+            f"State should be consistent: is_active={is_active}, has_live_component={has_live_component}"
+        )
 
     def test_concurrent_update_operations_thread_safe(self):
         """Test concurrent update operations are properly thread-safe."""
@@ -184,9 +184,9 @@ class TestRichLiveProgressManagerThreadSafety:
 
         # With proper thread safety, we should have NO errors
         # This validates that the thread safety implementation prevents race conditions
-        assert (
-            len(operation_errors) == 0
-        ), f"Thread safety implementation should prevent race conditions, but found errors: {operation_errors}"
+        assert len(operation_errors) == 0, (
+            f"Thread safety implementation should prevent race conditions, but found errors: {operation_errors}"
+        )
 
     def test_state_consistency_under_concurrent_access(self):
         """Test state consistency under high-frequency concurrent access."""
@@ -244,9 +244,9 @@ class TestRichLiveProgressManagerThreadSafety:
 
         # With proper thread safety, we should have NO state inconsistencies
         # This validates that the thread safety implementation maintains consistent state
-        assert (
-            len(inconsistent_states) == 0
-        ), f"Thread safety implementation should maintain consistent state, but found inconsistencies: {inconsistent_states}"
+        assert len(inconsistent_states) == 0, (
+            f"Thread safety implementation should maintain consistent state, but found inconsistencies: {inconsistent_states}"
+        )
 
     def test_attribute_error_during_concurrent_access(self):
         """Test for AttributeError during concurrent access to live_component."""
@@ -366,12 +366,12 @@ class TestRichLiveProgressManagerThreadSafety:
 
         # This test validates that the manager has proper thread safety mechanisms
         # Check for the presence of threading.Lock
-        assert hasattr(
-            manager, "_lock"
-        ), "RichLiveProgressManager should have a _lock attribute for thread safety"
-        assert isinstance(
-            manager._lock, type(threading.Lock())
-        ), "The _lock should be a threading.Lock instance"
+        assert hasattr(manager, "_lock"), (
+            "RichLiveProgressManager should have a _lock attribute for thread safety"
+        )
+        assert isinstance(manager._lock, type(threading.Lock())), (
+            "The _lock should be a threading.Lock instance"
+        )
 
         # Test that critical sections are protected
         def concurrent_operation(op_type, thread_id):

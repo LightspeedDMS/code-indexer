@@ -279,9 +279,9 @@ class TestAC9ListAllGroupsSorted:
 
         # All default groups should come before all custom groups
         if default_indices and custom_indices:
-            assert max(default_indices) < min(
-                custom_indices
-            ), "Default groups should be listed before custom groups"
+            assert max(default_indices) < min(custom_indices), (
+                "Default groups should be listed before custom groups"
+            )
 
     def test_list_custom_groups_sorted_by_name(
         self, client, admin_auth_token, group_manager
@@ -353,6 +353,6 @@ class TestAC9ListAllGroupsSorted:
 
         # Verify custom groups are sorted alphabetically
         custom_names = [g.name for g in custom_groups]
-        assert custom_names == sorted(
-            custom_names
-        ), "Custom groups should be sorted alphabetically"
+        assert custom_names == sorted(custom_names), (
+            "Custom groups should be sorted alphabetically"
+        )

@@ -277,7 +277,7 @@ class TestDeltaMergePromptOutputFormat:
         prompt_lower = prompt.lower()
         assert "complete" in prompt_lower and "document" in prompt_lower, (
             "Prompt must instruct Claude to return the COMPLETE updated document. "
-            f"Got prompt excerpt: ...{prompt[max(0, prompt.lower().find('output')-50):prompt.lower().find('output')+200]}..."
+            f"Got prompt excerpt: ...{prompt[max(0, prompt.lower().find('output') - 50) : prompt.lower().find('output') + 200]}..."
         )
 
     def test_prompt_specifies_required_output_sections(self, analyzer):
@@ -295,18 +295,18 @@ class TestDeltaMergePromptOutputFormat:
         )
 
         # All four required sections must be named in the prompt
-        assert (
-            "Overview" in prompt
-        ), "Prompt must specify 'Overview' as a required output section"
-        assert (
-            "Repository Roles" in prompt
-        ), "Prompt must specify 'Repository Roles' as a required output section"
-        assert (
-            "Intra-Domain Dependencies" in prompt or "Intra-Domain" in prompt
-        ), "Prompt must specify 'Intra-Domain Dependencies' as a required output section"
-        assert (
-            "Cross-Domain Connections" in prompt
-        ), "Prompt must specify 'Cross-Domain Connections' as a required output section"
+        assert "Overview" in prompt, (
+            "Prompt must specify 'Overview' as a required output section"
+        )
+        assert "Repository Roles" in prompt, (
+            "Prompt must specify 'Repository Roles' as a required output section"
+        )
+        assert "Intra-Domain Dependencies" in prompt or "Intra-Domain" in prompt, (
+            "Prompt must specify 'Intra-Domain Dependencies' as a required output section"
+        )
+        assert "Cross-Domain Connections" in prompt, (
+            "Prompt must specify 'Cross-Domain Connections' as a required output section"
+        )
 
     def test_prompt_prohibits_summary_only_response(self, analyzer):
         """
@@ -329,7 +329,7 @@ class TestDeltaMergePromptOutputFormat:
             or ("do not only return a summary" in prompt_lower)
         ), (
             "Prompt must explicitly say 'Do NOT return only a summary of changes'. "
-            f"Prompt output section: {prompt[prompt.lower().find('output format'):prompt.lower().find('output format')+500]}"
+            f"Prompt output section: {prompt[prompt.lower().find('output format') : prompt.lower().find('output format') + 500]}"
         )
 
     def test_prompt_output_format_section_contains_all_ac2_requirements(self, analyzer):
@@ -349,21 +349,21 @@ class TestDeltaMergePromptOutputFormat:
         prompt_lower = prompt.lower()
 
         # Requirement 1: "return the COMPLETE updated domain analysis document"
-        assert (
-            "complete" in prompt_lower
-        ), "AC2: Prompt must contain the word 'complete' regarding document output"
+        assert "complete" in prompt_lower, (
+            "AC2: Prompt must contain the word 'complete' regarding document output"
+        )
 
         # Requirement 2: Required output sections named explicitly
         required_sections = ["Overview", "Repository Roles", "Cross-Domain Connections"]
         for section in required_sections:
-            assert (
-                section in prompt
-            ), f"AC2: Prompt must specify '{section}' as a required output section"
+            assert section in prompt, (
+                f"AC2: Prompt must specify '{section}' as a required output section"
+            )
 
         # Requirement 3: "Do NOT return only a summary of changes"
-        assert (
-            "summary" in prompt_lower and "not" in prompt_lower
-        ), "AC2: Prompt must explicitly prohibit returning only a summary of changes"
+        assert "summary" in prompt_lower and "not" in prompt_lower, (
+            "AC2: Prompt must explicitly prohibit returning only a summary of changes"
+        )
 
 
 # =============================================================================
@@ -504,12 +504,12 @@ class TestUnchangedReposExtraction:
         )
 
         # user-service and permission-service are unchanged
-        assert (
-            "user-service" in prompt
-        ), "user-service is unchanged and must appear in prompt (Unchanged section)"
-        assert (
-            "permission-service" in prompt
-        ), "permission-service is unchanged and must appear in prompt (Unchanged section)"
+        assert "user-service" in prompt, (
+            "user-service is unchanged and must appear in prompt (Unchanged section)"
+        )
+        assert "permission-service" in prompt, (
+            "permission-service is unchanged and must appear in prompt (Unchanged section)"
+        )
 
 
 class TestUnchangedRepositoriesSection:
@@ -662,9 +662,9 @@ class TestSelfCorrectionRulesScopedToChangedRepos:
         )
 
         prompt_lower = prompt.lower()
-        assert (
-            "unchanged" in prompt_lower and "preserve" in prompt_lower
-        ), "Prompt must have a rule explicitly preserving UNCHANGED repos analysis."
+        assert "unchanged" in prompt_lower and "preserve" in prompt_lower, (
+            "Prompt must have a rule explicitly preserving UNCHANGED repos analysis."
+        )
 
     def test_never_remove_rule_for_unchanged_repos(self, analyzer):
         """
@@ -726,12 +726,12 @@ class TestSelfCorrectionRulesScopedToChangedRepos:
         )
 
         prompt_lower = prompt.lower()
-        assert (
-            "re-verify" in prompt_lower or "reverify" in prompt_lower
-        ), "AC3: Prompt must still instruct re-verification of changed repo deps"
-        assert (
-            "remove" in prompt_lower and "changed" in prompt_lower
-        ), "AC3: Prompt must still allow removal of stale deps for CHANGED repos"
+        assert "re-verify" in prompt_lower or "reverify" in prompt_lower, (
+            "AC3: Prompt must still instruct re-verification of changed repo deps"
+        )
+        assert "remove" in prompt_lower and "changed" in prompt_lower, (
+            "AC3: Prompt must still allow removal of stale deps for CHANGED repos"
+        )
 
 
 class TestRemovedReposCleanup:
@@ -773,12 +773,12 @@ None.
         )
 
         prompt_lower = prompt.lower()
-        assert (
-            "old-deprecated-repo" in prompt
-        ), "AC4: Removed repo must still be mentioned in prompt for cleanup"
-        assert (
-            "remove" in prompt_lower or "removed" in prompt_lower
-        ), "AC4: Prompt must instruct removal of references to removed repos"
+        assert "old-deprecated-repo" in prompt, (
+            "AC4: Removed repo must still be mentioned in prompt for cleanup"
+        )
+        assert "remove" in prompt_lower or "removed" in prompt_lower, (
+            "AC4: Prompt must instruct removal of references to removed repos"
+        )
 
     def test_removed_repos_not_in_unchanged_section(self, analyzer):
         """
@@ -815,9 +815,9 @@ This repo was decommissioned.
                 if next_section != -1
                 else prompt[section_start:]
             )
-            assert (
-                "old-deprecated-repo" not in section_text
-            ), "AC4: Removed repo must NOT appear in Unchanged Repositories section"
+            assert "old-deprecated-repo" not in section_text, (
+                "AC4: Removed repo must NOT appear in Unchanged Repositories section"
+            )
 
 
 class TestEdgeCases:
@@ -852,12 +852,12 @@ class TestEdgeCases:
                 if next_section != -1
                 else prompt[section_start:]
             )
-            assert (
-                "- code-indexer" not in section_text
-            ), "code-indexer is CHANGED and must not be in Unchanged section"
-            assert (
-                "- cidx-server" not in section_text
-            ), "cidx-server is CHANGED and must not be in Unchanged section"
+            assert "- code-indexer" not in section_text, (
+                "code-indexer is CHANGED and must not be in Unchanged section"
+            )
+            assert "- cidx-server" not in section_text, (
+                "cidx-server is CHANGED and must not be in Unchanged section"
+            )
 
     def test_no_repos_changed_existing_repos_appear_unchanged(self, analyzer):
         """
@@ -917,9 +917,9 @@ The only repository in this domain.
                 if next_section != -1
                 else prompt[section_start:]
             )
-            assert (
-                "- only-repo" not in section_text
-            ), "only-repo is the changed repo and must not be in Unchanged section"
+            assert "- only-repo" not in section_text, (
+                "only-repo is the changed repo and must not be in Unchanged section"
+            )
 
     def test_no_repo_headings_in_content_does_not_crash(self, analyzer):
         """
@@ -969,9 +969,9 @@ The only repository in this domain.
                 "cidx-server must be in Unchanged section even when changed_repos "
                 "uses dict format"
             )
-            assert (
-                "- code-indexer" not in section_text
-            ), "code-indexer (dict format alias) must not appear as unchanged"
+            assert "- code-indexer" not in section_text, (
+                "code-indexer (dict format alias) must not appear as unchanged"
+            )
 
 
 class TestNonRepoHeadingExclusion:

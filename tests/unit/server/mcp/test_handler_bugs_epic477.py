@@ -62,18 +62,18 @@ class TestListFilesBug:
             assert mock_file_service.list_files.called
 
             # Verify query_params is FileListQueryParams instance
-            assert (
-                received_query_params is not None
-            ), "Handler must pass query_params parameter"
-            assert isinstance(
-                received_query_params, FileListQueryParams
-            ), f"query_params must be FileListQueryParams instance, got {type(received_query_params).__name__}"
+            assert received_query_params is not None, (
+                "Handler must pass query_params parameter"
+            )
+            assert isinstance(received_query_params, FileListQueryParams), (
+                f"query_params must be FileListQueryParams instance, got {type(received_query_params).__name__}"
+            )
 
             # Verify query_params has expected values
             # Handler now builds recursive path pattern: src/ -> src/**/*
-            assert (
-                received_query_params.path_pattern == "src/**/*"
-            ), f"Expected path_pattern='src/**/*', got '{received_query_params.path_pattern}'"
+            assert received_query_params.path_pattern == "src/**/*", (
+                f"Expected path_pattern='src/**/*', got '{received_query_params.path_pattern}'"
+            )
 
 
 class TestGetFileContentBug:
@@ -88,14 +88,14 @@ class TestGetFileContentBug:
         from code_indexer.server.services.file_service import file_service
 
         # Verify method now exists
-        assert hasattr(
-            file_service, "get_file_content"
-        ), "FileListingService should have get_file_content method (bug is fixed)"
+        assert hasattr(file_service, "get_file_content"), (
+            "FileListingService should have get_file_content method (bug is fixed)"
+        )
 
         # Verify it's callable
-        assert callable(
-            file_service.get_file_content
-        ), "get_file_content should be callable"
+        assert callable(file_service.get_file_content), (
+            "get_file_content should be callable"
+        )
 
     def test_get_file_content_handler_needs_working_service_method(self, mock_user):
         """
@@ -164,14 +164,14 @@ class TestGetRepositoryStatisticsBug:
         source = inspect.getsource(service._get_repository_path)
 
         # Verify it now uses ActivatedRepoManager (bug is fixed)
-        assert (
-            "ActivatedRepoManager" in source
-        ), "RepositoryStatsService should use ActivatedRepoManager (bug is fixed)"
+        assert "ActivatedRepoManager" in source, (
+            "RepositoryStatsService should use ActivatedRepoManager (bug is fixed)"
+        )
 
         # Verify it does NOT use GoldenRepoManager anymore
-        assert (
-            "GoldenRepoManager" not in source
-        ), "RepositoryStatsService should not use GoldenRepoManager anymore"
+        assert "GoldenRepoManager" not in source, (
+            "RepositoryStatsService should not use GoldenRepoManager anymore"
+        )
 
     def test_get_repository_statistics_handler_needs_username_parameter(
         self, mock_user

@@ -95,15 +95,15 @@ class TestAnalyzeImpactFunctionality:
 
         # Every QueryResult should have depth field
         for result in results:
-            assert hasattr(
-                result, "depth"
-            ), f"QueryResult must have 'depth' field. Found fields: {result.__dict__.keys()}"
-            assert isinstance(
-                result.depth, int
-            ), f"depth must be integer, got {type(result.depth)}"
-            assert (
-                1 <= result.depth <= 3
-            ), f"depth should be between 1 and 3, got {result.depth}"
+            assert hasattr(result, "depth"), (
+                f"QueryResult must have 'depth' field. Found fields: {result.__dict__.keys()}"
+            )
+            assert isinstance(result.depth, int), (
+                f"depth must be integer, got {type(result.depth)}"
+            )
+            assert 1 <= result.depth <= 3, (
+                f"depth should be between 1 and 3, got {result.depth}"
+            )
 
     def test_bfs_traverse_single_database_call(self, scip_fixture_path):
         """Should verify _bfs_traverse_dependents calls get_dependents only ONCE.
@@ -215,14 +215,14 @@ class TestAnalyzeImpactFunctionality:
         )
 
         if "depth" in kwargs:
-            assert (
-                kwargs["depth"] == 3
-            ), f"Expected depth=3, got depth={kwargs['depth']}"
+            assert kwargs["depth"] == 3, (
+                f"Expected depth=3, got depth={kwargs['depth']}"
+            )
         elif len(first_call[0]) >= 2:
             # Positional argument (symbol, depth, exact)
-            assert (
-                first_call[0][1] == 3
-            ), f"Expected depth=3, got depth={first_call[0][1]}"
+            assert first_call[0][1] == 3, (
+                f"Expected depth=3, got depth={first_call[0][1]}"
+            )
 
     def test_returns_impact_analysis_result(self, scip_dir):
         """Should return ImpactAnalysisResult with expected structure."""
@@ -362,17 +362,17 @@ class TestExcludeIncludeFilters:
         result_paths = [str(s.file_path) for s in result]
 
         # These test paths should NOT be in results (excluded by */tests/*)
-        assert (
-            "tests/unit/test_foo.py" not in result_paths
-        ), "Pattern '*/tests/*' should exclude 'tests/unit/test_foo.py'"
-        assert (
-            "tests/integration/test_bar.py" not in result_paths
-        ), "Pattern '*/tests/*' should exclude 'tests/integration/test_bar.py'"
+        assert "tests/unit/test_foo.py" not in result_paths, (
+            "Pattern '*/tests/*' should exclude 'tests/unit/test_foo.py'"
+        )
+        assert "tests/integration/test_bar.py" not in result_paths, (
+            "Pattern '*/tests/*' should exclude 'tests/integration/test_bar.py'"
+        )
 
         # This production path SHOULD be in results (not excluded)
-        assert (
-            "src/main.py" in result_paths
-        ), "Pattern '*/tests/*' should NOT exclude 'src/main.py'"
+        assert "src/main.py" in result_paths, (
+            "Pattern '*/tests/*' should NOT exclude 'src/main.py'"
+        )
 
 
 class TestMatchesGlobPatternHelper:
@@ -463,9 +463,9 @@ class TestTraceCallChain:
         warning_messages = [
             rec.message for rec in caplog.records if rec.levelname == "WARNING"
         ]
-        assert not any(
-            "empty.scip.db" in msg for msg in warning_messages
-        ), f"Should not warn about empty database files, but got: {warning_messages}"
+        assert not any("empty.scip.db" in msg for msg in warning_messages), (
+            f"Should not warn about empty database files, but got: {warning_messages}"
+        )
 
     def test_trace_call_chains_logs_warning_for_invalid_database(
         self, tmp_path, caplog
@@ -498,9 +498,9 @@ class TestTraceCallChain:
         warning_messages = [
             rec.message for rec in caplog.records if rec.levelname == "WARNING"
         ]
-        assert any(
-            "invalid.scip.db" in msg for msg in warning_messages
-        ), f"Should warn about invalid database file, but got: {warning_messages}"
+        assert any("invalid.scip.db" in msg for msg in warning_messages), (
+            f"Should warn about invalid database file, but got: {warning_messages}"
+        )
 
 
 class TestGetSmartContext:

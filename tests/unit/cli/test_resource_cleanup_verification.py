@@ -117,9 +117,9 @@ class TestResourceCleanupFix:
         result = self.runner.invoke(cli, ["admin", "repos", "list"])
 
         # Should succeed
-        assert (
-            result.exit_code == 0
-        ), f"Admin repos list should succeed, got: {result.output}"
+        assert result.exit_code == 0, (
+            f"Admin repos list should succeed, got: {result.output}"
+        )
         assert "test-repo" in result.output
 
         # CRITICAL: Verify that client.close() was called for proper resource cleanup

@@ -195,6 +195,6 @@ class TestPasswordPolicyImplementation:
 
         for password, expected_valid in edge_cases:
             is_valid, message = PasswordPolicy.validate(password)
-            assert (
-                is_valid == expected_valid
-            ), f"Password '{password}' validation unexpected: {message}"
+            assert is_valid == expected_valid, (
+                f"Password '{password}' validation unexpected: {message}"
+            )

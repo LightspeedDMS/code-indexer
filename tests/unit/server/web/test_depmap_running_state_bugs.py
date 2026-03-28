@@ -140,12 +140,12 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
         assert response.status_code == 200
         content = response.text
         # Must show "Running", must NOT show "Unhealthy"
-        assert (
-            "Running" in content
-        ), f"Expected 'Running' in response but got: {content[:500]}"
-        assert (
-            "Unhealthy" not in content
-        ), f"'Unhealthy' must not override Running badge: {content[:500]}"
+        assert "Running" in content, (
+            f"Expected 'Running' in response but got: {content[:500]}"
+        )
+        assert "Unhealthy" not in content, (
+            f"'Unhealthy' must not override Running badge: {content[:500]}"
+        )
 
     def test_running_badge_preserved_when_content_critical(
         self, client, admin_session_cookie
@@ -177,12 +177,12 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
 
         assert response.status_code == 200
         content = response.text
-        assert (
-            "Running" in content
-        ), f"Expected 'Running' in response but got: {content[:500]}"
-        assert (
-            "Critical" not in content
-        ), f"'Critical' must not override Running badge: {content[:500]}"
+        assert "Running" in content, (
+            f"Expected 'Running' in response but got: {content[:500]}"
+        )
+        assert "Critical" not in content, (
+            f"'Critical' must not override Running badge: {content[:500]}"
+        )
 
     def test_content_health_still_applies_when_status_not_running(
         self, client, admin_session_cookie
@@ -255,9 +255,9 @@ class TestDepmapActivityEntriesDivHasLoadTrigger:
 
     def test_template_file_exists(self):
         """Sanity check: the template file we are testing actually exists."""
-        assert (
-            self.TEMPLATE_PATH.exists()
-        ), f"Template not found at {self.TEMPLATE_PATH}"
+        assert self.TEMPLATE_PATH.exists(), (
+            f"Template not found at {self.TEMPLATE_PATH}"
+        )
 
     def test_depmap_activity_entries_has_hx_trigger_with_load(self):
         """
@@ -268,9 +268,9 @@ class TestDepmapActivityEntriesDivHasLoadTrigger:
 
         # Find the depmap-activity-entries div
         # We look for the id and then check nearby attributes
-        assert (
-            'id="depmap-activity-entries"' in template_content
-        ), "depmap-activity-entries div must exist in template"
+        assert 'id="depmap-activity-entries"' in template_content, (
+            "depmap-activity-entries div must exist in template"
+        )
 
         # Extract the opening tag of the depmap-activity-entries div
         match = re.search(
@@ -330,10 +330,10 @@ class TestDepmapActivityEntriesDivHasLoadTrigger:
 
         # Extract the hx-trigger value
         trigger_match = re.search(r'hx-trigger="([^"]*)"', tag_html)
-        assert (
-            trigger_match is not None
-        ), f"Could not extract hx-trigger value from tag: {tag_html}"
+        assert trigger_match is not None, (
+            f"Could not extract hx-trigger value from tag: {tag_html}"
+        )
         trigger_value = trigger_match.group(1)
-        assert (
-            trigger_value == "load, every 3s"
-        ), f"hx-trigger must be exactly 'load, every 3s', got: '{trigger_value}'"
+        assert trigger_value == "load, every 3s", (
+            f"hx-trigger must be exactly 'load, every 3s', got: '{trigger_value}'"
+        )

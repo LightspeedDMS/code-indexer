@@ -129,9 +129,9 @@ def test_comprehensive_reconcile_modify_add_delete():
             text=True,
             timeout=180,
         )
-        assert (
-            index_result.returncode == 0
-        ), f"Initial index failed: {index_result.stderr}"
+        assert index_result.returncode == 0, (
+            f"Initial index failed: {index_result.stderr}"
+        )
         assert "✅ Indexing complete!" in index_result.stdout
 
         # Verify initial query works
@@ -142,12 +142,12 @@ def test_comprehensive_reconcile_modify_add_delete():
             text=True,
             timeout=30,
         )
-        assert (
-            query_result.returncode == 0
-        ), f"Initial query failed: {query_result.stderr}"
-        assert (
-            "file1.py" in query_result.stdout
-        ), "Should find file1.py in initial query"
+        assert query_result.returncode == 0, (
+            f"Initial query failed: {query_result.stderr}"
+        )
+        assert "file1.py" in query_result.stdout, (
+            "Should find file1.py in initial query"
+        )
 
         # Wait to ensure timestamp differences
         time.sleep(2)
@@ -201,9 +201,9 @@ class BrandNewClass:
             text=True,
             timeout=180,
         )
-        assert (
-            reconcile_result.returncode == 0
-        ), f"Reconcile failed: {reconcile_result.stderr}"
+        assert reconcile_result.returncode == 0, (
+            f"Reconcile failed: {reconcile_result.stderr}"
+        )
         assert "✅ Indexing complete!" in reconcile_result.stdout
 
         # Check reconcile detected work to do
@@ -226,9 +226,9 @@ class BrandNewClass:
             text=True,
             timeout=30,
         )
-        assert (
-            modified_query.returncode == 0
-        ), f"Modified query failed: {modified_query.stderr}"
+        assert modified_query.returncode == 0, (
+            f"Modified query failed: {modified_query.stderr}"
+        )
         assert "file1.py" in modified_query.stdout, "Should find modified file1.py"
 
         # The old content should NOT be found anymore
@@ -239,9 +239,9 @@ class BrandNewClass:
             text=True,
             timeout=30,
         )
-        assert (
-            old_query.returncode == 0
-        ), f"Old content query failed: {old_query.stderr}"
+        assert old_query.returncode == 0, (
+            f"Old content query failed: {old_query.stderr}"
+        )
         print(f"\n🔍 OLD CONTENT QUERY RESULT:\n{old_query.stdout}")
         # Check that the actual old content is not found
         if "original content 1" in old_query.stdout:
@@ -268,9 +268,9 @@ class BrandNewClass:
             text=True,
             timeout=30,
         )
-        assert (
-            deleted_query.returncode == 0
-        ), f"Deleted file query failed: {deleted_query.stderr}"
+        assert deleted_query.returncode == 0, (
+            f"Deleted file query failed: {deleted_query.stderr}"
+        )
 
         # Check if this is a git repository
         git_check = subprocess.run(
@@ -292,9 +292,9 @@ class BrandNewClass:
         else:
             # Non-git: file should be COMPLETELY REMOVED from database
             print("Non-git repository - deleted file should be completely removed")
-            assert (
-                "file2.py" not in deleted_query.stdout
-            ), "Deleted file should not be found in non-git repository"
+            assert "file2.py" not in deleted_query.stdout, (
+                "Deleted file should not be found in non-git repository"
+            )
 
         # === PHASE 5: Verify reconcile is idempotent ===
         print("\n=== PHASE 5: Verify idempotency ===")
@@ -307,15 +307,15 @@ class BrandNewClass:
             text=True,
             timeout=60,
         )
-        assert (
-            second_reconcile.returncode == 0
-        ), f"Second reconcile failed: {second_reconcile.stderr}"
+        assert second_reconcile.returncode == 0, (
+            f"Second reconcile failed: {second_reconcile.stderr}"
+        )
 
         # Should show files are up-to-date
         second_output = second_reconcile.stdout
-        assert (
-            "up-to-date" in second_output.lower()
-        ), f"Second reconcile should show files up-to-date: {second_output}"
+        assert "up-to-date" in second_output.lower(), (
+            f"Second reconcile should show files up-to-date: {second_output}"
+        )
 
         print(
             "\n✅ Comprehensive reconcile modify/add/delete test completed successfully!"
@@ -423,9 +423,9 @@ venv/
             text=True,
             timeout=180,
         )
-        assert (
-            index_result.returncode == 0
-        ), f"Master index failed: {index_result.stderr}"
+        assert index_result.returncode == 0, (
+            f"Master index failed: {index_result.stderr}"
+        )
 
         # Verify master files are indexed
         master_query = subprocess.run(
@@ -435,9 +435,9 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            master_query.returncode == 0
-        ), f"Master query failed: {master_query.stderr}"
+        assert master_query.returncode == 0, (
+            f"Master query failed: {master_query.stderr}"
+        )
         assert "master_only.py" in master_query.stdout, "Should find master_only.py"
 
         # === PHASE 3: Create feature branch with different files ===
@@ -473,9 +473,9 @@ venv/
             text=True,
             timeout=180,
         )
-        assert (
-            feature_index_result.returncode == 0
-        ), f"Feature index failed: {feature_index_result.stderr}"
+        assert feature_index_result.returncode == 0, (
+            f"Feature index failed: {feature_index_result.stderr}"
+        )
 
         # Verify feature_only.py is visible and master_only.py is hidden
         feature_query = subprocess.run(
@@ -485,9 +485,9 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            feature_query.returncode == 0
-        ), f"Feature query failed: {feature_query.stderr}"
+        assert feature_query.returncode == 0, (
+            f"Feature query failed: {feature_query.stderr}"
+        )
         assert "feature_only.py" in feature_query.stdout, "Should find feature_only.py"
 
         # Master-only file should not be visible in current branch
@@ -498,13 +498,13 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            master_hidden_query.returncode == 0
-        ), f"Master hidden query failed: {master_hidden_query.stderr}"
+        assert master_hidden_query.returncode == 0, (
+            f"Master hidden query failed: {master_hidden_query.stderr}"
+        )
         # The key test: master_only.py should not appear in results for current branch
-        assert (
-            "master_only.py" not in master_hidden_query.stdout
-        ), "master_only.py should be hidden when on feature branch"
+        assert "master_only.py" not in master_hidden_query.stdout, (
+            "master_only.py should be hidden when on feature branch"
+        )
 
         # === PHASE 5: Switch back to master - THE CRITICAL BUG TEST ===
         print("\n=== PHASE 5: Switch back to master (bug test) ===")
@@ -520,9 +520,9 @@ venv/
             text=True,
             timeout=180,
         )
-        assert (
-            master_reconcile_result.returncode == 0
-        ), f"Master reconcile failed: {master_reconcile_result.stderr}"
+        assert master_reconcile_result.returncode == 0, (
+            f"Master reconcile failed: {master_reconcile_result.stderr}"
+        )
 
         # === CRITICAL BUG TEST: Files that should be visible on master should become visible ===
         print("\n=== PHASE 6: Verify branch visibility bug fix ===")
@@ -535,9 +535,9 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            master_visible_query.returncode == 0
-        ), f"Master visible query failed: {master_visible_query.stderr}"
+        assert master_visible_query.returncode == 0, (
+            f"Master visible query failed: {master_visible_query.stderr}"
+        )
         assert "master_only.py" in master_visible_query.stdout, (
             "CRITICAL BUG TEST: master_only.py should be visible again when on master branch. "
             "This was the bug - files remained hidden after switching branches."
@@ -551,12 +551,12 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            feature_hidden_query.returncode == 0
-        ), f"Feature hidden query failed: {feature_hidden_query.stderr}"
-        assert (
-            "feature_only.py" not in feature_hidden_query.stdout
-        ), "feature_only.py should be hidden when on master branch"
+        assert feature_hidden_query.returncode == 0, (
+            f"Feature hidden query failed: {feature_hidden_query.stderr}"
+        )
+        assert "feature_only.py" not in feature_hidden_query.stdout, (
+            "feature_only.py should be hidden when on master branch"
+        )
 
         # === PHASE 7: Test multiple branch switches ===
         print("\n=== PHASE 7: Multiple branch switch test ===")
@@ -572,9 +572,9 @@ venv/
             text=True,
             timeout=180,
         )
-        assert (
-            feature_reconcile2.returncode == 0
-        ), f"Feature reconcile 2 failed: {feature_reconcile2.stderr}"
+        assert feature_reconcile2.returncode == 0, (
+            f"Feature reconcile 2 failed: {feature_reconcile2.stderr}"
+        )
 
         # Verify visibility switched correctly again
         feature_visible_query = subprocess.run(
@@ -584,12 +584,12 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            feature_visible_query.returncode == 0
-        ), f"Feature visible query failed: {feature_visible_query.stderr}"
-        assert (
-            "feature_only.py" in feature_visible_query.stdout
-        ), "feature_only.py should be visible again on feature branch"
+        assert feature_visible_query.returncode == 0, (
+            f"Feature visible query failed: {feature_visible_query.stderr}"
+        )
+        assert "feature_only.py" in feature_visible_query.stdout, (
+            "feature_only.py should be visible again on feature branch"
+        )
 
         master_hidden_query2 = subprocess.run(
             ["code-indexer", "query", "master_feature", "--quiet"],
@@ -598,12 +598,12 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            master_hidden_query2.returncode == 0
-        ), f"Master hidden query 2 failed: {master_hidden_query2.stderr}"
-        assert (
-            "master_only.py" not in master_hidden_query2.stdout
-        ), "master_only.py should be hidden again on feature branch"
+        assert master_hidden_query2.returncode == 0, (
+            f"Master hidden query 2 failed: {master_hidden_query2.stderr}"
+        )
+        assert "master_only.py" not in master_hidden_query2.stdout, (
+            "master_only.py should be hidden again on feature branch"
+        )
 
         # === PHASE 8: Test common files remain visible ===
         print("\n=== PHASE 8: Common files visibility test ===")
@@ -616,12 +616,12 @@ venv/
             text=True,
             timeout=30,
         )
-        assert (
-            common_query.returncode == 0
-        ), f"Common query failed: {common_query.stderr}"
-        assert (
-            "common.py" in common_query.stdout
-        ), "common.py should be visible in all branches"
+        assert common_query.returncode == 0, (
+            f"Common query failed: {common_query.stderr}"
+        )
+        assert "common.py" in common_query.stdout, (
+            "common.py should be visible in all branches"
+        )
 
         print("\n✅ COMPREHENSIVE BRANCH VISIBILITY TEST PASSED!")
         print("   ✅ Files correctly hidden/shown when switching branches")

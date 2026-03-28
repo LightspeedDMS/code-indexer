@@ -142,9 +142,9 @@ class TestRipgrepExitCodeHandling:
 
         assert len(warning_logs) == 0, "Exit code 1 (no stderr) should NOT log WARNING"
         assert len(debug_logs) > 0, "Exit code 1 (no stderr) should log at DEBUG"
-        assert any(
-            "no matches" in r.message.lower() for r in debug_logs
-        ), "DEBUG log should mention 'no matches'"
+        assert any("no matches" in r.message.lower() for r in debug_logs), (
+            "DEBUG log should mention 'no matches'"
+        )
 
     @pytest.mark.asyncio
     async def test_exit_code_1_with_stderr_logs_warning(
@@ -194,15 +194,15 @@ class TestRipgrepExitCodeHandling:
         # Should log at WARNING level (not DEBUG)
         warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
 
-        assert (
-            len(warning_logs) > 0
-        ), "Exit code 1 WITH stderr should log at WARNING level"
-        assert any(
-            "exit code 1" in r.message.lower() for r in warning_logs
-        ), "WARNING should mention exit code 1"
-        assert any(
-            "regex parse error" in r.message.lower() for r in warning_logs
-        ), "WARNING should include stderr content"
+        assert len(warning_logs) > 0, (
+            "Exit code 1 WITH stderr should log at WARNING level"
+        )
+        assert any("exit code 1" in r.message.lower() for r in warning_logs), (
+            "WARNING should mention exit code 1"
+        )
+        assert any("regex parse error" in r.message.lower() for r in warning_logs), (
+            "WARNING should include stderr content"
+        )
 
     @pytest.mark.asyncio
     async def test_exit_code_2_logs_warning(self, ripgrep_service, test_repo, caplog):
@@ -247,12 +247,12 @@ class TestRipgrepExitCodeHandling:
         warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
 
         assert len(warning_logs) > 0, "Exit code 2 should log at WARNING level"
-        assert any(
-            "exit code 2" in r.message.lower() for r in warning_logs
-        ), "WARNING should mention exit code 2"
-        assert any(
-            "permission denied" in r.message.lower() for r in warning_logs
-        ), "WARNING should include stderr content"
+        assert any("exit code 2" in r.message.lower() for r in warning_logs), (
+            "WARNING should mention exit code 2"
+        )
+        assert any("permission denied" in r.message.lower() for r in warning_logs), (
+            "WARNING should include stderr content"
+        )
 
     @pytest.mark.asyncio
     async def test_exit_code_1_empty_stderr_logs_debug(
@@ -301,9 +301,9 @@ class TestRipgrepExitCodeHandling:
         # Should log at DEBUG level, NOT WARNING
         warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
 
-        assert (
-            len(warning_logs) == 0
-        ), "Exit code 1 (empty stderr) should NOT log WARNING"
+        assert len(warning_logs) == 0, (
+            "Exit code 1 (empty stderr) should NOT log WARNING"
+        )
 
 
 class TestGrepExitCodeHandling:
@@ -399,9 +399,9 @@ class TestGrepExitCodeHandling:
 
         assert len(warning_logs) == 0, "Exit code 1 (no stderr) should NOT log WARNING"
         assert len(debug_logs) > 0, "Exit code 1 (no stderr) should log at DEBUG"
-        assert any(
-            "no matches" in r.message.lower() for r in debug_logs
-        ), "DEBUG log should mention 'no matches'"
+        assert any("no matches" in r.message.lower() for r in debug_logs), (
+            "DEBUG log should mention 'no matches'"
+        )
 
     @pytest.mark.asyncio
     async def test_exit_code_1_with_stderr_logs_warning(
@@ -447,12 +447,12 @@ class TestGrepExitCodeHandling:
         # Should log at WARNING level
         warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
 
-        assert (
-            len(warning_logs) > 0
-        ), "Exit code 1 WITH stderr should log at WARNING level"
-        assert any(
-            "exit code 1" in r.message.lower() for r in warning_logs
-        ), "WARNING should mention exit code 1"
+        assert len(warning_logs) > 0, (
+            "Exit code 1 WITH stderr should log at WARNING level"
+        )
+        assert any("exit code 1" in r.message.lower() for r in warning_logs), (
+            "WARNING should mention exit code 1"
+        )
 
     @pytest.mark.asyncio
     async def test_exit_code_2_logs_warning(self, grep_service, test_repo, caplog):
@@ -497,6 +497,6 @@ class TestGrepExitCodeHandling:
         warning_logs = [r for r in caplog.records if r.levelname == "WARNING"]
 
         assert len(warning_logs) > 0, "Exit code 2 should log at WARNING level"
-        assert any(
-            "exit code 2" in r.message.lower() for r in warning_logs
-        ), "WARNING should mention exit code 2"
+        assert any("exit code 2" in r.message.lower() for r in warning_logs), (
+            "WARNING should mention exit code 2"
+        )

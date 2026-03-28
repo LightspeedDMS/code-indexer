@@ -52,9 +52,9 @@ def _assert_no_crash(resp, tool_name: str) -> str:
         text = str(body)
 
     for indicator in CRASH_INDICATORS:
-        assert (
-            indicator not in text
-        ), f"{tool_name} CRASHED with '{indicator}': {text[:400]}"
+        assert indicator not in text, (
+            f"{tool_name} CRASHED with '{indicator}': {text[:400]}"
+        )
     return text
 
 
@@ -93,9 +93,9 @@ def admin_token(client):
         "/auth/login",
         json={"username": "admin", "password": "admin"},
     )
-    assert (
-        resp.status_code == 200
-    ), f"Login failed: {resp.status_code} {resp.text[:200]}"
+    assert resp.status_code == 200, (
+        f"Login failed: {resp.status_code} {resp.text[:200]}"
+    )
     return resp.json()["access_token"]
 
 
@@ -122,9 +122,9 @@ class TestAppModuleAttributesExist:
         from code_indexer.server import app as app_module
 
         assert hasattr(app_module, attr), f"app module missing attribute: {attr}"
-        assert (
-            getattr(app_module, attr) is not None
-        ), f"app module attribute is None: {attr}"
+        assert getattr(app_module, attr) is not None, (
+            f"app module attribute is None: {attr}"
+        )
 
 
 # ---------------------------------------------------------------------------

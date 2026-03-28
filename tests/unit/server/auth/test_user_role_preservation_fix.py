@@ -223,9 +223,9 @@ class TestUserRolePreservationFix:
             )
 
             # Verify role preservation
-            assert refresh_result[
-                "valid"
-            ], f"Token refresh should succeed for {username}"
+            assert refresh_result["valid"], (
+                f"Token refresh should succeed for {username}"
+            )
             refreshed_user_data = refresh_result["user_data"]
 
             assert refreshed_user_data["role"] == expected_role_str, (

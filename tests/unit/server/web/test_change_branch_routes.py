@@ -264,15 +264,15 @@ class TestChangeBranchAsyncRoute:
                 alias="my-repo",
             )
 
-        assert (
-            result.status_code == 202
-        ), "Route must return HTTP 202 Accepted when job is submitted"
+        assert result.status_code == 202, (
+            "Route must return HTTP 202 Accepted when job is submitted"
+        )
         import json
 
         body = json.loads(result.body)
-        assert (
-            body.get("job_id") == "job-abc-123"
-        ), "Response must include job_id from change_branch_async()"
+        assert body.get("job_id") == "job-abc-123", (
+            "Response must include job_id from change_branch_async()"
+        )
         mock_manager.change_branch_async.assert_called_once_with(
             "my-repo", "feature/new", "admin"
         )
@@ -306,9 +306,9 @@ class TestChangeBranchAsyncRoute:
                 alias="my-repo",
             )
 
-        assert (
-            result.status_code == 200
-        ), "Route must return HTTP 200 when already on target branch (job_id=None)"
+        assert result.status_code == 200, (
+            "Route must return HTTP 200 when already on target branch (job_id=None)"
+        )
         import json
 
         body = json.loads(result.body)
@@ -343,15 +343,15 @@ class TestChangeBranchAsyncRoute:
                 alias="my-repo",
             )
 
-        assert (
-            result.status_code == 409
-        ), "Route must return HTTP 409 when DuplicateJobError raised"
+        assert result.status_code == 409, (
+            "Route must return HTTP 409 when DuplicateJobError raised"
+        )
         import json
 
         body = json.loads(result.body)
-        assert (
-            "existing_job_id" in body
-        ), "Response must include existing_job_id from DuplicateJobError"
+        assert "existing_job_id" in body, (
+            "Response must include existing_job_id from DuplicateJobError"
+        )
         assert body["existing_job_id"] == "existing-job-id"
 
     @pytest.mark.asyncio

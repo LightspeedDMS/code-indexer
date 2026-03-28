@@ -42,9 +42,9 @@ class TestCleanupOrphanScipDatabases:
     def test_method_exists_on_generator(self, tmp_path: Path):
         """SCIPGenerator has _cleanup_orphan_scip_databases() method."""
         generator = _make_generator(tmp_path)
-        assert hasattr(
-            generator, "_cleanup_orphan_scip_databases"
-        ), "SCIPGenerator must have _cleanup_orphan_scip_databases() method"
+        assert hasattr(generator, "_cleanup_orphan_scip_databases"), (
+            "SCIPGenerator must have _cleanup_orphan_scip_databases() method"
+        )
 
     def test_returns_zero_when_scip_dir_missing(self, tmp_path: Path):
         """Returns 0 when .code-indexer/scip/ directory doesn't exist."""
@@ -99,14 +99,14 @@ class TestCleanupOrphanScipDatabases:
         assert result == 1, f"Expected 1 orphan removed, got {result}"
 
         # Orphan should be deleted
-        assert (
-            not orphan_db.exists()
-        ), f"Orphan database should have been deleted: {orphan_db}"
+        assert not orphan_db.exists(), (
+            f"Orphan database should have been deleted: {orphan_db}"
+        )
 
         # Live project should still exist
-        assert (
-            scip_dir / "src" / "liveproject" / "index.scip.db"
-        ).exists(), "Live project database should NOT be deleted"
+        assert (scip_dir / "src" / "liveproject" / "index.scip.db").exists(), (
+            "Live project database should NOT be deleted"
+        )
 
     def test_deletes_multiple_orphans(self, tmp_path: Path):
         """Multiple orphan databases are all deleted."""

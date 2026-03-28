@@ -108,15 +108,15 @@ class TestDaemonTemporalE2E:
         assert result["stats"]["total_commits"] >= 2  # We made 2 commits
 
         # CRITICAL: No file discovery should have happened
-        assert (
-            len(files_discovered) == 0
-        ), f"File discovery occurred: {files_discovered}"
+        assert len(files_discovered) == 0, (
+            f"File discovery occurred: {files_discovered}"
+        )
 
         # Temporal indexing should be fast (no semantic overhead)
         # Allow generous time for API calls but should not include file discovery
-        assert (
-            elapsed < 30
-        ), f"Temporal indexing took too long: {elapsed}s (indicates semantic overhead)"
+        assert elapsed < 30, (
+            f"Temporal indexing took too long: {elapsed}s (indicates semantic overhead)"
+        )
 
     def test_daemon_semantic_still_works_e2e(self, git_project):
         """E2E test that semantic indexing still works normally."""
@@ -155,9 +155,9 @@ class TestDaemonTemporalE2E:
         assert temporal_result["status"] == "completed"
 
         # Cache should be invalidated, verify by checking internal state
-        assert (
-            daemon.cache_entry is None
-        ), "Cache not invalidated after temporal indexing"
+        assert daemon.cache_entry is None, (
+            "Cache not invalidated after temporal indexing"
+        )
 
         # Now run semantic indexing
         semantic_result = daemon.exposed_index_blocking(
@@ -166,6 +166,6 @@ class TestDaemonTemporalE2E:
         assert semantic_result["status"] == "completed"
 
         # Cache should be invalidated again
-        assert (
-            daemon.cache_entry is None
-        ), "Cache not invalidated after semantic indexing"
+        assert daemon.cache_entry is None, (
+            "Cache not invalidated after semantic indexing"
+        )

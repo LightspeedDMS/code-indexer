@@ -99,9 +99,9 @@ class TestCLIIssuesFix:
         result = self.runner.invoke(cli, ["repos", "list"])
 
         # Test should FAIL with current code - reproducing the issue
-        assert (
-            result.exit_code != 0
-        ), "Command should fail with Pydantic validation error"
+        assert result.exit_code != 0, (
+            "Command should fail with Pydantic validation error"
+        )
         assert (
             "Invalid response format" in result.output
             or "validation error" in result.output.lower()
@@ -169,9 +169,9 @@ class TestCLIIssuesFix:
         result = self.runner.invoke(cli, ["admin", "repos", "list"])
 
         # Test should FAIL with current code - reproducing the issue
-        assert (
-            result.exit_code != 0
-        ), "Command should fail with ProjectCredentialManager type error"
+        assert result.exit_code != 0, (
+            "Command should fail with ProjectCredentialManager type error"
+        )
         assert (
             "TypeError" in result.output or "unsupported operand type" in result.output
         )
@@ -248,9 +248,9 @@ class TestCLIIssuesFix:
                     len(resource_warnings) > 0 or not mock_client.close.called
                 )
 
-                assert (
-                    cleanup_issue_detected
-                ), "Should detect API client resource cleanup issues"
+                assert cleanup_issue_detected, (
+                    "Should detect API client resource cleanup issues"
+                )
 
     def test_integration_repos_list_should_work_after_fix(self):
         """Integration test that should pass after fixing repos list Pydantic issues.
@@ -302,9 +302,9 @@ class TestCLIIssuesFix:
             result = self.runner.invoke(cli, ["repos", "list"])
 
             # After fix: Command should succeed
-            assert (
-                result.exit_code == 0
-            ), f"Command should succeed after fix, got: {result.output}"
+            assert result.exit_code == 0, (
+                f"Command should succeed after fix, got: {result.output}"
+            )
             assert "my-project" in result.output
             assert "main" in result.output
             assert "✓" in result.output or "synced" in result.output
@@ -365,8 +365,8 @@ class TestCLIIssuesFix:
             result = self.runner.invoke(cli, ["admin", "repos", "list"])
 
             # After fix: Command should succeed
-            assert (
-                result.exit_code == 0
-            ), f"Admin repos list should succeed after fix, got: {result.output}"
+            assert result.exit_code == 0, (
+                f"Admin repos list should succeed after fix, got: {result.output}"
+            )
             assert "test-repo" in result.output
             assert "Ready" in result.output or "ready" in result.output

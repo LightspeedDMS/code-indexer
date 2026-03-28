@@ -274,9 +274,9 @@ class TestGoldenRepoAliasValidationSecurity:
                 except ValueError as e:
                     error_msg = str(e)
                     # Verify error message contains the specific problematic character
-                    assert (
-                        expected_char in error_msg
-                    ), f"Error message should mention '{expected_char}' for alias '{alias}'"
+                    assert expected_char in error_msg, (
+                        f"Error message should mention '{expected_char}' for alias '{alias}'"
+                    )
 
 
 class TestGoldenRepoAliasValidationRegression:

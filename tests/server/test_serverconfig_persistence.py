@@ -54,12 +54,14 @@ class TestServerConfigSerialization:
                 config_dict = json.load(f)
 
             # Story #15: max_concurrent_claude_cli is nested in claude_integration_config
-            assert (
-                "claude_integration_config" in config_dict
-            ), "Serialized config should include claude_integration_config"
+            assert "claude_integration_config" in config_dict, (
+                "Serialized config should include claude_integration_config"
+            )
             assert (
                 "max_concurrent_claude_cli" in config_dict["claude_integration_config"]
-            ), "Serialized config should include max_concurrent_claude_cli in claude_integration_config"
+            ), (
+                "Serialized config should include max_concurrent_claude_cli in claude_integration_config"
+            )
             assert (
                 config_dict["claude_integration_config"]["max_concurrent_claude_cli"]
                 == 8
@@ -94,19 +96,23 @@ class TestServerConfigSerialization:
                 config_dict = json.load(f)
 
             # Story #15: description_refresh_interval_hours is nested in claude_integration_config
-            assert (
-                "claude_integration_config" in config_dict
-            ), "Serialized config should include claude_integration_config"
+            assert "claude_integration_config" in config_dict, (
+                "Serialized config should include claude_integration_config"
+            )
             assert (
                 "description_refresh_interval_hours"
                 in config_dict["claude_integration_config"]
-            ), "Serialized config should include description_refresh_interval_hours in claude_integration_config"
+            ), (
+                "Serialized config should include description_refresh_interval_hours in claude_integration_config"
+            )
             assert (
                 config_dict["claude_integration_config"][
                     "description_refresh_interval_hours"
                 ]
                 == 48
-            ), "Serialized description_refresh_interval_hours should match original value"
+            ), (
+                "Serialized description_refresh_interval_hours should match original value"
+            )
 
 
 # =============================================================================
@@ -146,9 +152,9 @@ class TestServerConfigBackwardCompatibility:
 
             assert config is not None, "Old config should load successfully"
             # Story #15: anthropic_api_key moved to claude_integration_config
-            assert (
-                config.claude_integration_config.anthropic_api_key is None
-            ), "Missing anthropic_api_key should default to None"
+            assert config.claude_integration_config.anthropic_api_key is None, (
+                "Missing anthropic_api_key should default to None"
+            )
 
     def test_deserialize_old_config_without_max_concurrent_claude_cli(self):
         """
@@ -179,9 +185,9 @@ class TestServerConfigBackwardCompatibility:
 
             assert config is not None, "Old config should load successfully"
             # Story #15: max_concurrent_claude_cli moved to claude_integration_config
-            assert (
-                config.claude_integration_config.max_concurrent_claude_cli == 4
-            ), "Missing max_concurrent_claude_cli should default to 4"
+            assert config.claude_integration_config.max_concurrent_claude_cli == 4, (
+                "Missing max_concurrent_claude_cli should default to 4"
+            )
 
     def test_deserialize_old_config_without_description_refresh_interval_hours(self):
         """
@@ -287,9 +293,9 @@ class TestServerConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "max_concurrent_claude_cli" in str(exc_info.value).lower()
-        ), "Error message should mention max_concurrent_claude_cli"
+        assert "max_concurrent_claude_cli" in str(exc_info.value).lower(), (
+            "Error message should mention max_concurrent_claude_cli"
+        )
 
     def test_validation_rejects_max_concurrent_claude_cli_negative(self):
         """
@@ -314,9 +320,9 @@ class TestServerConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "max_concurrent_claude_cli" in str(exc_info.value).lower()
-        ), "Error message should mention max_concurrent_claude_cli"
+        assert "max_concurrent_claude_cli" in str(exc_info.value).lower(), (
+            "Error message should mention max_concurrent_claude_cli"
+        )
 
     def test_validation_rejects_description_refresh_interval_hours_less_than_1(self):
         """
@@ -341,9 +347,9 @@ class TestServerConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "description_refresh_interval_hours" in str(exc_info.value).lower()
-        ), "Error message should mention description_refresh_interval_hours"
+        assert "description_refresh_interval_hours" in str(exc_info.value).lower(), (
+            "Error message should mention description_refresh_interval_hours"
+        )
 
     def test_validation_rejects_description_refresh_interval_hours_negative(self):
         """
@@ -368,9 +374,9 @@ class TestServerConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "description_refresh_interval_hours" in str(exc_info.value).lower()
-        ), "Error message should mention description_refresh_interval_hours"
+        assert "description_refresh_interval_hours" in str(exc_info.value).lower(), (
+            "Error message should mention description_refresh_interval_hours"
+        )
 
     def test_validation_accepts_valid_max_concurrent_claude_cli(self):
         """

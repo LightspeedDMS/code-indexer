@@ -176,9 +176,9 @@ class TestVectorCalculationManagerCancellation:
 
             # Should respond to cancellation within 3 seconds
             # (much faster than the 40+ seconds it would take without cancellation)
-            assert (
-                cancel_response_time < 3.0
-            ), f"Cancellation took {cancel_response_time:.2f}s, expected < 3.0s"
+            assert cancel_response_time < 3.0, (
+                f"Cancellation took {cancel_response_time:.2f}s, expected < 3.0s"
+            )
 
     def test_no_new_tasks_after_cancellation(self):
         """Test that no new tasks are processed after cancellation."""
@@ -216,9 +216,9 @@ class TestVectorCalculationManagerCancellation:
                     pass
 
             # Most or all batch2 tasks should be cancelled
-            assert (
-                batch2_successful <= 1
-            ), f"Expected most batch2 tasks cancelled, but {batch2_successful} succeeded"
+            assert batch2_successful <= 1, (
+                f"Expected most batch2 tasks cancelled, but {batch2_successful} succeeded"
+            )
 
     @pytest.mark.unit
     def test_cancellation_preserves_completed_results(self):
@@ -251,9 +251,9 @@ class TestVectorCalculationManagerCancellation:
                     pass
 
             # At least some tasks should have completed successfully before cancellation
-            assert (
-                completed_successfully >= 2
-            ), f"Expected some tasks to complete before cancellation, got {completed_successfully}"
+            assert completed_successfully >= 2, (
+                f"Expected some tasks to complete before cancellation, got {completed_successfully}"
+            )
 
     def test_cancellation_cleans_up_resources(self):
         """Test that cancellation properly cleans up resources."""
@@ -279,9 +279,9 @@ class TestVectorCalculationManagerCancellation:
         shutdown_time = time.time() - start_shutdown
 
         # Shutdown should be fast even with pending tasks
-        assert (
-            shutdown_time < 3.0
-        ), f"Shutdown took {shutdown_time:.2f}s, expected < 3.0s"
+        assert shutdown_time < 3.0, (
+            f"Shutdown took {shutdown_time:.2f}s, expected < 3.0s"
+        )
         assert not manager.is_running
 
     def test_multiple_cancellation_requests_safe(self):

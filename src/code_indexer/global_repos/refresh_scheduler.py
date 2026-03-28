@@ -278,8 +278,7 @@ class RefreshScheduler:
             )
         elif error.category == "corruption":
             logger.error(
-                f"Repo {alias_name} has corrupted git objects, "
-                "initiating auto re-clone"
+                f"Repo {alias_name} has corrupted git objects, initiating auto re-clone"
             )
             should_reclone = True
         elif count >= self.MAX_TRANSIENT_FAILURES:

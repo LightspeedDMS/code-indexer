@@ -453,14 +453,14 @@ class TestDashboardRefreshInterval:
             content = template_path.read_text()
 
             # Verify the interval is 2000ms (2 seconds), not 5000ms
-            assert (
-                "setInterval(refreshAll, 2000)" in content
-            ), "Dashboard should use 2000ms (2 second) refresh interval"
+            assert "setInterval(refreshAll, 2000)" in content, (
+                "Dashboard should use 2000ms (2 second) refresh interval"
+            )
 
             # Verify 5000ms is NOT present (old interval)
-            assert (
-                "setInterval(refreshAll, 5000)" not in content
-            ), "Dashboard should NOT use 5000ms (5 second) refresh interval"
+            assert "setInterval(refreshAll, 5000)" not in content, (
+                "Dashboard should NOT use 5000ms (5 second) refresh interval"
+            )
         else:
             pytest.skip("Dashboard template not found at expected path")
 
@@ -487,12 +487,12 @@ class TestDashboardHealthTemplate:
             content = template_path.read_text()
 
             # Verify disk I/O metrics are displayed
-            assert (
-                "disk_read_kb_s" in content
-            ), "Dashboard should display disk read speed (disk_read_kb_s)"
-            assert (
-                "disk_write_kb_s" in content
-            ), "Dashboard should display disk write speed (disk_write_kb_s)"
+            assert "disk_read_kb_s" in content, (
+                "Dashboard should display disk read speed (disk_read_kb_s)"
+            )
+            assert "disk_write_kb_s" in content, (
+                "Dashboard should display disk write speed (disk_write_kb_s)"
+            )
         else:
             pytest.skip("Dashboard health template not found at expected path")
 
@@ -515,12 +515,12 @@ class TestDashboardHealthTemplate:
             content = template_path.read_text()
 
             # Verify network I/O metrics are displayed
-            assert (
-                "net_rx_kb_s" in content
-            ), "Dashboard should display network receive speed (net_rx_kb_s)"
-            assert (
-                "net_tx_kb_s" in content
-            ), "Dashboard should display network transmit speed (net_tx_kb_s)"
+            assert "net_rx_kb_s" in content, (
+                "Dashboard should display network receive speed (net_rx_kb_s)"
+            )
+            assert "net_tx_kb_s" in content, (
+                "Dashboard should display network transmit speed (net_tx_kb_s)"
+            )
         else:
             pytest.skip("Dashboard health template not found at expected path")
 
@@ -544,9 +544,9 @@ class TestDashboardHealthTemplate:
 
             # Verify user-friendly labels exist
             assert "Disk" in content, "Dashboard should have Disk label"
-            assert (
-                "Network" in content or "Net" in content
-            ), "Dashboard should have Network label"
+            assert "Network" in content or "Net" in content, (
+                "Dashboard should have Network label"
+            )
             assert "KB/s" in content, "Dashboard should display KB/s units"
         else:
             pytest.skip("Dashboard health template not found at expected path")

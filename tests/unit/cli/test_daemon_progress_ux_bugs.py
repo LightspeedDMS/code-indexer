@@ -110,12 +110,12 @@ class TestDaemonProgressUXBugs:
 
         # BUG ASSERTION: This should FAIL initially
         # The display should show "150/1357" but currently shows "none/1357"
-        assert (
-            "none" not in display_text.lower()
-        ), f"Display shows 'none' instead of numeric current: {display_text}"
-        assert (
-            f"{current}/{total}" in display_text
-        ), f"Display should show '{current}/{total}' but got: {display_text}"
+        assert "none" not in display_text.lower(), (
+            f"Display shows 'none' instead of numeric current: {display_text}"
+        )
+        assert f"{current}/{total}" in display_text, (
+            f"Display should show '{current}/{total}' but got: {display_text}"
+        )
 
     def test_bug1_empty_info_shows_none_current(self, progress_manager):
         """
@@ -138,12 +138,12 @@ class TestDaemonProgressUXBugs:
         display = progress_manager.get_integrated_display()
         display_text = render_table_to_text(display, progress_manager.console)
 
-        assert (
-            "none" not in display_text.lower()
-        ), f"Display shows 'none' with empty info: {display_text}"
-        assert (
-            f"{current}/{total}" in display_text
-        ), f"Display should show '{current}/{total}': {display_text}"
+        assert "none" not in display_text.lower(), (
+            f"Display shows 'none' with empty info: {display_text}"
+        )
+        assert f"{current}/{total}" in display_text, (
+            f"Display should show '{current}/{total}': {display_text}"
+        )
 
     def test_bug1_missing_metrics_shows_zero_speed(self, progress_manager):
         """
@@ -226,15 +226,15 @@ class TestDaemonProgressUXBugs:
 
         # BUG ASSERTION: This should FAIL initially
         # Should show file listings but currently shows nothing
-        assert (
-            "file1.py" in display_text
-        ), f"Should show file1.py from slot_tracker: {display_text}"
-        assert (
-            "file2.py" in display_text
-        ), f"Should show file2.py from slot_tracker: {display_text}"
-        assert (
-            "vectorizing" in display_text or "chunking" in display_text
-        ), f"Should show file status: {display_text}"
+        assert "file1.py" in display_text, (
+            f"Should show file1.py from slot_tracker: {display_text}"
+        )
+        assert "file2.py" in display_text, (
+            f"Should show file2.py from slot_tracker: {display_text}"
+        )
+        assert "vectorizing" in display_text or "chunking" in display_text, (
+            f"Should show file status: {display_text}"
+        )
 
     def test_bug2_no_concurrent_file_listing_visible(
         self, progress_manager, slot_tracker

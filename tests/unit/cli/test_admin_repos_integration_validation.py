@@ -30,9 +30,9 @@ class TestAdminReposIntegrationValidation:
                 result = runner.invoke(cli, cmd_args)
 
                 # Should fail gracefully with mode restriction
-                assert (
-                    result.exit_code == 1
-                ), f"Command {cmd_name} should fail in local mode"
+                assert result.exit_code == 1, (
+                    f"Command {cmd_name} should fail in local mode"
+                )
 
                 # Should have clear error message about mode restriction
                 error_patterns = [
@@ -42,17 +42,17 @@ class TestAdminReposIntegrationValidation:
                     "No remote configuration found",
                 ]
 
-                assert any(
-                    pattern in result.output for pattern in error_patterns
-                ), f"Command {cmd_name} should show clear error message about mode restriction"
+                assert any(pattern in result.output for pattern in error_patterns), (
+                    f"Command {cmd_name} should show clear error message about mode restriction"
+                )
 
                 # Should not crash or show stack traces
-                assert (
-                    "Traceback" not in result.output
-                ), f"Command {cmd_name} should not show stack traces"
-                assert (
-                    "Exception" not in result.output
-                ), f"Command {cmd_name} should not show raw exceptions"
+                assert "Traceback" not in result.output, (
+                    f"Command {cmd_name} should not show stack traces"
+                )
+                assert "Exception" not in result.output, (
+                    f"Command {cmd_name} should not show raw exceptions"
+                )
 
     def test_admin_repos_list_input_validation(self):
         """Test that admin repos list validates input properly."""
@@ -142,9 +142,9 @@ class TestAdminReposIntegrationValidation:
                 ), f"Command {' '.join(cmd)} should provide actionable error message"
 
                 # Should not leave users without guidance
-                assert (
-                    result.output.strip() != ""
-                ), f"Command {' '.join(cmd)} should not produce empty output"
+                assert result.output.strip() != "", (
+                    f"Command {' '.join(cmd)} should not produce empty output"
+                )
 
     def test_admin_repos_commands_consistent_help_format(self):
         """Test that all commands have consistent help formatting."""
@@ -159,12 +159,12 @@ class TestAdminReposIntegrationValidation:
             assert result.exit_code == 0, f"Help for {cmd} should work"
 
             # Should have consistent formatting elements
-            assert (
-                "Examples:" in result.output
-            ), f"Help for {cmd} should contain examples"
-            assert (
-                f"cidx admin repos {cmd}" in result.output
-            ), f"Help for {cmd} should contain command examples"
+            assert "Examples:" in result.output, (
+                f"Help for {cmd} should contain examples"
+            )
+            assert f"cidx admin repos {cmd}" in result.output, (
+                f"Help for {cmd} should contain command examples"
+            )
 
             # Should mention admin privileges
             assert (
@@ -187,9 +187,9 @@ class TestAdminReposIntegrationValidation:
         # Test that all expected commands exist
         expected_commands = ["add", "list", "show", "refresh"]
         for cmd in expected_commands:
-            assert (
-                cmd in repos_result.output
-            ), f"Command {cmd} should be listed in repos help"
+            assert cmd in repos_result.output, (
+                f"Command {cmd} should be listed in repos help"
+            )
 
         # Test that each command can show help
         for cmd in expected_commands:
@@ -239,9 +239,9 @@ class TestAdminReposIntegrationValidation:
 
         for cmd in commands:
             result = runner.invoke(cli, cmd)
-            assert (
-                result.exit_code == 0
-            ), f"Command {' '.join(cmd)} should complete successfully"
+            assert result.exit_code == 0, (
+                f"Command {' '.join(cmd)} should complete successfully"
+            )
 
     def test_admin_repos_argument_parsing_edge_cases(self):
         """Test edge cases in argument parsing."""
@@ -289,12 +289,12 @@ class TestAdminReposCommandStructure:
 
             # Command should have help
             help_result = runner.invoke(cli, ["admin", "repos", subcmd, "--help"])
-            assert (
-                help_result.exit_code == 0
-            ), f"Subcommand {subcmd} should provide help"
-            assert (
-                description_fragment in help_result.output
-            ), f"Subcommand {subcmd} should have appropriate description"
+            assert help_result.exit_code == 0, (
+                f"Subcommand {subcmd} should provide help"
+            )
+            assert description_fragment in help_result.output, (
+                f"Subcommand {subcmd} should have appropriate description"
+            )
 
     def test_admin_repos_command_consistency(self):
         """Test consistency across all admin repos commands."""

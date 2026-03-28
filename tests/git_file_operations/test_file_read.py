@@ -62,7 +62,7 @@ class TestGetFileContent:
         """
         # Create a file with exact line count
         test_file = local_test_repo / "lines_test.txt"
-        lines = [f"Line {i+1}\n" for i in range(50)]
+        lines = [f"Line {i + 1}\n" for i in range(50)]
         test_file.write_text("".join(lines))
 
         service = FileListingService()
@@ -94,7 +94,7 @@ class TestGetFileContent:
         """
         # Create file with 200 numbered lines
         test_file = local_test_repo / "paginated.txt"
-        lines = [f"Content line {i+1}\n" for i in range(200)]
+        lines = [f"Content line {i + 1}\n" for i in range(200)]
         test_file.write_text("".join(lines))
 
         service = FileListingService()
@@ -136,7 +136,7 @@ class TestGetFileContent:
         """
         # Create small file
         test_file = local_test_repo / "small_file.txt"
-        lines = [f"Line {i+1}\n" for i in range(10)]
+        lines = [f"Line {i + 1}\n" for i in range(10)]
         test_file.write_text("".join(lines))
 
         service = FileListingService()
@@ -167,7 +167,7 @@ class TestGetFileContent:
         """
         # Create file with 100 lines
         test_file = local_test_repo / "next_offset_test.txt"
-        lines = [f"Line {i+1}\n" for i in range(100)]
+        lines = [f"Line {i + 1}\n" for i in range(100)]
         test_file.write_text("".join(lines))
 
         service = FileListingService()
@@ -323,9 +323,9 @@ class TestGetFileContent:
             )
 
         # Verify content_hash is in metadata
-        assert (
-            "content_hash" in result["metadata"]
-        ), "content_hash must be present in metadata for optimistic locking"
+        assert "content_hash" in result["metadata"], (
+            "content_hash must be present in metadata for optimistic locking"
+        )
 
         # Verify hash matches expected SHA-256 of full file content
         assert result["metadata"]["content_hash"] == expected_hash, (

@@ -25,9 +25,9 @@ class TestMixedImages:
         )
 
         # Verify 4 valid images (PNG, JPG, WebP, GIF)
-        assert (
-            len(valid_images) == 4
-        ), f"Expected 4 valid images, got {len(valid_images)}"
+        assert len(valid_images) == 4, (
+            f"Expected 4 valid images, got {len(valid_images)}"
+        )
 
         # Check each supported format is present
         png_images = [img for img in valid_images if img.endswith(".png")]
@@ -60,9 +60,9 @@ class TestMixedImages:
 
         # Get invalid results
         invalid_results = [r for r in all_results if not r.is_valid]
-        assert (
-            len(invalid_results) == 3
-        ), f"Expected 3 invalid images, got {len(invalid_results)}"
+        assert len(invalid_results) == 3, (
+            f"Expected 3 invalid images, got {len(invalid_results)}"
+        )
 
         # Check skip reasons
         missing_results = [r for r in invalid_results if r.skip_reason == "missing"]
@@ -71,15 +71,15 @@ class TestMixedImages:
             r for r in invalid_results if r.skip_reason == "unsupported_format"
         ]
 
-        assert (
-            len(missing_results) == 1
-        ), f"Expected 1 missing image, got {len(missing_results)}"
-        assert (
-            len(remote_results) == 1
-        ), f"Expected 1 remote URL, got {len(remote_results)}"
-        assert (
-            len(unsupported_results) == 1
-        ), f"Expected 1 unsupported format, got {len(unsupported_results)}"
+        assert len(missing_results) == 1, (
+            f"Expected 1 missing image, got {len(missing_results)}"
+        )
+        assert len(remote_results) == 1, (
+            f"Expected 1 remote URL, got {len(remote_results)}"
+        )
+        assert len(unsupported_results) == 1, (
+            f"Expected 1 unsupported format, got {len(unsupported_results)}"
+        )
 
         # Verify specific invalid images
         assert any("does-not-exist.png" in r.path for r in missing_results)
@@ -106,9 +106,9 @@ class TestMixedImages:
         invalid_count = sum(1 for r in all_results if not r.is_valid)
 
         assert valid_count == 4, f"Expected 4 valid in all_results, got {valid_count}"
-        assert (
-            invalid_count == 3
-        ), f"Expected 3 invalid in all_results, got {invalid_count}"
+        assert invalid_count == 3, (
+            f"Expected 3 invalid in all_results, got {invalid_count}"
+        )
 
     def test_text_content_indexed_despite_invalid_images(self, multimodal_repo_path):
         """Verify document text is accessible even with invalid images."""

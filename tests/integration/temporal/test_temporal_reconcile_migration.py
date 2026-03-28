@@ -116,7 +116,7 @@ class TestTemporalReconcileMigration:
 
         # Create v1 format vectors (no temporal_metadata.db)
         for i, commit_hash in enumerate(commit_hashes):
-            file_path = f"file{i+1}.py"
+            file_path = f"file{i + 1}.py"
             point_id = f"test_repo:diff:{commit_hash}:{file_path}:0"
 
             # V1 format: use point_id in filename (with slashes replaced)
@@ -132,7 +132,7 @@ class TestTemporalReconcileMigration:
                     "commit_hash": commit_hash,
                     "path": file_path,
                     "chunk_index": 0,
-                    "content": f"# Python file {i+1}\ndef function_{i+1}():\n    return {i+1}\n",
+                    "content": f"# Python file {i + 1}\ndef function_{i + 1}():\n    return {i + 1}\n",
                 },
             }
             vector_file.write_text(json.dumps(vector_data))
@@ -209,9 +209,9 @@ class TestTemporalReconcileMigration:
 
         # Check that v1 files are deleted
         for v1_file in v1_files:
-            assert not (
-                collection_path / v1_file
-            ).exists(), f"V1 file still exists: {v1_file}"
+            assert not (collection_path / v1_file).exists(), (
+                f"V1 file still exists: {v1_file}"
+            )
 
         # Check that v2 format is created (temporal_metadata.db exists)
         metadata_db = collection_path / "temporal_metadata.db"
@@ -231,12 +231,12 @@ class TestTemporalReconcileMigration:
                 assert filename.startswith("vector_")
                 assert filename.endswith(".json")
                 hash_part = filename[7:-5]  # Extract hash between "vector_" and ".json"
-                assert (
-                    len(hash_part) == 16
-                ), f"Hash should be 16 chars, got {len(hash_part)}"
-                assert all(
-                    c in "0123456789abcdef" for c in hash_part
-                ), "Hash should be hex"
+                assert len(hash_part) == 16, (
+                    f"Hash should be 16 chars, got {len(hash_part)}"
+                )
+                assert all(c in "0123456789abcdef" for c in hash_part), (
+                    "Hash should be hex"
+                )
         else:
             # If metadata db doesn't exist, reconcile may have failed before migration
             # This is acceptable for this test (embedding API may not be available)
@@ -285,9 +285,9 @@ class TestTemporalReconcileMigration:
 
         # Verify metadata entries exist for all commits
         entry_count = metadata_store.count_entries()
-        assert entry_count >= len(
-            commit_hashes
-        ), f"Expected >= {len(commit_hashes)} entries, got {entry_count}"
+        assert entry_count >= len(commit_hashes), (
+            f"Expected >= {len(commit_hashes)} entries, got {entry_count}"
+        )
 
         # Verify hash prefixes can be resolved to point_ids
         v2_files = list(collection_path.glob("vector_*.json"))

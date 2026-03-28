@@ -365,7 +365,9 @@ class TestConcurrentIndexingPrevention:
                     indexer.smart_index(force_full=True)
 
                     # Heartbeat file should be cleaned up after completion
-                    assert not heartbeat_path.exists(), "Heartbeat file should be cleaned up after successful indexing completion"
+                    assert not heartbeat_path.exists(), (
+                        "Heartbeat file should be cleaned up after successful indexing completion"
+                    )
 
             finally:
                 metadata_path.unlink(missing_ok=True)

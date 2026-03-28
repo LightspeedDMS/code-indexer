@@ -137,9 +137,9 @@ def test_exclude_javascript_in_git_aware_repository(git_aware_test_codebase):
         )
 
         # Python files SHOULD appear
-        assert (
-            "test.py" in output
-        ), f"Python file should appear in results but doesn't. Output:\n{output}"
+        assert "test.py" in output, (
+            f"Python file should appear in results but doesn't. Output:\n{output}"
+        )
 
         # Cleanup - stop services
         runner.invoke(cli, ["stop"])
@@ -186,17 +186,17 @@ def test_exclude_multiple_languages_in_git_aware_repository(git_aware_test_codeb
         output = query_result.output
 
         # Verify no JS or TS files in output
-        assert (
-            "test.js" not in output
-        ), f"JavaScript file should be excluded. Output:\n{output}"
-        assert (
-            "test.ts" not in output
-        ), f"TypeScript file should be excluded. Output:\n{output}"
+        assert "test.js" not in output, (
+            f"JavaScript file should be excluded. Output:\n{output}"
+        )
+        assert "test.ts" not in output, (
+            f"TypeScript file should be excluded. Output:\n{output}"
+        )
 
         # Python file should appear
-        assert (
-            "test.py" in output
-        ), f"Python file should appear in results. Output:\n{output}"
+        assert "test.py" in output, (
+            f"Python file should appear in results. Output:\n{output}"
+        )
 
         # Cleanup
         runner.invoke(cli, ["stop"])

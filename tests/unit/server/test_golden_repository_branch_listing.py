@@ -325,9 +325,9 @@ class TestGoldenRepositoryBranchListingEndpoint:
 
         for branch_name, expected_type in test_cases:
             result = classify_branch_type(branch_name)
-            assert (
-                result == expected_type
-            ), f"Branch '{branch_name}' should be classified as '{expected_type}', got '{result}'"
+            assert result == expected_type, (
+                f"Branch '{branch_name}' should be classified as '{expected_type}', got '{result}'"
+            )
 
 
 @pytest.mark.e2e

@@ -210,12 +210,12 @@ class TestActivatedRepositoryInfoValidation:
         errors = exc_info.value.errors()
         error_fields = [e["loc"][0] for e in errors]
 
-        assert (
-            "golden_repo_alias" in error_fields
-        ), "Should fail validation for missing golden_repo_alias"
-        assert (
-            "current_branch" in error_fields
-        ), "Should fail validation for missing current_branch"
+        assert "golden_repo_alias" in error_fields, (
+            "Should fail validation for missing golden_repo_alias"
+        )
+        assert "current_branch" in error_fields, (
+            "Should fail validation for missing current_branch"
+        )
 
     def test_composite_repo_metadata_structure_vs_required_api_model(
         self, activated_repo_manager

@@ -50,9 +50,9 @@ class TestLangfuseClientEagerInitialize:
     def test_eager_initialize_method_exists(self):
         """LangfuseClient must have an eager_initialize() method."""
         client = LangfuseClient(make_enabled_config())
-        assert hasattr(
-            client, "eager_initialize"
-        ), "LangfuseClient must have an eager_initialize() method"
+        assert hasattr(client, "eager_initialize"), (
+            "LangfuseClient must have an eager_initialize() method"
+        )
         assert callable(client.eager_initialize), "eager_initialize must be callable"
 
     def test_eager_initialize_calls_ensure_initialized(self):
@@ -69,9 +69,9 @@ class TestLangfuseClientEagerInitialize:
 
         client.eager_initialize()
 
-        assert (
-            len(ensure_init_called) >= 1
-        ), "eager_initialize() must call _ensure_initialized() to pre-warm the SDK"
+        assert len(ensure_init_called) >= 1, (
+            "eager_initialize() must call _ensure_initialized() to pre-warm the SDK"
+        )
 
     def test_eager_initialize_when_disabled_is_noop(self):
         """When Langfuse is disabled, eager_initialize() must be a no-op."""
@@ -134,9 +134,9 @@ class TestLangfuseServiceEagerInitialize:
         """LangfuseService must have an eager_initialize() method."""
         mock_config_manager = MagicMock()
         service = LangfuseService(mock_config_manager)
-        assert hasattr(
-            service, "eager_initialize"
-        ), "LangfuseService must have an eager_initialize() method"
+        assert hasattr(service, "eager_initialize"), (
+            "LangfuseService must have an eager_initialize() method"
+        )
         assert callable(service.eager_initialize), "eager_initialize must be callable"
 
     def test_eager_initialize_calls_client_eager_initialize(self):
@@ -158,9 +158,9 @@ class TestLangfuseServiceEagerInitialize:
 
         service.eager_initialize()
 
-        assert (
-            len(client_eager_init_called) >= 1
-        ), "LangfuseService.eager_initialize() must call client.eager_initialize()"
+        assert len(client_eager_init_called) >= 1, (
+            "LangfuseService.eager_initialize() must call client.eager_initialize()"
+        )
 
     def test_eager_initialize_failure_does_not_raise(self):
         """LangfuseService.eager_initialize() must not raise on failure."""

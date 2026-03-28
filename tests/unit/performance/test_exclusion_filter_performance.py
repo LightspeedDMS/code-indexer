@@ -91,14 +91,14 @@ def test_exclusion_filter_overhead_less_than_5ms(large_populated_store):
     overhead = filtered_time - baseline_time
 
     # Verify results are different (filter is working)
-    assert len(results_with_filter) <= len(
-        results_no_filter
-    ), "Filtered results should be <= unfiltered"
+    assert len(results_with_filter) <= len(results_no_filter), (
+        "Filtered results should be <= unfiltered"
+    )
 
     # Verify overhead is minimal
-    assert (
-        overhead < 0.005
-    ), f"Exclusion filter overhead {overhead*1000:.2f}ms exceeds 5ms threshold"
+    assert overhead < 0.005, (
+        f"Exclusion filter overhead {overhead * 1000:.2f}ms exceeds 5ms threshold"
+    )
 
 
 def test_multiple_exclusions_performance_scales_linearly(large_populated_store):
@@ -143,9 +143,9 @@ def test_multiple_exclusions_performance_scales_linearly(large_populated_store):
         ratio_2x = timings[1] / timings[0]
         ratio_4x = timings[2] / timings[0]
 
-        assert (
-            ratio_2x < 3.0
-        ), f"2x exclusions should not be 3x slower (ratio: {ratio_2x:.2f})"
-        assert (
-            ratio_4x < 5.0
-        ), f"4x exclusions should not be 5x slower (ratio: {ratio_4x:.2f})"
+        assert ratio_2x < 3.0, (
+            f"2x exclusions should not be 3x slower (ratio: {ratio_2x:.2f})"
+        )
+        assert ratio_4x < 5.0, (
+            f"4x exclusions should not be 5x slower (ratio: {ratio_4x:.2f})"
+        )

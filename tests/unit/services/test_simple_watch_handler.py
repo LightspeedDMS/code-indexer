@@ -645,9 +645,9 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
         )
 
         # Atomic write temp files: prefix=".tmp_", suffix=f"_{filename}"
-        assert handler._should_ignore_file(
-            Path("/some/dir/.tmp_abc123_somefile.md")
-        ), ".tmp_ prefixed file must be ignored"
+        assert handler._should_ignore_file(Path("/some/dir/.tmp_abc123_somefile.md")), (
+            ".tmp_ prefixed file must be ignored"
+        )
 
     def test_tmp_prefix_with_only_md_extension_is_ignored(self):
         """Even when the final extension is .md (not .tmp), .tmp_ prefix must be ignored."""
@@ -661,9 +661,9 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
 
         # Suffix is .md but basename starts with .tmp_
         p = Path("/repo/.tmp_XYZ12345_README.md")
-        assert handler._should_ignore_file(
-            p
-        ), f"File {p.name} has .md extension but .tmp_ prefix — must be ignored"
+        assert handler._should_ignore_file(p), (
+            f"File {p.name} has .md extension but .tmp_ prefix — must be ignored"
+        )
 
     def test_regular_md_file_is_not_ignored(self):
         """Regular .md files without .tmp_ prefix must NOT be ignored."""
@@ -675,9 +675,9 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
             indexing_callback=lambda f, t: None,
         )
 
-        assert not handler._should_ignore_file(
-            Path("/some/dir/README.md")
-        ), "Regular .md file must not be ignored"
+        assert not handler._should_ignore_file(Path("/some/dir/README.md")), (
+            "Regular .md file must not be ignored"
+        )
 
     def test_tmp_suffix_still_ignored(self):
         """Existing .tmp suffix filter must still work."""
@@ -689,9 +689,9 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
             indexing_callback=lambda f, t: None,
         )
 
-        assert handler._should_ignore_file(
-            Path("/some/dir/somefile.tmp")
-        ), ".tmp suffix file must still be ignored"
+        assert handler._should_ignore_file(Path("/some/dir/somefile.tmp")), (
+            ".tmp suffix file must still be ignored"
+        )
 
     def test_tmp_prefix_and_tmp_suffix_both_ignored(self):
         """File that is both .tmp_ prefixed and .tmp suffixed must be ignored."""
@@ -738,13 +738,13 @@ class TestSimpleWatchHandlerTmpPrefixFiltering:
         handler.stop_watching()
 
         # .tmp_ prefixed file must not appear in any callback
-        assert not any(
-            ".tmp_" in f for f in callback_files
-        ), f".tmp_ prefixed file must not trigger callback. Got: {callback_files}"
+        assert not any(".tmp_" in f for f in callback_files), (
+            f".tmp_ prefixed file must not trigger callback. Got: {callback_files}"
+        )
         # The real file should have triggered callback
-        assert any(
-            "real_content.md" in f for f in callback_files
-        ), f"real_content.md should have triggered callback. Got: {callback_files}"
+        assert any("real_content.md" in f for f in callback_files), (
+            f"real_content.md should have triggered callback. Got: {callback_files}"
+        )
 
 
 class TestSimpleWatchHandlerAdditionalHandlers:

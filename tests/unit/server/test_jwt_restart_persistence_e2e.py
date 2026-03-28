@@ -54,9 +54,9 @@ class TestJWTRestartPersistenceE2E:
 
                 # Verify that the same token still works with the new server instance
                 protected_response2 = client2.get("/api/admin/users", headers=headers)
-                assert (
-                    protected_response2.status_code == 200
-                ), "Token from first server should work with second server"
+                assert protected_response2.status_code == 200, (
+                    "Token from first server should work with second server"
+                )
 
                 # Verify response contains expected data
                 users_data = protected_response2.json()
@@ -76,9 +76,9 @@ class TestJWTRestartPersistenceE2E:
                 for endpoint in endpoints_to_test:
                     response = client2.get(endpoint, headers=headers)
                     # Should not return 401 (auth error), regardless of other status codes
-                    assert (
-                        response.status_code != 401
-                    ), f"Endpoint {endpoint} should not return auth error with valid token"
+                    assert response.status_code != 401, (
+                        f"Endpoint {endpoint} should not return auth error with valid token"
+                    )
 
     def test_jwt_secret_file_permissions_persist(self):
         """Test that JWT secret file maintains proper permissions across restarts."""
@@ -163,9 +163,9 @@ class TestJWTRestartPersistenceE2E:
                     secret2 = secret_file2.read_text()
 
                 # Secrets should be different
-                assert (
-                    secret1 != secret2
-                ), "Different server instances should have different secrets"
+                assert secret1 != secret2, (
+                    "Different server instances should have different secrets"
+                )
                 assert len(secret1) > 0 and len(secret2) > 0
 
     def test_environment_variable_override_persists(self):

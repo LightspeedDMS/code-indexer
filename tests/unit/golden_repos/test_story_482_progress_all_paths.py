@@ -262,7 +262,7 @@ class TestPathCIndexSourceProgress:
 
         # Must have received at least one progress callback call
         assert len(received) > 0, (
-            "PATH C: _index_source must call progress_callback. " "Got zero calls."
+            "PATH C: _index_source must call progress_callback. Got zero calls."
         )
         # Must have received calls with phase info
         calls_with_phase = [c for c in received if c.get("phase") is not None]
@@ -397,7 +397,7 @@ class TestPathDChangeBranchCoarseProgress:
 
         # Must have received at least one progress callback call
         assert len(received) > 0, (
-            "PATH D: change_branch must call progress_callback. " "Got zero calls."
+            "PATH D: change_branch must call progress_callback. Got zero calls."
         )
         # Progress values must be ascending and cover a meaningful range
         pct_values = [c["pct"] for c in received]
@@ -572,9 +572,9 @@ class TestPathEActivatedRepoIndexManagerProgress:
 
         # The hardcoded values 50 and 90 should not appear since ProgressPhaseAllocator
         # now determines all progress values dynamically.
-        assert (
-            50 not in received_values
-        ), f"PATH E: hardcoded 50% milestone still present. Values: {received_values}"
-        assert (
-            90 not in received_values
-        ), f"PATH E: hardcoded 90% milestone still present. Values: {received_values}"
+        assert 50 not in received_values, (
+            f"PATH E: hardcoded 50% milestone still present. Values: {received_values}"
+        )
+        assert 90 not in received_values, (
+            f"PATH E: hardcoded 90% milestone still present. Values: {received_values}"
+        )

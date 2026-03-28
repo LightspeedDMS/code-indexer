@@ -38,9 +38,9 @@ class TestRecordRunMetrics:
     def test_method_exists_on_backend(self, tmp_path):
         """AC9: DependencyMapTrackingBackend has record_run_metrics method."""
         backend = _make_backend(tmp_path)
-        assert hasattr(
-            backend, "record_run_metrics"
-        ), "DependencyMapTrackingBackend must have record_run_metrics method"
+        assert hasattr(backend, "record_run_metrics"), (
+            "DependencyMapTrackingBackend must have record_run_metrics method"
+        )
 
     def test_stores_metrics_retrievable_via_get_run_history(self, tmp_path):
         """AC9: Stored metrics are retrievable via get_run_history."""
@@ -85,9 +85,9 @@ class TestGetRunHistory:
     def test_method_exists_on_backend(self, tmp_path):
         """AC9: DependencyMapTrackingBackend has get_run_history method."""
         backend = _make_backend(tmp_path)
-        assert hasattr(
-            backend, "get_run_history"
-        ), "DependencyMapTrackingBackend must have get_run_history method"
+        assert hasattr(backend, "get_run_history"), (
+            "DependencyMapTrackingBackend must have get_run_history method"
+        )
 
     def test_returns_empty_when_no_runs(self, tmp_path):
         """AC9: Returns empty list when no metrics recorded."""

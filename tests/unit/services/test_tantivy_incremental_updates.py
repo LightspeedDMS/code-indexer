@@ -260,9 +260,9 @@ def test_update_document_performance_reasonable(tantivy_manager):
     # Note: Target is <100ms, but test environment may be slower
     # Core requirement: changes must be immediately searchable (atomic commit)
     assert len(results) == 1, "Updated content should be searchable"
-    assert (
-        elapsed_ms < 1000
-    ), f"Update+search took {elapsed_ms:.2f}ms, unreasonably slow"
+    assert elapsed_ms < 1000, (
+        f"Update+search took {elapsed_ms:.2f}ms, unreasonably slow"
+    )
 
     # Log performance for monitoring (goal is <100ms, acceptable up to 500ms)
     if elapsed_ms > 100:
@@ -300,9 +300,9 @@ def test_delete_document_performance_reasonable(tantivy_manager):
     # Note: Target is <100ms, but test environment may be slower
     # Core requirement: changes must be immediately searchable (atomic commit)
     assert len(results) == 0, "Deleted content should not be searchable"
-    assert (
-        elapsed_ms < 1000
-    ), f"Delete+search took {elapsed_ms:.2f}ms, unreasonably slow"
+    assert elapsed_ms < 1000, (
+        f"Delete+search took {elapsed_ms:.2f}ms, unreasonably slow"
+    )
 
     # Log performance for monitoring (goal is <100ms, acceptable up to 500ms)
     if elapsed_ms > 100:

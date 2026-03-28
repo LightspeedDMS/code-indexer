@@ -120,9 +120,9 @@ class TestUnifiedLoginSubmission:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert location == "/admin/" or location.endswith(
-            "/admin/"
-        ), f"Expected redirect to /admin/, got {location}"
+        assert location == "/admin/" or location.endswith("/admin/"), (
+            f"Expected redirect to /admin/, got {location}"
+        )
 
         # Should set session cookie
         assert "session" in response.cookies, "Session cookie should be set"
@@ -163,9 +163,9 @@ class TestUnifiedLoginSubmission:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/user/api-keys" in location
-        ), f"Expected redirect to /user/api-keys, got {location}"
+        assert "/user/api-keys" in location, (
+            f"Expected redirect to /user/api-keys, got {location}"
+        )
 
         # Should set session cookie
         assert "session" in response.cookies, "Session cookie should be set"
@@ -203,9 +203,9 @@ class TestUnifiedLoginSubmission:
         # Should redirect to explicit redirect_to
         assert response.status_code in [302, 303]
         location = response.headers.get("location", "")
-        assert (
-            "/admin/users" in location
-        ), f"Expected redirect to /admin/users, got {location}"
+        assert "/admin/users" in location, (
+            f"Expected redirect to /admin/users, got {location}"
+        )
 
     def test_login_open_redirect_prevention(
         self, web_infrastructure: WebTestInfrastructure, admin_user: dict
@@ -270,9 +270,9 @@ class TestUnifiedLoginSubmission:
         )
 
         # Should contain error message
-        assert (
-            "invalid" in response.text.lower() or "error" in response.text.lower()
-        ), "Response should contain error message"
+        assert "invalid" in response.text.lower() or "error" in response.text.lower(), (
+            "Response should contain error message"
+        )
 
         # Should NOT set session cookie
         assert "session" not in response.cookies, "Session cookie should NOT be set"
@@ -337,19 +337,19 @@ class TestSSOInitiation:
         # After fix with | tojson: encodeURIComponent("/query?repo=backend\u0026query=auth")
         # (Note: tojson uses double quotes and Unicode escapes \u0026 for &)
         # Before fix (broken): encodeURIComponent('/query%3Frepo%3Dbackend%26query%3Dauth')
-        assert (
-            'encodeURIComponent("/query?repo=backend' in response.text
-        ), "JavaScript should have JSON-escaped URL for encodeURIComponent to handle"
+        assert 'encodeURIComponent("/query?repo=backend' in response.text, (
+            "JavaScript should have JSON-escaped URL for encodeURIComponent to handle"
+        )
 
         # Verify tojson is being used (produces Unicode escapes or raw chars, not HTML entities)
-        assert (
-            r"\u0026" in response.text or "&query=" in response.text
-        ), "Should use Unicode escape \\u0026 or raw & (from tojson), not HTML entities"
+        assert r"\u0026" in response.text or "&query=" in response.text, (
+            "Should use Unicode escape \\u0026 or raw & (from tojson), not HTML entities"
+        )
 
         # Verify no double-encoding (the broken state we're fixing)
-        assert (
-            "%253F" not in response.text
-        ), "Should NOT have double-encoded ? (%253F indicates double-encoding)"
+        assert "%253F" not in response.text, (
+            "Should NOT have double-encoded ? (%253F indicates double-encoding)"
+        )
 
         # SSO endpoint should handle the redirect_to parameter correctly
         # (May fail if OIDC not configured, which is acceptable)
@@ -397,9 +397,9 @@ class TestSSOInitiation:
         ), "JavaScript should have the OAuth authorize URL"
 
         # The key fix: tojson escapes & as \u0026 (Unicode escape) not &amp; (HTML entity)
-        assert (
-            r"\u0026" in response.text or "&" in response.text
-        ), "JavaScript should use either raw & or Unicode escape \\u0026, not HTML entities"
+        assert r"\u0026" in response.text or "&" in response.text, (
+            "JavaScript should use either raw & or Unicode escape \\u0026, not HTML entities"
+        )
 
         # Verify NO HTML entities in JavaScript context
         # Note: &amp; may still appear in HTML form fields (correct), but not in <script> blocks
@@ -590,9 +590,9 @@ class TestBackwardsCompatibility:
         """
         response = web_client.get("/admin/login", follow_redirects=False)
 
-        assert (
-            response.status_code == 301
-        ), f"Expected 301 Moved Permanently, got {response.status_code}"
+        assert response.status_code == 301, (
+            f"Expected 301 Moved Permanently, got {response.status_code}"
+        )
         location = response.headers.get("location", "")
         assert "/login" in location, f"Expected redirect to /login, got {location}"
 
@@ -672,9 +672,9 @@ class TestOAuthAuthorizationFlow:
         if response.status_code == 303:
             location = response.headers.get("location", "")
             assert "/login" in location, f"Should redirect to /login, got {location}"
-            assert (
-                "redirect_to" in location
-            ), "Should preserve OAuth params in redirect_to"
+            assert "redirect_to" in location, (
+                "Should preserve OAuth params in redirect_to"
+            )
 
     def test_oauth_authorize_authenticated_shows_consent(
         self, authenticated_client: TestClient
@@ -708,9 +708,9 @@ class TestOAuthAuthorizationFlow:
 
         # If consent screen shown, should contain authorization UI (not login form)
         if response.status_code == 200:
-            assert (
-                "Authorization" in response.text or "Authorize" in response.text
-            ), "Should show authorization consent screen"
+            assert "Authorization" in response.text or "Authorize" in response.text, (
+                "Should show authorization consent screen"
+            )
             # Should NOT contain login form
             assert not (
                 "username" in response.text.lower()
@@ -744,12 +744,12 @@ class TestProtectedRouteDecorators:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/login" in location
-        ), f"Should redirect to unified /login, got {location}"
-        assert (
-            "redirect_to" in location
-        ), "Should include redirect_to parameter for return URL"
+        assert "/login" in location, (
+            f"Should redirect to unified /login, got {location}"
+        )
+        assert "redirect_to" in location, (
+            "Should include redirect_to parameter for return URL"
+        )
 
     def test_require_user_session_allows_any_authenticated_user(
         self, authenticated_client: TestClient

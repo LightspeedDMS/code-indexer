@@ -134,9 +134,9 @@ class TestGoldenRepoMetadataProtocolCompliance:
             "close",
         ]
         for method_name in required:
-            assert callable(
-                getattr(backend, method_name, None)
-            ), f"Missing method: {method_name}"
+            assert callable(getattr(backend, method_name, None)), (
+                f"Missing method: {method_name}"
+            )
 
 
 # ---------------------------------------------------------------------------

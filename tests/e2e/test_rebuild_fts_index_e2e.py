@@ -162,9 +162,9 @@ class TestRebuildFTSIndexE2E:
                     "module",
                     "fts",
                 ]
-                assert any(
-                    err in output.lower() for err in acceptable_errors
-                ), f"Unexpected error: {output}"
+                assert any(err in output.lower() for err in acceptable_errors), (
+                    f"Unexpected error: {output}"
+                )
 
     @pytest.mark.e2e
     def test_rebuild_fts_index_with_empty_file_records(self):
@@ -240,15 +240,15 @@ class TestRebuildFTSIndexE2E:
                 )
 
                 # Verify old file is gone
-                assert not (
-                    fts_index_dir / "old_file.txt"
-                ).exists(), "Old FTS data should be removed"
+                assert not (fts_index_dir / "old_file.txt").exists(), (
+                    "Old FTS data should be removed"
+                )
             else:
                 # If it fails, check for acceptable reasons (e.g., tantivy not installed)
                 acceptable_errors = ["tantivy", "import", "module"]
-                assert any(
-                    err in output.lower() for err in acceptable_errors
-                ), f"Unexpected error: {output}"
+                assert any(err in output.lower() for err in acceptable_errors), (
+                    f"Unexpected error: {output}"
+                )
 
     @pytest.mark.e2e
     def test_rebuild_fts_index_shows_progress(self):
@@ -282,6 +282,6 @@ class TestRebuildFTSIndexE2E:
             else:
                 # Acceptable failure (tantivy not installed)
                 acceptable_errors = ["tantivy", "import", "module"]
-                assert any(
-                    err in output.lower() for err in acceptable_errors
-                ), f"Unexpected error: {output}"
+                assert any(err in output.lower() for err in acceptable_errors), (
+                    f"Unexpected error: {output}"
+                )

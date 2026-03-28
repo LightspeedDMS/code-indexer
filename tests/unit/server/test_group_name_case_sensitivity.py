@@ -123,9 +123,9 @@ class TestGetGroupByNameCaseSensitivity:
 
         # get_group_by_name() should find with any case (same behavior)
         found = group_manager.get_group_by_name("testgroup")
-        assert (
-            found is not None
-        ), "get_group_by_name() should be case-insensitive to match create_group()"
+        assert found is not None, (
+            "get_group_by_name() should be case-insensitive to match create_group()"
+        )
         assert found.name == "TestGroup"
 
     def test_auto_assign_golden_repo_works_with_case_variants(self, group_manager):

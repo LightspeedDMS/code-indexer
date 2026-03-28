@@ -34,20 +34,20 @@ def test_multiple_languages_wrapped_in_should_clause():
     must_conditions = filter_conditions["must"]
 
     # Should have exactly 1 item in must
-    assert (
-        len(must_conditions) == 1
-    ), f"Expected 1 must condition, got {len(must_conditions)}"
+    assert len(must_conditions) == 1, (
+        f"Expected 1 must condition, got {len(must_conditions)}"
+    )
 
     # That 1 item should be a "should" clause
-    assert (
-        "should" in must_conditions[0]
-    ), "Multiple languages should be wrapped in 'should' clause"
+    assert "should" in must_conditions[0], (
+        "Multiple languages should be wrapped in 'should' clause"
+    )
 
     # The "should" clause should contain both language filters
     should_clause = must_conditions[0]["should"]
-    assert (
-        len(should_clause) == 2
-    ), f"Expected 2 language filters in 'should', got {len(should_clause)}"
+    assert len(should_clause) == 2, (
+        f"Expected 2 language filters in 'should', got {len(should_clause)}"
+    )
 
 
 def test_single_language_not_wrapped():
@@ -76,9 +76,9 @@ def test_single_language_not_wrapped():
 
     # For single language, it's a list of the language filter (which itself contains "should" for extensions)
     assert len(must_conditions) == 1
-    assert (
-        "should" in must_conditions[0]
-    ), "Single language filter should contain 'should' for extensions"
+    assert "should" in must_conditions[0], (
+        "Single language filter should contain 'should' for extensions"
+    )
 
 
 def test_old_buggy_logic_creates_and():
@@ -98,9 +98,9 @@ def test_old_buggy_logic_creates_and():
         must_conditions_buggy.append(language_filter)  # BUG: appending directly to must
 
     # This creates AND logic: must match Python extensions AND JavaScript extensions (impossible!)
-    assert (
-        len(must_conditions_buggy) == 2
-    ), "Buggy code creates 2 separate must conditions"
+    assert len(must_conditions_buggy) == 2, (
+        "Buggy code creates 2 separate must conditions"
+    )
     assert "should" in must_conditions_buggy[0], "First is Python 'should' clause"
     assert "should" in must_conditions_buggy[1], "Second is JavaScript 'should' clause"
     # This structure means: (py OR pyi OR pyw) AND (js OR jsx) = impossible!
@@ -130,12 +130,12 @@ def test_multiple_path_filters_or_logic():
     assert len(must_conditions) == 1
 
     # That item should be a "should" clause
-    assert (
-        "should" in must_conditions[0]
-    ), "Multiple paths should be wrapped in 'should' clause"
+    assert "should" in must_conditions[0], (
+        "Multiple paths should be wrapped in 'should' clause"
+    )
 
     # The "should" clause should contain both path filters
     should_clause = must_conditions[0]["should"]
-    assert (
-        len(should_clause) == 2
-    ), f"Expected 2 path filters in 'should', got {len(should_clause)}"
+    assert len(should_clause) == 2, (
+        f"Expected 2 path filters in 'should', got {len(should_clause)}"
+    )

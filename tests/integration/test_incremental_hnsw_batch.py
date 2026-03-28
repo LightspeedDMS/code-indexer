@@ -97,9 +97,9 @@ class {prefix.capitalize()}Class{i}:
         assert "new_file" in result.stdout
 
         # Incremental should be relatively fast (adjusted for CI environment)
-        assert (
-            incremental_time < 15
-        ), f"Incremental indexing took {incremental_time:.2f}s"
+        assert incremental_time < 15, (
+            f"Incremental indexing took {incremental_time:.2f}s"
+        )
 
     def test_cidx_index_first_run_uses_full_rebuild(self, tmpdir):
         """Test cidx index on fresh repo uses full rebuild."""
@@ -210,9 +210,9 @@ class {prefix.capitalize()}Class{i}:
 
         # Check for incremental update in output
         # Should be fast for incremental temporal (adjusted for CI)
-        assert (
-            incremental_time < 15
-        ), f"Incremental temporal index took {incremental_time:.2f}s"
+        assert incremental_time < 15, (
+            f"Incremental temporal index took {incremental_time:.2f}s"
+        )
 
         # Verify temporal query returns recent commits
         result = subprocess.run(
@@ -366,6 +366,6 @@ class Module{i}Handler{j}:
         # For small test cases with API overhead, incremental might not be faster
         # The real benefit comes with larger codebases (1000+ files)
         # Just verify both complete successfully
-        assert (
-            result.returncode == 0
-        ), "Incremental indexing should complete successfully"
+        assert result.returncode == 0, (
+            "Incremental indexing should complete successfully"
+        )

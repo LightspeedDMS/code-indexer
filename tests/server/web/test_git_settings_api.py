@@ -29,9 +29,9 @@ class TestGitSettingsAPI:
         """
         response = web_client.get("/api/settings/git")
 
-        assert (
-            response.status_code == 401
-        ), f"Expected 401 Unauthorized, got {response.status_code}"
+        assert response.status_code == 401, (
+            f"Expected 401 Unauthorized, got {response.status_code}"
+        )
 
     def test_get_git_settings_returns_current_config(
         self, authenticated_client: TestClient
@@ -46,9 +46,9 @@ class TestGitSettingsAPI:
         response = authenticated_client.get("/api/settings/git")
 
         # Verify response
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 OK, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 OK, got {response.status_code}"
+        )
         data = response.json()
 
         assert "service_committer_name" in data
@@ -67,9 +67,9 @@ class TestGitSettingsAPI:
         """
         response = authenticated_client.get("/api/settings/git")
 
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 OK, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 OK, got {response.status_code}"
+        )
         data = response.json()
 
         # Verify response structure with expected field types
@@ -103,9 +103,9 @@ class TestUpdateGitSettings:
         payload = {"default_committer_email": "new@example.com"}
         response = web_client.put("/api/settings/git", json=payload)
 
-        assert (
-            response.status_code == 401
-        ), f"Expected 401 Unauthorized, got {response.status_code}"
+        assert response.status_code == 401, (
+            f"Expected 401 Unauthorized, got {response.status_code}"
+        )
 
     def test_put_git_settings_updates_config(self, authenticated_client: TestClient):
         """
@@ -122,9 +122,9 @@ class TestUpdateGitSettings:
         response = authenticated_client.put("/api/settings/git", json=payload)
 
         # Verify response
-        assert (
-            response.status_code == 200
-        ), f"Expected 200 OK, got {response.status_code}"
+        assert response.status_code == 200, (
+            f"Expected 200 OK, got {response.status_code}"
+        )
         data = response.json()
         assert data["default_committer_email"] == new_email
 

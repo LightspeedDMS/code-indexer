@@ -514,9 +514,9 @@ class TestRemoteQueryCLIIntegration:
                 assert callable(query)
 
                 # Verify the query command has Click decorators (indicating CLI integration)
-                assert hasattr(
-                    query, "params"
-                ), "Query command should have Click parameters"
+                assert hasattr(query, "params"), (
+                    "Query command should have Click parameters"
+                )
 
                 # Note: Full CLI integration testing would require more complex setup
                 # with proper Click context management. The main functionality is tested
@@ -546,9 +546,9 @@ class TestRemoteQueryCLIIntegration:
         ]
 
         for param in expected_params:
-            assert (
-                param in command_params
-            ), f"Parameter {param} missing from query command"
+            assert param in command_params, (
+                f"Parameter {param} missing from query command"
+            )
 
     def test_cli_query_command_help_consistency(self):
         """Test that CLI query command help text is consistent between modes."""

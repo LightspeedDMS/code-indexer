@@ -25,9 +25,9 @@ class TestDaemonQuietFlagParsing:
         args = ["test query", "--quiet", "--limit", "10"]
         result = parse_query_args(args)
 
-        assert (
-            result["quiet"] is True
-        ), "quiet flag should be True when --quiet is present"
+        assert result["quiet"] is True, (
+            "quiet flag should be True when --quiet is present"
+        )
         assert result["query_text"] == "test query"
         assert result["limit"] == 10
 
@@ -52,9 +52,9 @@ class TestDaemonQuietFlagPropagation:
             # Verify FTS display was called with quiet=True
             mock_fts.assert_called_once()
             call_kwargs = mock_fts.call_args[1]
-            assert (
-                call_kwargs.get("quiet") is True
-            ), "_display_fts_results should receive quiet=True"
+            assert call_kwargs.get("quiet") is True, (
+                "_display_fts_results should receive quiet=True"
+            )
 
     @patch("code_indexer.config.ConfigManager")
     @patch("code_indexer.cli_daemon_fast.get_socket_path")
@@ -91,9 +91,9 @@ class TestDaemonQuietFlagPropagation:
         # Verify _display_results was called with quiet=True
         assert mock_display.called, "_display_results should be called"
         call_kwargs = mock_display.call_args[1]
-        assert (
-            call_kwargs.get("quiet") is True
-        ), "quiet=True should be passed to _display_results"
+        assert call_kwargs.get("quiet") is True, (
+            "quiet=True should be passed to _display_results"
+        )
 
 
 if __name__ == "__main__":

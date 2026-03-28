@@ -41,16 +41,16 @@ def test_chunk_images_field_is_list_of_strings():
     # This is the critical assertion: images should be a list of strings
     if len(images) > 0:
         for img_ref in images:
-            assert isinstance(
-                img_ref, str
-            ), f"Expected img_ref to be a string, got {type(img_ref)}: {img_ref}"
+            assert isinstance(img_ref, str), (
+                f"Expected img_ref to be a string, got {type(img_ref)}: {img_ref}"
+            )
             # Should be a relative path string like "images/database-schema.png"
             assert not isinstance(img_ref, dict), "img_ref should NOT be a dict"
 
         # Verify the actual content
-        assert (
-            "images/database-schema.png" in images
-        ), f"Expected image path in {images}"
+        assert "images/database-schema.png" in images, (
+            f"Expected image path in {images}"
+        )
 
     print(f"\nEVIDENCE: chunk['images'] = {images}")
     print(f"Type: {type(images)}")

@@ -116,9 +116,9 @@ class TestDaemonE2EIntegration:
 
         # Check output doesn't show repeated restart attempts
         restart_count = result.stderr.count("attempting restart")
-        assert (
-            restart_count <= 2
-        ), f"Should have max 2 restart attempts, found {restart_count}"
+        assert restart_count <= 2, (
+            f"Should have max 2 restart attempts, found {restart_count}"
+        )
 
     def test_daemon_crash_recovery_fallback(self, test_project):
         """Test crash recovery with proper fallback to standalone."""
@@ -144,9 +144,9 @@ class TestDaemonE2EIntegration:
 
         # Verify no excessive daemon spawning
         daemon_count = self._count_daemon_processes()
-        assert (
-            daemon_count <= 1
-        ), f"Should have max 1 daemon after recovery, found {daemon_count}"
+        assert daemon_count <= 1, (
+            f"Should have max 1 daemon after recovery, found {daemon_count}"
+        )
 
     def test_daemon_start_stop_lifecycle(self, test_project):
         """Test daemon start/stop commands work properly."""
@@ -185,13 +185,13 @@ class TestDaemonE2EIntegration:
         time.sleep(1)
 
         # Verify daemon stopped
-        assert not self._is_socket_active(
-            socket_path
-        ), "Daemon socket should be inactive"
+        assert not self._is_socket_active(socket_path), (
+            "Daemon socket should be inactive"
+        )
         daemon_count = self._count_daemon_processes()
-        assert (
-            daemon_count == 0
-        ), f"Should have 0 daemons after stop, found {daemon_count}"
+        assert daemon_count == 0, (
+            f"Should have 0 daemons after stop, found {daemon_count}"
+        )
 
     def test_multiple_queries_single_daemon(self, test_project):
         """Test that multiple queries reuse same daemon, not spawn new ones."""

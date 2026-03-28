@@ -197,9 +197,9 @@ def test_temporal_status_fallback_when_du_unavailable(
                         for call in add_row_calls
                         if call[0][0] == "Temporal Index"
                     ]
-                    assert (
-                        len(temporal_rows) > 0
-                    ), "Temporal Index row should be present"
+                    assert len(temporal_rows) > 0, (
+                        "Temporal Index row should be present"
+                    )
                     # Verify size was calculated (non-zero)
                     temporal_row_text = temporal_rows[0][2]
                     assert "Storage:" in temporal_row_text

@@ -38,15 +38,15 @@ class TestPasswordStrengthValidator:
         is_valid, result = self.validator.validate(password)
 
         assert is_valid, f"Strong password '{password}' should be accepted"
-        assert (
-            result.score >= 4
-        ), f"Password strength score should be >= 4/5, got {result.score}"
-        assert (
-            result.strength == "strong"
-        ), f"Password strength should be 'strong', got '{result.strength}'"
-        assert (
-            len(result.issues) == 0
-        ), f"Strong password should have no issues, got {result.issues}"
+        assert result.score >= 4, (
+            f"Password strength score should be >= 4/5, got {result.score}"
+        )
+        assert result.strength == "strong", (
+            f"Password strength should be 'strong', got '{result.strength}'"
+        )
+        assert len(result.issues) == 0, (
+            f"Strong password should have no issues, got {result.issues}"
+        )
 
     def test_additional_strong_passwords_accepted(self):
         """Test various strong passwords that should be accepted."""
@@ -62,9 +62,9 @@ class TestPasswordStrengthValidator:
         for password in strong_passwords:
             is_valid, result = self.validator.validate(password)
             assert is_valid, f"Strong password '{password}' should be accepted"
-            assert (
-                result.score >= 4
-            ), f"Strong password should score >= 4/5, got {result.score}"
+            assert result.score >= 4, (
+                f"Strong password should score >= 4/5, got {result.score}"
+            )
             assert result.strength == "strong"
 
     def test_weak_password_rejection_scenario_2(self):
@@ -91,12 +91,12 @@ class TestPasswordStrengthValidator:
 
         # Check specific missing requirements
         issue_text = " ".join(result.issues)
-        assert (
-            "uppercase" in issue_text.lower()
-        ), "Should indicate missing uppercase letters"
-        assert (
-            "special" in issue_text.lower()
-        ), "Should indicate missing special characters"
+        assert "uppercase" in issue_text.lower(), (
+            "Should indicate missing uppercase letters"
+        )
+        assert "special" in issue_text.lower(), (
+            "Should indicate missing special characters"
+        )
 
         # Check suggestions are provided
         assert len(result.suggestions) > 0, "Should provide improvement suggestions"
@@ -112,12 +112,12 @@ class TestPasswordStrengthValidator:
 
         for password in short_passwords:
             is_valid, result = self.validator.validate(password)
-            assert (
-                not is_valid
-            ), f"Password '{password}' ({len(password)} chars) should be too short"
-            assert any(
-                "12 character" in issue for issue in result.issues
-            ), "Should indicate 12 character minimum requirement"
+            assert not is_valid, (
+                f"Password '{password}' ({len(password)} chars) should be too short"
+            )
+            assert any("12 character" in issue for issue in result.issues), (
+                "Should indicate 12 character minimum requirement"
+            )
 
         # Test minimum valid length
         valid_12_char = "Test123!Abcd"  # Exactly 12 chars
@@ -135,13 +135,13 @@ class TestPasswordStrengthValidator:
 
         for password, missing_requirement in test_cases:
             is_valid, result = self.validator.validate(password)
-            assert (
-                not is_valid
-            ), f"Password missing {missing_requirement} should be rejected"
+            assert not is_valid, (
+                f"Password missing {missing_requirement} should be rejected"
+            )
             issue_text = " ".join(result.issues).lower()
-            assert (
-                missing_requirement in issue_text
-            ), f"Should indicate missing {missing_requirement}"
+            assert missing_requirement in issue_text, (
+                f"Should indicate missing {missing_requirement}"
+            )
 
     def test_common_password_detection_scenario_3(self):
         """
@@ -195,13 +195,13 @@ class TestPasswordStrengthValidator:
 
         for password in personal_passwords:
             is_valid, result = self.validator.validate(password, username, email)
-            assert (
-                not is_valid
-            ), f"Password '{password}' containing personal info should be rejected"
+            assert not is_valid, (
+                f"Password '{password}' containing personal info should be rejected"
+            )
             issue_text = " ".join(result.issues).lower()
-            assert (
-                "personal" in issue_text
-            ), "Should indicate password contains personal information"
+            assert "personal" in issue_text, (
+                "Should indicate password contains personal information"
+            )
 
     def test_password_entropy_calculation_scenario_5(self):
         """
@@ -230,28 +230,28 @@ class TestPasswordStrengthValidator:
             is_valid, result = self.validator.validate(password)
 
             # Check entropy calculation exists
-            assert hasattr(
-                result, "entropy"
-            ), "Result should include entropy calculation"
-            assert (
-                result.entropy >= 0
-            ), f"Entropy should be non-negative, got {result.entropy}"
+            assert hasattr(result, "entropy"), (
+                "Result should include entropy calculation"
+            )
+            assert result.entropy >= 0, (
+                f"Entropy should be non-negative, got {result.entropy}"
+            )
 
             # For very weak passwords like "aaa"
             if password == "aaa":
-                assert (
-                    not is_valid
-                ), f"Very weak password '{password}' should be rejected"
+                assert not is_valid, (
+                    f"Very weak password '{password}' should be rejected"
+                )
                 assert result.entropy < 20, "Very weak password should have low entropy"
 
             # For high entropy passwords
             elif password == "7#kL9$mN2@pQ5&xR":
-                assert (
-                    is_valid == expected_valid
-                ), "High entropy password validation should match expected"
-                assert (
-                    result.entropy > 50
-                ), "High entropy password should have entropy > 50 bits"
+                assert is_valid == expected_valid, (
+                    "High entropy password validation should match expected"
+                )
+                assert result.entropy > 50, (
+                    "High entropy password should have entropy > 50 bits"
+                )
 
     def test_entropy_calculation_accuracy(self):
         """Test entropy calculation using information theory."""
@@ -266,9 +266,9 @@ class TestPasswordStrengthValidator:
 
             if expected_entropy is not None:
                 # Allow some tolerance for floating point calculations
-                assert (
-                    abs(result.entropy - expected_entropy) < 1
-                ), f"Entropy calculation for '{password}' should be ~{expected_entropy}, got {result.entropy}"
+                assert abs(result.entropy - expected_entropy) < 1, (
+                    f"Entropy calculation for '{password}' should be ~{expected_entropy}, got {result.entropy}"
+                )
 
     def test_real_time_password_strength_indicators(self):
         """
@@ -288,9 +288,9 @@ class TestPasswordStrengthValidator:
             is_valid, result = self.validator.validate(password)
 
             assert hasattr(result, "score"), "Result should include strength score"
-            assert hasattr(
-                result, "strength"
-            ), "Result should include strength indicator"
+            assert hasattr(result, "strength"), (
+                "Result should include strength indicator"
+            )
             assert result.strength in [
                 "weak",
                 "medium",
@@ -317,9 +317,9 @@ class TestPasswordStrengthValidator:
             is_valid, result = self.validator.validate(password)
 
             if not is_valid:
-                assert (
-                    len(result.suggestions) > 0
-                ), f"Weak password '{password}' should get improvement suggestions"
+                assert len(result.suggestions) > 0, (
+                    f"Weak password '{password}' should get improvement suggestions"
+                )
 
                 for keyword in expected_suggestion_keywords:
                     # At least one suggestion should contain each expected keyword
@@ -327,7 +327,9 @@ class TestPasswordStrengthValidator:
                         keyword in suggestion.lower()
                         for suggestion in result.suggestions
                     )
-                    assert has_keyword, f"Suggestions should mention '{keyword}' for password '{password}'"
+                    assert has_keyword, (
+                        f"Suggestions should mention '{keyword}' for password '{password}'"
+                    )
 
     def test_keyboard_pattern_detection(self):
         """Test detection of keyboard patterns and sequences."""
@@ -383,9 +385,9 @@ class TestPasswordStrengthValidator:
             # Should detect as common password variants
             if not is_valid:
                 issue_text = " ".join(result.issues).lower()
-                assert (
-                    "common" in issue_text
-                ), f"L33t speak password '{password}' should be detected as common"
+                assert "common" in issue_text, (
+                    f"L33t speak password '{password}' should be detected as common"
+                )
 
     def test_performance_requirements(self):
         """Test performance requirements from story (< 50ms validation)."""
@@ -398,9 +400,9 @@ class TestPasswordStrengthValidator:
         end_time = time.time()
 
         execution_time = (end_time - start_time) * 1000  # Convert to milliseconds
-        assert (
-            execution_time < 50
-        ), f"Password validation should complete in < 50ms, took {execution_time:.2f}ms"
+        assert execution_time < 50, (
+            f"Password validation should complete in < 50ms, took {execution_time:.2f}ms"
+        )
 
     def test_integration_with_existing_password_requirements(self):
         """Test integration with existing password_validator.py requirements."""
@@ -414,9 +416,9 @@ class TestPasswordStrengthValidator:
         for password in passwords_9_to_11_chars:
             is_valid, result = self.validator.validate(password)
             # New system requires 12+ chars, so these should be rejected
-            assert (
-                not is_valid
-            ), f"Password '{password}' should be rejected by new 12-char requirement"
+            assert not is_valid, (
+                f"Password '{password}' should be rejected by new 12-char requirement"
+            )
 
     def test_memory_usage_requirements(self):
         """Test memory usage requirements from story (< 100MB for password lists)."""
@@ -432,9 +434,9 @@ class TestPasswordStrengthValidator:
 
         # Should be much less than 100MB for reasonable password lists
         max_size_mb = 100 * 1024 * 1024  # 100MB in bytes
-        assert (
-            validator_size < max_size_mb
-        ), f"Password validator memory usage should be < 100MB, got {validator_size} bytes"
+        assert validator_size < max_size_mb, (
+            f"Password validator memory usage should be < 100MB, got {validator_size} bytes"
+        )
 
     def test_concurrent_validation_capability(self):
         """Test capability to handle concurrent validations."""
@@ -467,9 +469,9 @@ class TestPasswordStrengthValidator:
 
         # Should complete in reasonable time
         total_time = end_time - start_time
-        assert (
-            total_time < 1.0
-        ), f"10 concurrent validations should complete in < 1 second, took {total_time:.2f}s"
+        assert total_time < 1.0, (
+            f"10 concurrent validations should complete in < 1 second, took {total_time:.2f}s"
+        )
 
 
 class TestPasswordValidationResult:
@@ -532,12 +534,12 @@ class TestPasswordStrengthIntegration:
             assert result.score >= 4, "Valid passwords should have high strength scores"
         else:
             # Would reject password change
-            assert (
-                len(result.issues) > 0
-            ), "Invalid passwords should have specific issues listed"
-            assert (
-                len(result.suggestions) > 0
-            ), "Invalid passwords should have improvement suggestions"
+            assert len(result.issues) > 0, (
+                "Invalid passwords should have specific issues listed"
+            )
+            assert len(result.suggestions) > 0, (
+                "Invalid passwords should have improvement suggestions"
+            )
 
     def test_integration_with_password_requirements(self):
         """Test that new validator is compatible with existing requirements interface."""
@@ -548,9 +550,9 @@ class TestPasswordStrengthIntegration:
 
         assert isinstance(requirements, dict), "Requirements should be dictionary"
         assert "min_length" in requirements, "Should specify minimum length"
-        assert (
-            requirements["min_length"] >= 12
-        ), "New system should require at least 12 characters"
+        assert requirements["min_length"] >= 12, (
+            "New system should require at least 12 characters"
+        )
 
 
 if __name__ == "__main__":

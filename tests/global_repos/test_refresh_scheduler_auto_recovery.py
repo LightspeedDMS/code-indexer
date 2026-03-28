@@ -194,9 +194,9 @@ class TestAutoReclone:
             except RuntimeError:
                 pass  # Re-clone attempt may still raise; we care it was tried
 
-        assert (
-            "test-repo-global" in reclone_attempted
-        ), "Re-clone was not attempted for corruption error"
+        assert "test-repo-global" in reclone_attempted, (
+            "Re-clone was not attempted for corruption error"
+        )
 
     def test_transient_failures_trigger_reclone_after_threshold(self, tmp_path):
         """
@@ -236,9 +236,9 @@ class TestAutoReclone:
                 except RuntimeError:
                     pass
 
-            assert (
-                len(reclone_calls) == 0
-            ), "Re-clone should not be triggered before threshold (3)"
+            assert len(reclone_calls) == 0, (
+                "Re-clone should not be triggered before threshold (3)"
+            )
 
             # Third failure — should trigger re-clone
             try:
@@ -246,9 +246,9 @@ class TestAutoReclone:
             except RuntimeError:
                 pass
 
-        assert (
-            len(reclone_calls) >= 1
-        ), "Re-clone should be triggered after 3 consecutive transient failures"
+        assert len(reclone_calls) >= 1, (
+            "Re-clone should be triggered after 3 consecutive transient failures"
+        )
 
 
 class TestRecloneGuardRails:
@@ -328,12 +328,12 @@ class TestRecloneGuardRails:
 
         # .versioned/ structure must still exist
         assert versioned_dir.exists(), ".versioned/{alias}/ was incorrectly deleted"
-        assert (
-            snapshot_dir.exists()
-        ), "versioned snapshot directory was incorrectly deleted"
-        assert (
-            snapshot_file.exists()
-        ), "versioned snapshot files were incorrectly deleted"
+        assert snapshot_dir.exists(), (
+            "versioned snapshot directory was incorrectly deleted"
+        )
+        assert snapshot_file.exists(), (
+            "versioned snapshot files were incorrectly deleted"
+        )
 
     def test_reclone_deletes_only_master_clone(self, tmp_path):
         """
@@ -386,9 +386,9 @@ class TestRecloneGuardRails:
         assert len(clone_calls) == 1, "git clone should be called exactly once"
         clone_args = clone_calls[0][0][0]
         assert "https://github.com/test/repo" in clone_args
-        assert (
-            str(temp_clone) in clone_args
-        ), "git clone destination must be the temp path, not master directly"
+        assert str(temp_clone) in clone_args, (
+            "git clone destination must be the temp path, not master directly"
+        )
 
     def test_reclone_preserves_master_on_clone_failure(self, tmp_path):
         """
@@ -418,12 +418,12 @@ class TestRecloneGuardRails:
             )
 
         assert result is False, "_attempt_reclone should return False on clone failure"
-        assert (
-            master_path.exists()
-        ), "Master clone directory must survive a failed clone attempt"
-        assert (
-            sentinel.exists()
-        ), "Files inside master clone must survive a failed clone attempt"
+        assert master_path.exists(), (
+            "Master clone directory must survive a failed clone attempt"
+        )
+        assert sentinel.exists(), (
+            "Files inside master clone must survive a failed clone attempt"
+        )
 
     def test_reclone_cleans_up_temp_on_failure(self, tmp_path):
         """
@@ -457,9 +457,9 @@ class TestRecloneGuardRails:
             )
 
         assert result is False
-        assert (
-            not temp_clone.exists()
-        ), "Temp clone directory must be cleaned up after a failed clone attempt"
+        assert not temp_clone.exists(), (
+            "Temp clone directory must be cleaned up after a failed clone attempt"
+        )
 
     def test_reclone_replaces_master_on_success(self, tmp_path):
         """
@@ -494,6 +494,6 @@ class TestRecloneGuardRails:
 
         assert result is True, "_attempt_reclone should return True on success"
         assert master_path.exists(), "Master path must exist after successful reclone"
-        assert (
-            not temp_clone.exists()
-        ), "Temp directory must be removed after successful reclone (renamed to master)"
+        assert not temp_clone.exists(), (
+            "Temp directory must be removed after successful reclone (renamed to master)"
+        )

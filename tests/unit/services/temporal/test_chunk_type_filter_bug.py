@@ -91,9 +91,9 @@ def test_chunk_type_filter_with_realistic_data():
     )
 
     # VERIFICATION: The result should be the commit_message
-    assert (
-        filtered_results[0].metadata["type"] == "commit_message"
-    ), f"Expected type='commit_message' but got type='{filtered_results[0].metadata['type']}'"
-    assert (
-        "exception logging" in filtered_results[0].content.lower()
-    ), f"Expected commit message content but got: {filtered_results[0].content}"
+    assert filtered_results[0].metadata["type"] == "commit_message", (
+        f"Expected type='commit_message' but got type='{filtered_results[0].metadata['type']}'"
+    )
+    assert "exception logging" in filtered_results[0].content.lower(), (
+        f"Expected commit message content but got: {filtered_results[0].content}"
+    )

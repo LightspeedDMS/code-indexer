@@ -169,12 +169,12 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
                 print(f"  - {result['file_path']}")
 
             # This should pass - only .js files should be returned
-            assert (
-                len(results["results"]) == 1
-            ), f"Expected 1 .js file, got {len(results['results'])}"
-            assert all(
-                r["file_path"].endswith(".js") for r in results["results"]
-            ), "All results should be .js files"
+            assert len(results["results"]) == 1, (
+                f"Expected 1 .js file, got {len(results['results'])}"
+            )
+            assert all(r["file_path"].endswith(".js") for r in results["results"]), (
+                "All results should be .js files"
+            )
 
             # TEST 2: Request .py and .txt files
             results = semantic_query_manager.query_user_repositories(
@@ -189,9 +189,9 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
                 print(f"  - {result['file_path']}")
 
             # This should return 2 files (.py and .txt)
-            assert (
-                len(results["results"]) == 2
-            ), f"Expected 2 files (.py, .txt), got {len(results['results'])}"
+            assert len(results["results"]) == 2, (
+                f"Expected 2 files (.py, .txt), got {len(results['results'])}"
+            )
             file_extensions_found = [
                 r["file_path"].split(".")[-1] for r in results["results"]
             ]
@@ -208,9 +208,9 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
 
             print(f"Results for .cpp filter: {len(results['results'])} files")
             # Should return 0 results
-            assert (
-                len(results["results"]) == 0
-            ), f"Expected 0 .cpp files, got {len(results['results'])}"
+            assert len(results["results"]) == 0, (
+                f"Expected 0 .cpp files, got {len(results['results'])}"
+            )
 
             # TEST 4: No file extension filter - should return all files
             results = semantic_query_manager.query_user_repositories(
@@ -222,9 +222,9 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
 
             print(f"Results with no filter: {len(results['results'])} files")
             # Should return all 5 files
-            assert (
-                len(results["results"]) == 5
-            ), f"Expected 5 files total, got {len(results['results'])}"
+            assert len(results["results"]) == 5, (
+                f"Expected 5 files total, got {len(results['results'])}"
+            )
 
     def test_file_extension_filtering_edge_cases(self, semantic_query_manager):
         """Test edge cases for file extension filtering."""
@@ -298,12 +298,12 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
                 limit=10,
             )
 
-            assert (
-                len(results["results"]) == 1
-            ), "Should find the .js file (test.min.js)"
-            assert results["results"][0]["file_path"].endswith(
-                ".js"
-            ), "Result should be .js file"
+            assert len(results["results"]) == 1, (
+                "Should find the .js file (test.min.js)"
+            )
+            assert results["results"][0]["file_path"].endswith(".js"), (
+                "Result should be .js file"
+            )
 
             # TEST: Request .bak files
             results = semantic_query_manager.query_user_repositories(
@@ -314,9 +314,9 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
             )
 
             assert len(results["results"]) == 1, "Should find the .bak file"
-            assert results["results"][0]["file_path"].endswith(
-                ".bak"
-            ), "Result should be .bak file"
+            assert results["results"][0]["file_path"].endswith(".bak"), (
+                "Result should be .bak file"
+            )
 
             # TEST: Request empty string extension (edge case)
             results = semantic_query_manager.query_user_repositories(
@@ -327,6 +327,6 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
             )
 
             # All files "end with" empty string, so this should return all files
-            assert (
-                len(results["results"]) == 4
-            ), "Empty extension should match all files"
+            assert len(results["results"]) == 4, (
+                "Empty extension should match all files"
+            )

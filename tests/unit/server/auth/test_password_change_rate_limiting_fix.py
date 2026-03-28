@@ -107,13 +107,13 @@ class TestPasswordChangeRateLimitingFix:
                                 )
                                 # First 4 attempts should get 401, 5th should trigger rate limit (429)
                                 if attempt < 4:
-                                    assert (
-                                        response.status_code == 401
-                                    ), f"Attempt {attempt + 1} should return 401"
+                                    assert response.status_code == 401, (
+                                        f"Attempt {attempt + 1} should return 401"
+                                    )
                                 else:
-                                    assert (
-                                        response.status_code == 429
-                                    ), f"Attempt {attempt + 1} should return 429"
+                                    assert response.status_code == 429, (
+                                        f"Attempt {attempt + 1} should return 429"
+                                    )
                                     assert (
                                         "Too many failed attempts"
                                         in response.json()["detail"]
@@ -181,9 +181,9 @@ class TestPasswordChangeRateLimitingFix:
                             )
 
                             # Should return 429 because record_failed_attempt returned True
-                            assert (
-                                response.status_code == 429
-                            ), f"Expected 429, got {response.status_code}"
+                            assert response.status_code == 429, (
+                                f"Expected 429, got {response.status_code}"
+                            )
                             assert (
                                 "Too many failed attempts" in response.json()["detail"]
                             )

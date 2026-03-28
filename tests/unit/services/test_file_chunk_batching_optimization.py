@@ -165,20 +165,20 @@ class TestFileChunkBatchingOptimization:
             result = future.result()  # Wait for completion
 
         # CRITICAL VALIDATION: Single batch API call, zero individual calls
-        assert (
-            mock_vector_manager.submit_batch_task_call_count == 1
-        ), "Must use exactly 1 batch API call per file"
-        assert (
-            mock_vector_manager.submit_chunk_call_count == 0
-        ), "Must not use individual chunk API calls in optimized version"
+        assert mock_vector_manager.submit_batch_task_call_count == 1, (
+            "Must use exactly 1 batch API call per file"
+        )
+        assert mock_vector_manager.submit_chunk_call_count == 0, (
+            "Must not use individual chunk API calls in optimized version"
+        )
 
         # Verify batch submission received all chunk texts
         batch_call = mock_vector_manager.submit_batch_task.call_args
         chunk_texts = batch_call[0][0]  # First positional argument
         expected_texts = ["chunk_1_content", "chunk_2_content", "chunk_3_content"]
-        assert (
-            chunk_texts == expected_texts
-        ), "Batch submission must include all chunk texts in order"
+        assert chunk_texts == expected_texts, (
+            "Batch submission must include all chunk texts in order"
+        )
 
         # Verify successful processing
         assert result.success is True
@@ -241,18 +241,18 @@ class TestFileChunkBatchingOptimization:
             point = points_data[i]
 
             # Verify text content mapping
-            assert expected_text in str(
-                point
-            ), f"Point {i} must contain correct chunk text"
+            assert expected_text in str(point), (
+                f"Point {i} must contain correct chunk text"
+            )
 
             # Verify embedding mapping (accept both list and tuple formats)
             actual_vector = point["vector"]
             expected_vector_list = list(
                 expected_vector
             )  # Convert tuple to list for comparison
-            assert (
-                actual_vector == expected_vector_list
-            ), f"Point {i} must have correct embedding from batch result"
+            assert actual_vector == expected_vector_list, (
+                f"Point {i} must have correct embedding from batch result"
+            )
 
             # Verify metadata mapping
             payload = point["payload"]
@@ -319,9 +319,9 @@ class TestFileChunkBatchingOptimization:
         )
 
         # Verify no partial data written to Filesystem
-        assert (
-            not mock_filesystem_client.upsert_points.called
-        ), "No data should be written to Filesystem on batch failure"
+        assert not mock_filesystem_client.upsert_points.called, (
+            "No data should be written to Filesystem on batch failure"
+        )
 
     def test_order_preservation_and_metadata_consistency(
         self,
@@ -356,18 +356,18 @@ class TestFileChunkBatchingOptimization:
             payload = point["payload"]
 
             # Verify chunk index sequence
-            assert (
-                payload["chunk_index"] == i
-            ), f"Point {i} must have correct chunk_index"
+            assert payload["chunk_index"] == i, (
+                f"Point {i} must have correct chunk_index"
+            )
 
             # Verify line number ordering (chunks must be in file order)
             if i > 0:
                 prev_point = points_data[i - 1]
                 prev_line_end = prev_point["payload"]["line_end"]
                 curr_line_start = payload["line_start"]
-                assert (
-                    curr_line_start > prev_line_end
-                ), f"Chunk {i} line_start must be after previous chunk line_end"
+                assert curr_line_start > prev_line_end, (
+                    f"Chunk {i} line_start must be after previous chunk line_end"
+                )
 
             # Verify consistent metadata across all points
             expected_metadata_keys = {
@@ -378,9 +378,9 @@ class TestFileChunkBatchingOptimization:
                 "total_chunks",
             }
             actual_keys = set(payload.keys())
-            assert expected_metadata_keys.issubset(
-                actual_keys
-            ), f"Point {i} missing required metadata keys. Expected: {expected_metadata_keys}, Actual: {actual_keys}"
+            assert expected_metadata_keys.issubset(actual_keys), (
+                f"Point {i} missing required metadata keys. Expected: {expected_metadata_keys}, Actual: {actual_keys}"
+            )
 
         assert result.success is True
 
@@ -449,16 +449,16 @@ class TestFileChunkBatchingOptimization:
         )  # 1 batch call
 
         # Verify dramatic reduction
-        assert (
-            api_calls_new_approach == 1
-        ), "Must use exactly 1 API call for any number of chunks"
+        assert api_calls_new_approach == 1, (
+            "Must use exactly 1 API call for any number of chunks"
+        )
         assert api_calls_old_approach == 10, "Old approach would need 10 API calls"
 
         # Calculate and verify improvement ratio
         improvement_ratio = api_calls_old_approach / api_calls_new_approach
-        assert (
-            improvement_ratio == 10.0
-        ), f"Expected 10x improvement, got {improvement_ratio}x"
+        assert improvement_ratio == 10.0, (
+            f"Expected 10x improvement, got {improvement_ratio}x"
+        )
 
         # Verify all chunks still processed successfully
         assert result.success is True

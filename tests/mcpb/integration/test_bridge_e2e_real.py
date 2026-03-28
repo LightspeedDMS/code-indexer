@@ -186,29 +186,29 @@ class TestBridgeE2E:
         # Validate each tool has required fields
         expected_tool_names = sorted(TOOL_REGISTRY.keys())
         actual_tool_names = sorted([t["name"] for t in tools])
-        assert (
-            actual_tool_names == expected_tool_names
-        ), f"Tool names mismatch. Expected: {expected_tool_names}, Got: {actual_tool_names}"
+        assert actual_tool_names == expected_tool_names, (
+            f"Tool names mismatch. Expected: {expected_tool_names}, Got: {actual_tool_names}"
+        )
 
         # Validate each tool has proper schema definition
         for tool in tools:
             assert "name" in tool, f"Tool missing 'name' field: {tool}"
             assert "description" in tool, f"Tool {tool['name']} missing 'description'"
             assert "inputSchema" in tool, f"Tool {tool['name']} missing 'inputSchema'"
-            assert (
-                "type" in tool["inputSchema"]
-            ), f"Tool {tool['name']} inputSchema missing 'type'"
-            assert (
-                "properties" in tool["inputSchema"]
-            ), f"Tool {tool['name']} inputSchema missing 'properties'"
+            assert "type" in tool["inputSchema"], (
+                f"Tool {tool['name']} inputSchema missing 'type'"
+            )
+            assert "properties" in tool["inputSchema"], (
+                f"Tool {tool['name']} inputSchema missing 'properties'"
+            )
 
         # Validate search_code tool has proper parameter count
         search_code_tool = next((t for t in tools if t["name"] == "search_code"), None)
         assert search_code_tool is not None, "search_code tool not found"
         param_count = len(search_code_tool["inputSchema"]["properties"])
-        assert (
-            param_count == 25
-        ), f"search_code should have 25 parameters, got {param_count}"
+        assert param_count == 25, (
+            f"search_code should have 25 parameters, got {param_count}"
+        )
 
     @pytest.mark.asyncio
     async def test_bridge_includes_bearer_token(self, bridge_config, test_server):

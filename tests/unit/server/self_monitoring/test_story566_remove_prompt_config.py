@@ -24,9 +24,9 @@ class TestAC1_SelfMonitoringConfigNoPromptFields:
         import dataclasses
 
         field_names = {f.name for f in dataclasses.fields(SelfMonitoringConfig)}
-        assert (
-            "prompt_template" not in field_names
-        ), "SelfMonitoringConfig must not have prompt_template field (Story #566)"
+        assert "prompt_template" not in field_names, (
+            "SelfMonitoringConfig must not have prompt_template field (Story #566)"
+        )
 
     def test_self_monitoring_config_has_no_prompt_user_modified_field(self):
         """SelfMonitoringConfig must not have a prompt_user_modified field."""
@@ -34,9 +34,9 @@ class TestAC1_SelfMonitoringConfigNoPromptFields:
         import dataclasses
 
         field_names = {f.name for f in dataclasses.fields(SelfMonitoringConfig)}
-        assert (
-            "prompt_user_modified" not in field_names
-        ), "SelfMonitoringConfig must not have prompt_user_modified field (Story #566)"
+        assert "prompt_user_modified" not in field_names, (
+            "SelfMonitoringConfig must not have prompt_user_modified field (Story #566)"
+        )
 
     def test_self_monitoring_config_still_has_required_fields(self):
         """SelfMonitoringConfig must still have enabled, cadence_minutes, and model."""
@@ -123,9 +123,9 @@ class TestAC3_ServiceAlwaysLoadsPromptFromFile:
         import inspect
 
         sig = inspect.signature(SelfMonitoringService.__init__)
-        assert (
-            "prompt_template" not in sig.parameters
-        ), "SelfMonitoringService must not accept prompt_template constructor param (Story #566)"
+        assert "prompt_template" not in sig.parameters, (
+            "SelfMonitoringService must not accept prompt_template constructor param (Story #566)"
+        )
 
     def test_service_execute_scan_calls_get_default_prompt(self, tmp_path):
         """_execute_scan must call get_default_prompt() (not use a stored template)."""
@@ -203,9 +203,9 @@ class TestAC3_ServiceAlwaysLoadsPromptFromFile:
                 "prompt_template",
                 call_kwargs[0][4] if len(call_kwargs[0]) > 4 else None,
             )
-            assert (
-                passed_prompt == expected_prompt
-            ), f"Expected prompt from file, got: {passed_prompt!r}"
+            assert passed_prompt == expected_prompt, (
+                f"Expected prompt from file, got: {passed_prompt!r}"
+            )
 
     def test_service_has_no_prompt_template_attribute(self):
         """SelfMonitoringService instance must NOT store _prompt_template attribute."""
@@ -217,9 +217,9 @@ class TestAC3_ServiceAlwaysLoadsPromptFromFile:
             job_manager=Mock(),
         )
 
-        assert not hasattr(
-            service, "_prompt_template"
-        ), "SelfMonitoringService must not store _prompt_template (Story #566)"
+        assert not hasattr(service, "_prompt_template"), (
+            "SelfMonitoringService must not store _prompt_template (Story #566)"
+        )
 
 
 class TestAC4_BackwardCompatibilityWithStaleConfig:
@@ -330,9 +330,9 @@ class TestAC5_PostEndpointIgnoresPromptTemplate:
 
         # Verify the dataclass itself has no prompt_template field (structural guarantee)
         field_names = {f.name for f in dataclasses.fields(SelfMonitoringConfig)}
-        assert (
-            "prompt_template" not in field_names
-        ), "Config dataclass must not have prompt_template after Story #566"
+        assert "prompt_template" not in field_names, (
+            "Config dataclass must not have prompt_template after Story #566"
+        )
 
     def test_post_handler_saves_cadence_and_model_only(self, tmp_path):
         """POST form submission persists cadence and model but not prompt."""
@@ -385,9 +385,9 @@ class TestAC1_HTMLTemplateNoPromptTextarea:
         assert template_path.exists(), f"Template not found at {template_path}"
         content = template_path.read_text(encoding="utf-8")
 
-        assert (
-            'name="prompt_template"' not in content
-        ), "self_monitoring.html must not contain prompt_template textarea (Story #566)"
+        assert 'name="prompt_template"' not in content, (
+            "self_monitoring.html must not contain prompt_template textarea (Story #566)"
+        )
 
     def test_html_template_still_has_cadence_select(self):
         """self_monitoring.html must still have cadence_minutes select field."""
@@ -404,9 +404,9 @@ class TestAC1_HTMLTemplateNoPromptTextarea:
         assert template_path.exists()
         content = template_path.read_text(encoding="utf-8")
 
-        assert (
-            'name="cadence_minutes"' in content
-        ), "self_monitoring.html must retain cadence_minutes field"
+        assert 'name="cadence_minutes"' in content, (
+            "self_monitoring.html must retain cadence_minutes field"
+        )
 
     def test_html_template_still_has_model_select(self):
         """self_monitoring.html must still have model select field."""
@@ -440,6 +440,6 @@ class TestAC1_HTMLTemplateNoPromptTextarea:
         assert template_path.exists()
         content = template_path.read_text(encoding="utf-8")
 
-        assert (
-            'name="enabled"' in content
-        ), "self_monitoring.html must retain enabled checkbox"
+        assert 'name="enabled"' in content, (
+            "self_monitoring.html must retain enabled checkbox"
+        )

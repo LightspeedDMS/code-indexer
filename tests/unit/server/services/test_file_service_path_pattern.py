@@ -144,14 +144,14 @@ class TestPathPatternRecursiveGlob:
         file_paths = sorted([f.path for f in result.files])
 
         # Verify we have files from deep paths (5 levels: src/main/java/com/example/)
-        assert any(
-            "src/main/java/com/example/" in p for p in file_paths
-        ), "Should match deeply nested .java files (5+ levels)"
+        assert any("src/main/java/com/example/" in p for p in file_paths), (
+            "Should match deeply nested .java files (5+ levels)"
+        )
 
         # Verify we got all .java files
-        assert (
-            len(file_paths) == 6
-        ), f"Should match 6 .java files, got {len(file_paths)}"
+        assert len(file_paths) == 6, (
+            f"Should match 6 .java files, got {len(file_paths)}"
+        )
 
     def test_pattern_with_middle_directory_wildcard(self, temp_repo, service):
         """Test pattern src/**/example/*.java matches with middle wildcards."""
@@ -198,9 +198,9 @@ class TestPathPatternRecursiveGlob:
             repo_path=str(temp_repo), query_params=query_params
         )
 
-        assert (
-            len(result.files) == 0
-        ), "Pattern with no matches should return empty list"
+        assert len(result.files) == 0, (
+            "Pattern with no matches should return empty list"
+        )
 
     def test_case_sensitive_pattern_matching(self, temp_repo, service):
         """Test that pattern matching is case-sensitive."""
@@ -248,9 +248,9 @@ class TestPathPatternEdgeCases:
         )
 
         # Should match both files
-        assert (
-            len(result.files) == 2
-        ), f"Should match both test files, got {len(result.files)}"
+        assert len(result.files) == 2, (
+            f"Should match both test files, got {len(result.files)}"
+        )
 
     def test_empty_pattern_same_as_no_pattern(self, tmp_path, service):
         """Test that empty pattern is treated same as no pattern."""
@@ -268,6 +268,6 @@ class TestPathPatternEdgeCases:
         )
 
         # Should return same results
-        assert len(no_pattern_result.files) == len(
-            empty_pattern_result.files
-        ), "Empty pattern should behave same as no pattern"
+        assert len(no_pattern_result.files) == len(empty_pattern_result.files), (
+            "Empty pattern should behave same as no pattern"
+        )

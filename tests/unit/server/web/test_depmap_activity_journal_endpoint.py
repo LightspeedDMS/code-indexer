@@ -221,9 +221,9 @@ class TestDepmapActivityJournalEndpoint:
         assert response.status_code == 200
         headers_lower = {k.lower(): v for k, v in response.headers.items()}
         progress_val = headers_lower.get("x-journal-progress", "")
-        assert (
-            progress_val.isdigit()
-        ), f"Expected numeric progress, got: '{progress_val}'"
+        assert progress_val.isdigit(), (
+            f"Expected numeric progress, got: '{progress_val}'"
+        )
 
     def test_endpoint_returns_empty_body_when_no_active_journal(
         self, client, admin_session_cookie

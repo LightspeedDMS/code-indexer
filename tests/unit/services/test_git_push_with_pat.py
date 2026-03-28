@@ -379,9 +379,9 @@ class TestGitPushWithPatUrlConversion:
         push_cmd = []
 
         def mock_run_git(cmd, **kwargs):
-            assert (
-                "get-url" not in cmd
-            ), "Should not call git remote get-url when URL pre-provided"
+            assert "get-url" not in cmd, (
+                "Should not call git remote get-url when URL pre-provided"
+            )
             if "rev-parse" in cmd:
                 result = MagicMock()
                 result.stdout = "main"

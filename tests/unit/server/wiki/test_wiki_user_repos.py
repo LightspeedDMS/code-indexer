@@ -435,9 +435,9 @@ class TestUserWikiWebToggle:
         from code_indexer.server.web.routes import web_router
 
         paths = [r.path for r in web_router.routes]
-        assert any(
-            "activated-repos" in p and "wiki-toggle" in p for p in paths
-        ), "Expected an activated-repos wiki-toggle route in web_router paths"
+        assert any("activated-repos" in p and "wiki-toggle" in p for p in paths), (
+            "Expected an activated-repos wiki-toggle route in web_router paths"
+        )
 
     def test_repos_list_template_has_wiki_checkbox(self):
         """repos_list.html template must contain a user-wiki-toggle checkbox."""
@@ -446,9 +446,9 @@ class TestUserWikiWebToggle:
             / "../../../../src/code_indexer/server/web/templates/partials/repos_list.html"
         )
         content = template_path.read_text()
-        assert (
-            "user-wiki-toggle" in content or "wiki-toggle" in content
-        ), "Expected wiki toggle checkbox in repos_list.html template"
+        assert "user-wiki-toggle" in content or "wiki-toggle" in content, (
+            "Expected wiki toggle checkbox in repos_list.html template"
+        )
 
 
 # ===========================================================================

@@ -84,9 +84,9 @@ class TestIncrementalCommitDetection:
                 # CURRENT BEHAVIOR: No range check - this will FAIL initially
                 # Expected: ["git", "log", "abc123def456..HEAD", ...]
                 # Actual: ["git", "log", ...]
-                assert (
-                    "abc123def456..HEAD" in args
-                ), "Should use last_commit..HEAD range for incremental indexing"
+                assert "abc123def456..HEAD" in args, (
+                    "Should use last_commit..HEAD range for incremental indexing"
+                )
 
 
 class TestBeginIndexingCall:
@@ -272,12 +272,12 @@ class TestPointExistenceFiltering:
                 # Verify that only NEW points were upserted
                 # This will FAIL initially because no filtering is done
                 upserted_ids = [p["id"] for p in upserted_points]
-                assert (
-                    "existing_point_1" not in upserted_ids
-                ), "Existing points should be filtered"
-                assert (
-                    "existing_point_2" not in upserted_ids
-                ), "Existing points should be filtered"
+                assert "existing_point_1" not in upserted_ids, (
+                    "Existing points should be filtered"
+                )
+                assert "existing_point_2" not in upserted_ids, (
+                    "Existing points should be filtered"
+                )
                 assert "new_point_1" in upserted_ids, "New points should be upserted"
                 assert "new_point_2" in upserted_ids, "New points should be upserted"
 
@@ -340,9 +340,9 @@ class TestClearFlagSupport:
             )
 
         # Verify clear_collection was called for temporal collection
-        assert (
-            "code-indexer-temporal" in clear_calls
-        ), "clear_collection should be called for temporal collection"
+        assert "code-indexer-temporal" in clear_calls, (
+            "clear_collection should be called for temporal collection"
+        )
 
 
 if __name__ == "__main__":

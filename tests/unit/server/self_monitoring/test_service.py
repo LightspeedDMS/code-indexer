@@ -472,9 +472,9 @@ class TestSelfMonitoringServiceStartupCadence:
         first_wait = wait_timeouts[0]
         expected_wait = 300 * 60  # 5 hours in seconds
         assert first_wait is not None, "Expected initial wait timeout"
-        assert (
-            abs(first_wait - expected_wait) < self.TIMESTAMP_TOLERANCE_SECONDS
-        ), f"Expected ~{expected_wait}s wait, got {first_wait}s"
+        assert abs(first_wait - expected_wait) < self.TIMESTAMP_TOLERANCE_SECONDS, (
+            f"Expected ~{expected_wait}s wait, got {first_wait}s"
+        )
 
         # Verify: No scan was submitted during initial wait
         mock_job_manager.submit_job.assert_not_called()
@@ -696,9 +696,9 @@ class TestSelfMonitoringServiceStartupCadence:
 
         # Verify: trigger_scan() fails with "not enabled" error (BUG DEMONSTRATED)
         assert result["status"] == "error", f"Expected 'error' status, got: {result}"
-        assert (
-            "not enabled" in result["error"].lower()
-        ), f"Expected 'not enabled' error, got: {result['error']}"
+        assert "not enabled" in result["error"].lower(), (
+            f"Expected 'not enabled' error, got: {result['error']}"
+        )
 
         # Verify job was NOT submitted
         mock_job_manager.submit_job.assert_not_called()
@@ -794,12 +794,12 @@ class TestOrphanedScanCleanup:
         completed_at, status, error_message = row
         assert completed_at is not None, "Expected completed_at to be set"
         assert status == "FAILURE", f"Expected status FAILURE, got {status}"
-        assert (
-            "orphaned" in error_message.lower()
-        ), f"Expected 'orphaned' in error message, got: {error_message}"
-        assert (
-            "2 hours" in error_message.lower()
-        ), f"Expected '2 hours' in error message, got: {error_message}"
+        assert "orphaned" in error_message.lower(), (
+            f"Expected 'orphaned' in error message, got: {error_message}"
+        )
+        assert "2 hours" in error_message.lower(), (
+            f"Expected '2 hours' in error message, got: {error_message}"
+        )
 
         # Cleanup
         import os
@@ -934,9 +934,9 @@ class TestOrphanedScanCleanup:
                     cleanup_log = msg
                     break
 
-            assert (
-                cleanup_log is not None
-            ), f"Expected cleanup log with count=2, got: {[call[0][0] for call in info_calls]}"
+            assert cleanup_log is not None, (
+                f"Expected cleanup log with count=2, got: {[call[0][0] for call in info_calls]}"
+            )
             assert "2" in cleanup_log, f"Expected count 2 in log message: {cleanup_log}"
 
         # Cleanup
@@ -993,13 +993,13 @@ class TestOrphanedScanCleanup:
         service.stop()
 
         # Verify: Both cleanup and submit were called
-        assert (
-            len(call_order) >= 2
-        ), f"Expected at least 2 calls (cleanup + submit), got: {call_order}"
+        assert len(call_order) >= 2, (
+            f"Expected at least 2 calls (cleanup + submit), got: {call_order}"
+        )
         assert "cleanup" in call_order, "Expected cleanup to be called"
         assert "submit" in call_order, "Expected submit to be called"
 
         # Verify: Cleanup was called before submit
-        assert call_order.index("cleanup") < call_order.index(
-            "submit"
-        ), f"Expected cleanup before submit, got order: {call_order}"
+        assert call_order.index("cleanup") < call_order.index("submit"), (
+            f"Expected cleanup before submit, got order: {call_order}"
+        )

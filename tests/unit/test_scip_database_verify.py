@@ -655,16 +655,16 @@ class TestCallGraphVerification:
         assert cleanup_success is True, "Cleanup should succeed"
 
         # 2. Database file should still exist
-        assert (
-            manager.db_path.exists()
-        ), "Database file should still exist after cleanup"
+        assert manager.db_path.exists(), (
+            "Database file should still exist after cleanup"
+        )
 
         # 3. Database should be non-empty (not recreated as 0-byte file)
         db_size_after = manager.db_path.stat().st_size
         assert db_size_after > 0, "Database should be non-empty after cleanup"
-        assert (
-            db_size_after == db_size_before
-        ), "Database size should not change after cleanup"
+        assert db_size_after == db_size_before, (
+            "Database size should not change after cleanup"
+        )
 
         # 4. Database should still contain schema and data
         conn = sqlite3.connect(manager.db_path)

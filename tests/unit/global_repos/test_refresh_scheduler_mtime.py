@@ -71,9 +71,9 @@ class TestHasLocalChanges:
         (source_path / "some_repo.md").write_text("# content")
 
         result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
-        assert (
-            result is True
-        ), "No versioned dir means first indexing is needed — must return True"
+        assert result is True, (
+            "No versioned dir means first indexing is needed — must return True"
+        )
 
     def test_files_newer_than_version_timestamp_returns_true(
         self, scheduler, temp_golden_repos_dir
@@ -96,9 +96,9 @@ class TestHasLocalChanges:
         os.utime(test_file, (2000, 2000))
 
         result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
-        assert (
-            result is True
-        ), "File mtime 2000 > version timestamp 1000 → must return True"
+        assert result is True, (
+            "File mtime 2000 > version timestamp 1000 → must return True"
+        )
 
     def test_files_older_than_version_timestamp_returns_false(
         self, scheduler, temp_golden_repos_dir
@@ -121,9 +121,9 @@ class TestHasLocalChanges:
         os.utime(test_file, (1000, 1000))
 
         result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
-        assert (
-            result is False
-        ), "File mtime 1000 < version timestamp 9999999999 → must return False"
+        assert result is False, (
+            "File mtime 1000 < version timestamp 9999999999 → must return False"
+        )
 
     def test_empty_dir_returns_false(self, scheduler, temp_golden_repos_dir):
         """
@@ -240,9 +240,9 @@ class TestHasLocalChanges:
 
         result = scheduler._has_local_changes(str(source_path), "cidx-meta-global")
         # File mtime 7000 > latest v_5000 → True
-        assert (
-            result is True
-        ), "File mtime 7000 > latest version 5000 → must return True."
+        assert result is True, (
+            "File mtime 7000 > latest version 5000 → must return True."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -302,9 +302,9 @@ class TestCreateNewIndexGitGuards:
                     with pytest.raises(RuntimeError):
                         scheduler._create_new_index(alias_name, str(source_path))
 
-        assert (
-            git_calls == []
-        ), f"No git commands must run for non-git repos. Got: {git_calls}"
+        assert git_calls == [], (
+            f"No git commands must run for non-git repos. Got: {git_calls}"
+        )
 
     def test_git_commands_run_for_git_repo(self, scheduler, temp_golden_repos_dir):
         """
@@ -360,9 +360,9 @@ class TestCreateNewIndexGitGuards:
 
         # Should have called git update-index and git restore
         git_cmd_names = [cmd[1] for cmd in git_calls]
-        assert (
-            "update-index" in git_cmd_names
-        ), "git update-index must be called when .git dir exists"
-        assert (
-            "restore" in git_cmd_names
-        ), "git restore must be called when .git dir exists"
+        assert "update-index" in git_cmd_names, (
+            "git update-index must be called when .git dir exists"
+        )
+        assert "restore" in git_cmd_names, (
+            "git restore must be called when .git dir exists"
+        )

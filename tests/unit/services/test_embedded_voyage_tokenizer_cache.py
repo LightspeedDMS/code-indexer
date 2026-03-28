@@ -437,9 +437,9 @@ class TestIntegrationCacheVsNetwork:
 
         # Load via local cache path
         cache_path = VoyageTokenizer._resolve_hf_cache_path("voyage-3")
-        assert (
-            cache_path is not None
-        ), "Expected valid cache path for this integration test"
+        assert cache_path is not None, (
+            "Expected valid cache path for this integration test"
+        )
 
         tok_file = Tokenizer.from_file(str(cache_path))
         tok_file.no_truncation()

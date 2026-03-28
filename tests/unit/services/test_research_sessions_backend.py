@@ -92,9 +92,9 @@ class TestResearchSessionsSqliteBackend:
         from code_indexer.server.storage.protocols import ResearchSessionsBackend
 
         b = ResearchSessionsSqliteBackend(db_path)
-        assert isinstance(
-            b, ResearchSessionsBackend
-        ), "ResearchSessionsSqliteBackend must satisfy the ResearchSessionsBackend Protocol"
+        assert isinstance(b, ResearchSessionsBackend), (
+            "ResearchSessionsSqliteBackend must satisfy the ResearchSessionsBackend Protocol"
+        )
         b.close()
 
     def test_create_session_and_get_session_round_trip(self, backend):
@@ -195,9 +195,9 @@ class TestBackendRegistryResearchSessions:
         import dataclasses
 
         field_names = {f.name for f in dataclasses.fields(BackendRegistry)}
-        assert (
-            "research_sessions" in field_names
-        ), "BackendRegistry must have a research_sessions field"
+        assert "research_sessions" in field_names, (
+            "BackendRegistry must have a research_sessions field"
+        )
 
     def test_storage_factory_creates_research_sessions_in_sqlite_mode(self, tmp_path):
         """StorageFactory._create_sqlite_backends creates a research_sessions backend."""
@@ -210,6 +210,6 @@ class TestBackendRegistryResearchSessions:
 
         registry = StorageFactory._create_sqlite_backends(data_dir)
         assert hasattr(registry, "research_sessions")
-        assert isinstance(
-            registry.research_sessions, ResearchSessionsBackend
-        ), "StorageFactory must create a ResearchSessionsBackend for research_sessions"
+        assert isinstance(registry.research_sessions, ResearchSessionsBackend), (
+            "StorageFactory must create a ResearchSessionsBackend for research_sessions"
+        )

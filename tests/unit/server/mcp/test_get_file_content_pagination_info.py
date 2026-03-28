@@ -99,9 +99,9 @@ class TestGetFileContentPaginationInfo:
             # Verify metadata includes total_pages
             metadata = data.get("metadata", {})
             assert "total_pages" in metadata, "metadata must include total_pages"
-            assert (
-                metadata["total_pages"] > 0
-            ), "total_pages must be > 0 for truncated content"
+            assert metadata["total_pages"] > 0, (
+                "total_pages must be > 0 for truncated content"
+            )
 
     def test_truncated_content_returns_has_more_in_metadata(
         self, mock_user, mock_file_service
@@ -142,9 +142,9 @@ class TestGetFileContentPaginationInfo:
 
             metadata = data.get("metadata", {})
             assert "has_more" in metadata, "metadata must include has_more"
-            assert (
-                metadata["has_more"] is True
-            ), "has_more must be True for truncated content"
+            assert metadata["has_more"] is True, (
+                "has_more must be True for truncated content"
+            )
 
     def test_truncated_content_returns_total_pages_at_top_level(
         self, mock_user, mock_file_service
@@ -345,6 +345,6 @@ class TestGetFileContentPaginationInfo:
             total_pages = data.get("total_pages") or data.get("metadata", {}).get(
                 "total_pages"
             )
-            assert (
-                total_pages == 5
-            ), f"Expected 5 pages for 2500 chars with 500 chars/page, got {total_pages}"
+            assert total_pages == 5, (
+                f"Expected 5 pages for 2500 chars with 500 chars/page, got {total_pages}"
+            )

@@ -29,9 +29,9 @@ class TestHnswlibSubmoduleBuild:
 
         # Check for key hnswlib files
         python_bindings = submodule_dir / "python_bindings"
-        assert (
-            python_bindings.exists()
-        ), "python_bindings directory not found in submodule"
+        assert python_bindings.exists(), (
+            "python_bindings directory not found in submodule"
+        )
 
     def test_submodule_is_initialized(self):
         """
@@ -43,9 +43,9 @@ class TestHnswlibSubmoduleBuild:
         submodule_dir = project_root / "third_party" / "hnswlib"
 
         git_marker = submodule_dir / ".git"
-        assert (
-            git_marker.exists()
-        ), "Submodule not initialized. Run: git submodule update --init"
+        assert git_marker.exists(), (
+            "Submodule not initialized. Run: git submodule update --init"
+        )
 
     def test_submodule_has_custom_commit(self):
         """
@@ -65,15 +65,15 @@ class TestHnswlibSubmoduleBuild:
             timeout=5,
         )
 
-        assert (
-            result.returncode == 0
-        ), f"Failed to get submodule commit: {result.stderr}"
+        assert result.returncode == 0, (
+            f"Failed to get submodule commit: {result.stderr}"
+        )
         commit_msg = result.stdout.strip()
 
         # Should be the custom commit with check_integrity
-        assert (
-            "checkIntegrity" in commit_msg or "check_integrity" in commit_msg
-        ), f"Submodule not on custom commit. Current: {commit_msg}"
+        assert "checkIntegrity" in commit_msg or "check_integrity" in commit_msg, (
+            f"Submodule not on custom commit. Current: {commit_msg}"
+        )
 
     def test_pyproject_toml_does_not_have_pypi_hnswlib(self):
         """
@@ -87,9 +87,9 @@ class TestHnswlibSubmoduleBuild:
         content = pyproject.read_text()
 
         # Should not have PyPI hnswlib dependency
-        assert (
-            "hnswlib>=0.8.0" not in content
-        ), "PyPI hnswlib dependency still present in pyproject.toml"
+        assert "hnswlib>=0.8.0" not in content, (
+            "PyPI hnswlib dependency still present in pyproject.toml"
+        )
 
     def test_requirements_files_do_not_have_hnswlib(self):
         """
@@ -119,9 +119,9 @@ class TestHnswlibSubmoduleBuild:
         index = hnswlib.Index(space="l2", dim=128)
 
         # Should have check_integrity method
-        assert hasattr(
-            index, "check_integrity"
-        ), "check_integrity() method not available - using PyPI version?"
+        assert hasattr(index, "check_integrity"), (
+            "check_integrity() method not available - using PyPI version?"
+        )
 
     @pytest.mark.skipif(
         os.environ.get("CI") == "true", reason="Build test skipped in CI"
@@ -144,8 +144,8 @@ class TestHnswlibSubmoduleBuild:
             import hnswlib
 
             index = hnswlib.Index(space="l2", dim=128)
-            assert hasattr(
-                index, "check_integrity"
-            ), "Built from PyPI instead of submodule"
+            assert hasattr(index, "check_integrity"), (
+                "Built from PyPI instead of submodule"
+            )
         except ImportError:
             pytest.skip("hnswlib not installed - expected for initial test run")

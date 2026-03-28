@@ -91,9 +91,9 @@ class TestRebuildFTSDaemonMode:
             output = result.stdout + result.stderr
 
             # Should succeed
-            assert (
-                result.returncode == 0
-            ), f"Expected success, got {result.returncode}\nOutput: {output}"
-            assert (
-                "success" in output.lower() or "complete" in output.lower()
-            ), f"Expected success message\nOutput: {output}"
+            assert result.returncode == 0, (
+                f"Expected success, got {result.returncode}\nOutput: {output}"
+            )
+            assert "success" in output.lower() or "complete" in output.lower(), (
+                f"Expected success message\nOutput: {output}"
+            )

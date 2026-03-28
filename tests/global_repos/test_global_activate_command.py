@@ -76,9 +76,9 @@ class TestGlobalActivateCommand:
             )
 
             # Verify: Command failed with appropriate error
-            assert (
-                result.returncode != 0
-            ), "Expected command to fail for nonexistent repo"
+            assert result.returncode != 0, (
+                "Expected command to fail for nonexistent repo"
+            )
             assert (
                 "not found" in result.stderr.lower()
                 or "not found" in result.stdout.lower()

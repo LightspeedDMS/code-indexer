@@ -258,9 +258,9 @@ class TestDependencyMapServiceWriteLock:
                     assert "status" in result
             except Exception as e:
                 # Any exception must NOT be about _refresh_scheduler being None
-                assert "_refresh_scheduler" not in str(
-                    e
-                ), f"Exception must not be about _refresh_scheduler: {e}"
+                assert "_refresh_scheduler" not in str(e), (
+                    f"Exception must not be about _refresh_scheduler: {e}"
+                )
 
 
 # ============================================================================
@@ -519,6 +519,6 @@ class TestLangfuseTraceSyncServiceWriteLock:
                     max_concurrent_observations=1,
                 )
             except Exception as e:
-                assert "_refresh_scheduler" not in str(
-                    e
-                ), f"Exception must not be about _refresh_scheduler: {e}"
+                assert "_refresh_scheduler" not in str(e), (
+                    f"Exception must not be about _refresh_scheduler: {e}"
+                )

@@ -78,9 +78,9 @@ class TestRealTimeFeedbackManager:
             feedback_manager.provide_continuous_activity_updates(8, mock_callback)
 
             # Verify heartbeat callback
-            assert (
-                len(mock_callback.call_args_list) >= 2
-            ), "Should have start + heartbeat calls"
+            assert len(mock_callback.call_args_list) >= 2, (
+                "Should have start + heartbeat calls"
+            )
 
             # Check heartbeat message format by looking at info keyword arguments
             heartbeat_found = any(
@@ -89,7 +89,9 @@ class TestRealTimeFeedbackManager:
                 for call in mock_callback.call_args_list
             )
 
-            assert heartbeat_found, f"Heartbeat message not found in callback calls: {[call.kwargs.get('info', '') for call in mock_callback.call_args_list]}"
+            assert heartbeat_found, (
+                f"Heartbeat message not found in callback calls: {[call.kwargs.get('info', '') for call in mock_callback.call_args_list]}"
+            )
 
     def test_file_status_transitions_timing(self, feedback_manager, mock_callback):
         """
@@ -116,12 +118,12 @@ class TestRealTimeFeedbackManager:
 
         # Verify timing requirements
         assert queued_time - start_time < 0.1, "Queued status took too long"
-        assert (
-            processing_time - queued_time < 0.1
-        ), "Processing transition took too long"
-        assert (
-            complete_time - processing_time < 0.1
-        ), "Complete transition took too long"
+        assert processing_time - queued_time < 0.1, (
+            "Processing transition took too long"
+        )
+        assert complete_time - processing_time < 0.1, (
+            "Complete transition took too long"
+        )
 
         # Verify status icons and messages
         calls = mock_callback.call_args_list
@@ -200,13 +202,13 @@ class TestRealTimeFeedbackManager:
         call_info = mock_callback.call_args.kwargs["info"]
 
         # Should show worker information with percentages
-        assert (
-            "Worker" in call_info or "Thread" in call_info
-        ), "Worker/Thread info missing"
+        assert "Worker" in call_info or "Thread" in call_info, (
+            "Worker/Thread info missing"
+        )
         assert "%" in call_info, "Progress percentages missing"
-        assert any(
-            f in call_info for f in ["file1.py", "file2.py", "file3.py"]
-        ), "File names missing"
+        assert any(f in call_info for f in ["file1.py", "file2.py", "file3.py"]), (
+            "File names missing"
+        )
 
         # Should indicate concurrent processing
         assert len(concurrent_files) <= 8, "Should handle up to 8 concurrent files"
@@ -271,9 +273,9 @@ class TestRealTimeFeedbackManager:
 
         # Verify thread safety (should not crash and should have multiple calls)
         # We expect the initial call plus at least one heartbeat from threaded calls
-        assert (
-            mock_callback.call_count >= 2
-        ), f"Should have multiple calls from threaded execution, got {mock_callback.call_count}"
+        assert mock_callback.call_count >= 2, (
+            f"Should have multiple calls from threaded execution, got {mock_callback.call_count}"
+        )
 
         # Most importantly, verify it didn't crash during concurrent access
         assert True, "Thread safety test completed without crashing"
@@ -296,15 +298,15 @@ class TestRealTimeFeedbackManager:
                 rate = feedback_manager._calculate_files_per_second(i)
                 rates.append(rate)
                 if i > 1:  # Skip first call which may be 0 due to initialization
-                    assert (
-                        rate > 0
-                    ), f"Rate should be positive after first call, got {rate} at iteration {i}"
+                    assert rate > 0, (
+                        f"Rate should be positive after first call, got {rate} at iteration {i}"
+                    )
 
             # Should have at least some positive rates
             positive_rates = [r for r in rates if r > 0]
-            assert (
-                len(positive_rates) >= 2
-            ), f"Should have multiple positive rates, got {rates}"
+            assert len(positive_rates) >= 2, (
+                f"Should have multiple positive rates, got {rates}"
+            )
 
             # Final rate should be approximately 0.5 files/second
             final_rate = rates[-1]

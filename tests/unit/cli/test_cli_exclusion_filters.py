@@ -85,9 +85,9 @@ def test_exclude_language_single_extension_creates_must_not_filter(
 
     # Verify JavaScript has expected extensions
     expected_extensions = {"js", "jsx"}
-    assert (
-        extensions == expected_extensions
-    ), f"Expected {expected_extensions}, got {extensions}"
+    assert extensions == expected_extensions, (
+        f"Expected {expected_extensions}, got {extensions}"
+    )
 
     # Verify filter construction logic
     must_not_conditions = []
@@ -95,9 +95,9 @@ def test_exclude_language_single_extension_creates_must_not_filter(
         must_not_conditions.append({"key": "language", "match": {"value": ext}})
 
     # Verify we have correct number of conditions
-    assert (
-        len(must_not_conditions) == 2
-    ), "Should have 2 must_not conditions for JavaScript"
+    assert len(must_not_conditions) == 2, (
+        "Should have 2 must_not conditions for JavaScript"
+    )
 
     # Verify structure
     for condition in must_not_conditions:
@@ -142,9 +142,9 @@ def test_exclude_multiple_languages_creates_combined_must_not_filter(
     # Verify all expected extensions are present
     excluded_extensions = {cond["match"]["value"] for cond in must_not_conditions}
     expected_extensions = {"js", "jsx", "py", "pyw", "pyi"}
-    assert (
-        excluded_extensions == expected_extensions
-    ), f"Expected {expected_extensions}, got {excluded_extensions}"
+    assert excluded_extensions == expected_extensions, (
+        f"Expected {expected_extensions}, got {excluded_extensions}"
+    )
 
 
 def test_exclude_language_with_include_language_creates_both_filters(
@@ -163,9 +163,9 @@ def test_exclude_language_with_include_language_creates_both_filters(
     # Test inclusion filter (Python)
     python_filter = mapper.build_language_filter("python")
     # Python has multiple extensions, should use "should" for OR logic
-    assert (
-        "should" in python_filter
-    ), "Python filter should use OR logic for multiple extensions"
+    assert "should" in python_filter, (
+        "Python filter should use OR logic for multiple extensions"
+    )
 
     # Verify Python extensions in should clause
     python_extensions = {cond["match"]["value"] for cond in python_filter["should"]}
@@ -190,9 +190,9 @@ def test_exclude_language_with_include_language_creates_both_filters(
     # Verify both filters exist
     assert "must" in filter_conditions, "Should have must conditions"
     assert "must_not" in filter_conditions, "Should have must_not conditions"
-    assert (
-        len(filter_conditions["must_not"]) == 2
-    ), "Should have 2 JavaScript exclusions"
+    assert len(filter_conditions["must_not"]) == 2, (
+        "Should have 2 JavaScript exclusions"
+    )
 
 
 def test_exclude_language_with_path_filter_creates_combined_filters(

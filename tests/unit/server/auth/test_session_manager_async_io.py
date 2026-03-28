@@ -63,9 +63,9 @@ class TestSaveSessionDataOutsideLock:
 
             manager.invalidate_all_user_sessions("testuser")
 
-            assert (
-                len(lock_held_during_save) >= 1
-            ), "_save_session_data must be called at least once"
+            assert len(lock_held_during_save) >= 1, (
+                "_save_session_data must be called at least once"
+            )
             assert not any(lock_held_during_save), (
                 "_save_session_data must be called OUTSIDE the lock scope. "
                 "Lock was still held when _save_session_data was called."
@@ -102,9 +102,9 @@ class TestSaveSessionDataOutsideLock:
             manager.invalidate_specific_token("testuser", "token-123")
 
             assert len(lock_held_during_save) >= 1
-            assert not any(
-                lock_held_during_save
-            ), "_save_session_data must be called OUTSIDE the lock in invalidate_specific_token"
+            assert not any(lock_held_during_save), (
+                "_save_session_data must be called OUTSIDE the lock in invalidate_specific_token"
+            )
         finally:
             os.unlink(session_file)
 
@@ -144,9 +144,9 @@ class TestSaveSessionDataOutsideLock:
 
             if removed > 0:
                 # If cleanup actually happened, verify save was outside lock
-                assert not any(
-                    lock_held_during_save
-                ), "_save_session_data must be called OUTSIDE the lock in cleanup_old_data"
+                assert not any(lock_held_during_save), (
+                    "_save_session_data must be called OUTSIDE the lock in cleanup_old_data"
+                )
         finally:
             os.unlink(session_file)
 
@@ -165,9 +165,9 @@ class TestSessionManagerDataConsistency:
 
             # Reload from disk to verify persistence
             manager2 = PasswordChangeSessionManager(session_file_path=session_file)
-            assert (
-                "alice" in manager2._password_change_timestamps
-            ), "Password change timestamp must be persisted to disk"
+            assert "alice" in manager2._password_change_timestamps, (
+                "Password change timestamp must be persisted to disk"
+            )
         finally:
             os.unlink(session_file)
 
@@ -181,9 +181,9 @@ class TestSessionManagerDataConsistency:
             manager.invalidate_specific_token("bob", "tok-abc")
 
             manager2 = PasswordChangeSessionManager(session_file_path=session_file)
-            assert (
-                "bob" in manager2._invalidated_sessions
-            ), "Invalidated token must be persisted to disk"
+            assert "bob" in manager2._invalidated_sessions, (
+                "Invalidated token must be persisted to disk"
+            )
             assert "tok-abc" in manager2._invalidated_sessions["bob"]
         finally:
             os.unlink(session_file)
@@ -220,9 +220,9 @@ class TestSessionManagerDataConsistency:
 
             # All users must have a password change timestamp in memory
             for username in usernames:
-                assert (
-                    username in manager._password_change_timestamps
-                ), f"User {username} must have a password change timestamp after concurrent invalidation"
+                assert username in manager._password_change_timestamps, (
+                    f"User {username} must have a password change timestamp after concurrent invalidation"
+                )
         finally:
             os.unlink(session_file)
 
@@ -359,7 +359,7 @@ class TestSQLiteBackendUnaffected:
 
             manager.invalidate_all_user_sessions("sqliteuser")
 
-            assert (
-                len(save_called) == 0
-            ), "SQLite backend must NOT call _save_session_data (no file I/O for SQLite path)"
+            assert len(save_called) == 0, (
+                "SQLite backend must NOT call _save_session_data (no file I/O for SQLite path)"
+            )
             mock_backend.set_password_change_timestamp.assert_called_once()

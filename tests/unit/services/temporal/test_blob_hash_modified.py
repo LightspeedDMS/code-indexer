@@ -70,9 +70,9 @@ class TestBlobHashModified:
             assert len(diffs) == 1, f"Expected 1 diff, got {len(diffs)}"
             diff = diffs[0]
 
-            assert (
-                diff.diff_type == "modified"
-            ), f"Expected modified, got {diff.diff_type}"
-            assert (
-                diff.blob_hash == expected_blob_hash
-            ), f"Modified file blob_hash should be '{expected_blob_hash}' but got '{diff.blob_hash}'"
+            assert diff.diff_type == "modified", (
+                f"Expected modified, got {diff.diff_type}"
+            )
+            assert diff.blob_hash == expected_blob_hash, (
+                f"Modified file blob_hash should be '{expected_blob_hash}' but got '{diff.blob_hash}'"
+            )

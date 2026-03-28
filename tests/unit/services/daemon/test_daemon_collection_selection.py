@@ -92,12 +92,12 @@ def test_daemon_selects_main_collection_not_temporal():
         collections = vector_store.list_collections()
 
         # Verify test setup: temporal collection is alphabetically first (this triggers the bug)
-        assert (
-            collections[0] == "code-indexer-temporal"
-        ), "Test setup verification: temporal collection should be alphabetically first"
-        assert (
-            collections[1] == "voyage-code-3"
-        ), "Test setup verification: main collection should be alphabetically second"
+        assert collections[0] == "code-indexer-temporal", (
+            "Test setup verification: temporal collection should be alphabetically first"
+        )
+        assert collections[1] == "voyage-code-3", (
+            "Test setup verification: main collection should be alphabetically second"
+        )
 
         # Initialize daemon service and load indexes
         from code_indexer.daemon.service import CIDXDaemonService
@@ -133,9 +133,9 @@ def test_daemon_selects_main_collection_not_temporal():
         # 2. Select the main collection (first non-temporal collection)
 
         # Verification: Check if HNSW index was loaded (basic sanity check)
-        assert (
-            cache_entry.hnsw_index is not None
-        ), "Daemon should have loaded an HNSW index (but it loaded the WRONG collection)"
+        assert cache_entry.hnsw_index is not None, (
+            "Daemon should have loaded an HNSW index (but it loaded the WRONG collection)"
+        )
 
         # The real test: After fix, we need to verify daemon loaded 'voyage-code-3', not 'code-indexer-temporal'
         # This requires either:

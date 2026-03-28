@@ -16,9 +16,9 @@ def test_concurrent_file_display_class_does_not_exist():
     from src.code_indexer.progress import multi_threaded_display
 
     # This should fail initially - class should not exist after elimination
-    assert not hasattr(
-        multi_threaded_display, "ConcurrentFileDisplay"
-    ), "ConcurrentFileDisplay class must be completely deleted"
+    assert not hasattr(multi_threaded_display, "ConcurrentFileDisplay"), (
+        "ConcurrentFileDisplay class must be completely deleted"
+    )
 
 
 def test_file_processing_line_dataclass_does_not_exist():
@@ -26,9 +26,9 @@ def test_file_processing_line_dataclass_does_not_exist():
     from src.code_indexer.progress import multi_threaded_display
 
     # This should fail initially - dataclass should not exist after elimination
-    assert not hasattr(
-        multi_threaded_display, "FileProcessingLine"
-    ), "FileProcessingLine dataclass must be completely deleted"
+    assert not hasattr(multi_threaded_display, "FileProcessingLine"), (
+        "FileProcessingLine dataclass must be completely deleted"
+    )
 
 
 def test_no_dictionary_operations_in_multi_threaded_display():
@@ -53,9 +53,9 @@ def test_no_dictionary_operations_in_multi_threaded_display():
         if pattern in content:
             found_patterns.append(pattern)
 
-    assert (
-        not found_patterns
-    ), f"Dictionary patterns found in display code: {found_patterns}"
+    assert not found_patterns, (
+        f"Dictionary patterns found in display code: {found_patterns}"
+    )
 
 
 def test_multi_threaded_progress_manager_uses_direct_array_access():
@@ -70,9 +70,9 @@ def test_multi_threaded_progress_manager_uses_direct_array_access():
     manager = MultiThreadedProgressManager(console)
 
     # Manager should not have concurrent_display attribute after elimination
-    assert not hasattr(
-        manager, "concurrent_display"
-    ), "MultiThreadedProgressManager must not have concurrent_display attribute"
+    assert not hasattr(manager, "concurrent_display"), (
+        "MultiThreadedProgressManager must not have concurrent_display attribute"
+    )
 
 
 def test_display_reads_slot_tracker_array_directly():
@@ -101,9 +101,9 @@ def test_display_reads_slot_tracker_array_directly():
     display_lines = manager.get_display_lines_from_tracker(tracker)
 
     assert len(display_lines) == 1, "Display should read directly from tracker array"
-    assert (
-        "test.py" in display_lines[0]
-    ), "Display line should contain filename from tracker array"
+    assert "test.py" in display_lines[0], (
+        "Display line should contain filename from tracker array"
+    )
 
 
 def test_single_data_structure_architecture():
@@ -125,9 +125,9 @@ def test_single_data_structure_architecture():
 
     # Verify only one data structure exists
     assert hasattr(tracker, "status_array"), "CleanSlotTracker must have status_array"
-    assert hasattr(
-        manager, "slot_tracker"
-    ), "Manager should reference slot_tracker directly"
+    assert hasattr(manager, "slot_tracker"), (
+        "Manager should reference slot_tracker directly"
+    )
 
 
 def test_threadcount_plus_two_array_scanning():
@@ -162,14 +162,14 @@ def test_threadcount_plus_two_array_scanning():
     # Manager should scan array directly: for slot_id in range(14)
     display_lines = manager.get_array_display_lines(tracker, max_slots)
 
-    assert (
-        len(display_lines) == 3
-    ), "Display should find 3 active files by scanning array"
+    assert len(display_lines) == 3, (
+        "Display should find 3 active files by scanning array"
+    )
 
     # Should use simple slot scanning logic
-    assert all(
-        "file_" in line for line in display_lines
-    ), "All display lines should contain file data from array"
+    assert all("file_" in line for line in display_lines), (
+        "All display lines should contain file data from array"
+    )
 
 
 def test_no_insert_remove_operations():
@@ -193,9 +193,9 @@ def test_no_insert_remove_operations():
         if op in content:
             found_operations.append(op)
 
-    assert (
-        not found_operations
-    ), f"Complex operations found in display code: {found_operations}"
+    assert not found_operations, (
+        f"Complex operations found in display code: {found_operations}"
+    )
 
 
 def test_stale_data_problem_eliminated():
@@ -225,11 +225,11 @@ def test_stale_data_problem_eliminated():
     # Display should immediately reflect the update (no stale data)
     display_lines = manager.get_current_display_lines(tracker)
 
-    assert any(
-        "complete" in line.lower() for line in display_lines
-    ), "Display should immediately show updated status from tracker array"
+    assert any("complete" in line.lower() for line in display_lines), (
+        "Display should immediately show updated status from tracker array"
+    )
 
     # No separate display data means no stale data possible
-    assert not hasattr(
-        manager, "active_lines"
-    ), "No separate display data structure should exist"
+    assert not hasattr(manager, "active_lines"), (
+        "No separate display data structure should exist"
+    )

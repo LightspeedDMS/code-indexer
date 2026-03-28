@@ -102,9 +102,9 @@ class TestReferencesQuery:
         assert len(results) > 0, "Should find Logger#log references"
 
         # Logger#log is used extensively - should find multiple references
-        assert (
-            len(results) >= 10
-        ), f"Should find at least 10 references, found {len(results)}"
+        assert len(results) >= 10, (
+            f"Should find at least 10 references, found {len(results)}"
+        )
 
         # Verify references in controllers (Logger#log is primarily used in controllers)
         controller_refs = [r for r in results if "controllers/" in r.file_path]
@@ -121,9 +121,9 @@ class TestReferencesQuery:
         assert len(results) > 0, "Should find Logger references"
 
         # Simple name search should find various Logger usages
-        assert (
-            len(results) >= 5
-        ), f"Should find multiple Logger references, found {len(results)}"
+        assert len(results) >= 5, (
+            f"Should find multiple Logger references, found {len(results)}"
+        )
 
     def test_find_user_references(self, query_engine):
         """Should find User class references across codebase."""
@@ -152,9 +152,9 @@ class TestDependenciesQuery:
         }
 
         # Should find Logger dependency
-        assert any(
-            "Logger" in name for name in dependency_names
-        ), "UserService should depend on Logger"
+        assert any("Logger" in name for name in dependency_names), (
+            "UserService should depend on Logger"
+        )
 
     def test_get_auth_service_dependencies(self, query_engine):
         """Should find symbols that AuthService depends on."""
@@ -163,9 +163,9 @@ class TestDependenciesQuery:
         assert len(results) > 0, "AuthService should have dependencies"
 
         # AuthService has multiple dependencies
-        assert (
-            len(results) >= 3
-        ), f"AuthService should have at least 3 dependencies, found {len(results)}"
+        assert len(results) >= 3, (
+            f"AuthService should have at least 3 dependencies, found {len(results)}"
+        )
 
 
 class TestDependentsQuery:
@@ -178,15 +178,15 @@ class TestDependentsQuery:
         assert len(results) > 0, "Logger should have dependents"
 
         # Logger is used by many classes
-        assert (
-            len(results) >= 5
-        ), f"Logger should have at least 5 dependents, found {len(results)}"
+        assert len(results) >= 5, (
+            f"Logger should have at least 5 dependents, found {len(results)}"
+        )
 
         # Verify dependents span multiple files
         file_paths = {r.file_path for r in results}
-        assert (
-            len(file_paths) >= 3
-        ), "Logger should be used in at least 3 different files"
+        assert len(file_paths) >= 3, (
+            "Logger should be used in at least 3 different files"
+        )
 
     def test_get_user_dependents(self, query_engine):
         """Should find symbols that depend on User class."""
@@ -195,9 +195,9 @@ class TestDependentsQuery:
         assert len(results) > 0, "User should have dependents"
 
         # User class is referenced by services and controllers
-        assert (
-            len(results) >= 3
-        ), f"User should have at least 3 dependents, found {len(results)}"
+        assert len(results) >= 3, (
+            f"User should have at least 3 dependents, found {len(results)}"
+        )
 
 
 class TestImpactQuery:
@@ -210,9 +210,9 @@ class TestImpactQuery:
         assert len(results) > 0, "Logger changes should have impact"
 
         # Logger is fundamental - should impact multiple files
-        assert (
-            len(results) >= 3
-        ), f"Logger should impact at least 3 files, found {len(results)}"
+        assert len(results) >= 3, (
+            f"Logger should impact at least 3 files, found {len(results)}"
+        )
 
         # Verify results have required fields
         for result in results:
@@ -231,9 +231,9 @@ class TestImpactQuery:
         assert len(results) > 0, "UserService changes should have impact"
 
         # UserService is used by controllers
-        assert any(
-            "controller" in result.file_path for result in results
-        ), "UserService changes should impact controllers"
+        assert any("controller" in result.file_path for result in results), (
+            "UserService changes should impact controllers"
+        )
 
 
 class TestCallChainQuery:

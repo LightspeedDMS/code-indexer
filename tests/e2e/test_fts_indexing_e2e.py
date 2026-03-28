@@ -101,14 +101,14 @@ class Product:
                     # Verify Tantivy index was created
                     tantivy_dir = project_dir / ".code-indexer" / "tantivy_index"
                     assert tantivy_dir.exists(), "Tantivy index directory should exist"
-                    assert (
-                        tantivy_dir.is_dir()
-                    ), "Tantivy index path should be directory"
+                    assert tantivy_dir.is_dir(), (
+                        "Tantivy index path should be directory"
+                    )
 
                     # Verify index contains segments
-                    assert any(
-                        tantivy_dir.rglob("*")
-                    ), "Tantivy index should contain files"
+                    assert any(tantivy_dir.rglob("*")), (
+                        "Tantivy index should contain files"
+                    )
             finally:
                 # Cleanup
                 self.run_cidx_command(["stop"], cwd=project_dir)
@@ -136,9 +136,9 @@ class Product:
 
                     # FTS index should NOT exist
                     tantivy_dir = project_dir / ".code-indexer" / "tantivy_index"
-                    assert (
-                        not tantivy_dir.exists()
-                    ), "FTS index should not be created by default"
+                    assert not tantivy_dir.exists(), (
+                        "FTS index should not be created by default"
+                    )
             finally:
                 self.run_cidx_command(["stop"], cwd=project_dir)
 
@@ -244,12 +244,12 @@ class Product:
                 # Verify FTS index still exists
                 assert tantivy_dir.exists(), "FTS index should persist after restart"
                 after_files = set(tantivy_dir.rglob("*"))
-                assert (
-                    len(after_files) > 0
-                ), "FTS index should contain files after restart"
-                assert (
-                    initial_files == after_files
-                ), "FTS index files should be unchanged"
+                assert len(after_files) > 0, (
+                    "FTS index should contain files after restart"
+                )
+                assert initial_files == after_files, (
+                    "FTS index files should be unchanged"
+                )
             finally:
                 self.run_cidx_command(["stop"], cwd=project_dir)
 

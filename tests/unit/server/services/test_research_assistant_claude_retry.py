@@ -107,14 +107,14 @@ class TestResearchAssistantClaudeRetry:
             time.sleep(0.2)
 
         # Verify command used --resume (not --session-id)
-        assert (
-            len(captured_commands) == 1
-        ), "Should execute Claude CLI once (successful resume)"
+        assert len(captured_commands) == 1, (
+            "Should execute Claude CLI once (successful resume)"
+        )
         cmd = captured_commands[0]
         assert "--resume" in cmd, "Subsequent message must try --resume first"
-        assert (
-            "--session-id" not in cmd
-        ), "Successful resume should not use --session-id"
+        assert "--session-id" not in cmd, (
+            "Successful resume should not use --session-id"
+        )
 
     def test_retry_logic_on_no_conversation_found(self, research_service):
         """Test Bug #153: Retry with --session-id when --resume fails with 'No conversation found'."""
@@ -165,18 +165,18 @@ class TestResearchAssistantClaudeRetry:
             time.sleep(0.2)
 
         # Verify retry logic was triggered
-        assert (
-            len(captured_commands) == 2
-        ), "Should execute Claude CLI twice (resume failed, retry succeeded)"
+        assert len(captured_commands) == 2, (
+            "Should execute Claude CLI twice (resume failed, retry succeeded)"
+        )
         assert "--resume" in captured_commands[0], "First attempt must use --resume"
         assert "--session-id" in captured_commands[1], "Retry must use --session-id"
 
         # Verify job completed successfully
         status = research_service.poll_job(_job_id)
         assert status["status"] == "complete", "Job should complete after retry"
-        assert (
-            status["response"] == "Test response"
-        ), "Should return response from retry"
+        assert status["response"] == "Test response", (
+            "Should return response from retry"
+        )
 
     def test_retry_logic_on_not_found_error(self, research_service):
         """Test Bug #153: Retry with --session-id when --resume fails with 'not found' (lowercase)."""
@@ -263,9 +263,9 @@ class TestResearchAssistantClaudeRetry:
             time.sleep(0.2)
 
         # Verify NO retry happened (only one call)
-        assert (
-            len(captured_commands) == 1
-        ), "Should execute Claude CLI ONCE (no retry needed)"
+        assert len(captured_commands) == 1, (
+            "Should execute Claude CLI ONCE (no retry needed)"
+        )
         assert "--resume" in captured_commands[0], "Should use --resume"
         assert "--session-id" not in captured_commands[0], "Should NOT use --session-id"
 
@@ -301,9 +301,9 @@ class TestResearchAssistantClaudeRetry:
             time.sleep(0.2)
 
         # Verify NO retry happened (only one call)
-        assert (
-            len(captured_commands) == 1
-        ), "Should execute Claude CLI ONCE (no retry on non-'not found' errors)"
+        assert len(captured_commands) == 1, (
+            "Should execute Claude CLI ONCE (no retry on non-'not found' errors)"
+        )
         assert "--resume" in captured_commands[0], "Should use --resume"
 
         # Verify job failed

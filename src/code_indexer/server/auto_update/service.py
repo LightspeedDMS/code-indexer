@@ -87,15 +87,15 @@ class AutoUpdateService:
         if present, bypassing normal change detection flow.
         """
         # Validate components are injected before use
-        assert (
-            self.change_detector is not None
-        ), "change_detector must be set before calling poll_once()"
-        assert (
-            self.deployment_lock is not None
-        ), "deployment_lock must be set before calling poll_once()"
-        assert (
-            self.deployment_executor is not None
-        ), "deployment_executor must be set before calling poll_once()"
+        assert self.change_detector is not None, (
+            "change_detector must be set before calling poll_once()"
+        )
+        assert self.deployment_lock is not None, (
+            "deployment_lock must be set before calling poll_once()"
+        )
+        assert self.deployment_executor is not None, (
+            "deployment_executor must be set before calling poll_once()"
+        )
 
         # Story #355: Check for restart signal file BEFORE redeploy marker check.
         # Server writes this file to request a restart when running under systemd

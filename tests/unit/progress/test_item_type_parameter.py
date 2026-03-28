@@ -38,26 +38,26 @@ class TestItemTypeParameter:
         # The files_info field should be "50/100 commits" not "50/100 files"
 
         # Get the progress task to check fields
-        assert (
-            progress_manager.main_task_id is not None
-        ), "Progress task should be created"
+        assert progress_manager.main_task_id is not None, (
+            "Progress task should be created"
+        )
 
         # Access the task to verify files_info field
         task = progress_manager.progress.tasks[0]
         files_info = task.fields.get("files_info", "")
 
         # CRITICAL ASSERTION: Should show "commits" not "files"
-        assert (
-            "commits" in files_info
-        ), f"files_info should contain 'commits': {files_info}"
-        assert (
-            "50/100 commits" == files_info
-        ), f"Expected '50/100 commits', got: {files_info}"
+        assert "commits" in files_info, (
+            f"files_info should contain 'commits': {files_info}"
+        )
+        assert "50/100 commits" == files_info, (
+            f"Expected '50/100 commits', got: {files_info}"
+        )
 
         # Ensure "files" is NOT in the count
-        assert (
-            "files" not in files_info
-        ), f"files_info should not contain 'files': {files_info}"
+        assert "files" not in files_info, (
+            f"files_info should not contain 'files': {files_info}"
+        )
 
     def test_aggregate_progress_displays_commits_with_item_type(self):
         """Test AggregateProgressDisplay shows 'commits' when item_type='commits'."""
@@ -81,20 +81,20 @@ class TestItemTypeParameter:
         progress_line = aggregate_display.get_progress_line()
 
         # CRITICAL ASSERTION: Should show "commits" not "files"
-        assert (
-            "75/150 commits" in progress_line
-        ), f"Progress line should contain '75/150 commits': {progress_line}"
+        assert "75/150 commits" in progress_line, (
+            f"Progress line should contain '75/150 commits': {progress_line}"
+        )
 
         # Ensure "files" is NOT in the count
-        assert (
-            "75/150 files" not in progress_line
-        ), f"Progress line should not contain '75/150 files': {progress_line}"
+        assert "75/150 files" not in progress_line, (
+            f"Progress line should not contain '75/150 files': {progress_line}"
+        )
 
         # Verify metrics line also shows "commits/s" not "files/s"
         metrics_line = aggregate_display.get_metrics_line()
-        assert (
-            "commits/s" in metrics_line
-        ), f"Metrics line should contain 'commits/s': {metrics_line}"
-        assert (
-            "files/s" not in metrics_line
-        ), f"Metrics line should not contain 'files/s': {metrics_line}"
+        assert "commits/s" in metrics_line, (
+            f"Metrics line should contain 'commits/s': {metrics_line}"
+        )
+        assert "files/s" not in metrics_line, (
+            f"Metrics line should not contain 'files/s': {metrics_line}"
+        )

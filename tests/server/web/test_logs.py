@@ -46,9 +46,9 @@ class TestLogsPageDisplay:
         response = authenticated_client.get("/admin/logs")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Logs - CIDX Admin" in response.text
-        ), "Page title should be 'Logs - CIDX Admin'"
+        assert "Logs - CIDX Admin" in response.text, (
+            "Page title should be 'Logs - CIDX Admin'"
+        )
 
     def test_logs_page_has_table(self, authenticated_client: TestClient):
         """
@@ -98,17 +98,17 @@ class TestLogsPageDisplay:
 
         assert response.status_code == 200
         # Check for navigation highlighting (aria-current="page" on Logs link)
-        assert (
-            'aria-current="page"' in response.text
-        ), "Navigation should be highlighted"
+        assert 'aria-current="page"' in response.text, (
+            "Navigation should be highlighted"
+        )
         # Verify it's on the Logs link
         # Look for pattern: <a href="/admin/logs" aria-current="page">Logs</a>
         logs_link_pattern = (
             r'<a[^>]*href="/admin/logs"[^>]*aria-current="page"[^>]*>Logs</a>'
         )
-        assert re.search(
-            logs_link_pattern, response.text
-        ), "Logs link should have aria-current='page'"
+        assert re.search(logs_link_pattern, response.text), (
+            "Logs link should have aria-current='page'"
+        )
 
 
 # =============================================================================
@@ -133,9 +133,9 @@ class TestLogsRefresh:
         text_lower = response.text.lower()
         assert "refresh" in text_lower, "Page should have a Refresh button"
         # Should be an actual button element
-        assert (
-            "<button" in response.text and "refresh" in text_lower
-        ), "Should have <button> element for refresh"
+        assert "<button" in response.text and "refresh" in text_lower, (
+            "Should have <button> element for refresh"
+        )
 
     def test_refresh_button_htmx_configured(self, authenticated_client: TestClient):
         """
@@ -150,9 +150,9 @@ class TestLogsRefresh:
         assert response.status_code == 200
         # Check for HTMX attributes on refresh button
         assert "hx-get" in response.text, "Refresh button should have hx-get attribute"
-        assert (
-            "/admin/partials/logs-list" in response.text
-        ), "hx-get should point to logs partial endpoint"
+        assert "/admin/partials/logs-list" in response.text, (
+            "hx-get should point to logs partial endpoint"
+        )
 
     def test_logs_partial_endpoint_exists(self, authenticated_client: TestClient):
         """
@@ -190,9 +190,9 @@ class TestLogsFiltering:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            'name="level"' in response.text or 'id="level"' in text_lower
-        ), "Page should have level filter"
+        assert 'name="level"' in response.text or 'id="level"' in text_lower, (
+            "Page should have level filter"
+        )
         # Should have common log levels
         assert "debug" in text_lower or "info" in text_lower, "Should have log levels"
 
@@ -208,9 +208,9 @@ class TestLogsFiltering:
 
         assert response.status_code == 200
         # Should have logger filter input or select
-        assert (
-            'name="logger"' in response.text or "logger" in response.text.lower()
-        ), "Page should have logger filter"
+        assert 'name="logger"' in response.text or "logger" in response.text.lower(), (
+            "Page should have logger filter"
+        )
 
     def test_search_filter_present(self, authenticated_client: TestClient):
         """
@@ -224,9 +224,9 @@ class TestLogsFiltering:
 
         assert response.status_code == 200
         # Should have search input
-        assert (
-            'type="search"' in response.text or 'name="search"' in response.text
-        ), "Page should have search field"
+        assert 'type="search"' in response.text or 'name="search"' in response.text, (
+            "Page should have search field"
+        )
 
     def test_level_filter_works(self, authenticated_client: TestClient):
         """
@@ -256,9 +256,9 @@ class TestLogsFiltering:
         assert response.status_code == 200
         # Page parameter should be accepted
         page_response = authenticated_client.get("/admin/logs?page=1")
-        assert (
-            page_response.status_code == 200
-        ), "Should accept page parameter without error"
+        assert page_response.status_code == 200, (
+            "Should accept page parameter without error"
+        )
 
 
 # =============================================================================
@@ -297,15 +297,15 @@ class TestLogsExport:
         response = authenticated_client.get("/admin/logs/export?format=json")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "application/json" in response.headers.get("content-type", "").lower()
-        ), "Expected JSON content-type"
+        assert "application/json" in response.headers.get("content-type", "").lower(), (
+            "Expected JSON content-type"
+        )
 
         # Verify Content-Disposition header triggers download
         content_disposition = response.headers.get("content-disposition", "")
-        assert (
-            "attachment" in content_disposition
-        ), "Expected attachment in Content-Disposition"
+        assert "attachment" in content_disposition, (
+            "Expected attachment in Content-Disposition"
+        )
         assert "logs_" in content_disposition, "Expected filename with 'logs_' prefix"
         assert ".json" in content_disposition, "Expected .json extension"
 
@@ -328,15 +328,15 @@ class TestLogsExport:
         response = authenticated_client.get("/admin/logs/export?format=csv")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "text/csv" in response.headers.get("content-type", "").lower()
-        ), "Expected CSV content-type"
+        assert "text/csv" in response.headers.get("content-type", "").lower(), (
+            "Expected CSV content-type"
+        )
 
         # Verify Content-Disposition header triggers download
         content_disposition = response.headers.get("content-disposition", "")
-        assert (
-            "attachment" in content_disposition
-        ), "Expected attachment in Content-Disposition"
+        assert "attachment" in content_disposition, (
+            "Expected attachment in Content-Disposition"
+        )
         assert ".csv" in content_disposition, "Expected .csv extension"
 
         # Verify UTF-8 BOM for Excel compatibility
@@ -387,9 +387,9 @@ class TestLogsExport:
         response = authenticated_client.get("/admin/logs/export")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "application/json" in response.headers.get("content-type", "").lower()
-        ), "Expected JSON content-type"
+        assert "application/json" in response.headers.get("content-type", "").lower(), (
+            "Expected JSON content-type"
+        )
 
     def test_export_filename_has_timestamp(self, authenticated_client: TestClient):
         """
@@ -405,6 +405,6 @@ class TestLogsExport:
 
         content_disposition = response.headers.get("content-disposition", "")
         # Check for timestamp pattern (YYYYMMDD_HHMMSS)
-        assert re.search(
-            r"logs_\d{8}_\d{6}\.json", content_disposition
-        ), "Expected timestamp in filename (logs_YYYYMMDD_HHMMSS.json)"
+        assert re.search(r"logs_\d{8}_\d{6}\.json", content_disposition), (
+            "Expected timestamp in filename (logs_YYYYMMDD_HHMMSS.json)"
+        )

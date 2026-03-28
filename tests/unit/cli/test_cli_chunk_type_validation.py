@@ -44,10 +44,12 @@ class TestChunkTypeValidation:
             print(f"\n=== Exit code: {result.exit_code} ===")
             print(f"\n=== Output: {result.output} ===")
 
-            assert (
-                result.exit_code != 0
-            ), "Expected non-zero exit code for invalid flag combination"
+            assert result.exit_code != 0, (
+                "Expected non-zero exit code for invalid flag combination"
+            )
             assert (
                 "--chunk-type requires --time-range or --time-range-all"
                 in result.output
-            ), f"Expected error message about missing temporal flags. Got: {result.output}"
+            ), (
+                f"Expected error message about missing temporal flags. Got: {result.output}"
+            )

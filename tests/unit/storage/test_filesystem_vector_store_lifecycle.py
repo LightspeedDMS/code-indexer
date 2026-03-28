@@ -125,9 +125,9 @@ class TestFilesystemVectorStoreLifecycle:
         # O(n²) FIX PROOF: Index should be rebuilt 0 times during upserts
         # OLD behavior: would be 5 (disaster!)
         # NEW behavior: 0 (index building deferred to end_indexing)
-        assert (
-            rebuild_count == 0
-        ), f"O(n²) FIXED: Index rebuilt {rebuild_count} times during upserts (should be 0, was 5 before fix)"
+        assert rebuild_count == 0, (
+            f"O(n²) FIXED: Index rebuilt {rebuild_count} times during upserts (should be 0, was 5 before fix)"
+        )
 
     def test_upsert_with_lifecycle_rebuilds_index_once(self, store, test_vectors):
         """GREEN TEST: Demonstrates O(n) behavior WITH lifecycle methods.
@@ -194,9 +194,9 @@ class TestFilesystemVectorStoreLifecycle:
             store.end_indexing("test_coll")
 
         # O(n) PROOF: Index should be rebuilt exactly 1 time (in end_indexing only)
-        assert (
-            rebuild_count == 1
-        ), f"O(n) behavior: Index rebuilt {rebuild_count} times (should be 1 with lifecycle)"
+        assert rebuild_count == 1, (
+            f"O(n) behavior: Index rebuilt {rebuild_count} times (should be 1 with lifecycle)"
+        )
 
     def test_vector_size_caching_avoids_repeated_json_parsing(
         self, store, test_vectors, tmp_path
@@ -249,9 +249,9 @@ class TestFilesystemVectorStoreLifecycle:
 
         # OPTIMIZATION PROOF: Should read metadata file ONCE (at cache population), not 4 times
         # First read populates cache, subsequent upserts use cache for quantization_range
-        assert (
-            read_count == 1
-        ), f"Metadata read {read_count} times (should be 1 with caching)"
+        assert read_count == 1, (
+            f"Metadata read {read_count} times (should be 1 with caching)"
+        )
 
     def test_end_indexing_returns_vector_count(self, store, test_vectors):
         """GIVEN vectors indexed via lifecycle
@@ -319,9 +319,9 @@ class TestVectorSizeCaching:
         AC3: Thread-safe with _metadata_lock
         """
         # This will FAIL initially - method doesn't exist yet (RED phase)
-        assert hasattr(
-            store, "_get_vector_size"
-        ), "_get_vector_size() method must exist"
+        assert hasattr(store, "_get_vector_size"), (
+            "_get_vector_size() method must exist"
+        )
 
         # First call should read and cache
         size1 = store._get_vector_size("test_coll")
@@ -332,9 +332,9 @@ class TestVectorSizeCaching:
         assert size2 == 1536, "Should return same cached value"
 
         # Verify cache exists
-        assert hasattr(
-            store, "_vector_size_cache"
-        ), "Must have _vector_size_cache attribute"
+        assert hasattr(store, "_vector_size_cache"), (
+            "Must have _vector_size_cache attribute"
+        )
         assert "test_coll" in store._vector_size_cache, "Collection should be cached"
 
     def test_get_vector_size_handles_corrupted_json(self, store, tmp_path):
@@ -592,6 +592,6 @@ class TestFilesystemVectorStoreWatchModeOptimization:
             store.end_indexing("test_coll")
 
         # Verify default behavior
-        assert (
-            rebuild_called
-        ), "HNSW rebuild SHOULD be called by default (backward compatibility)"
+        assert rebuild_called, (
+            "HNSW rebuild SHOULD be called by default (backward compatibility)"
+        )

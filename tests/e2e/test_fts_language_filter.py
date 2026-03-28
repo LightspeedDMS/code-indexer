@@ -99,9 +99,9 @@ class TestSingleLanguageFilterE2E:
         assert result.returncode == 0, f"Command failed: {result.stderr}"
 
         # Check output contains Python files
-        assert (
-            "main.py" in result.stdout or "utils.py" in result.stdout
-        ), "Should find Python files"
+        assert "main.py" in result.stdout or "utils.py" in result.stdout, (
+            "Should find Python files"
+        )
 
         # Check output does NOT contain other language files
         assert "app.js" not in result.stdout, "Should not find JavaScript files"
@@ -123,9 +123,9 @@ class TestSingleLanguageFilterE2E:
         assert result.returncode == 0, f"Command failed: {result.stderr}"
 
         # Check output contains JavaScript files
-        assert (
-            "app.js" in result.stdout or "helper.jsx" in result.stdout
-        ), "Should find JavaScript files"
+        assert "app.js" in result.stdout or "helper.jsx" in result.stdout, (
+            "Should find JavaScript files"
+        )
 
         # Check output does NOT contain other language files
         assert "main.py" not in result.stdout, "Should not find Python files"
@@ -239,9 +239,9 @@ class TestLanguageFilterWithFuzzyE2E:
 
         # If results found, verify they are Python files
         if result.stdout.strip():
-            assert (
-                "main.py" in result.stdout or "utils.py" in result.stdout
-            ), "Fuzzy results should be Python files"
+            assert "main.py" in result.stdout or "utils.py" in result.stdout, (
+                "Fuzzy results should be Python files"
+            )
 
 
 class TestLanguageFilterWithCaseSensitiveE2E:
@@ -274,9 +274,9 @@ class TestLanguageFilterWithCaseSensitiveE2E:
         # If results found, verify they are Python files
         if result.stdout.strip():
             output = result.stdout
-            assert (
-                "main.py" in output or "utils.py" in output
-            ), "Case-sensitive results should be Python files"
+            assert "main.py" in output or "utils.py" in output, (
+                "Case-sensitive results should be Python files"
+            )
 
 
 class TestEdgeCasesE2E:
@@ -528,9 +528,9 @@ class TestExclusionPrecedenceE2E:
         assert result.returncode == 0, f"Command failed: {result.stderr}"
 
         # Should have Python results
-        assert (
-            "main.py" in result.stdout or "utils.py" in result.stdout
-        ), "Should return Python files"
+        assert "main.py" in result.stdout or "utils.py" in result.stdout, (
+            "Should return Python files"
+        )
 
         # Should NOT have JavaScript results
         assert "app.js" not in result.stdout, "JavaScript should be excluded"
@@ -823,6 +823,6 @@ class TestExcludeLanguagePerformanceE2E:
         elapsed = time.time() - start_time
 
         assert result.returncode == 0, f"Command failed: {result.stderr}"
-        assert (
-            elapsed < 2.0
-        ), f"Query with exclusions took {elapsed:.2f}s, should be <2s"
+        assert elapsed < 2.0, (
+            f"Query with exclusions took {elapsed:.2f}s, should be <2s"
+        )

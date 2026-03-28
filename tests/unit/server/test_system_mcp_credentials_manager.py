@@ -96,9 +96,9 @@ class TestUserManagerGetSystemMcpCredentials:
         result = manager.get_system_mcp_credentials()
 
         cred_ids = {c["credential_id"] for c in result}
-        assert (
-            "usr1" not in cred_ids
-        ), "Non-admin credential must not appear in system creds"
+        assert "usr1" not in cred_ids, (
+            "Non-admin credential must not appear in system creds"
+        )
 
     def test_sqlite_path_returns_empty_when_no_admin_creds(
         self, tmp_path: Path

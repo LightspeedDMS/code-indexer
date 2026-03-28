@@ -148,9 +148,9 @@ class TestBranchFilteringIntegration:
 
         # Verify no issue-tracker patterns in results
         for branch in result.branches:
-            assert not ISSUE_TRACKER_PATTERN.search(
-                branch
-            ), f"Branch '{branch}' should have been filtered out"
+            assert not ISSUE_TRACKER_PATTERN.search(branch), (
+                f"Branch '{branch}' should have been filtered out"
+            )
 
 
 class TestMultipleReposFetching:

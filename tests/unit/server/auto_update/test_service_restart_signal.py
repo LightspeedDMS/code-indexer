@@ -124,9 +124,9 @@ class TestRestartSignalDetected:
                 ):
                     service.poll_once()
 
-        assert deleted_before_restart == [
-            True
-        ], "Signal file must be deleted BEFORE restart_server() is called"
+        assert deleted_before_restart == [True], (
+            "Signal file must be deleted BEFORE restart_server() is called"
+        )
 
     def test_signal_file_is_deleted_after_detection(self, service, tmp_path):
         """
@@ -263,9 +263,9 @@ class TestRestartSignalDeletedOnFailure:
                 ):
                     service.poll_once()
 
-        assert (
-            not signal_file.exists()
-        ), "Signal file must be deleted even on restart failure"
+        assert not signal_file.exists(), (
+            "Signal file must be deleted even on restart failure"
+        )
 
     def test_restart_failure_is_logged(self, service, tmp_path):
         """
@@ -553,9 +553,9 @@ class TestSignalCheckedBeforeRedeployMarker:
                     service.poll_once()
 
         # Pending marker check should NOT happen because signal triggered early return
-        assert (
-            "pending_check" not in call_order
-        ), "PENDING_REDEPLOY_MARKER should not be checked when restart signal is present"
+        assert "pending_check" not in call_order, (
+            "PENDING_REDEPLOY_MARKER should not be checked when restart signal is present"
+        )
 
     def test_no_signal_falls_through_to_redeploy_marker_check(self, service, tmp_path):
         """

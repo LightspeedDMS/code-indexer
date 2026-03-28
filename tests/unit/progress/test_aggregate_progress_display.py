@@ -66,12 +66,14 @@ class TestAggregateProgressLine:
         assert any(
             indicator in current_output
             for indicator in ["/path/to", ".py", "/current/"]
-        ), "Current format should show individual files - this is what we want to change"
+        ), (
+            "Current format should show individual files - this is what we want to change"
+        )
 
         # ASSERTION: File count is not clearly separated (should fail)
-        assert (
-            "45/120 files" not in current_output
-        ), "Current format doesn't show clear file count - this is what we need to add"
+        assert "45/120 files" not in current_output, (
+            "Current format doesn't show clear file count - this is what we need to add"
+        )
 
         # Clean up
         manager.stop_display()
@@ -121,26 +123,26 @@ class TestAggregateProgressLine:
             assert "0:02:12" in progress_line, "Progress bar should show remaining time"
 
             # Should contain file count
-            assert (
-                "45/120 files" in progress_line
-            ), "Progress bar should show file count"
+            assert "45/120 files" in progress_line, (
+                "Progress bar should show file count"
+            )
 
             # Should NOT contain individual file paths (but should contain file count with /)
-            assert (
-                ".py" not in progress_line
-            ), "Progress bar should not show individual file names"
+            assert ".py" not in progress_line, (
+                "Progress bar should not show individual file names"
+            )
             # Check that there are no file paths (slashes not in the file count context)
             # We know file count has format "N/M files", so exclude that pattern
             line_without_file_count = progress_line.replace(f"{45}/{120} files", "")
-            assert (
-                "/" not in line_without_file_count
-            ), "Progress bar should not show file paths"
+            assert "/" not in line_without_file_count, (
+                "Progress bar should not show file paths"
+            )
 
         except ImportError:
             # This should fail because AggregateProgressDisplay doesn't exist yet
-            assert (
-                False
-            ), "AggregateProgressDisplay class doesn't exist - need to implement"
+            assert False, (
+                "AggregateProgressDisplay class doesn't exist - need to implement"
+            )
 
         manager.stop_display()
 
@@ -186,15 +188,15 @@ class TestAggregateProgressLine:
 
             # Expected format: "12.3 files/s | 456.7 KB/s | 8 threads"
             expected = "12.3 files/s | 456.7 KB/s | 8 threads"
-            assert (
-                expected in metrics_line
-            ), f"Metrics line should match format: {expected}"
+            assert expected in metrics_line, (
+                f"Metrics line should match format: {expected}"
+            )
 
         except ImportError:
             # This should fail because AggregateProgressDisplay doesn't exist yet
-            assert (
-                False
-            ), "AggregateProgressDisplay class doesn't exist - need to implement"
+            assert False, (
+                "AggregateProgressDisplay class doesn't exist - need to implement"
+            )
 
         manager.stop_display()
 
@@ -257,9 +259,9 @@ class TestAggregateProgressLine:
             assert has_live_component, "Manager should have live component"
 
         except ImportError:
-            assert (
-                False
-            ), "AggregateProgressDisplay integration doesn't exist - need to implement"
+            assert False, (
+                "AggregateProgressDisplay integration doesn't exist - need to implement"
+            )
 
         manager.stop_display()
 
@@ -294,19 +296,19 @@ class TestAggregateProgressLine:
             metrics = calculator.get_current_metrics()
 
             # Should calculate files/s: 50 files / 10 seconds = 5.0 files/s
-            assert (
-                metrics.files_per_second == 5.0
-            ), f"Expected 5.0 files/s, got {metrics.files_per_second}"
+            assert metrics.files_per_second == 5.0, (
+                f"Expected 5.0 files/s, got {metrics.files_per_second}"
+            )
 
             # Should calculate KB/s: 500KB / 10 seconds = 50.0 KB/s
-            assert (
-                metrics.kb_per_second == 50.0
-            ), f"Expected 50.0 KB/s, got {metrics.kb_per_second}"
+            assert metrics.kb_per_second == 50.0, (
+                f"Expected 50.0 KB/s, got {metrics.kb_per_second}"
+            )
 
             # Should track current thread count
-            assert (
-                metrics.active_threads == 8
-            ), f"Expected 8 threads, got {metrics.active_threads}"
+            assert metrics.active_threads == 8, (
+                f"Expected 8 threads, got {metrics.active_threads}"
+            )
 
         except ImportError:
             assert False, "ProgressMetricsCalculator doesn't exist - need to implement"
@@ -329,9 +331,9 @@ class TestAggregateProgressLine:
 
             # Should have specific column layout
             columns = progress_bar.columns
-            assert (
-                len(columns) >= 6
-            ), "Progress bar should have multiple columns for clean layout"
+            assert len(columns) >= 6, (
+                "Progress bar should have multiple columns for clean layout"
+            )
 
             # Should create task and update with metrics
             task_id = progress_bar.add_task("Indexing", total=120)
@@ -351,20 +353,20 @@ class TestAggregateProgressLine:
             # Should show clean format without individual files
             # Progress should be around 37-38% (45/120 = 37.5%)
             assert "%" in output, "Should show percentage"
-            assert any(
-                pct in output for pct in ["37%", "38%"]
-            ), f"Should show correct percentage, got: {output}"
+            assert any(pct in output for pct in ["37%", "38%"]), (
+                f"Should show correct percentage, got: {output}"
+            )
             assert "45/120 files" in output, "Should show file count"
             # Check for file paths (excluding the file count)
             output_without_count = output.replace("45/120 files", "")
-            assert (
-                ".py" not in output_without_count
-            ), "Should not show individual file names"
+            assert ".py" not in output_without_count, (
+                "Should not show individual file names"
+            )
             assert not any(
                 path in output_without_count for path in ["/src/", "/home/", ".py"]
             ), "Should not show file paths"
 
         except ImportError:
-            assert (
-                False
-            ), "create_aggregate_progress_bar doesn't exist - need to implement"
+            assert False, (
+                "create_aggregate_progress_bar doesn't exist - need to implement"
+            )

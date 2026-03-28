@@ -367,9 +367,9 @@ class TestCleanupManager:
         assert str(index_path) not in cleanup_mgr._cleanup_queue
 
         # CRITICAL log should have been emitted
-        assert any(
-            r.levelname == "CRITICAL" for r in caplog.records
-        ), "Expected CRITICAL log when circuit breaker trips"
+        assert any(r.levelname == "CRITICAL" for r in caplog.records), (
+            "Expected CRITICAL log when circuit breaker trips"
+        )
 
     def test_circuit_breaker_resets_on_success(self, tmp_path):
         """

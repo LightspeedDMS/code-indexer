@@ -28,16 +28,16 @@ class TestPayloadCacheConfigDisplay:
         text_lower = response.text.lower()
 
         # Check payload cache display labels
-        assert (
-            "payload preview size" in text_lower
-        ), "Should show Payload Preview Size field"
-        assert (
-            "payload max fetch size" in text_lower
-        ), "Should show Payload Max Fetch Size field"
+        assert "payload preview size" in text_lower, (
+            "Should show Payload Preview Size field"
+        )
+        assert "payload max fetch size" in text_lower, (
+            "Should show Payload Max Fetch Size field"
+        )
         assert "payload cache ttl" in text_lower, "Should show Payload Cache TTL field"
-        assert (
-            "payload cleanup interval" in text_lower
-        ), "Should show Payload Cleanup Interval field"
+        assert "payload cleanup interval" in text_lower, (
+            "Should show Payload Cleanup Interval field"
+        )
 
     def test_payload_cache_default_values_displayed(
         self, authenticated_client: TestClient
@@ -79,18 +79,18 @@ class TestPayloadCacheConfigEditing:
         text_lower = response.text.lower()
 
         # Check form field names exist
-        assert (
-            'name="payload_preview_size_chars"' in text_lower
-        ), "Should have payload_preview_size_chars form field"
-        assert (
-            'name="payload_max_fetch_size_chars"' in text_lower
-        ), "Should have payload_max_fetch_size_chars form field"
-        assert (
-            'name="payload_cache_ttl_seconds"' in text_lower
-        ), "Should have payload_cache_ttl_seconds form field"
-        assert (
-            'name="payload_cleanup_interval_seconds"' in text_lower
-        ), "Should have payload_cleanup_interval_seconds form field"
+        assert 'name="payload_preview_size_chars"' in text_lower, (
+            "Should have payload_preview_size_chars form field"
+        )
+        assert 'name="payload_max_fetch_size_chars"' in text_lower, (
+            "Should have payload_max_fetch_size_chars form field"
+        )
+        assert 'name="payload_cache_ttl_seconds"' in text_lower, (
+            "Should have payload_cache_ttl_seconds form field"
+        )
+        assert 'name="payload_cleanup_interval_seconds"' in text_lower, (
+            "Should have payload_cleanup_interval_seconds form field"
+        )
 
 
 class TestPayloadCacheConfigValidation:
@@ -128,9 +128,9 @@ class TestPayloadCacheConfigValidation:
         text_lower = response.text.lower()
 
         # Should show validation error
-        assert (
-            "valid number" in text_lower or "must be" in text_lower
-        ), "Should show validation error for invalid payload preview size"
+        assert "valid number" in text_lower or "must be" in text_lower, (
+            "Should show validation error for invalid payload preview size"
+        )
 
     def test_payload_preview_size_validation_negative(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -164,9 +164,9 @@ class TestPayloadCacheConfigValidation:
         text_lower = response.text.lower()
 
         # Should show validation error about positive number
-        assert (
-            "positive" in text_lower or "must be" in text_lower
-        ), "Should show validation error for negative payload preview size"
+        assert "positive" in text_lower or "must be" in text_lower, (
+            "Should show validation error for negative payload preview size"
+        )
 
 
 class TestPayloadCacheConfigSave:

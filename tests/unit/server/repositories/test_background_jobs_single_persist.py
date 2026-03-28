@@ -97,13 +97,13 @@ class TestSingleJobPersist:
         self.manager._persist_jobs(job_id="job-50")
 
         # Assert: Only 1 get_job call (for job-50) and 1 update_job call
-        assert (
-            len(get_job_calls) == 1
-        ), f"Expected 1 get_job call, got {len(get_job_calls)}"
+        assert len(get_job_calls) == 1, (
+            f"Expected 1 get_job call, got {len(get_job_calls)}"
+        )
         assert get_job_calls[0] == "job-50"
-        assert (
-            len(update_job_calls) == 1
-        ), f"Expected 1 update_job call, got {len(update_job_calls)}"
+        assert len(update_job_calls) == 1, (
+            f"Expected 1 update_job call, got {len(update_job_calls)}"
+        )
         assert update_job_calls[0] == "job-50"
         assert len(save_job_calls) == 0, "Should not call save_job for existing jobs"
 
@@ -182,9 +182,9 @@ class TestSingleJobPersist:
         time.sleep(0.3)
 
         # Assert: The new job was saved (save_job call for the new job)
-        assert (
-            job_id in save_calls
-        ), f"New job {job_id} should have been saved. save_calls={save_calls}"
+        assert job_id in save_calls, (
+            f"New job {job_id} should have been saved. save_calls={save_calls}"
+        )
         # No updates for the 10 existing jobs during submit
         existing_updates = [jid for jid in update_calls if jid.startswith("existing-")]
         assert len(existing_updates) == 0, (
@@ -240,13 +240,13 @@ class TestSingleJobPersist:
 
         # Every persist during job execution should be for the specific job
         for call_job_id in job_specific_calls:
-            assert (
-                call_job_id == job_id
-            ), f"Persist call should be for job {job_id}, got {call_job_id}"
+            assert call_job_id == job_id, (
+                f"Persist call should be for job {job_id}, got {call_job_id}"
+            )
         # At least some persist calls should have been job-specific
-        assert (
-            len(job_specific_calls) >= 1
-        ), "Should have at least one job-specific persist call"
+        assert len(job_specific_calls) >= 1, (
+            "Should have at least one job-specific persist call"
+        )
 
     def test_cancel_job_persists_single_job(self):
         """Component 3: cancel_job should persist only the cancelled job."""
@@ -281,10 +281,10 @@ class TestSingleJobPersist:
 
         # Assert: The persist call during cancel should be for this specific job
         cancel_persist_calls = [c for c in persist_calls if c is not None]
-        assert (
-            len(cancel_persist_calls) >= 1
-        ), "Cancel should trigger at least one persist"
+        assert len(cancel_persist_calls) >= 1, (
+            "Cancel should trigger at least one persist"
+        )
         for call_job_id in cancel_persist_calls:
-            assert (
-                call_job_id == job_id
-            ), f"Cancel persist should be for job {job_id}, got {call_job_id}"
+            assert call_job_id == job_id, (
+                f"Cancel persist should be for job {job_id}, got {call_job_id}"
+            )

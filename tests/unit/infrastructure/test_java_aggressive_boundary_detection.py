@@ -91,7 +91,7 @@ class TestJavaAggressiveBoundaryDetection:
                         }
                     }
                 }
-                
+
                 private void cleanup() {
                     // Cleanup resources
                 }
@@ -129,14 +129,14 @@ class TestJavaAggressiveBoundaryDetection:
                 "Transaction cannot be completed due to insufficient funds."
                 in chunk_text
             ):
-                assert (
-                    "- Mobile app quick transfer" in chunk_text
-                ), f"Chunk {i + 1} has incomplete INSUFFICIENT_FUNDS error message"
+                assert "- Mobile app quick transfer" in chunk_text, (
+                    f"Chunk {i + 1} has incomplete INSUFFICIENT_FUNDS error message"
+                )
 
             if "Business rule violation occurred:" in chunk_text:
-                assert (
-                    "This indicates a serious business logic error" in chunk_text
-                ), f"Chunk {i + 1} has incomplete BUSINESS_RULE_VIOLATION error message"
+                assert "This indicates a serious business logic error" in chunk_text, (
+                    f"Chunk {i + 1} has incomplete BUSINESS_RULE_VIOLATION error message"
+                )
 
     @pytest.mark.skip(
         reason="Java multi-line construct boundary detection needs enhancement"
@@ -154,17 +154,17 @@ class TestJavaAggressiveBoundaryDetection:
                 "https://app.example.com",
                 "https://staging.example.com"
             })
-            public class UserController<T extends BaseEntity & Serializable, 
+            public class UserController<T extends BaseEntity & Serializable,
                                        R extends BaseResponse<T>,
                                        S extends BaseService<T, R>> {
-                
+
                 @Autowired
                 @Qualifier("userServiceImpl")
                 private final S userService;
-                
+
                 @Value("${app.security.jwt.secret:default-secret-key-that-should-be-changed}")
                 private String jwtSecret;
-                
+
                 @PostMapping(
                     value = "/create",
                     consumes = MediaType.APPLICATION_JSON_VALUE,
@@ -212,7 +212,7 @@ class TestJavaAggressiveBoundaryDetection:
                     @RequestHeader(value = "X-Trace-Id", required = false) String traceId,
                     @RequestParam(value = "sendWelcomeEmail", defaultValue = "true") boolean sendEmail
                 ) throws ValidationException, UserAlreadyExistsException {
-                    
+
                     if (log.isDebugEnabled()) {
                         log.debug(
                             "Creating user with email: {} and username: {}. " +
@@ -220,13 +220,13 @@ class TestJavaAggressiveBoundaryDetection:
                             "Send welcome email: {}. " +
                             "Request originated from: {}",
                             request.getEmail(),
-                            request.getUsername(), 
+                            request.getUsername(),
                             traceId,
                             sendEmail,
                             request.getOriginatingSystem()
                         );
                     }
-                    
+
                     return userService.createUser(request, traceId, sendEmail);
                 }
             }
@@ -278,9 +278,9 @@ class TestJavaAggressiveBoundaryDetection:
                     return users.stream()
                         .filter(user -> {
                             boolean isActive = user.isActive();
-                            boolean hasValidEmail = user.getEmail() != null && 
+                            boolean hasValidEmail = user.getEmail() != null &&
                                                    user.getEmail().matches("^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
-                            boolean hasRequiredFields = user.getFirstName() != null && 
+                            boolean hasRequiredFields = user.getFirstName() != null &&
                                                        user.getLastName() != null &&
                                                        user.getDateOfBirth() != null;
                             if (!isActive) {
@@ -305,7 +305,7 @@ class TestJavaAggressiveBoundaryDetection:
                                 result.setFullName(user.getFirstName() + " " + user.getLastName());
                                 result.setProcessedDate(LocalDateTime.now());
                                 result.setEmail(user.getEmail().toLowerCase().trim());
-                                
+
                                 // Calculate user score based on multiple factors
                                 double score = calculateUserScore(
                                     user.getLoginFrequency(),
@@ -314,7 +314,7 @@ class TestJavaAggressiveBoundaryDetection:
                                     user.getVerificationStatus()
                                 );
                                 result.setScore(score);
-                                
+
                                 // Add additional metadata
                                 Map<String, Object> metadata = new HashMap<>();
                                 metadata.put("processingTimestamp", System.currentTimeMillis());
@@ -322,7 +322,7 @@ class TestJavaAggressiveBoundaryDetection:
                                 metadata.put("dataSource", user.getDataSource());
                                 metadata.put("qualityScore", user.getDataQualityScore());
                                 result.setMetadata(metadata);
-                                
+
                                 if (log.isTraceEnabled()) {
                                     log.trace(
                                         "Successfully processed user: {} (ID: {}). " +
@@ -336,7 +336,7 @@ class TestJavaAggressiveBoundaryDetection:
                                         user.getDataQualityScore()
                                     );
                                 }
-                                
+
                                 return result;
                             } catch (Exception e) {
                                 log.error(
@@ -383,23 +383,23 @@ class TestJavaAggressiveBoundaryDetection:
                         in chunk_text
                     ):
                         # This chunk should contain the complete filter lambda
-                        assert (
-                            "})" in chunk_text
-                        ), f"Chunk {i + 1} contains incomplete filter lambda expression"
+                        assert "})" in chunk_text, (
+                            f"Chunk {i + 1} contains incomplete filter lambda expression"
+                        )
 
             # Check logging statements are complete
             if (
                 "log.warn(" in chunk_text
                 and "Filtering out inactive user:" in chunk_text
             ):
-                assert (
-                    "user.getCreatedDate()" in chunk_text
-                ), f"Chunk {i + 1} has incomplete log.warn statement"
+                assert "user.getCreatedDate()" in chunk_text, (
+                    f"Chunk {i + 1} has incomplete log.warn statement"
+                )
 
             if "log.error(" in chunk_text and "Failed to process user:" in chunk_text:
-                assert (
-                    "user.getStatus()," in chunk_text
-                ), f"Chunk {i + 1} has incomplete log.error statement"
+                assert "user.getStatus()," in chunk_text, (
+                    f"Chunk {i + 1} has incomplete log.error statement"
+                )
 
     def _extract_expected_content(self, original_lines, start_line, end_line):
         """Extract expected content based on line numbers."""
@@ -420,11 +420,11 @@ class TestJavaAggressiveBoundaryDetection:
             """
             /**
              * Comprehensive user service interface with advanced features.
-             * 
+             *
              * This interface defines the contract for user management operations
              * including CRUD operations, authentication, authorization, and
              * advanced user analytics.
-             * 
+             *
              * @param <T> the user entity type extending BaseUser
              * @param <R> the response type for user operations
              * @since 2.0.0
@@ -434,10 +434,10 @@ class TestJavaAggressiveBoundaryDetection:
              */
             @FunctionalInterface
             public interface UserService<T extends BaseUser & Auditable, R extends BaseResponse<T>> {
-                
+
                 /**
                  * Creates a new user in the system with comprehensive validation.
-                 * 
+                 *
                  * This method performs the following operations:
                  * 1. Validates user input data according to business rules
                  * 2. Checks for duplicate emails and usernames
@@ -445,7 +445,7 @@ class TestJavaAggressiveBoundaryDetection:
                  * 4. Persists user data to the database
                  * 5. Sends welcome notification if configured
                  * 6. Logs the creation event for audit purposes
-                 * 
+                 *
                  * @param userData the user data transfer object containing all user information
                  * @param context the execution context with security and session information
                  * @return the created user response with generated ID and metadata
@@ -454,12 +454,12 @@ class TestJavaAggressiveBoundaryDetection:
                  * @throws SecurityException if caller lacks required permissions
                  * @throws SystemException if system error occurs during creation
                  */
-                R createUser(T userData, ExecutionContext context) 
+                R createUser(T userData, ExecutionContext context)
                     throws ValidationException, DuplicateUserException, SecurityException, SystemException;
-                
+
                 /**
                  * Retrieves user by unique identifier with optional data projection.
-                 * 
+                 *
                  * @param userId the unique user identifier (must be positive)
                  * @param includeDetails whether to include detailed user information
                  * @param projection the fields to include in response (null for all fields)
@@ -467,9 +467,9 @@ class TestJavaAggressiveBoundaryDetection:
                  * @throws InvalidParameterException if userId is invalid
                  * @throws SecurityException if caller lacks read permissions for user
                  */
-                default Optional<R> getUserById(Long userId, boolean includeDetails, Set<String> projection) 
+                default Optional<R> getUserById(Long userId, boolean includeDetails, Set<String> projection)
                     throws InvalidParameterException, SecurityException {
-                    
+
                     if (userId == null || userId <= 0) {
                         throw new InvalidParameterException(
                             "User ID must be a positive number. " +
@@ -482,7 +482,7 @@ class TestJavaAggressiveBoundaryDetection:
                             "Please verify the user ID and try again."
                         );
                     }
-                    
+
                     try {
                         T user = findUserInDatabase(userId);
                         if (user == null) {
@@ -502,9 +502,9 @@ class TestJavaAggressiveBoundaryDetection:
                             }
                             return Optional.empty();
                         }
-                        
+
                         R response = convertToResponse(user, includeDetails, projection);
-                        
+
                         if (log.isTraceEnabled()) {
                             log.trace(
                                 "Successfully retrieved user: {} (ID: {}). " +
@@ -518,9 +518,9 @@ class TestJavaAggressiveBoundaryDetection:
                                 calculateResponseSize(response)
                             );
                         }
-                        
+
                         return Optional.of(response);
-                        
+
                     } catch (DatabaseException e) {
                         log.error(
                             "Database error occurred while retrieving user: {}. " +
@@ -536,7 +536,7 @@ class TestJavaAggressiveBoundaryDetection:
                         throw new SystemException("Failed to retrieve user due to database error", e);
                     }
                 }
-                
+
                 /**
                  * Validates user permissions for specific operations.
                  */
@@ -556,9 +556,9 @@ class TestJavaAggressiveBoundaryDetection:
 
             # If chunk contains the start of a method Javadoc, it should be complete
             if "/**" in chunk_text and "Creates a new user in the system" in chunk_text:
-                assert (
-                    "*/" in chunk_text
-                ), f"Chunk {i + 1} contains incomplete Javadoc for createUser method"
+                assert "*/" in chunk_text, (
+                    f"Chunk {i + 1} contains incomplete Javadoc for createUser method"
+                )
 
             # Check that method signatures with throws clauses are complete
             if "R createUser(T userData, ExecutionContext context)" in chunk_text:
@@ -571,12 +571,12 @@ class TestJavaAggressiveBoundaryDetection:
             if "default Optional<R> getUserById(" in chunk_text:
                 if "InvalidParameterException" in chunk_text:
                     # This chunk should contain the complete error message
-                    assert (
-                        "Please verify the user ID and try again." in chunk_text
-                    ), f"Chunk {i + 1} has incomplete InvalidParameterException message"
+                    assert "Please verify the user ID and try again." in chunk_text, (
+                        f"Chunk {i + 1} has incomplete InvalidParameterException message"
+                    )
 
             # Check logging statements are complete
             if "log.debug(" in chunk_text and "User not found with ID:" in chunk_text:
-                assert (
-                    "- Permission restrictions apply" in chunk_text
-                ), f"Chunk {i + 1} has incomplete log.debug statement"
+                assert "- Permission restrictions apply" in chunk_text, (
+                    f"Chunk {i + 1} has incomplete log.debug statement"
+                )

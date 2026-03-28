@@ -349,7 +349,7 @@ class JobPollingEngine:
                     if remaining_time < 60:
                         info_message += f" (timeout: {int(remaining_time)}s)"
                     else:
-                        info_message += f" (timeout: {int(remaining_time/60)}m)"
+                        info_message += f" (timeout: {int(remaining_time / 60)}m)"
 
                 self.progress_callback(0, 0, Path(""), info=info_message)
             else:
@@ -376,7 +376,7 @@ class JobPollingEngine:
                     if remaining_time < 60:
                         info_parts.append(f"timeout: {int(remaining_time)}s")
                     else:
-                        info_parts.append(f"timeout: {int(remaining_time/60)}m")
+                        info_parts.append(f"timeout: {int(remaining_time / 60)}m")
 
                 info_message = " | ".join(info_parts)
 

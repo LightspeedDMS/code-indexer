@@ -196,9 +196,9 @@ class TestRecordRunMetricsCalled:
         svc._finalize_analysis(config, paths, repo_list, domain_list)
 
         # The critical assertion: record_run_metrics must be called
-        assert (
-            svc._tracking_backend.record_run_metrics.called
-        ), "record_run_metrics must be called during _finalize_analysis"
+        assert svc._tracking_backend.record_run_metrics.called, (
+            "record_run_metrics must be called during _finalize_analysis"
+        )
 
         # Verify required metric keys are present
         call_args = svc._tracking_backend.record_run_metrics.call_args
@@ -313,7 +313,9 @@ class TestInvokeDomainDiscoveryPublicMethod:
         )
 
         # invoke_domain_discovery must be called (public method)
-        assert svc._analyzer.invoke_domain_discovery.called, "invoke_domain_discovery (public) must be called, not _invoke_claude_cli (private)"
+        assert svc._analyzer.invoke_domain_discovery.called, (
+            "invoke_domain_discovery (public) must be called, not _invoke_claude_cli (private)"
+        )
 
     def test_discover_and_assign_does_not_call_private_invoke_claude_cli(
         self, tmp_path
@@ -343,7 +345,9 @@ class TestInvokeDomainDiscoveryPublicMethod:
         )
 
         # _invoke_claude_cli must NOT be called directly on the mock analyzer
-        assert not svc._analyzer._invoke_claude_cli.called, "_invoke_claude_cli (private) must not be called directly; use invoke_domain_discovery instead"
+        assert not svc._analyzer._invoke_claude_cli.called, (
+            "_invoke_claude_cli (private) must not be called directly; use invoke_domain_discovery instead"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -428,25 +432,25 @@ class TestGenerateIndexMdParseRoundtrip:
         repo_to_domains = svc._parse_repo_to_domain_mapping(index_file)
 
         # Step 3: Verify correct mappings are returned
-        assert (
-            "repo-auth" in repo_to_domains
-        ), "repo-auth must appear in parsed mappings"
-        assert (
-            "repo-login" in repo_to_domains
-        ), "repo-login must appear in parsed mappings"
-        assert (
-            "repo-data" in repo_to_domains
-        ), "repo-data must appear in parsed mappings"
+        assert "repo-auth" in repo_to_domains, (
+            "repo-auth must appear in parsed mappings"
+        )
+        assert "repo-login" in repo_to_domains, (
+            "repo-login must appear in parsed mappings"
+        )
+        assert "repo-data" in repo_to_domains, (
+            "repo-data must appear in parsed mappings"
+        )
 
-        assert (
-            "authentication" in repo_to_domains["repo-auth"]
-        ), "repo-auth must be mapped to 'authentication' domain"
-        assert (
-            "authentication" in repo_to_domains["repo-login"]
-        ), "repo-login must be mapped to 'authentication' domain"
-        assert (
-            "data-processing" in repo_to_domains["repo-data"]
-        ), "repo-data must be mapped to 'data-processing' domain"
+        assert "authentication" in repo_to_domains["repo-auth"], (
+            "repo-auth must be mapped to 'authentication' domain"
+        )
+        assert "authentication" in repo_to_domains["repo-login"], (
+            "repo-login must be mapped to 'authentication' domain"
+        )
+        assert "data-processing" in repo_to_domains["repo-data"], (
+            "repo-data must be mapped to 'data-processing' domain"
+        )
 
     def test_generate_index_md_uses_domain_singular_header(self, tmp_path):
         """H3: _generate_index_md uses 'Domain' column header (singular), consistent with parser expectations."""
@@ -466,6 +470,6 @@ class TestGenerateIndexMdParseRoundtrip:
 
         content = (staging_dir / "_index.md").read_text()
         # The matrix table header should use "Domain" (singular) to match parser
-        assert (
-            "| Repository | Domain |" in content
-        ), "_index.md Repo-to-Domain Matrix must use 'Domain' (singular) column header"
+        assert "| Repository | Domain |" in content, (
+            "_index.md Repo-to-Domain Matrix must use 'Domain' (singular) column header"
+        )

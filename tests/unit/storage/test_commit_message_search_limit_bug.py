@@ -85,7 +85,7 @@ def test_search_uses_prefetch_limit_not_limit_multiplier():
                         # BUG: Currently uses k=limit*2 (=40) instead of k=prefetch_limit (=400)
                         assert call_kwargs["k"] == prefetch_limit, (
                             f"HNSW query should use k=prefetch_limit ({prefetch_limit}), "
-                            f"but used k={call_kwargs['k']} (limit*2={user_limit*2})"
+                            f"but used k={call_kwargs['k']} (limit*2={user_limit * 2})"
                         )
 
 

@@ -77,9 +77,9 @@ class TestRepoCategoriesSchema:
                 # Verify column constraints
                 assert col_dict["name"]["notnull"] == 1, "name should be NOT NULL"
                 assert col_dict["pattern"]["notnull"] == 1, "pattern should be NOT NULL"
-                assert (
-                    col_dict["priority"]["notnull"] == 1
-                ), "priority should be NOT NULL"
+                assert col_dict["priority"]["notnull"] == 1, (
+                    "priority should be NOT NULL"
+                )
 
             finally:
                 conn.close()
@@ -118,9 +118,9 @@ class TestGoldenReposMetadataMigration:
             try:
                 cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
                 columns = {row[1] for row in cursor.fetchall()}
-                assert (
-                    "category_id" in columns
-                ), "category_id column should be added by migration"
+                assert "category_id" in columns, (
+                    "category_id column should be added by migration"
+                )
             finally:
                 conn.close()
 
@@ -154,9 +154,9 @@ class TestGoldenReposMetadataMigration:
             try:
                 cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
                 columns = {row[1] for row in cursor.fetchall()}
-                assert (
-                    "category_auto_assigned" in columns
-                ), "category_auto_assigned should be added"
+                assert "category_auto_assigned" in columns, (
+                    "category_auto_assigned should be added"
+                )
             finally:
                 conn.close()
 
@@ -229,12 +229,12 @@ class TestGoldenReposMetadataMigration:
                         category_fk = fk
                         break
 
-                assert (
-                    category_fk is not None
-                ), "category_id should have foreign key constraint"
-                assert (
-                    category_fk[2] == "repo_categories"
-                ), "FK should reference repo_categories"
+                assert category_fk is not None, (
+                    "category_id should have foreign key constraint"
+                )
+                assert category_fk[2] == "repo_categories", (
+                    "FK should reference repo_categories"
+                )
                 assert category_fk[6] == "SET NULL", "ON DELETE should be SET NULL"
 
             finally:

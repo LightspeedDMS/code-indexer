@@ -33,9 +33,9 @@ class TestBug1FalseVectorCount:
             cli_code = f.read()
 
         # Verify "(approx)" and "~" are used in the output message
-        assert (
-            "(approx)" in cli_code and "approximate_vectors_created" in cli_code
-        ), "CLI should clearly label vector count as approximate"
+        assert "(approx)" in cli_code and "approximate_vectors_created" in cli_code, (
+            "CLI should clearly label vector count as approximate"
+        )
 
         # This is acceptable - the estimate is clearly communicated
         # Real bugs are #2 (no exception handling), #3 (no deduplication logging), #4 (broad exception catching)
@@ -81,9 +81,9 @@ class TestBug2NoExceptionHandling:
                     worker_start_line = i
                     break
 
-        assert (
-            worker_start_line is not None
-        ), "Could not find worker() function (expected around line 529)"
+        assert worker_start_line is not None, (
+            "Could not find worker() function (expected around line 529)"
+        )
 
         # Look for the main try/except/finally block in worker
         # The worker has a try block starting around line 551 with except at 1063 and finally at 1069

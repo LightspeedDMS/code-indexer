@@ -739,9 +739,9 @@ class TestScipHandlerRegistration:
         ]
 
         for handler_name in expected_handlers:
-            assert (
-                handler_name in HANDLER_REGISTRY
-            ), f"Handler '{handler_name}' not registered in HANDLER_REGISTRY"
-            assert callable(
-                HANDLER_REGISTRY[handler_name]
-            ), f"Handler '{handler_name}' is not callable"
+            assert handler_name in HANDLER_REGISTRY, (
+                f"Handler '{handler_name}' not registered in HANDLER_REGISTRY"
+            )
+            assert callable(HANDLER_REGISTRY[handler_name]), (
+                f"Handler '{handler_name}' is not callable"
+            )

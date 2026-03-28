@@ -118,15 +118,15 @@ def test_exclude_single_language_javascript(
     # Verify no JavaScript files in results
     assert len(results) > 0, "Should return some results"
     for result in results:
-        assert (
-            result["payload"]["language"] != "js"
-        ), f"Should not return JavaScript files, got {result['id']}"
+        assert result["payload"]["language"] != "js", (
+            f"Should not return JavaScript files, got {result['id']}"
+        )
 
     # Verify we got Python, TypeScript, or Java files
     languages_found = {r["payload"]["language"] for r in results}
-    assert languages_found.issubset(
-        {"py", "ts", "java"}
-    ), "Should only return non-JavaScript files"
+    assert languages_found.issubset({"py", "ts", "java"}), (
+        "Should only return non-JavaScript files"
+    )
 
 
 def test_exclude_multiple_languages(populated_store_with_languages, test_vectors):
@@ -168,9 +168,9 @@ def test_exclude_multiple_languages(populated_store_with_languages, test_vectors
 
     # Verify we only got Python and Java files
     languages_found = {r["payload"]["language"] for r in results}
-    assert languages_found.issubset(
-        {"py", "java"}
-    ), "Should only return Python and Java files"
+    assert languages_found.issubset({"py", "java"}), (
+        "Should only return Python and Java files"
+    )
 
 
 def test_exclude_with_must_conditions_combined(
@@ -208,9 +208,9 @@ def test_exclude_with_must_conditions_combined(
     # Verify all results match must conditions
     assert len(results) > 0, "Should return some results"
     for result in results:
-        assert (
-            result["payload"]["type"] == "content"
-        ), "All results should be content type"
+        assert result["payload"]["type"] == "content", (
+            "All results should be content type"
+        )
         assert result["payload"]["language"] != "js", "No results should be JavaScript"
 
     # Verify we got non-JavaScript files

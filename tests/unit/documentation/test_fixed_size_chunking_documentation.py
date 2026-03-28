@@ -39,9 +39,9 @@ class TestFixedSizeChunkingDocumentation:
         content = readme_path.read_text()
 
         # Must contain model-aware chunking descriptions
-        assert (
-            "model-aware" in content.lower() and "chunking" in content.lower()
-        ), "README.md must describe the model-aware chunking approach"
+        assert "model-aware" in content.lower() and "chunking" in content.lower(), (
+            "README.md must describe the model-aware chunking approach"
+        )
 
         # Must mention model-aware chunk sizes
         assert "4096" in content, "README.md must mention VoyageAI chunk sizes"
@@ -49,9 +49,9 @@ class TestFixedSizeChunkingDocumentation:
         # Note: Fallback size (1000) may not be mentioned in user documentation
 
         # Should mention overlap functionality
-        assert (
-            "overlap" in content.lower()
-        ), "README.md should describe chunk overlap functionality"
+        assert "overlap" in content.lower(), (
+            "README.md should describe chunk overlap functionality"
+        )
 
     def test_readme_removes_semantic_chunking_references(self, readme_path):
         """README.md must not contain any semantic chunking references."""
@@ -70,9 +70,9 @@ class TestFixedSizeChunkingDocumentation:
         ]
 
         for term in forbidden_terms:
-            assert (
-                term not in content
-            ), f"README.md must not contain '{term}' - all semantic chunking references must be removed"
+            assert term not in content, (
+                f"README.md must not contain '{term}' - all semantic chunking references must be removed"
+            )
 
     def test_readme_explains_chunking_behavior(self, readme_path):
         """README.md must explain how the fixed-size chunking works."""
@@ -84,9 +84,9 @@ class TestFixedSizeChunkingDocumentation:
             1 for keyword in chunking_keywords if keyword.lower() in content.lower()
         )
 
-        assert (
-            found_keywords >= 3
-        ), "README.md must explain how chunking works with key terms like chunk, text, overlap, character"
+        assert found_keywords >= 3, (
+            "README.md must explain how chunking works with key terms like chunk, text, overlap, character"
+        )
 
     def test_configuration_reference_removes_semantic_options(self, config_ref_path):
         """CONFIGURATION_REFERENCE.md must not contain semantic chunking options."""
@@ -106,9 +106,9 @@ class TestFixedSizeChunkingDocumentation:
         ]
 
         for option in forbidden_options:
-            assert (
-                option not in content
-            ), f"CONFIGURATION_REFERENCE.md must not contain '{option}' configuration option"
+            assert option not in content, (
+                f"CONFIGURATION_REFERENCE.md must not contain '{option}' configuration option"
+            )
 
     def test_configuration_reference_documents_fixed_size_options(
         self, config_ref_path
@@ -123,9 +123,9 @@ class TestFixedSizeChunkingDocumentation:
         required_options = ["chunk_size", "chunk_overlap"]
 
         for option in required_options:
-            assert (
-                option in content
-            ), f"CONFIGURATION_REFERENCE.md must document the '{option}' configuration option"
+            assert option in content, (
+                f"CONFIGURATION_REFERENCE.md must document the '{option}' configuration option"
+            )
 
     def test_cli_help_text_describes_current_chunking(self, project_root):
         """CLI --help output must describe current fixed-size chunking behavior."""
@@ -148,9 +148,9 @@ class TestFixedSizeChunkingDocumentation:
             forbidden_terms = ["semantic chunking", "ast-based", "tree-sitter"]
 
             for term in forbidden_terms:
-                assert (
-                    term not in help_text
-                ), f"CLI help must not contain '{term}' - remove semantic chunking references"
+                assert term not in help_text, (
+                    f"CLI help must not contain '{term}' - remove semantic chunking references"
+                )
 
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             pytest.skip(f"Could not run CLI help command: {e}")
@@ -173,9 +173,9 @@ class TestFixedSizeChunkingDocumentation:
         has_breaking_indicator = any(
             indicator in content for indicator in breaking_change_indicators
         )
-        assert (
-            has_breaking_indicator
-        ), "RELEASE_NOTES.md must document the chunking change as a breaking change"
+        assert has_breaking_indicator, (
+            "RELEASE_NOTES.md must document the chunking change as a breaking change"
+        )
 
         # Must mention the change from semantic to fixed-size chunking
         change_indicators = ["chunking", "semantic", "fixed-size", "fixed size"]
@@ -183,9 +183,9 @@ class TestFixedSizeChunkingDocumentation:
         found_indicators = sum(
             1 for indicator in change_indicators if indicator in content
         )
-        assert (
-            found_indicators >= 2
-        ), "RELEASE_NOTES.md must describe the transition from semantic to fixed-size chunking"
+        assert found_indicators >= 2, (
+            "RELEASE_NOTES.md must describe the transition from semantic to fixed-size chunking"
+        )
 
     def test_release_notes_explain_benefits(self, release_notes_path):
         """RELEASE_NOTES.md must explain benefits of fixed-size chunking."""
@@ -205,9 +205,9 @@ class TestFixedSizeChunkingDocumentation:
         ]
 
         found_benefits = sum(1 for keyword in benefit_keywords if keyword in content)
-        assert (
-            found_benefits >= 1
-        ), "RELEASE_NOTES.md should explain the benefits of the new chunking approach"
+        assert found_benefits >= 1, (
+            "RELEASE_NOTES.md should explain the benefits of the new chunking approach"
+        )
 
     def test_migration_guidance_provided(self, release_notes_path):
         """Documentation must provide migration guidance for users."""
@@ -222,7 +222,9 @@ class TestFixedSizeChunkingDocumentation:
         has_migration_guidance = any(
             keyword in content for keyword in migration_keywords
         )
-        assert has_migration_guidance, "Documentation must provide migration guidance for users upgrading from semantic chunking"
+        assert has_migration_guidance, (
+            "Documentation must provide migration guidance for users upgrading from semantic chunking"
+        )
 
     def test_chunk_size_examples_accurate(self, readme_path):
         """README.md examples must show accurate chunk sizes (1000 chars)."""
@@ -243,9 +245,9 @@ class TestFixedSizeChunkingDocumentation:
         if chunk_sizes:
             # Verify chunk sizes are around 1000
             for size in chunk_sizes:
-                assert (
-                    800 <= size <= 1200
-                ), f"Chunk size example {size} must be in range 800-1200 characters to reflect actual behavior"
+                assert 800 <= size <= 1200, (
+                    f"Chunk size example {size} must be in range 800-1200 characters to reflect actual behavior"
+                )
 
     def test_overlap_examples_accurate(self, readme_path):
         """README.md examples must show accurate overlap (150 chars, 15%)."""
@@ -268,17 +270,17 @@ class TestFixedSizeChunkingDocumentation:
                     if (
                         10 <= pct <= 20
                     ):  # Only validate if it looks like an overlap percentage
-                        assert (
-                            10 <= pct <= 20
-                        ), f"Overlap percentage {pct}% must be around 15% to reflect actual behavior"
+                        assert 10 <= pct <= 20, (
+                            f"Overlap percentage {pct}% must be around 15% to reflect actual behavior"
+                        )
 
             # Verify character counts are around 150
             if char_matches:
                 char_counts = [int(match) for match in char_matches]
                 for count in char_counts:
-                    assert (
-                        100 <= count <= 200
-                    ), f"Overlap character count {count} must be around 150 characters to reflect actual behavior"
+                    assert 100 <= count <= 200, (
+                        f"Overlap character count {count} must be around 150 characters to reflect actual behavior"
+                    )
 
     def test_no_ast_references_in_any_documentation(self, project_root):
         """Scan all documentation files for AST/semantic chunking references."""
@@ -342,7 +344,9 @@ class TestFixedSizeChunkingDocumentation:
                 # Skip binary or inaccessible files
                 continue
 
-        assert not violations, f"Found semantic chunking references in documentation: {'; '.join(violations)}"
+        assert not violations, (
+            f"Found semantic chunking references in documentation: {'; '.join(violations)}"
+        )
 
     def test_configuration_examples_reflect_current_options(self, project_root):
         """Configuration examples in documentation must reflect current options."""
@@ -368,9 +372,9 @@ class TestFixedSizeChunkingDocumentation:
                 ]
 
                 for option in forbidden_options:
-                    assert (
-                        option not in content
-                    ), f"Configuration file {config_file} must not contain deprecated option '{option}'"
+                    assert option not in content, (
+                        f"Configuration file {config_file} must not contain deprecated option '{option}'"
+                    )
 
             except (UnicodeDecodeError, PermissionError):
                 continue

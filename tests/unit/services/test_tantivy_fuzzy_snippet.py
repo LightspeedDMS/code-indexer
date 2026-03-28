@@ -184,12 +184,12 @@ class TestFuzzySearchSnippetDisplay:
         assert py_result["snippet"] != "", "Fuzzy match should show snippet"
 
         # Snippet should contain the ACTUAL matched text, not query text
-        assert (
-            "glob pattern" in py_result["snippet"].lower()
-        ), "Snippet should contain actual matched text 'glob pattern'"
-        assert (
-            "glub pattern" not in py_result["snippet"].lower()
-        ), "Snippet should NOT contain query text 'glub pattern'"
+        assert "glob pattern" in py_result["snippet"].lower(), (
+            "Snippet should contain actual matched text 'glob pattern'"
+        )
+        assert "glub pattern" not in py_result["snippet"].lower(), (
+            "Snippet should NOT contain query text 'glub pattern'"
+        )
 
         # Line and column should be valid
         assert py_result["line"] > 0, "Line number should be valid"
@@ -220,9 +220,9 @@ class TestFuzzySearchSnippetDisplay:
         assert md_result["snippet"] != "", "Fuzzy match should show snippet"
 
         # Snippet should contain actual matched text
-        assert (
-            "global pattern" in md_result["snippet"].lower()
-        ), "Snippet should contain actual matched text 'global pattern'"
+        assert "global pattern" in md_result["snippet"].lower(), (
+            "Snippet should contain actual matched text 'global pattern'"
+        )
 
         # Line and column should be valid
         assert md_result["line"] > 0
@@ -248,9 +248,9 @@ class TestFuzzySearchSnippetDisplay:
         # Check that match_text contains actual matched text
         for result in results:
             # match_text should NOT be the query text "glub"
-            assert (
-                result["match_text"].lower() != "glub"
-            ), f"match_text should be actual match, not query: {result['match_text']}"
+            assert result["match_text"].lower() != "glub", (
+                f"match_text should be actual match, not query: {result['match_text']}"
+            )
 
             # match_text should be similar to actual content (e.g., "glob")
             # For fuzzy matches, we expect to see the actual word from content
@@ -277,15 +277,15 @@ class TestFuzzySearchSnippetDisplay:
         # Line should be valid (>0, not the fallback line from document)
         # In our test content, "glob pattern" appears in line 1 and line 5
         # The fuzzy matcher finds the first occurrence (line 1)
-        assert (
-            py_result["line"] > 0
-        ), f"Line number should be valid: {py_result['line']}"
+        assert py_result["line"] > 0, (
+            f"Line number should be valid: {py_result['line']}"
+        )
 
         # Column should be > 1 (not the fallback value of 1)
         # The actual "glob pattern" text starts after some leading characters
-        assert (
-            py_result["column"] > 1
-        ), f"Column should point to match location, not fallback: {py_result['column']}"
+        assert py_result["column"] > 1, (
+            f"Column should point to match location, not fallback: {py_result['column']}"
+        )
 
     def test_fuzzy_multiple_results_all_have_snippets(self, indexed_manager):
         """
@@ -305,15 +305,15 @@ class TestFuzzySearchSnippetDisplay:
 
         # ALL results should have snippets
         for result in results:
-            assert (
-                result["snippet"] != ""
-            ), f"All fuzzy results should have snippets: {result['path']}"
-            assert (
-                result["line"] > 0
-            ), f"All fuzzy results should have valid line: {result['path']}"
-            assert (
-                result["column"] > 0
-            ), f"All fuzzy results should have valid column: {result['path']}"
+            assert result["snippet"] != "", (
+                f"All fuzzy results should have snippets: {result['path']}"
+            )
+            assert result["line"] > 0, (
+                f"All fuzzy results should have valid line: {result['path']}"
+            )
+            assert result["column"] > 0, (
+                f"All fuzzy results should have valid column: {result['path']}"
+            )
 
     def test_fuzzy_with_zero_snippet_lines(self, indexed_manager):
         """
@@ -371,19 +371,19 @@ class TestFuzzySearchSnippetDisplay:
             file_result = next(
                 (r for r in results if r["path"].endswith(file_ext)), None
             )
-            assert (
-                file_result is not None
-            ), f"Should find exact match in {file_ext} file for '{query}'"
+            assert file_result is not None, (
+                f"Should find exact match in {file_ext} file for '{query}'"
+            )
 
             # Snippet should be present
-            assert (
-                file_result["snippet"] != ""
-            ), f"Exact match should have snippet for '{query}'"
+            assert file_result["snippet"] != "", (
+                f"Exact match should have snippet for '{query}'"
+            )
 
             # Should contain query text
-            assert (
-                query.lower() in file_result["snippet"].lower()
-            ), f"Snippet should contain exact query text '{query}'"
+            assert query.lower() in file_result["snippet"].lower(), (
+                f"Snippet should contain exact query text '{query}'"
+            )
 
             # Line/column should be valid
             assert file_result["line"] > 0

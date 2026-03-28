@@ -70,9 +70,9 @@ class TestFixVerification:
                     # Remote mode was detected, but query failed due to missing git context
                     # This is expected behavior - remote mode requires git repository
                     # The actual error may be "path filter cannot be empty" or similar
-                    assert (
-                        result.exit_code != 0
-                    ), "Query should fail without git repository"
+                    assert result.exit_code != 0, (
+                        "Query should fail without git repository"
+                    )
 
                     # Should not have "no configuration found" error (config was found - remote mode detected)
                     assert "no configuration found" not in result.output.lower()

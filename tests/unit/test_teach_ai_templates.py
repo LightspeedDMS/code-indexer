@@ -74,6 +74,6 @@ class TestSkillsInstaller:
         expected_count = sum(1 for _ in template_dir.rglob("*") if _.is_file())
 
         # Verify installed file count matches template count
-        assert (
-            len(installed_files) == expected_count
-        ), f"Expected {expected_count} files, got {len(installed_files)}"
+        assert len(installed_files) == expected_count, (
+            f"Expected {expected_count} files, got {len(installed_files)}"
+        )

@@ -67,9 +67,9 @@ class TestDashboardPlaceholderHealth:
             result = service.get_dashboard_data("admin", "admin")
 
             # Must be a valid HealthCheckResponse instance
-            assert isinstance(
-                result.health, HealthCheckResponse
-            ), f"Expected HealthCheckResponse, got {type(result.health)}"
+            assert isinstance(result.health, HealthCheckResponse), (
+                f"Expected HealthCheckResponse, got {type(result.health)}"
+            )
 
     def test_placeholder_health_has_valid_status(self):
         """
@@ -115,9 +115,9 @@ class TestDashboardPlaceholderHealth:
             result = service.get_dashboard_data("admin", "admin")
 
             # Must have a valid datetime timestamp
-            assert isinstance(
-                result.health.timestamp, datetime
-            ), f"Expected datetime, got {type(result.health.timestamp)}"
+            assert isinstance(result.health.timestamp, datetime), (
+                f"Expected datetime, got {type(result.health.timestamp)}"
+            )
 
     def test_placeholder_health_has_valid_services_dict(self):
         """
@@ -137,9 +137,9 @@ class TestDashboardPlaceholderHealth:
             result = service.get_dashboard_data("admin", "admin")
 
             # Must have a valid dict for services
-            assert isinstance(
-                result.health.services, dict
-            ), f"Expected dict for services, got {type(result.health.services)}"
+            assert isinstance(result.health.services, dict), (
+                f"Expected dict for services, got {type(result.health.services)}"
+            )
 
     def test_placeholder_health_has_valid_system_info(self):
         """
@@ -160,9 +160,9 @@ class TestDashboardPlaceholderHealth:
             result = service.get_dashboard_data("admin", "admin")
 
             # Must have a valid SystemHealthInfo
-            assert isinstance(
-                result.health.system, SystemHealthInfo
-            ), f"Expected SystemHealthInfo, got {type(result.health.system)}"
+            assert isinstance(result.health.system, SystemHealthInfo), (
+                f"Expected SystemHealthInfo, got {type(result.health.system)}"
+            )
 
     def test_get_health_partial_still_calls_get_health_data(self):
         """

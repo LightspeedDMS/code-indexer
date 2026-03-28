@@ -75,9 +75,9 @@ class TestTemporalClearMetadata:
 
         # After clearing, metadata should NOT exist
         # This will FAIL initially because we don't remove the metadata file
-        assert (
-            not temporal_meta_path.exists()
-        ), "Metadata file should be removed when clearing temporal index"
+        assert not temporal_meta_path.exists(), (
+            "Metadata file should be removed when clearing temporal index"
+        )
 
 
 if __name__ == "__main__":

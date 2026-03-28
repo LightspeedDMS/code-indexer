@@ -87,9 +87,9 @@ class TestWatchQueryCoordination:
         # Verify HNSW is fresh after initial indexing
         collection_path = repo_path / collection_name
         hnsw_manager = HNSWIndexManager(vector_dim=1536, space="cosine")
-        assert not hnsw_manager.is_stale(
-            collection_path
-        ), "HNSW should be fresh after normal indexing"
+        assert not hnsw_manager.is_stale(collection_path), (
+            "HNSW should be fresh after normal indexing"
+        )
 
         # === STEP 2: Watch mode update (simulate file change) ===
         new_points = [
@@ -105,9 +105,9 @@ class TestWatchQueryCoordination:
         store.end_indexing(collection_name, skip_hnsw_rebuild=True)  # Watch mode!
 
         # Verify HNSW is now stale
-        assert hnsw_manager.is_stale(
-            collection_path
-        ), "HNSW should be stale after watch mode"
+        assert hnsw_manager.is_stale(collection_path), (
+            "HNSW should be stale after watch mode"
+        )
 
         # === STEP 3: Query triggers auto-rebuild ===
         mock_embedding_provider = Mock()
@@ -126,14 +126,14 @@ class TestWatchQueryCoordination:
         assert len(results) > 0, "Search should return results"
 
         # Verify HNSW is now fresh (rebuilt during search)
-        assert not hnsw_manager.is_stale(
-            collection_path
-        ), "HNSW should be fresh after query rebuild"
+        assert not hnsw_manager.is_stale(collection_path), (
+            "HNSW should be fresh after query rebuild"
+        )
 
         # Verify all vectors are searchable (including watch mode addition)
-        assert (
-            store.count_points(collection_name) == 4
-        ), "Should have 4 vectors (3 initial + 1 watch)"
+        assert store.count_points(collection_name) == 4, (
+            "Should have 4 vectors (3 initial + 1 watch)"
+        )
 
     def test_multiple_watch_changes_single_rebuild(self, git_repo_with_files):
         """GIVEN multiple watch mode updates
@@ -203,15 +203,15 @@ class TestWatchQueryCoordination:
         )
 
         assert len(results1) > 0, "First search should return results"
-        assert not hnsw_manager.is_stale(
-            collection_path
-        ), "HNSW should be fresh after first query"
+        assert not hnsw_manager.is_stale(collection_path), (
+            "HNSW should be fresh after first query"
+        )
 
         # Verify HNSW was rebuilt (file modified)
         mtime_after_first_query = hnsw_file.stat().st_mtime
-        assert (
-            mtime_after_first_query > mtime_before_first_query
-        ), "HNSW should be rebuilt on first query"
+        assert mtime_after_first_query > mtime_before_first_query, (
+            "HNSW should be rebuilt on first query"
+        )
 
         # === Second query: should NOT trigger rebuild ===
         # Small delay to ensure mtime would change if file was modified
@@ -229,14 +229,14 @@ class TestWatchQueryCoordination:
 
         # Verify HNSW was NOT rebuilt (file not modified)
         mtime_after_second_query = hnsw_file.stat().st_mtime
-        assert (
-            mtime_after_second_query == mtime_after_first_query
-        ), "HNSW should not be rebuilt on second query"
+        assert mtime_after_second_query == mtime_after_first_query, (
+            "HNSW should not be rebuilt on second query"
+        )
 
         # Verify all vectors present
-        assert (
-            store.count_points(collection_name) == 8
-        ), "Should have 8 vectors (3 initial + 5 watch)"
+        assert store.count_points(collection_name) == 8, (
+            "Should have 8 vectors (3 initial + 5 watch)"
+        )
 
     def test_watch_mode_performance_benefit(self, git_repo_with_files):
         """GIVEN watch mode processing
@@ -299,11 +299,11 @@ class TestWatchQueryCoordination:
 
         # Watch mode should be significantly faster (at least 2x)
         # With 100 vectors, HNSW rebuild takes significant time
-        assert (
-            watch_duration < normal_duration / 2
-        ), f"Watch mode ({watch_duration:.3f}s) should be faster than normal mode ({normal_duration:.3f}s)"
+        assert watch_duration < normal_duration / 2, (
+            f"Watch mode ({watch_duration:.3f}s) should be faster than normal mode ({normal_duration:.3f}s)"
+        )
 
         # Watch mode should complete in <2 seconds (requirement)
-        assert (
-            watch_duration < 2.0
-        ), f"Watch mode should complete in <2s, took {watch_duration:.3f}s"
+        assert watch_duration < 2.0, (
+            f"Watch mode should complete in <2s, took {watch_duration:.3f}s"
+        )

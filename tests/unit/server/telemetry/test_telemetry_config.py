@@ -49,9 +49,9 @@ class TestTelemetryConfigDefaults:
         Then collector_endpoint should be http://localhost:4317
         """
         config = TelemetryConfig()
-        assert (
-            config.collector_endpoint == "http://localhost:4317"
-        ), "Default endpoint should be http://localhost:4317"
+        assert config.collector_endpoint == "http://localhost:4317", (
+            "Default endpoint should be http://localhost:4317"
+        )
 
     def test_telemetry_config_default_collector_protocol(self):
         """
@@ -73,9 +73,9 @@ class TestTelemetryConfigDefaults:
         Then service_name should be cidx-server
         """
         config = TelemetryConfig()
-        assert (
-            config.service_name == "cidx-server"
-        ), "Default service_name should be cidx-server"
+        assert config.service_name == "cidx-server", (
+            "Default service_name should be cidx-server"
+        )
 
     def test_telemetry_config_default_export_flags(self):
         """
@@ -101,12 +101,12 @@ class TestTelemetryConfigDefaults:
         And machine_metrics_interval_seconds should be 60
         """
         config = TelemetryConfig()
-        assert (
-            config.machine_metrics_enabled is True
-        ), "machine_metrics_enabled should be True by default"
-        assert (
-            config.machine_metrics_interval_seconds == 60
-        ), "machine_metrics_interval_seconds should be 60 by default"
+        assert config.machine_metrics_enabled is True, (
+            "machine_metrics_enabled should be True by default"
+        )
+        assert config.machine_metrics_interval_seconds == 60, (
+            "machine_metrics_interval_seconds should be 60 by default"
+        )
 
     def test_telemetry_config_default_trace_sample_rate(self):
         """
@@ -117,9 +117,9 @@ class TestTelemetryConfigDefaults:
         Then trace_sample_rate should be 1.0
         """
         config = TelemetryConfig()
-        assert (
-            config.trace_sample_rate == 1.0
-        ), "trace_sample_rate should be 1.0 by default"
+        assert config.trace_sample_rate == 1.0, (
+            "trace_sample_rate should be 1.0 by default"
+        )
 
     def test_telemetry_config_default_deployment_environment(self):
         """
@@ -130,9 +130,9 @@ class TestTelemetryConfigDefaults:
         Then deployment_environment should be development
         """
         config = TelemetryConfig()
-        assert (
-            config.deployment_environment == "development"
-        ), "deployment_environment should be development by default"
+        assert config.deployment_environment == "development", (
+            "deployment_environment should be development by default"
+        )
 
 
 # =============================================================================
@@ -152,12 +152,12 @@ class TestServerConfigTelemetryIntegration:
         Then it should have a telemetry_config field of type TelemetryConfig
         """
         config = ServerConfig(server_dir="/tmp/test")
-        assert hasattr(
-            config, "telemetry_config"
-        ), "ServerConfig should have telemetry_config field"
-        assert isinstance(
-            config.telemetry_config, TelemetryConfig
-        ), "telemetry_config should be TelemetryConfig instance"
+        assert hasattr(config, "telemetry_config"), (
+            "ServerConfig should have telemetry_config field"
+        )
+        assert isinstance(config.telemetry_config, TelemetryConfig), (
+            "telemetry_config should be TelemetryConfig instance"
+        )
 
     def test_serverconfig_telemetry_disabled_by_default(self):
         """
@@ -168,9 +168,9 @@ class TestServerConfigTelemetryIntegration:
         Then telemetry_config.enabled should be False
         """
         config = ServerConfig(server_dir="/tmp/test")
-        assert (
-            config.telemetry_config.enabled is False
-        ), "Telemetry should be disabled by default in ServerConfig"
+        assert config.telemetry_config.enabled is False, (
+            "Telemetry should be disabled by default in ServerConfig"
+        )
 
 
 # =============================================================================
@@ -205,9 +205,9 @@ class TestTelemetryConfigSerialization:
             with open(manager.config_file_path, "r") as f:
                 config_dict = json.load(f)
 
-            assert (
-                "telemetry_config" in config_dict
-            ), "Serialized config should include telemetry_config"
+            assert "telemetry_config" in config_dict, (
+                "Serialized config should include telemetry_config"
+            )
             telemetry = config_dict["telemetry_config"]
             assert telemetry["enabled"] is True
             assert telemetry["collector_endpoint"] == "http://collector:4317"
@@ -285,12 +285,12 @@ class TestTelemetryConfigSerialization:
             config = manager.load_config()
 
             assert config is not None, "Old config should load successfully"
-            assert hasattr(
-                config, "telemetry_config"
-            ), "Should have telemetry_config field"
-            assert (
-                config.telemetry_config.enabled is False
-            ), "Telemetry should be disabled for old configs"
+            assert hasattr(config, "telemetry_config"), (
+                "Should have telemetry_config field"
+            )
+            assert config.telemetry_config.enabled is False, (
+                "Telemetry should be disabled for old configs"
+            )
 
     def test_telemetry_config_roundtrip(self):
         """
@@ -390,9 +390,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.enabled is True
-            ), "CIDX_TELEMETRY_ENABLED=true should enable telemetry"
+            assert config.telemetry_config.enabled is True, (
+                "CIDX_TELEMETRY_ENABLED=true should enable telemetry"
+            )
         finally:
             os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
 
@@ -413,9 +413,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.enabled is False
-            ), "CIDX_TELEMETRY_ENABLED=false should disable telemetry"
+            assert config.telemetry_config.enabled is False, (
+                "CIDX_TELEMETRY_ENABLED=false should disable telemetry"
+            )
         finally:
             os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
 
@@ -456,9 +456,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.collector_protocol == "http"
-            ), "CIDX_OTEL_COLLECTOR_PROTOCOL should override protocol"
+            assert config.telemetry_config.collector_protocol == "http", (
+                "CIDX_OTEL_COLLECTOR_PROTOCOL should override protocol"
+            )
         finally:
             os.environ.pop("CIDX_OTEL_COLLECTOR_PROTOCOL", None)
 
@@ -477,9 +477,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.service_name == "env-service-name"
-            ), "CIDX_OTEL_SERVICE_NAME should override service_name"
+            assert config.telemetry_config.service_name == "env-service-name", (
+                "CIDX_OTEL_SERVICE_NAME should override service_name"
+            )
         finally:
             os.environ.pop("CIDX_OTEL_SERVICE_NAME", None)
 
@@ -498,9 +498,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.trace_sample_rate == 0.5
-            ), "CIDX_OTEL_TRACE_SAMPLE_RATE should override trace_sample_rate"
+            assert config.telemetry_config.trace_sample_rate == 0.5, (
+                "CIDX_OTEL_TRACE_SAMPLE_RATE should override trace_sample_rate"
+            )
         finally:
             os.environ.pop("CIDX_OTEL_TRACE_SAMPLE_RATE", None)
 
@@ -519,9 +519,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.deployment_environment == "production"
-            ), "CIDX_DEPLOYMENT_ENVIRONMENT should override deployment_environment"
+            assert config.telemetry_config.deployment_environment == "production", (
+                "CIDX_DEPLOYMENT_ENVIRONMENT should override deployment_environment"
+            )
         finally:
             os.environ.pop("CIDX_DEPLOYMENT_ENVIRONMENT", None)
 
@@ -540,9 +540,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert (
-                config.telemetry_config.trace_sample_rate == 1.0
-            ), "Invalid trace_sample_rate should keep default"
+            assert config.telemetry_config.trace_sample_rate == 1.0, (
+                "Invalid trace_sample_rate should keep default"
+            )
         finally:
             os.environ.pop("CIDX_OTEL_TRACE_SAMPLE_RATE", None)
 
@@ -590,9 +590,9 @@ class TestTelemetryConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "trace_sample_rate" in str(exc_info.value).lower()
-        ), "Error should mention trace_sample_rate"
+        assert "trace_sample_rate" in str(exc_info.value).lower(), (
+            "Error should mention trace_sample_rate"
+        )
 
     def test_validation_rejects_trace_sample_rate_above_one(self):
         """
@@ -610,9 +610,9 @@ class TestTelemetryConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "trace_sample_rate" in str(exc_info.value).lower()
-        ), "Error should mention trace_sample_rate"
+        assert "trace_sample_rate" in str(exc_info.value).lower(), (
+            "Error should mention trace_sample_rate"
+        )
 
     def test_validation_rejects_invalid_collector_protocol(self):
         """
@@ -630,9 +630,9 @@ class TestTelemetryConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "collector_protocol" in str(exc_info.value).lower()
-        ), "Error should mention collector_protocol"
+        assert "collector_protocol" in str(exc_info.value).lower(), (
+            "Error should mention collector_protocol"
+        )
 
     def test_validation_rejects_negative_machine_metrics_interval(self):
         """
@@ -650,9 +650,9 @@ class TestTelemetryConfigValidation:
         with pytest.raises(ValueError) as exc_info:
             manager.validate_config(config)
 
-        assert (
-            "machine_metrics_interval" in str(exc_info.value).lower()
-        ), "Error should mention machine_metrics_interval"
+        assert "machine_metrics_interval" in str(exc_info.value).lower(), (
+            "Error should mention machine_metrics_interval"
+        )
 
     def test_validation_accepts_grpc_protocol(self):
         """

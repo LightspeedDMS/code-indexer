@@ -232,12 +232,12 @@ class TestCoWGitStructureFix:
         # Verify the fix worked
         assert result.returncode == 0, f"git remote command failed: {result.stderr}"
         remotes = result.stdout
-        assert (
-            "origin" in remotes
-        ), "CoW repository should now have 'origin' remote after fix"
-        assert (
-            real_git_repo in remotes
-        ), f"Origin should point to golden repo path: {remotes}"
+        assert "origin" in remotes, (
+            "CoW repository should now have 'origin' remote after fix"
+        )
+        assert real_git_repo in remotes, (
+            f"Origin should point to golden repo path: {remotes}"
+        )
 
     def test_direct_git_operations_on_golden_repo(self, real_git_repo):
         """Test that git operations work correctly on the golden repository."""
@@ -314,9 +314,9 @@ class TestCoWGitStructureFix:
         assert result.returncode == 0, f"git remote failed: {result.stderr}"
         remotes = result.stdout
         assert "origin" in remotes, "Fixed CoW clone should have 'origin' remote"
-        assert (
-            real_git_repo in remotes
-        ), f"Origin should point to golden repo: {remotes}"
+        assert real_git_repo in remotes, (
+            f"Origin should point to golden repo: {remotes}"
+        )
 
     def test_cow_clone_with_git_structure_fix_enables_fetch(
         self, activated_repo_manager, real_git_repo, temp_data_dir
@@ -338,9 +338,9 @@ class TestCoWGitStructureFix:
             text=True,
         )
 
-        assert (
-            result.returncode == 0
-        ), f"git fetch should work after fix: {result.stderr}"
+        assert result.returncode == 0, (
+            f"git fetch should work after fix: {result.stderr}"
+        )
 
     def test_cow_clone_with_git_structure_fix_enables_branch_listing(
         self, activated_repo_manager, real_git_repo, temp_data_dir
@@ -362,9 +362,9 @@ class TestCoWGitStructureFix:
         assert result.returncode == 0, f"git branch failed: {result.stderr}"
         branches = result.stdout
         assert "master" in branches, f"Should see master branch: {branches}"
-        assert (
-            "remotes/golden" in branches
-        ), f"Should see remote branches (golden): {branches}"
+        assert "remotes/golden" in branches, (
+            f"Should see remote branches (golden): {branches}"
+        )
         assert "feature-branch" in branches, f"Should see feature-branch: {branches}"
 
     def test_activated_repo_branch_switching_works_after_fix(
@@ -422,9 +422,9 @@ class TestCoWGitStructureFix:
         )
         assert git_result.returncode == 0
         current_branch = git_result.stdout.strip()
-        assert (
-            current_branch == "feature-branch"
-        ), f"Expected 'feature-branch', got '{current_branch}'"
+        assert current_branch == "feature-branch", (
+            f"Expected 'feature-branch', got '{current_branch}'"
+        )
 
     def test_cow_clone_cleanup_on_failure(self, activated_repo_manager, temp_data_dir):
         """Test that CoW clone cleans up on failure."""
@@ -438,6 +438,6 @@ class TestCoWGitStructureFix:
             )
 
         # Verify no partial directory was left behind
-        assert not os.path.exists(
-            activated_path
-        ), "Failed clone should clean up destination directory"
+        assert not os.path.exists(activated_path), (
+            "Failed clone should clean up destination directory"
+        )

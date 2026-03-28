@@ -68,20 +68,20 @@ class TestAcquireCreatesLockFile:
         lock_file = lock_dir / ".locks" / "my-repo.lock"
         content = json.loads(lock_file.read_text())
 
-        assert (
-            content["owner"] == "test-owner"
-        ), f"Lock file must record owner. Got: {content.get('owner')}"
-        assert (
-            content["pid"] == os.getpid()
-        ), f"Lock file must record current PID. Got: {content.get('pid')}"
-        assert (
-            content["ttl_seconds"] == 3600
-        ), f"Lock file must record ttl_seconds=3600. Got: {content.get('ttl_seconds')}"
+        assert content["owner"] == "test-owner", (
+            f"Lock file must record owner. Got: {content.get('owner')}"
+        )
+        assert content["pid"] == os.getpid(), (
+            f"Lock file must record current PID. Got: {content.get('pid')}"
+        )
+        assert content["ttl_seconds"] == 3600, (
+            f"Lock file must record ttl_seconds=3600. Got: {content.get('ttl_seconds')}"
+        )
 
         acquired_at = datetime.fromisoformat(content["acquired_at"])
-        assert (
-            before <= acquired_at <= after
-        ), f"acquired_at ({acquired_at}) must be between before ({before}) and after ({after})"
+        assert before <= acquired_at <= after, (
+            f"acquired_at ({acquired_at}) must be between before ({before}) and after ({after})"
+        )
 
         manager.release("my-repo", "test-owner")
 
@@ -104,9 +104,9 @@ class TestAcquireCreatesLockFile:
         lock_file = lock_dir / ".locks" / "my-repo.lock"
         content = json.loads(lock_file.read_text())
 
-        assert (
-            content["ttl_seconds"] == 3600
-        ), f"Default TTL must be 3600. Got: {content.get('ttl_seconds')}"
+        assert content["ttl_seconds"] == 3600, (
+            f"Default TTL must be 3600. Got: {content.get('ttl_seconds')}"
+        )
 
         manager.release("my-repo", "test-owner")
 
@@ -126,9 +126,9 @@ class TestSecondAcquireFails:
 
         second = manager.acquire("my-repo", "owner-B")
 
-        assert (
-            second is False
-        ), "acquire() must return False when lock is already held by live PID"
+        assert second is False, (
+            "acquire() must return False when lock is already held by live PID"
+        )
 
         manager.release("my-repo", "owner-A")
 
@@ -196,14 +196,14 @@ class TestStaleLockDeadPID:
         ):
             result = manager.acquire("my-repo", "new-owner")
 
-        assert (
-            result is True
-        ), "acquire() must evict stale lock from dead PID and succeed"
+        assert result is True, (
+            "acquire() must evict stale lock from dead PID and succeed"
+        )
 
         content = json.loads(lock_file.read_text())
-        assert (
-            content["owner"] == "new-owner"
-        ), f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
+        assert content["owner"] == "new-owner", (
+            f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
+        )
 
         manager.release("my-repo", "new-owner")
 
@@ -227,9 +227,9 @@ class TestStaleLockDeadPID:
 
         result = manager.acquire("my-repo", "intruder")
 
-        assert (
-            result is False
-        ), "acquire() must return False when lock is held by a live PID"
+        assert result is False, (
+            "acquire() must return False when lock is held by a live PID"
+        )
 
         assert lock_file.exists(), "Lock file must not be deleted for live PID"
 
@@ -266,9 +266,9 @@ class TestStaleLockTTLExpired:
         assert result is True, "acquire() must evict TTL-expired lock and succeed"
 
         content = json.loads(lock_file.read_text())
-        assert (
-            content["owner"] == "new-owner"
-        ), f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
+        assert content["owner"] == "new-owner", (
+            f"New lock must have owner 'new-owner'. Got: {content.get('owner')}"
+        )
 
         manager.release("my-repo", "new-owner")
 
@@ -310,9 +310,9 @@ class TestRelease:
 
         result = manager.release("my-repo", "wrong-owner")
 
-        assert (
-            result is False
-        ), "release() must return False when caller is not the lock owner"
+        assert result is False, (
+            "release() must return False when caller is not the lock owner"
+        )
 
         lock_file = lock_dir / ".locks" / "my-repo.lock"
         assert lock_file.exists(), "Lock file must NOT be deleted by wrong owner"
@@ -328,17 +328,17 @@ class TestRelease:
         assert result is True, "release() must return True when owner matches"
 
         lock_file = lock_dir / ".locks" / "my-repo.lock"
-        assert (
-            not lock_file.exists()
-        ), "Lock file must be deleted after successful release()"
+        assert not lock_file.exists(), (
+            "Lock file must be deleted after successful release()"
+        )
 
     def test_release_on_absent_file_returns_true(self, manager):
         """release() returns True (idempotent) when lock file does not exist."""
         result = manager.release("nonexistent-repo", "any-owner")
 
-        assert (
-            result is True
-        ), "release() must return True when lock file doesn't exist (idempotent)"
+        assert result is True, (
+            "release() must return True when lock file doesn't exist (idempotent)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -446,9 +446,9 @@ class TestIsLocked:
 
         result = manager.is_locked("my-repo")
 
-        assert (
-            result is False
-        ), "is_locked() must return False for corrupt lock with no pid and no acquired_at"
+        assert result is False, (
+            "is_locked() must return False for corrupt lock with no pid and no acquired_at"
+        )
         assert not lock_file.exists(), "is_locked() must delete the corrupt lock file"
 
 
@@ -464,9 +464,9 @@ class TestGetLockInfo:
         """get_lock_info() returns None when lock file does not exist."""
         result = manager.get_lock_info("nonexistent-repo")
 
-        assert (
-            result is None
-        ), "get_lock_info() must return None when lock file is absent"
+        assert result is None, (
+            "get_lock_info() must return None when lock file is absent"
+        )
 
     def test_get_lock_info_returns_dict_when_locked(self, manager):
         """get_lock_info() returns a dict with lock metadata when lock is held."""
@@ -475,15 +475,15 @@ class TestGetLockInfo:
         info = manager.get_lock_info("my-repo")
 
         assert info is not None, "get_lock_info() must return dict when lock is held"
-        assert (
-            info["owner"] == "my-owner"
-        ), f"get_lock_info() owner must be 'my-owner'. Got: {info.get('owner')}"
-        assert (
-            info["pid"] == os.getpid()
-        ), f"get_lock_info() pid must be current PID. Got: {info.get('pid')}"
-        assert (
-            info["ttl_seconds"] == 1800
-        ), f"get_lock_info() ttl_seconds must be 1800. Got: {info.get('ttl_seconds')}"
+        assert info["owner"] == "my-owner", (
+            f"get_lock_info() owner must be 'my-owner'. Got: {info.get('owner')}"
+        )
+        assert info["pid"] == os.getpid(), (
+            f"get_lock_info() pid must be current PID. Got: {info.get('pid')}"
+        )
+        assert info["ttl_seconds"] == 1800, (
+            f"get_lock_info() ttl_seconds must be 1800. Got: {info.get('ttl_seconds')}"
+        )
         assert "acquired_at" in info, "get_lock_info() must include acquired_at"
 
         manager.release("my-repo", "my-owner")

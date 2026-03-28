@@ -33,17 +33,17 @@ class TestPerformanceValidationFrameworkIntegration:
             time.sleep(0.1)  # 100ms
 
         # Validate measurement
-        assert (
-            0.08 <= framework.wall_time <= 0.15
-        ), f"Wall time measurement incorrect: {framework.wall_time}"
-        assert (
-            framework.cpu_time >= 0
-        ), f"CPU time should be non-negative: {framework.cpu_time}"
+        assert 0.08 <= framework.wall_time <= 0.15, (
+            f"Wall time measurement incorrect: {framework.wall_time}"
+        )
+        assert framework.cpu_time >= 0, (
+            f"CPU time should be non-negative: {framework.cpu_time}"
+        )
         # Memory delta can be 0 in some cases, just ensure it's measured
         assert hasattr(framework, "memory_delta"), "Memory delta should be measured"
-        assert (
-            framework.peak_memory > 0
-        ), f"Peak memory should be positive: {framework.peak_memory}"
+        assert framework.peak_memory > 0, (
+            f"Peak memory should be positive: {framework.peak_memory}"
+        )
 
         print("✅ Performance measurement:")
         print(f"   Wall time: {framework.wall_time:.3f}s")
@@ -95,9 +95,9 @@ class TestPerformanceValidationFrameworkIntegration:
 
         try:
             # Validate codebase structure
-            assert (
-                temp_path.exists() and temp_path.is_dir()
-            ), "Test directory should exist"
+            assert temp_path.exists() and temp_path.is_dir(), (
+                "Test directory should exist"
+            )
             assert len(test_files) == 5, f"Expected 5 files, got {len(test_files)}"
 
             # Validate file content
@@ -123,9 +123,9 @@ class TestPerformanceValidationFrameworkIntegration:
                     languages_found.add(lang_map[extension])
 
                 # Validate content is realistic
-                assert (
-                    len(content) > 1000
-                ), f"File content too small: {len(content)} chars"
+                assert len(content) > 1000, (
+                    f"File content too small: {len(content)} chars"
+                )
                 assert (
                     "class " in content or "function" in content or "def " in content
                 ), "Should contain code patterns"
@@ -135,14 +135,14 @@ class TestPerformanceValidationFrameworkIntegration:
             expected_size = 10 * 1024  # 10KB
 
             # Allow 50% variance in file sizes
-            assert (
-                0.5 * expected_size <= avg_file_size <= 2.0 * expected_size
-            ), f"Average file size {avg_file_size} not within expected range around {expected_size}"
+            assert 0.5 * expected_size <= avg_file_size <= 2.0 * expected_size, (
+                f"Average file size {avg_file_size} not within expected range around {expected_size}"
+            )
 
             # Validate language diversity
-            assert (
-                len(languages_found) >= 2
-            ), f"Should have multiple languages, found: {languages_found}"
+            assert len(languages_found) >= 2, (
+                f"Should have multiple languages, found: {languages_found}"
+            )
 
             print("✅ Test codebase creation:")
             print(f"   Files created: {len(test_files)}")
@@ -188,9 +188,9 @@ class TestPerformanceValidationFrameworkIntegration:
             thread_utilization=0.875,  # Exceeds 0.8 requirement (7/8 workers)
         )
 
-        assert (
-            good_benchmark.meets_requirements()
-        ), "Good benchmark should meet requirements"
+        assert good_benchmark.meets_requirements(), (
+            "Good benchmark should meet requirements"
+        )
 
         # Create benchmark that fails speedup requirement
         bad_speedup_benchmark = PerformanceBenchmark(
@@ -224,9 +224,9 @@ class TestPerformanceValidationFrameworkIntegration:
             thread_utilization=0.75,  # Fails 0.8 requirement
         )
 
-        assert (
-            not bad_speedup_benchmark.meets_requirements()
-        ), "Bad benchmark should fail requirements"
+        assert not bad_speedup_benchmark.meets_requirements(), (
+            "Bad benchmark should fail requirements"
+        )
 
         print("✅ Benchmark validation:")
         print(
@@ -249,37 +249,37 @@ class TestPerformanceValidationFrameworkIntegration:
 
             # Basic size validation - be more lenient with size requirements
             actual_size = len(content.encode("utf-8"))
-            assert (
-                0.3 * target_size <= actual_size <= 3.0 * target_size
-            ), f"{language} content size {actual_size} not within expected range around {target_size}"
+            assert 0.3 * target_size <= actual_size <= 3.0 * target_size, (
+                f"{language} content size {actual_size} not within expected range around {target_size}"
+            )
 
             # Content quality validation
             lines = content.split("\n")
             non_empty_lines = [line for line in lines if line.strip()]
 
-            assert (
-                len(non_empty_lines) >= 50
-            ), f"{language} should have substantial content"
+            assert len(non_empty_lines) >= 50, (
+                f"{language} should have substantial content"
+            )
 
             # Language-specific patterns
             if language == "python":
-                assert (
-                    "def " in content
-                ), "Python content should have function definitions"
-                assert (
-                    "class " in content
-                ), "Python content should have class definitions"
+                assert "def " in content, (
+                    "Python content should have function definitions"
+                )
+                assert "class " in content, (
+                    "Python content should have class definitions"
+                )
                 assert "import " in content, "Python content should have imports"
             elif language == "javascript":
-                assert (
-                    "function" in content or "=>" in content
-                ), "JavaScript should have functions"
-                assert (
-                    "const " in content or "let " in content
-                ), "JavaScript should have variable declarations"
-                assert (
-                    "require(" in content or "module.exports" in content
-                ), "JavaScript should have module patterns"
+                assert "function" in content or "=>" in content, (
+                    "JavaScript should have functions"
+                )
+                assert "const " in content or "let " in content, (
+                    "JavaScript should have variable declarations"
+                )
+                assert "require(" in content or "module.exports" in content, (
+                    "JavaScript should have module patterns"
+                )
             elif language == "java":
                 assert "public class" in content, "Java should have class definitions"
                 assert "public " in content, "Java should have public methods"
@@ -345,9 +345,9 @@ class TestPerformanceValidationFrameworkIntegration:
         total_time = time.time() - start_time
 
         # Validate concurrent execution
-        assert (
-            framework.peak_workers_count >= 4
-        ), f"Expected significant concurrency (≥4), got {framework.peak_workers_count}"
+        assert framework.peak_workers_count >= 4, (
+            f"Expected significant concurrency (≥4), got {framework.peak_workers_count}"
+        )
 
         # Calculate theoretical vs actual utilization
         theoretical_sequential_time = (
@@ -355,9 +355,9 @@ class TestPerformanceValidationFrameworkIntegration:
         )  # 0.8s if sequential
         expected_speedup = theoretical_sequential_time / total_time
 
-        assert (
-            expected_speedup >= 2.0
-        ), f"Expected ≥2x speedup from concurrent execution, got {expected_speedup:.1f}x"
+        assert expected_speedup >= 2.0, (
+            f"Expected ≥2x speedup from concurrent execution, got {expected_speedup:.1f}x"
+        )
 
         thread_utilization = framework.peak_workers_count / worker_count
 

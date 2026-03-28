@@ -507,12 +507,12 @@ class TestGitHubProviderSortingOrder:
             provider.discover_repositories(page=1, page_size=50)
 
         # Verify sorting parameters are correct for last push descending
-        assert (
-            captured_params.get("sort") == "pushed"
-        ), f"Expected sort='pushed', got '{captured_params.get('sort')}'"
-        assert (
-            captured_params.get("direction") == "desc"
-        ), f"Expected direction='desc', got '{captured_params.get('direction')}'"
+        assert captured_params.get("sort") == "pushed", (
+            f"Expected sort='pushed', got '{captured_params.get('sort')}'"
+        )
+        assert captured_params.get("direction") == "desc", (
+            f"Expected direction='desc', got '{captured_params.get('direction')}'"
+        )
 
 
 class TestGitHubProviderErrorHandling:

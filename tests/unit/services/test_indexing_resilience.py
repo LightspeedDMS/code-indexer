@@ -106,18 +106,18 @@ class TestIndexSourceNoTimeout:
                 continue  # Skip comments
             if "timeout=" in stripped and "subprocess" in source:
                 # Allow timeout=None but not timeout=<value>
-                assert (
-                    "timeout=None" in stripped
-                ), f"Found timeout in subprocess call: {stripped}"
+                assert "timeout=None" in stripped, (
+                    f"Found timeout in subprocess call: {stripped}"
+                )
 
     def test_index_source_has_no_timeout_expired_handler(self):
         """Verify _index_source() has no TimeoutExpired exception handler."""
         from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 
         source = inspect.getsource(RefreshScheduler._index_source)
-        assert (
-            "TimeoutExpired" not in source
-        ), "_index_source should not handle TimeoutExpired"
+        assert "TimeoutExpired" not in source, (
+            "_index_source should not handle TimeoutExpired"
+        )
 
 
 class TestIndexSourceConditionalReconcile:
@@ -129,9 +129,9 @@ class TestIndexSourceConditionalReconcile:
 
         source = inspect.getsource(RefreshScheduler._index_source)
         assert "--reconcile" in source, "_index_source should reference --reconcile"
-        assert (
-            "needs_reconcile" in source
-        ), "_index_source should have conditional reconcile logic"
+        assert "needs_reconcile" in source, (
+            "_index_source should have conditional reconcile logic"
+        )
 
     def test_index_source_uses_fts_flag(self):
         """Verify _index_source() always passes --fts to cidx index."""
@@ -146,9 +146,9 @@ class TestIndexSourceConditionalReconcile:
 
         source = inspect.getsource(RefreshScheduler._index_source)
         assert "metadata.json" in source, "_index_source should read metadata.json"
-        assert (
-            "in_progress" in source
-        ), "_index_source should check for in_progress status"
+        assert "in_progress" in source, (
+            "_index_source should check for in_progress status"
+        )
         assert "failed" in source, "_index_source should check for failed status"
 
     def test_reconcile_used_when_metadata_shows_interrupted(self, tmp_path):

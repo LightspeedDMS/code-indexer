@@ -32,34 +32,34 @@ class TestAddIndexCliIndexTypes:
         result = runner.invoke(cli, ["server", "add-index", "--help"])
 
         # Check that semantic is in the help output as a choice
-        assert (
-            "semantic" in result.output.lower()
-        ), "CLI add-index should accept 'semantic' as a valid index type"
+        assert "semantic" in result.output.lower(), (
+            "CLI add-index should accept 'semantic' as a valid index type"
+        )
 
     def test_cli_add_index_accepts_fts(self, runner):
         """Test that CLI accepts 'fts' as valid index type."""
         result = runner.invoke(cli, ["server", "add-index", "--help"])
 
         # Check that fts is in the help output as a choice
-        assert (
-            "fts" in result.output.lower()
-        ), "CLI add-index should accept 'fts' as a valid index type"
+        assert "fts" in result.output.lower(), (
+            "CLI add-index should accept 'fts' as a valid index type"
+        )
 
     def test_cli_add_index_accepts_temporal(self, runner):
         """Test that CLI accepts 'temporal' as valid index type."""
         result = runner.invoke(cli, ["server", "add-index", "--help"])
 
-        assert (
-            "temporal" in result.output.lower()
-        ), "CLI add-index should accept 'temporal' as a valid index type"
+        assert "temporal" in result.output.lower(), (
+            "CLI add-index should accept 'temporal' as a valid index type"
+        )
 
     def test_cli_add_index_accepts_scip(self, runner):
         """Test that CLI accepts 'scip' as valid index type."""
         result = runner.invoke(cli, ["server", "add-index", "--help"])
 
-        assert (
-            "scip" in result.output.lower()
-        ), "CLI add-index should accept 'scip' as a valid index type"
+        assert "scip" in result.output.lower(), (
+            "CLI add-index should accept 'scip' as a valid index type"
+        )
 
     def test_cli_add_index_rejects_semantic_fts(self, runner):
         """

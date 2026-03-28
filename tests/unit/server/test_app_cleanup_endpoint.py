@@ -111,18 +111,18 @@ class TestCleanupEndpointDefaultParamSignature:
                 cleanup_route = route
                 break
 
-        assert (
-            cleanup_route is not None
-        ), "Could not find /api/admin/jobs/cleanup route in app"
+        assert cleanup_route is not None, (
+            "Could not find /api/admin/jobs/cleanup route in app"
+        )
 
         # Inspect the endpoint function
         endpoint = cleanup_route.endpoint
         sig = inspect.signature(endpoint)
         params = sig.parameters
 
-        assert (
-            "max_age_hours" in params
-        ), "cleanup_old_jobs must have max_age_hours parameter"
+        assert "max_age_hours" in params, (
+            "cleanup_old_jobs must have max_age_hours parameter"
+        )
 
         max_age_param = params["max_age_hours"]
         # The default should be None (not 24) for Story #360

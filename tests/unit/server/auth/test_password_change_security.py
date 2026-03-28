@@ -482,12 +482,12 @@ class TestPasswordChangeConcurrencyProtection:
                                     1 for status in results if status == 409
                                 )
 
-                                assert (
-                                    success_count == 1
-                                ), f"Expected 1 successful change, got {success_count}"
-                                assert (
-                                    conflict_count == 4
-                                ), f"Expected 4 conflicts, got {conflict_count}"
+                                assert success_count == 1, (
+                                    f"Expected 1 successful change, got {success_count}"
+                                )
+                                assert conflict_count == 4, (
+                                    f"Expected 4 conflicts, got {conflict_count}"
+                                )
 
 
 @pytest.mark.e2e

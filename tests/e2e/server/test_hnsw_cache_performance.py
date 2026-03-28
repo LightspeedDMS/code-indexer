@@ -315,20 +315,20 @@ class TestHNSWCachePerformance:
         # and warm query is <1ms (cache hit), giving 200-1800x speedup.
         # For this test with smaller index, we expect >100x minimum.
 
-        assert (
-            speedup_ratio > 100.0
-        ), f"Cache speedup should be >100x, got {speedup_ratio:.1f}x"
+        assert speedup_ratio > 100.0, (
+            f"Cache speedup should be >100x, got {speedup_ratio:.1f}x"
+        )
 
         # Warm query should be very fast (sub-10ms)
-        assert (
-            warm_time_ms < 10.0
-        ), f"Warm query should be <10ms, got {warm_time_ms:.2f}ms"
+        assert warm_time_ms < 10.0, (
+            f"Warm query should be <10ms, got {warm_time_ms:.2f}ms"
+        )
 
         # Cache hit rate should be 50% (1 hit, 1 miss)
         hit_rate = stats_after_warm.hit_ratio
-        assert (
-            abs(hit_rate - 0.5) < 0.01
-        ), f"Hit rate should be ~50%, got {hit_rate:.2%}"
+        assert abs(hit_rate - 0.5) < 0.01, (
+            f"Hit rate should be ~50%, got {hit_rate:.2%}"
+        )
 
     def test_cache_isolation_per_repository(self, indexed_repository):
         """
@@ -390,9 +390,9 @@ class TestHNSWCachePerformance:
         )
 
         # Verify cache is NOT active
-        assert (
-            backend.hnsw_index_cache is None
-        ), "Cache should NOT be active when None is passed"
+        assert backend.hnsw_index_cache is None, (
+            "Cache should NOT be active when None is passed"
+        )
 
         # Queries should work without cache
         embedding_provider = MockEmbeddingProvider(vector_size=1024)

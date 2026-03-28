@@ -41,51 +41,51 @@ from typing import Optional, Dict
 
 class AuthService:
     """Handles user authentication and session management."""
-    
+
     def __init__(self):
         self.users: Dict[str, str] = {}  # username -> password_hash
         self.sessions: Dict[str, str] = {}  # session_id -> username
-    
+
     def register_user(self, username: str, password: str) -> bool:
         """Register a new user with hashed password."""
         if username in self.users:
             return False
-        
+
         # Hash password with salt
         salt = secrets.token_hex(16)
-        password_hash = hashlib.pbkdf2_hmac('sha256', 
-                                           password.encode(), 
-                                           salt.encode(), 
+        password_hash = hashlib.pbkdf2_hmac('sha256',
+                                           password.encode(),
+                                           salt.encode(),
                                            100000)
-        
+
         self.users[username] = f"{salt}:{password_hash.hex()}"
         return True
-    
+
     def authenticate(self, username: str, password: str) -> Optional[str]:
         """Authenticate user and return session ID if successful."""
         if username not in self.users:
             return None
-        
+
         stored = self.users[username]
         salt, stored_hash = stored.split(':')
-        
+
         # Verify password
         password_hash = hashlib.pbkdf2_hmac('sha256',
                                            password.encode(),
                                            salt.encode(),
                                            100000)
-        
+
         if password_hash.hex() == stored_hash:
             session_id = secrets.token_urlsafe(32)
             self.sessions[session_id] = username
             return session_id
-        
+
         return None
-    
+
     def get_user_from_session(self, session_id: str) -> Optional[str]:
         """Get username from session ID."""
         return self.sessions.get(session_id)
-    
+
     def logout(self, session_id: str) -> bool:
         """Logout user by removing session."""
         if session_id in self.sessions:
@@ -106,21 +106,21 @@ from .auth import AuthService
 
 class APIHandler:
     """Handles HTTP API requests with authentication."""
-    
+
     def __init__(self):
         self.auth_service = AuthService()
-    
+
     def handle_login(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle user login request."""
         username = request_data.get('username')
         password = request_data.get('password')
-        
+
         if not username or not password:
             return {
                 'success': False,
                 'error': 'Username and password required'
             }
-        
+
         session_id = self.auth_service.authenticate(username, password)
         if session_id:
             return {
@@ -133,24 +133,24 @@ class APIHandler:
                 'success': False,
                 'error': 'Invalid credentials'
             }
-    
+
     def handle_register(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle user registration request."""
         username = request_data.get('username')
         password = request_data.get('password')
-        
+
         if not username or not password:
             return {
                 'success': False,
                 'error': 'Username and password required'
             }
-        
+
         if len(password) < 8:
             return {
                 'success': False,
                 'error': 'Password must be at least 8 characters'
             }
-        
+
         success = self.auth_service.register_user(username, password)
         if success:
             return {
@@ -162,24 +162,24 @@ class APIHandler:
                 'success': False,
                 'error': 'Username already exists'
             }
-    
+
     def handle_protected_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
         """Handle request that requires authentication."""
         session_id = request_data.get('session_id')
-        
+
         if not session_id:
             return {
                 'success': False,
                 'error': 'Session ID required'
             }
-        
+
         username = self.auth_service.get_user_from_session(session_id)
         if not username:
             return {
                 'success': False,
                 'error': 'Invalid or expired session'
             }
-        
+
         return {
             'success': True,
             'username': username,
@@ -286,12 +286,12 @@ result = api.handle_protected_request({'session_id': session_id})
             assert len(result.response) > 100, "Response should be substantial"
 
             # Verify tool usage tracking data is present
-            assert (
-                result.tool_usage_summary is not None
-            ), "Tool usage summary should be generated"
-            assert (
-                result.tool_usage_stats is not None
-            ), "Tool usage stats should be generated"
+            assert result.tool_usage_summary is not None, (
+                "Tool usage summary should be generated"
+            )
+            assert result.tool_usage_stats is not None, (
+                "Tool usage stats should be generated"
+            )
 
             # Verify tool usage stats contain expected fields
             stats = result.tool_usage_stats
@@ -308,9 +308,9 @@ result = api.handle_protected_request({'session_id': session_id})
             if stats["total_events"] > 0:
                 # If tools were used, verify summary content
                 assert "Claude used" in summary, "Summary should mention tool usage"
-                assert (
-                    "Tool Usage Statistics" in summary
-                ), "Summary should contain statistics section"
+                assert "Tool Usage Statistics" in summary, (
+                    "Summary should contain statistics section"
+                )
             else:
                 # If no tools were used, verify we get the "no tool usage" message
                 assert "No tool usage" in summary or "Tool Usage Statistics" in summary

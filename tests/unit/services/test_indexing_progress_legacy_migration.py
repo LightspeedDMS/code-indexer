@@ -305,7 +305,9 @@ class TestLegacyProgressMigration:
             # Should have logged migration warning
             assert any(
                 "migrat" in record.message.lower() for record in caplog.records
-            ), f"Migration log not found. Captured logs: {[r.message for r in caplog.records]}"
+            ), (
+                f"Migration log not found. Captured logs: {[r.message for r in caplog.records]}"
+            )
 
     def test_no_migration_needed_for_new_format(self):
         """Test that new format files are not unnecessarily migrated."""

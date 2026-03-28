@@ -133,18 +133,18 @@ def test_temporal_service_initialization_includes_vector_store_client():
             call_kwargs = mock_temporal_service_class.call_args.kwargs
 
             # This assertion should FAIL before fix and PASS after fix
-            assert (
-                "vector_store_client" in call_kwargs
-            ), "TemporalSearchService initialized WITHOUT vector_store_client parameter - CRITICAL BUG!"
+            assert "vector_store_client" in call_kwargs, (
+                "TemporalSearchService initialized WITHOUT vector_store_client parameter - CRITICAL BUG!"
+            )
 
-            assert (
-                call_kwargs["vector_store_client"] is not None
-            ), "vector_store_client parameter is None - service will fail!"
+            assert call_kwargs["vector_store_client"] is not None, (
+                "vector_store_client parameter is None - service will fail!"
+            )
 
             # Verify it's the correct vector store instance
-            assert (
-                call_kwargs["vector_store_client"] == mock_vector_store
-            ), "Wrong vector_store_client instance passed"
+            assert call_kwargs["vector_store_client"] == mock_vector_store, (
+                "Wrong vector_store_client instance passed"
+            )
 
 
 def test_temporal_query_e2e_with_real_initialization():
@@ -237,13 +237,13 @@ def test_temporal_query_e2e_with_real_initialization():
                 os.chdir(old_cwd)
 
             # Should NOT see "Temporal index not found" error
-            assert (
-                "Temporal index not found" not in result.output
-            ), f"Got 'Temporal index not found' error - initialization bug not fixed!\nOutput: {result.output}"
+            assert "Temporal index not found" not in result.output, (
+                f"Got 'Temporal index not found' error - initialization bug not fixed!\nOutput: {result.output}"
+            )
 
             # Should process temporal query successfully
             if result.exit_code != 0:
                 # Check if it's the initialization bug
-                assert "vector_store_client" not in str(
-                    result.exception
-                ), f"Initialization bug: {result.exception}"
+                assert "vector_store_client" not in str(result.exception), (
+                    f"Initialization bug: {result.exception}"
+                )

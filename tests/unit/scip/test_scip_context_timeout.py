@@ -41,9 +41,9 @@ class TestGetSmartContextTimeoutParameter:
         from code_indexer.scip.query.composites import get_smart_context
 
         sig = inspect.signature(get_smart_context)
-        assert (
-            "timeout_seconds" in sig.parameters
-        ), "get_smart_context() must have a timeout_seconds parameter"
+        assert "timeout_seconds" in sig.parameters, (
+            "get_smart_context() must have a timeout_seconds parameter"
+        )
         default = sig.parameters["timeout_seconds"].default
         assert default == 30, f"timeout_seconds default must be 30, got {default}"
 
@@ -76,9 +76,9 @@ class TestGetSmartContextTimeoutParameter:
             elapsed = time.monotonic() - start
 
         # Must return well within double the timeout (generous for CI)
-        assert (
-            elapsed < 5.0
-        ), f"get_smart_context() took {elapsed:.1f}s — should have timed out within 1s"
+        assert elapsed < 5.0, (
+            f"get_smart_context() took {elapsed:.1f}s — should have timed out within 1s"
+        )
 
     def test_get_smart_context_timeout_exception_type(self, tmp_path: Path) -> None:
         """get_smart_context() must raise a QueryTimeoutError on timeout."""
@@ -148,9 +148,9 @@ class TestSCIPQueryServiceContextTimeout:
             service.get_context("Symbol", timeout_seconds=45)
 
         call_kwargs = mock_ctx.call_args[1]
-        assert (
-            "timeout_seconds" in call_kwargs
-        ), "get_context() must pass timeout_seconds to get_smart_context()"
+        assert "timeout_seconds" in call_kwargs, (
+            "get_context() must pass timeout_seconds to get_smart_context()"
+        )
         assert call_kwargs["timeout_seconds"] == 45
 
     def test_get_context_default_timeout_is_30_seconds(self, tmp_path: Path) -> None:
@@ -159,13 +159,13 @@ class TestSCIPQueryServiceContextTimeout:
         from code_indexer.server.services.scip_query_service import SCIPQueryService
 
         sig = inspect.signature(SCIPQueryService.get_context)
-        assert (
-            "timeout_seconds" in sig.parameters
-        ), "get_context() must have a timeout_seconds parameter"
+        assert "timeout_seconds" in sig.parameters, (
+            "get_context() must have a timeout_seconds parameter"
+        )
         default = sig.parameters["timeout_seconds"].default
-        assert (
-            default == 30
-        ), f"get_context timeout_seconds default must be 30, got {default}"
+        assert default == 30, (
+            f"get_context timeout_seconds default must be 30, got {default}"
+        )
 
     def test_get_context_propagates_timeout_error(self, tmp_path: Path) -> None:
         """SCIPQueryService.get_context() must propagate timeout as exception."""
@@ -241,10 +241,10 @@ class TestScipContextHandlerTimeout:
             scip_context({"symbol": "Symbol"}, mock_user)
 
         call_kwargs = mock_service.get_context.call_args[1]
-        assert (
-            "timeout_seconds" in call_kwargs
-        ), "scip_context handler must pass timeout_seconds to service.get_context()"
+        assert "timeout_seconds" in call_kwargs, (
+            "scip_context handler must pass timeout_seconds to service.get_context()"
+        )
         # Default timeout must be >= 30 seconds (reasonable for large repos)
-        assert (
-            call_kwargs["timeout_seconds"] >= 30
-        ), f"timeout_seconds must be >= 30, got {call_kwargs['timeout_seconds']}"
+        assert call_kwargs["timeout_seconds"] >= 30, (
+            f"timeout_seconds must be >= 30, got {call_kwargs['timeout_seconds']}"
+        )

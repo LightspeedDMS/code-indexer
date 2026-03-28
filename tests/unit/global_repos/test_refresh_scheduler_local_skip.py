@@ -131,9 +131,9 @@ class TestRefreshSchedulerLocalRepoSkip:
             "Local:// repos must NOT be submitted to _submit_refresh_job. "
             "The scheduler loop skips local:// repos entirely."
         )
-        assert (
-            "test-repo-global" in submitted
-        ), "Remote repos must still be submitted (regression guard)."
+        assert "test-repo-global" in submitted, (
+            "Remote repos must still be submitted (regression guard)."
+        )
 
     def test_execute_refresh_local_repo_uses_mtime_not_early_return(
         self,
@@ -199,12 +199,12 @@ class TestRefreshSchedulerLocalRepoSkip:
                 "C2 (Story #224): _detect_existing_indexes() must be called for local repos. "
                 "Local repos no longer return early."
             )
-            assert (
-                mock_reconcile.call_count >= 1
-            ), "C2 (Story #224): _reconcile_registry_with_filesystem() must be called for local repos."
-            assert (
-                mock_mtime.call_count == 1
-            ), "C2 (Story #224): _has_local_changes() must be called for mtime detection."
+            assert mock_reconcile.call_count >= 1, (
+                "C2 (Story #224): _reconcile_registry_with_filesystem() must be called for local repos."
+            )
+            assert mock_mtime.call_count == 1, (
+                "C2 (Story #224): _has_local_changes() must be called for mtime detection."
+            )
 
         # Result must not be the old "Local repo, skipped" early return
         assert result["success"] is True

@@ -162,9 +162,9 @@ class TestServerStartupFixIntegration:
                 time.sleep(2)
                 try:
                     process = psutil.Process(pid)
-                    assert (
-                        process.is_running()
-                    ), f"Server process died after {(i + 1) * 2} seconds"
+                    assert process.is_running(), (
+                        f"Server process died after {(i + 1) * 2} seconds"
+                    )
                 except psutil.NoSuchProcess:
                     pytest.fail(
                         f"Server process {pid} died after {(i + 1) * 2} seconds"
@@ -246,9 +246,9 @@ class TestServerStartupFixIntegration:
                 # Verify process still running
                 try:
                     process = psutil.Process(pid)
-                    assert (
-                        process.is_running()
-                    ), f"Server process died during request {i + 1}"
+                    assert process.is_running(), (
+                        f"Server process died during request {i + 1}"
+                    )
                 except psutil.NoSuchProcess:
                     pytest.fail(f"Server process {pid} died during request {i + 1}")
 

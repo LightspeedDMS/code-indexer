@@ -523,9 +523,9 @@ class TestMultiIndexQueryService:
         total_time = time.time() - start_time
 
         # Parallel execution: total time should be ~0.1s (max of both), not ~0.2s (sum)
-        assert (
-            total_time < 0.15
-        ), f"Expected parallel execution (~0.1s), got {total_time:.3f}s"
+        assert total_time < 0.15, (
+            f"Expected parallel execution (~0.1s), got {total_time:.3f}s"
+        )
 
         # Both queries should have been called
         assert mock_vector_store.search.call_count == 2

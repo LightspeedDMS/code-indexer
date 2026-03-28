@@ -108,9 +108,9 @@ class TestAdminReposAddSimple:
                 "network",
             ]
 
-            assert any(
-                error in error_output for error in acceptable_errors
-            ), f"Unexpected error: {result.output}"
+            assert any(error in error_output for error in acceptable_errors), (
+                f"Unexpected error: {result.output}"
+            )
 
     def test_admin_repos_add_help_content(self, runner: CliRunner):
         """Test that admin repos add help shows correct information."""
@@ -158,9 +158,9 @@ class TestAdminReposAddSimple:
         ]
 
         for url in invalid_urls:
-            assert not git_url_pattern.match(
-                url
-            ), f"Invalid URL should not match: {url}"
+            assert not git_url_pattern.match(url), (
+                f"Invalid URL should not match: {url}"
+            )
 
     def test_alias_validation_patterns(self):
         """Test alias validation patterns directly."""
@@ -191,6 +191,6 @@ class TestAdminReposAddSimple:
         ]
 
         for alias in invalid_aliases:
-            assert not alias_pattern.match(
-                alias
-            ), f"Invalid alias should not match: {alias}"
+            assert not alias_pattern.match(alias), (
+                f"Invalid alias should not match: {alias}"
+            )

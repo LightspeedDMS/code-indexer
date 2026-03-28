@@ -82,9 +82,9 @@ class TestRegisterLocalRepo:
             folder_path=test_folder,
             fire_lifecycle_hooks=False,
         )
-        assert (
-            result2 is False
-        ), "Duplicate registration should return False (idempotent)"
+        assert result2 is False, (
+            "Duplicate registration should return False (idempotent)"
+        )
 
     def test_register_local_repo_validates_alias_path_traversal(
         self, golden_repo_manager, test_folder

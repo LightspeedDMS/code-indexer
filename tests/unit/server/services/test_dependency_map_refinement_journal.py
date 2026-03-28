@@ -155,9 +155,9 @@ class TestJournalInitIsCalled:
 
         mock_journal.init.assert_called_once()
         init_arg = mock_journal.init.call_args[0][0]
-        assert isinstance(
-            init_arg, Path
-        ), f"init() should receive a Path, got {type(init_arg)}"
+        assert isinstance(init_arg, Path), (
+            f"init() should receive a Path, got {type(init_arg)}"
+        )
 
     def test_journal_logs_disabled_when_refinement_disabled(self, tmp_path):
         """init() IS called when refinement_enabled=False to log the skip reason."""
@@ -245,12 +245,12 @@ class TestPerDomainLogMessages:
         all_log_messages = " ".join(
             str(c.args[0]) for c in mock_journal.log.call_args_list if c.args
         )
-        assert (
-            "payments" in all_log_messages
-        ), "Domain 'payments' must appear in journal log messages"
-        assert (
-            "auth" in all_log_messages
-        ), "Domain 'auth' must appear in journal log messages"
+        assert "payments" in all_log_messages, (
+            "Domain 'payments' must appear in journal log messages"
+        )
+        assert "auth" in all_log_messages, (
+            "Domain 'auth' must appear in journal log messages"
+        )
 
     def test_before_domain_message_logged(self, tmp_path):
         """A 'Refining domain' message should be logged before each domain."""
@@ -416,9 +416,9 @@ class TestCompletionLogMessage:
         import re
 
         has_number = bool(re.search(r"\d", completion_msg))
-        assert (
-            has_number
-        ), f"Completion message should include a count, got: '{completion_msg}'"
+        assert has_number, (
+            f"Completion message should include a count, got: '{completion_msg}'"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -451,9 +451,9 @@ class TestJournalErrorsNonFatal:
         service.run_refinement_cycle()
 
         # Both domains should still be processed
-        assert (
-            service.refine_or_create_domain.call_count == 2
-        ), "Both domains must be processed even when journal.log() raises"
+        assert service.refine_or_create_domain.call_count == 2, (
+            "Both domains must be processed even when journal.log() raises"
+        )
 
     def test_journal_log_error_mid_loop_does_not_skip_domains(self, tmp_path):
         """If journal.log() raises during loop, remaining domains still process."""
@@ -473,9 +473,9 @@ class TestJournalErrorsNonFatal:
         service.run_refinement_cycle()
 
         # All 3 domains should be processed
-        assert (
-            service.refine_or_create_domain.call_count == 3
-        ), "All 3 domains must be processed despite intermittent journal errors"
+        assert service.refine_or_create_domain.call_count == 3, (
+            "All 3 domains must be processed despite intermittent journal errors"
+        )
 
     def test_tracking_update_still_called_when_journal_fails(self, tmp_path):
         """Cursor update (tracking_backend.update_tracking) runs even if journal fails."""
@@ -505,9 +505,9 @@ class TestJournalInitDirectoryPath:
 
         mock_journal.init.assert_called_once()
         init_path = mock_journal.init.call_args[0][0]
-        assert "depmap-refinement-journal" in str(
-            init_path
-        ), f"init() path must contain 'depmap-refinement-journal', got: {init_path}"
+        assert "depmap-refinement-journal" in str(init_path), (
+            f"init() path must contain 'depmap-refinement-journal', got: {init_path}"
+        )
 
     def test_journal_init_path_is_under_home_tmp(self, tmp_path):
         """init() path must be under ~/.tmp/."""
@@ -518,11 +518,9 @@ class TestJournalInitDirectoryPath:
 
         init_path = mock_journal.init.call_args[0][0]
         expected_prefix = os.path.expanduser("~/.tmp")
-        assert str(
-            init_path
-        ).startswith(
-            expected_prefix
-        ), f"init() path must start with '~/.tmp' (~={expected_prefix}), got: {init_path}"
+        assert str(init_path).startswith(expected_prefix), (
+            f"init() path must start with '~/.tmp' (~={expected_prefix}), got: {init_path}"
+        )
 
     def test_journal_init_path_matches_exact_pattern(self, tmp_path):
         """init() path must exactly match ~/.tmp/depmap-refinement-journal/."""

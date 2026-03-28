@@ -180,7 +180,7 @@ class TestCommitMessageChunkTextBug:
             )
 
             assert "testing purposes" in chunk_text, (
-                f"BUG: chunk_text missing commit body text. " f"Got: {chunk_text!r}"
+                f"BUG: chunk_text missing commit body text. Got: {chunk_text!r}"
             )
 
             # Verify the text length is reasonable (not truncated to empty)

@@ -53,9 +53,9 @@ def function_three():
             assert isinstance(chunk["line_start"], int), "line_start should be integer"
             assert isinstance(chunk["line_end"], int), "line_end should be integer"
             assert chunk["line_start"] >= 1, "line_start should be 1-indexed"
-            assert (
-                chunk["line_end"] >= chunk["line_start"]
-            ), "line_end should be >= line_start"
+            assert chunk["line_end"] >= chunk["line_start"], (
+                "line_end should be >= line_start"
+            )
 
     def test_chunk_text_accurate_line_boundaries(self):
         """Test that line numbers accurately reflect text boundaries."""
@@ -83,9 +83,9 @@ line 5"""
 
             # Should cover all lines from 1 to total_lines
             expected_lines = set(range(1, total_lines + 1))
-            assert covered_lines.issuperset(
-                expected_lines
-            ), "Not all lines covered by chunks"
+            assert covered_lines.issuperset(expected_lines), (
+                "Not all lines covered by chunks"
+            )
 
     def test_chunk_file_includes_line_numbers(self):
         """Test that chunk_file includes line numbers when processing files."""
@@ -181,12 +181,12 @@ if __name__ == "__main__":
 
             # The chunk should represent content from those line ranges
             assert line_start >= 1, f"line_start should be >= 1, got {line_start}"
-            assert line_end <= len(
-                text_lines
-            ), f"line_end should be <= {len(text_lines)}, got {line_end}"
-            assert (
-                line_start <= line_end
-            ), f"line_start should be <= line_end, got {line_start}-{line_end}"
+            assert line_end <= len(text_lines), (
+                f"line_end should be <= {len(text_lines)}, got {line_end}"
+            )
+            assert line_start <= line_end, (
+                f"line_start should be <= line_end, got {line_start}-{line_end}"
+            )
 
             # Extract key content from the expected lines to verify semantic correspondence
             expected_lines = text_lines[
@@ -227,7 +227,9 @@ if __name__ == "__main__":
                     for line in expected_lines
                     if line.strip() and len(line.strip()) > 5
                 ]
-                assert False, f"No substantial content from lines {line_start}-{line_end} found in chunk. Expected one of: {substantial_lines[:3]}"
+                assert False, (
+                    f"No substantial content from lines {line_start}-{line_end} found in chunk. Expected one of: {substantial_lines[:3]}"
+                )
 
 
 class TestLineNumbersInProcessorMetadata:
@@ -292,15 +294,15 @@ class TestMultiLanguageLineNumberAccuracy:
         original_lines = original_text.splitlines()
 
         # Verify line numbers are valid
-        assert (
-            chunk_dict["line_start"] >= 1
-        ), f"{language}: line_start must be >= 1, got {chunk_dict['line_start']}"
-        assert (
-            chunk_dict["line_end"] >= chunk_dict["line_start"]
-        ), f"{language}: line_end must be >= line_start"
-        assert (
-            chunk_dict["line_end"] <= len(original_lines)
-        ), f"{language}: line_end {chunk_dict['line_end']} exceeds total lines {len(original_lines)}"
+        assert chunk_dict["line_start"] >= 1, (
+            f"{language}: line_start must be >= 1, got {chunk_dict['line_start']}"
+        )
+        assert chunk_dict["line_end"] >= chunk_dict["line_start"], (
+            f"{language}: line_end must be >= line_start"
+        )
+        assert chunk_dict["line_end"] <= len(original_lines), (
+            f"{language}: line_end {chunk_dict['line_end']} exceeds total lines {len(original_lines)}"
+        )
 
         # Extract the expected content based on reported line numbers
         expected_lines = original_lines[
@@ -327,7 +329,9 @@ class TestMultiLanguageLineNumberAccuracy:
             line for line in expected_lines if line.strip() and len(line.strip()) > 5
         ]
         if substantial_expected and not found_expected_content:
-            assert False, f"{language}: No substantial content from lines {chunk_dict['line_start']}-{chunk_dict['line_end']} found in chunk"
+            assert False, (
+                f"{language}: No substantial content from lines {chunk_dict['line_start']}-{chunk_dict['line_end']} found in chunk"
+            )
 
     def test_java_line_number_accuracy(self):
         """Test line number accuracy for Java code."""

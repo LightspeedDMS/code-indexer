@@ -75,16 +75,16 @@ def test_concurrent_register_operations_serialized(registry):
 
     # Verify all three repos were successfully registered
     registry._load_registry()
-    assert (
-        len([k for k in registry._registry_data.keys() if "test-repo-" in k]) == 3
-    ), "All three register operations should succeed"
+    assert len([k for k in registry._registry_data.keys() if "test-repo-" in k]) == 3, (
+        "All three register operations should succeed"
+    )
 
     # Verify registry file is valid JSON
     with open(registry.registry_file, "r") as f:
         data = json.load(f)
-    assert (
-        len([k for k in data.keys() if "test-repo-" in k]) == 3
-    ), "Registry file should contain all three repos"
+    assert len([k for k in data.keys() if "test-repo-" in k]) == 3, (
+        "Registry file should contain all three repos"
+    )
 
 
 def test_concurrent_unregister_operations_serialized(registry):
@@ -145,9 +145,9 @@ def test_concurrent_unregister_operations_serialized(registry):
     # Verify registry file is valid JSON and empty
     with open(registry.registry_file, "r") as f:
         data = json.load(f)
-    assert (
-        len([k for k in data.keys() if "repo" in k and "-global" in k]) == 0
-    ), "Registry file should have no repos after unregister"
+    assert len([k for k in data.keys() if "repo" in k and "-global" in k]) == 0, (
+        "Registry file should have no repos after unregister"
+    )
 
 
 def test_concurrent_register_unregister_serialized(registry):
@@ -199,17 +199,17 @@ def test_concurrent_register_unregister_serialized(registry):
     # Verify final state is consistent
     registry._load_registry()
     assert "new-repo-global" in registry._registry_data, "New repo should be registered"
-    assert (
-        "existing-repo-global" not in registry._registry_data
-    ), "Existing repo should be unregistered"
+    assert "existing-repo-global" not in registry._registry_data, (
+        "Existing repo should be unregistered"
+    )
 
     # Verify registry file is valid JSON
     with open(registry.registry_file, "r") as f:
         data = json.load(f)
     assert "new-repo-global" in data, "Registry file should contain new repo"
-    assert (
-        "existing-repo-global" not in data
-    ), "Registry file should not contain removed repo"
+    assert "existing-repo-global" not in data, (
+        "Registry file should not contain removed repo"
+    )
 
 
 def test_registry_file_lock_prevents_corruption(registry):
@@ -287,9 +287,9 @@ def test_registry_file_lock_prevents_corruption(registry):
 
     # Verify final registry is valid and consistent
     registry._load_registry()
-    assert isinstance(
-        registry._registry_data, dict
-    ), "Final registry should be valid dict"
+    assert isinstance(registry._registry_data, dict), (
+        "Final registry should be valid dict"
+    )
 
 
 def test_file_lock_released_on_exception(registry):

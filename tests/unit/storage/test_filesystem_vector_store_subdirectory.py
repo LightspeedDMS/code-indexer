@@ -209,9 +209,9 @@ class TestFilesystemVectorStoreSubdirectory:
             subdirectory="multimodal_index",
         )
 
-        assert (
-            len(multimodal_results) == 1
-        ), "Should find exactly one result in multimodal_index"
+        assert len(multimodal_results) == 1, (
+            "Should find exactly one result in multimodal_index"
+        )
         assert multimodal_results[0]["id"] == "doc_001"
         assert "images" in multimodal_results[0]["payload"]
 
@@ -245,9 +245,9 @@ class TestFilesystemVectorStoreSubdirectory:
         with open(meta_file) as f:
             metadata = json.load(f)
 
-        assert (
-            "subdirectory" not in metadata or metadata["subdirectory"] is None
-        ), "No subdirectory in metadata"
+        assert "subdirectory" not in metadata or metadata["subdirectory"] is None, (
+            "No subdirectory in metadata"
+        )
 
         # Verify upsert and search work without subdirectory parameter
         points = [

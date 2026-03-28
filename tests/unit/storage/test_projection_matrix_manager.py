@@ -62,9 +62,9 @@ class TestProjectionMatrixManager:
             input_dim=1536, output_dim=64, seed=99
         )
 
-        assert not np.allclose(
-            matrix1, matrix2
-        ), "Different seeds must produce different matrices"
+        assert not np.allclose(matrix1, matrix2), (
+            "Different seeds must produce different matrices"
+        )
 
     def test_save_and_load_projection_matrix(self, tmp_path):
         """GIVEN a projection matrix
@@ -95,9 +95,9 @@ class TestProjectionMatrixManager:
         # Load and compare
         loaded_matrix = manager.load_matrix(collection_path)
 
-        assert np.allclose(
-            original_matrix, loaded_matrix
-        ), "Loaded matrix must match original"
+        assert np.allclose(original_matrix, loaded_matrix), (
+            "Loaded matrix must match original"
+        )
         assert loaded_matrix.shape == (
             1536,
             64,
@@ -212,6 +212,6 @@ class TestProjectionMatrixManager:
         # Relative ordering should be approximately preserved
         # If d(v1,v2) < d(v1,v3), then d(p1,p2) should be < d(p1,p3)
         if dist_12_orig < dist_13_orig:
-            assert (
-                dist_12_proj < dist_13_proj * 1.5
-            ), "Relative distances should be preserved"
+            assert dist_12_proj < dist_13_proj * 1.5, (
+                "Relative distances should be preserved"
+            )

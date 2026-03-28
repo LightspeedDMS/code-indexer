@@ -31,16 +31,16 @@ class TestAsyncEnsureMinimumTimeExists:
     def test_method_exists(self):
         """TimingAttackPrevention must have async_ensure_minimum_time method."""
         tap = TimingAttackPrevention(minimum_response_time_ms=100)
-        assert hasattr(
-            tap, "async_ensure_minimum_time"
-        ), "TimingAttackPrevention must have async_ensure_minimum_time method"
+        assert hasattr(tap, "async_ensure_minimum_time"), (
+            "TimingAttackPrevention must have async_ensure_minimum_time method"
+        )
 
     def test_method_is_coroutine_function(self):
         """async_ensure_minimum_time must be an async def method."""
         tap = TimingAttackPrevention(minimum_response_time_ms=100)
-        assert inspect.iscoroutinefunction(
-            tap.async_ensure_minimum_time
-        ), "async_ensure_minimum_time must be an async def method"
+        assert inspect.iscoroutinefunction(tap.async_ensure_minimum_time), (
+            "async_ensure_minimum_time must be an async def method"
+        )
 
 
 class TestAsyncEnsureMinimumTimeUsesAsyncioSleep:
@@ -61,12 +61,12 @@ class TestAsyncEnsureMinimumTimeUsesAsyncioSleep:
 
                     result = await tap.async_ensure_minimum_time(fast_operation)
 
-                    assert (
-                        mock_time_sleep.call_count == 0
-                    ), "async_ensure_minimum_time must NOT call time.sleep"
-                    assert (
-                        mock_async_sleep.call_count >= 1
-                    ), "async_ensure_minimum_time must call asyncio.sleep for padding"
+                    assert mock_time_sleep.call_count == 0, (
+                        "async_ensure_minimum_time must NOT call time.sleep"
+                    )
+                    assert mock_async_sleep.call_count >= 1, (
+                        "async_ensure_minimum_time must call asyncio.sleep for padding"
+                    )
                     return result
 
         result = asyncio.get_event_loop().run_until_complete(run_test())
@@ -146,16 +146,16 @@ class TestSyncConstantTimeExecuteUnchanged:
             result = tap.constant_time_execute(lambda: "sync_result")
 
         assert result == "sync_result"
-        assert (
-            mock_time_sleep.call_count >= 1
-        ), "constant_time_execute must still use time.sleep"
+        assert mock_time_sleep.call_count >= 1, (
+            "constant_time_execute must still use time.sleep"
+        )
 
     def test_sync_method_is_not_coroutine(self):
         """constant_time_execute must remain a synchronous method."""
         tap = TimingAttackPrevention(minimum_response_time_ms=100)
-        assert not inspect.iscoroutinefunction(
-            tap.constant_time_execute
-        ), "constant_time_execute must remain a synchronous def method"
+        assert not inspect.iscoroutinefunction(tap.constant_time_execute), (
+            "constant_time_execute must remain a synchronous def method"
+        )
 
     def test_sync_method_comment_documents_correct_behavior(self):
         """

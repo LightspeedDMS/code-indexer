@@ -149,15 +149,15 @@ def test_lazy_load_reduces_json_loads(store_with_many_vectors):
     # CRITICAL: Lazy loading should load FEWER JSON files than eager loading
     # Eager loading loads all candidates (50 from prefetch with limit*2)
     # Lazy loading should early exit after finding 5 results
-    assert (
-        lazy_json_loads <= eager_json_loads
-    ), f"Lazy loading should not exceed eager loads: lazy={lazy_json_loads}, eager={eager_json_loads}"
+    assert lazy_json_loads <= eager_json_loads, (
+        f"Lazy loading should not exceed eager loads: lazy={lazy_json_loads}, eager={eager_json_loads}"
+    )
 
     # Lazy loading should load at most slightly more than limit (due to prefetch ordering)
     # With good HNSW ordering, we should hit limit quickly
-    assert (
-        lazy_json_loads <= limit * 2
-    ), f"Lazy loading should early exit near limit: loaded {lazy_json_loads}, limit={limit}"
+    assert lazy_json_loads <= limit * 2, (
+        f"Lazy loading should early exit near limit: loaded {lazy_json_loads}, limit={limit}"
+    )
 
     print(f"✓ Eager loading: {eager_json_loads} JSON files loaded")
     print(f"✓ Lazy loading: {lazy_json_loads} JSON files loaded")

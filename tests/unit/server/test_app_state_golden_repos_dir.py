@@ -88,19 +88,19 @@ class TestAppStateGoldenReposDirIntegration:
         from code_indexer.server.app import app
 
         # After startup, app.state should have golden_repos_dir
-        assert hasattr(
-            app.state, "golden_repos_dir"
-        ), "app.state should have golden_repos_dir attribute after startup"
+        assert hasattr(app.state, "golden_repos_dir"), (
+            "app.state should have golden_repos_dir attribute after startup"
+        )
 
         # Value should be a string
-        assert isinstance(
-            app.state.golden_repos_dir, str
-        ), "golden_repos_dir should be stored as string"
+        assert isinstance(app.state.golden_repos_dir, str), (
+            "golden_repos_dir should be stored as string"
+        )
 
         # Value should end with 'golden-repos'
-        assert app.state.golden_repos_dir.endswith(
-            "golden-repos"
-        ), "golden_repos_dir should end with 'golden-repos'"
+        assert app.state.golden_repos_dir.endswith("golden-repos"), (
+            "golden_repos_dir should end with 'golden-repos'"
+        )
 
     @pytest.mark.skip(
         reason="Will pass after implementation - currently fails (RED phase)"
@@ -125,6 +125,6 @@ class TestAppStateGoldenReposDirIntegration:
             from code_indexer.server.app import app
 
             # Verify golden_repos_dir matches expected path
-            assert (
-                app.state.golden_repos_dir == expected_golden_dir
-            ), f"Expected {expected_golden_dir}, got {app.state.golden_repos_dir}"
+            assert app.state.golden_repos_dir == expected_golden_dir, (
+                f"Expected {expected_golden_dir}, got {app.state.golden_repos_dir}"
+            )

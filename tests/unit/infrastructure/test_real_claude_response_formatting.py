@@ -217,9 +217,9 @@ relationships, not just text matches."""
             if "Code-Indexer Project Analysis" in stripped:
                 analysis_header_found = True
                 # Look for ANSI color codes (cyan = \x1b[96m or similar)
-                assert (
-                    "\x1b[" in line
-                ), f"Main header '{stripped}' should have ANSI color codes, got: {repr(line)}"
+                assert "\x1b[" in line, (
+                    f"Main header '{stripped}' should have ANSI color codes, got: {repr(line)}"
+                )
 
             # Check for "Top 5" and "Core Algorithms" separately since they might be on different lines
             if ("Top" in stripped and "5" in stripped) or (
@@ -235,7 +235,9 @@ relationships, not just text matches."""
             algorithm_header_found = True
 
         assert analysis_header_found, "Should find the main project analysis header"
-        assert algorithm_header_found, f"Should find the algorithms header. Found lines with formatting: {[line for line in lines if 'Core Algorithms' in line or ('Top' in line and '5' in line)]}"
+        assert algorithm_header_found, (
+            f"Should find the algorithms header. Found lines with formatting: {[line for line in lines if 'Core Algorithms' in line or ('Top' in line and '5' in line)]}"
+        )
 
         # Check that bold text is properly formatted with ANSI codes
         bold_text_formatted = False
@@ -246,9 +248,9 @@ relationships, not just text matches."""
                     bold_text_formatted = True
                     break
 
-        assert (
-            bold_text_formatted
-        ), "Should find and properly format bold text with ANSI codes"
+        assert bold_text_formatted, (
+            "Should find and properly format bold text with ANSI codes"
+        )
 
         # Check that code blocks are formatted properly
         for line in lines:
@@ -308,4 +310,6 @@ def example():
                     print(f"Found formatted header: {repr(line)}")
 
         # This should now PASS with our fix
-        assert header_formatted, f"Headers should now be formatted with ANSI codes. Output was: {repr(output[:200])}"
+        assert header_formatted, (
+            f"Headers should now be formatted with ANSI codes. Output was: {repr(output[:200])}"
+        )

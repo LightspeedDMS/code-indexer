@@ -188,6 +188,6 @@ class TestRealTimingAttackPrevention:
         print(f"Unit test timing variation: {time_variation:.2%} (target: <50%)")
 
         # Should have very low timing variation
-        assert (
-            time_variation < 0.5
-        ), f"Unit-level timing variation too large: {time_variation:.2%}"
+        assert time_variation < 0.5, (
+            f"Unit-level timing variation too large: {time_variation:.2%}"
+        )

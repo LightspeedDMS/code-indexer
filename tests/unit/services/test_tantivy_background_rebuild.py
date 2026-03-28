@@ -142,9 +142,9 @@ class TestFTSBackgroundRebuild:
         t2.join(timeout=3.0)
 
         # Verify query succeeded during rebuild (AC3)
-        assert (
-            query_during_rebuild_succeeded.is_set()
-        ), "Query must succeed during rebuild without blocking (AC3)"
+        assert query_during_rebuild_succeeded.is_set(), (
+            "Query must succeed during rebuild without blocking (AC3)"
+        )
 
     def test_fts_rebuild_uses_atomic_swap(
         self, tmp_path: Path, sample_documents: List[Dict[str, Any]]
@@ -174,15 +174,15 @@ class TestFTSBackgroundRebuild:
         # Wait for rebuild - use 10s to handle pytest overhead (2s was insufficient)
         rebuild_thread.join(timeout=10.0)
 
-        assert (
-            not rebuild_thread.is_alive()
-        ), "Rebuild thread must complete within 10 seconds"
+        assert not rebuild_thread.is_alive(), (
+            "Rebuild thread must complete within 10 seconds"
+        )
 
         # Verify .tmp file was created and swapped (should not exist after swap)
         temp_fts_dir = collection_path / "tantivy_fts.tmp"
-        assert (
-            not temp_fts_dir.exists()
-        ), "Temp directory should not exist after atomic swap"
+        assert not temp_fts_dir.exists(), (
+            "Temp directory should not exist after atomic swap"
+        )
 
         # Verify final index exists
         assert fts_dir.exists()
@@ -231,12 +231,12 @@ class TestOrphanedTempFileCleanup:
         rebuilder.rebuild_with_lock(simple_build, target_file)
 
         # Verify orphaned files were cleaned up (AC9)
-        assert (
-            not orphaned_tmp1.exists()
-        ), "Orphaned tantivy_fts.tmp should be cleaned up before rebuild (AC9)"
-        assert (
-            not orphaned_tmp2.exists()
-        ), "Orphaned hnsw_index.bin.tmp should be cleaned up before rebuild (AC9)"
+        assert not orphaned_tmp1.exists(), (
+            "Orphaned tantivy_fts.tmp should be cleaned up before rebuild (AC9)"
+        )
+        assert not orphaned_tmp2.exists(), (
+            "Orphaned hnsw_index.bin.tmp should be cleaned up before rebuild (AC9)"
+        )
 
     def test_cleanup_preserves_recent_temp_files(self, tmp_path: Path):
         """Test that cleanup preserves recent .tmp files (active rebuilds)."""

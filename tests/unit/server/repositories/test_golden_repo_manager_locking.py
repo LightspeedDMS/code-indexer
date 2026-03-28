@@ -183,9 +183,9 @@ def test_concurrent_remove_operations_serialized(manager):
 
         # Each cleanup_end should come before the next cleanup_start
         for i in range(len(cleanup_starts) - 1):
-            assert (
-                cleanup_ends[i] < cleanup_starts[i + 1]
-            ), f"Cleanup operations should be serialized (log: {execution_log})"
+            assert cleanup_ends[i] < cleanup_starts[i + 1], (
+                f"Cleanup operations should be serialized (log: {execution_log})"
+            )
 
 
 def test_concurrent_add_remove_serialized(manager):

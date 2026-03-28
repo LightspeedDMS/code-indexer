@@ -36,12 +36,12 @@ class TestClaudeIntegrationConfigFields:
         """
         config = ClaudeIntegrationConfig()
 
-        assert hasattr(
-            config, "anthropic_api_key"
-        ), "ClaudeIntegrationConfig should have anthropic_api_key field"
-        assert (
-            config.anthropic_api_key is None
-        ), "anthropic_api_key should default to None"
+        assert hasattr(config, "anthropic_api_key"), (
+            "ClaudeIntegrationConfig should have anthropic_api_key field"
+        )
+        assert config.anthropic_api_key is None, (
+            "anthropic_api_key should default to None"
+        )
 
     def test_claude_integration_config_has_max_concurrent_claude_cli_field(self):
         """
@@ -55,13 +55,13 @@ class TestClaudeIntegrationConfigFields:
         """
         config = ClaudeIntegrationConfig()
 
-        assert hasattr(
-            config, "max_concurrent_claude_cli"
-        ), "ClaudeIntegrationConfig should have max_concurrent_claude_cli field"
+        assert hasattr(config, "max_concurrent_claude_cli"), (
+            "ClaudeIntegrationConfig should have max_concurrent_claude_cli field"
+        )
         # Story #24: Default changed from 4 to 2 for resource-constrained systems
-        assert (
-            config.max_concurrent_claude_cli == 2
-        ), "max_concurrent_claude_cli should default to 2"
+        assert config.max_concurrent_claude_cli == 2, (
+            "max_concurrent_claude_cli should default to 2"
+        )
 
     def test_claude_integration_config_has_description_refresh_interval_hours_field(
         self,
@@ -75,12 +75,12 @@ class TestClaudeIntegrationConfigFields:
         """
         config = ClaudeIntegrationConfig()
 
-        assert hasattr(
-            config, "description_refresh_interval_hours"
-        ), "ClaudeIntegrationConfig should have description_refresh_interval_hours field"
-        assert (
-            config.description_refresh_interval_hours == 24
-        ), "description_refresh_interval_hours should default to 24"
+        assert hasattr(config, "description_refresh_interval_hours"), (
+            "ClaudeIntegrationConfig should have description_refresh_interval_hours field"
+        )
+        assert config.description_refresh_interval_hours == 24, (
+            "description_refresh_interval_hours should default to 24"
+        )
 
     def test_claude_integration_config_accepts_custom_max_concurrent_claude_cli(self):
         """
@@ -92,9 +92,9 @@ class TestClaudeIntegrationConfigFields:
         """
         config = ClaudeIntegrationConfig(max_concurrent_claude_cli=8)
 
-        assert (
-            config.max_concurrent_claude_cli == 8
-        ), "max_concurrent_claude_cli should accept custom value"
+        assert config.max_concurrent_claude_cli == 8, (
+            "max_concurrent_claude_cli should accept custom value"
+        )
 
     def test_claude_integration_config_accepts_custom_description_refresh_interval_hours(
         self,
@@ -108,9 +108,9 @@ class TestClaudeIntegrationConfigFields:
         """
         config = ClaudeIntegrationConfig(description_refresh_interval_hours=48)
 
-        assert (
-            config.description_refresh_interval_hours == 48
-        ), "description_refresh_interval_hours should accept custom value"
+        assert config.description_refresh_interval_hours == 48, (
+            "description_refresh_interval_hours should accept custom value"
+        )
 
 
 class TestServerConfigClaudeIntegrationAccess:
@@ -126,9 +126,9 @@ class TestServerConfigClaudeIntegrationAccess:
         """
         config = ServerConfig(server_dir="/tmp/test")
 
-        assert hasattr(
-            config, "claude_integration_config"
-        ), "ServerConfig should have claude_integration_config field"
+        assert hasattr(config, "claude_integration_config"), (
+            "ServerConfig should have claude_integration_config field"
+        )
         assert config.claude_integration_config is not None
         assert isinstance(config.claude_integration_config, ClaudeIntegrationConfig)
 

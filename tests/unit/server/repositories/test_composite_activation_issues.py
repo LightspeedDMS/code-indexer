@@ -218,9 +218,9 @@ class TestIssue1RepositoryDiscoveryFailure:
         # CRITICAL ASSERTION: This will FAIL initially
         # discovered_repos should be populated with component repository names
         assert "discovered_repos" in metadata, "Metadata should have discovered_repos"
-        assert (
-            len(metadata["discovered_repos"]) == 2
-        ), f"Expected 2 discovered repos, got {len(metadata['discovered_repos'])}"
+        assert len(metadata["discovered_repos"]) == 2, (
+            f"Expected 2 discovered repos, got {len(metadata['discovered_repos'])}"
+        )
         assert set(metadata["discovered_repos"]) == {
             "click",
             "hello-world-test",
@@ -249,20 +249,20 @@ class TestIssue1RepositoryDiscoveryFailure:
         )
 
         click_config_dir = composite_path / "click" / ".code-indexer"
-        assert (
-            click_config_dir.exists()
-        ), "click component should have .code-indexer directory"
-        assert (
-            click_config_dir / "config.json"
-        ).exists(), "click component should have config.json"
+        assert click_config_dir.exists(), (
+            "click component should have .code-indexer directory"
+        )
+        assert (click_config_dir / "config.json").exists(), (
+            "click component should have config.json"
+        )
 
         hello_config_dir = composite_path / "hello-world-test" / ".code-indexer"
-        assert (
-            hello_config_dir.exists()
-        ), "hello-world-test component should have .code-indexer directory"
-        assert (
-            hello_config_dir / "config.json"
-        ).exists(), "hello-world-test component should have config.json"
+        assert hello_config_dir.exists(), (
+            "hello-world-test component should have .code-indexer directory"
+        )
+        assert (hello_config_dir / "config.json").exists(), (
+            "hello-world-test component should have config.json"
+        )
 
 
 @pytest.mark.e2e
@@ -403,9 +403,9 @@ class TestIssue3QueryExecutionAnomaly:
 
         # Check if repository is detected as composite
         is_composite = query_manager._is_composite_repository(composite_path)
-        assert (
-            is_composite is True
-        ), "Composite repository should be detected by query manager"
+        assert is_composite is True, (
+            "Composite repository should be detected by query manager"
+        )
 
         # Mock ProxyConfigManager to return component repos
         with patch(
@@ -440,18 +440,18 @@ class TestIssue3QueryExecutionAnomaly:
                 repo_paths = call_args[0][1]  # Second positional arg is repo_paths
 
                 # CRITICAL ASSERTION: Should search only 2 component repos
-                assert (
-                    len(repo_paths) == 2
-                ), f"Should search 2 component repos, got {len(repo_paths)}"
+                assert len(repo_paths) == 2, (
+                    f"Should search 2 component repos, got {len(repo_paths)}"
+                )
 
                 # Verify repo paths are correct
                 expected_paths = [
                     str(composite_path / "click"),
                     str(composite_path / "hello-world-test"),
                 ]
-                assert set(repo_paths) == set(
-                    expected_paths
-                ), f"Should search component repos, got {repo_paths}"
+                assert set(repo_paths) == set(expected_paths), (
+                    f"Should search component repos, got {repo_paths}"
+                )
 
     def test_composite_repo_metadata_includes_correct_discovered_repos(
         self, activated_repo_manager, temp_data_dir
@@ -480,9 +480,9 @@ class TestIssue3QueryExecutionAnomaly:
 
         # This is what enables correct query routing
         discovered = repo_metadata["discovered_repos"]
-        assert (
-            len(discovered) == 2
-        ), f"Discovered repos should be 2 for correct query routing, got {len(discovered)}"
+        assert len(discovered) == 2, (
+            f"Discovered repos should be 2 for correct query routing, got {len(discovered)}"
+        )
         assert set(discovered) == {"click", "hello-world-test"}
 
 

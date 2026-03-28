@@ -36,9 +36,9 @@ class TestJWTRefreshEndpointSecurity:
         )
 
         # SECURITY REQUIREMENT: Should return 401 for invalid refresh token
-        assert (
-            response.status_code == 401
-        ), f"Invalid refresh token should return 401, got {response.status_code}"
+        assert response.status_code == 401, (
+            f"Invalid refresh token should return 401, got {response.status_code}"
+        )
 
     def test_refresh_endpoint_requires_refresh_token_field(self, client):
         """Test that refresh endpoint requires refresh_token field in request."""

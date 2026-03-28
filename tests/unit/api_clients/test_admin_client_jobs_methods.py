@@ -18,9 +18,9 @@ class TestAdminAPIClientJobsMethods:
         )
 
         # Check method exists
-        assert hasattr(
-            client, "cleanup_jobs"
-        ), "AdminAPIClient should have cleanup_jobs method"
-        assert callable(
-            getattr(client, "cleanup_jobs", None)
-        ), "cleanup_jobs should be callable"
+        assert hasattr(client, "cleanup_jobs"), (
+            "AdminAPIClient should have cleanup_jobs method"
+        )
+        assert callable(getattr(client, "cleanup_jobs", None)), (
+            "cleanup_jobs should be callable"
+        )

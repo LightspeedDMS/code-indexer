@@ -147,7 +147,7 @@ class TestMonotonicProgressGuard:
         # All values should be non-decreasing
         for i in range(1, len(received)):
             assert received[i] >= received[i - 1], (
-                f"Progress decreased at index {i}: {received[i-1]} -> {received[i]}. "
+                f"Progress decreased at index {i}: {received[i - 1]} -> {received[i]}. "
                 f"Full sequence: {received}"
             )
 

@@ -85,12 +85,12 @@ class TestSCIPServiceDelegation:
         from code_indexer.server.mcp import handlers as mcp_handlers
         from code_indexer.server.routers import scip_queries as rest_router
 
-        assert hasattr(
-            mcp_handlers, "_get_scip_query_service"
-        ), "MCP handlers must have _get_scip_query_service function"
-        assert hasattr(
-            rest_router, "_get_scip_query_service"
-        ), "REST router must have _get_scip_query_service function"
+        assert hasattr(mcp_handlers, "_get_scip_query_service"), (
+            "MCP handlers must have _get_scip_query_service function"
+        )
+        assert hasattr(rest_router, "_get_scip_query_service"), (
+            "REST router must have _get_scip_query_service function"
+        )
 
     def test_rest_router_imports_scip_query_service(self):
         """Verify REST router imports SCIPQueryService directly."""
@@ -107,9 +107,9 @@ class TestSCIPServiceDelegation:
         mcp_uses_scip_service = (
             "SCIPQueryService" in mcp_handlers._get_scip_query_service.__code__.co_names
         )
-        assert (
-            mcp_uses_scip_service
-        ), "MCP handlers must reference SCIPQueryService in _get_scip_query_service"
+        assert mcp_uses_scip_service, (
+            "MCP handlers must reference SCIPQueryService in _get_scip_query_service"
+        )
 
 
 class TestAllSCIPOperationsMCP:
@@ -148,9 +148,9 @@ class TestAllSCIPOperationsMCP:
                 mcp_response = await handler(params, mock_user)
 
             mcp_data = _extract_mcp_response_data(mcp_response)
-            assert (
-                mcp_data["success"] is True
-            ), f"MCP {handler.__name__} failed: {mcp_data.get('error')}"
+            assert mcp_data["success"] is True, (
+                f"MCP {handler.__name__} failed: {mcp_data.get('error')}"
+            )
 
 
 class TestAllSCIPOperationsREST:
@@ -221,6 +221,6 @@ class TestAllSCIPOperationsREST:
                     **kwargs,
                 )
 
-            assert (
-                rest_response["success"] is True
-            ), f"REST {handler.__name__} failed: {rest_response.get('error')}"
+            assert rest_response["success"] is True, (
+                f"REST {handler.__name__} failed: {rest_response.get('error')}"
+            )

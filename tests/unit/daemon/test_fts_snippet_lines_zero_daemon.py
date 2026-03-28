@@ -85,13 +85,13 @@ class TestFTSSnippetLinesZeroDaemon:
             mock_manager.search.assert_called_once()
 
             # FAILING ASSERTION: Verify snippet_lines was passed
-            assert (
-                "snippet_lines" in captured_kwargs
-            ), "snippet_lines parameter not passed to TantivyIndexManager.search()"
+            assert "snippet_lines" in captured_kwargs, (
+                "snippet_lines parameter not passed to TantivyIndexManager.search()"
+            )
 
-            assert (
-                captured_kwargs["snippet_lines"] == 0
-            ), f"Expected snippet_lines=0, got {captured_kwargs.get('snippet_lines')}"
+            assert captured_kwargs["snippet_lines"] == 0, (
+                f"Expected snippet_lines=0, got {captured_kwargs.get('snippet_lines')}"
+            )
 
     def test_daemon_fts_query_snippet_lines_zero_returns_empty_snippets(self, tmp_path):
         """Test that daemon FTS query with snippet_lines=0 returns empty snippets (end-to-end).
@@ -151,13 +151,13 @@ class TestFTSSnippetLinesZeroDaemon:
             call_kwargs = mock_manager.search.call_args.kwargs
 
             # CRITICAL ASSERTION: Verify snippet_lines was passed
-            assert (
-                "snippet_lines" in call_kwargs
-            ), "snippet_lines parameter not passed to TantivyIndexManager.search()"
+            assert "snippet_lines" in call_kwargs, (
+                "snippet_lines parameter not passed to TantivyIndexManager.search()"
+            )
 
-            assert (
-                call_kwargs["snippet_lines"] == 0
-            ), f"Expected snippet_lines=0, got {call_kwargs.get('snippet_lines')}"
+            assert call_kwargs["snippet_lines"] == 0, (
+                f"Expected snippet_lines=0, got {call_kwargs.get('snippet_lines')}"
+            )
 
     def test_daemon_fts_rpc_call_includes_snippet_lines_parameter(self, tmp_path):
         """Test that RPC call from client to daemon includes snippet_lines parameter.
@@ -245,13 +245,13 @@ class TestFTSSnippetLinesZeroDaemon:
             call_kwargs = mock_conn.root.exposed_query_fts.call_args.kwargs
 
             # FAILING ASSERTION: snippet_lines should be in RPC call
-            assert (
-                "snippet_lines" in call_kwargs
-            ), "snippet_lines parameter not included in RPC call to daemon"
+            assert "snippet_lines" in call_kwargs, (
+                "snippet_lines parameter not included in RPC call to daemon"
+            )
 
-            assert (
-                call_kwargs["snippet_lines"] == 0
-            ), f"Expected snippet_lines=0 in RPC call, got {call_kwargs.get('snippet_lines')}"
+            assert call_kwargs["snippet_lines"] == 0, (
+                f"Expected snippet_lines=0 in RPC call, got {call_kwargs.get('snippet_lines')}"
+            )
 
             assert exit_code == 0, "Query should succeed"
 
@@ -286,9 +286,9 @@ class TestFTSSnippetLinesZeroDaemon:
         )
 
         # PASSING ASSERTION: This should already work (verifying existing behavior)
-        assert (
-            snippet == ""
-        ), f"Expected empty snippet with snippet_lines=0, got: '{snippet}'"
+        assert snippet == "", (
+            f"Expected empty snippet with snippet_lines=0, got: '{snippet}'"
+        )
 
         # Line/column should still be calculated
         assert line_num == 2, f"Expected line 2, got {line_num}"

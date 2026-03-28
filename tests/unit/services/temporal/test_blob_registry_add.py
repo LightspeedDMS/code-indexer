@@ -61,9 +61,9 @@ class TestBlobRegistryAdd:
                 temporal_indexer = TemporalIndexer(config_manager, vector_store)
 
                 # Verify registry starts empty
-                assert (
-                    len(temporal_indexer.indexed_blobs) == 0
-                ), "Registry should start empty"
+                assert len(temporal_indexer.indexed_blobs) == 0, (
+                    "Registry should start empty"
+                )
 
                 # Mock the diff scanner to return a diff with a new blob hash
                 test_blob_hash = "new_blob_123"
@@ -121,6 +121,6 @@ class TestBlobRegistryAdd:
                             )
 
                         # Verify: After indexing, the blob hash should be in the registry
-                        assert (
-                            test_blob_hash in temporal_indexer.indexed_blobs
-                        ), f"Blob hash '{test_blob_hash}' should be added to registry after indexing"
+                        assert test_blob_hash in temporal_indexer.indexed_blobs, (
+                            f"Blob hash '{test_blob_hash}' should be added to registry after indexing"
+                        )

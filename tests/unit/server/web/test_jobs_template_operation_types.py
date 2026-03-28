@@ -80,32 +80,32 @@ class TestJobsDropdownContainsAllOperationTypes:
         """AC1: Dropdown includes global_repo_refresh option."""
         rendered = jobs_template.render(base_context)
 
-        assert (
-            'value="global_repo_refresh"' in rendered
-        ), "Dropdown must include option with value='global_repo_refresh'"
-        assert (
-            "Global Repo Refresh" in rendered
-        ), "Dropdown must include 'Global Repo Refresh' label"
+        assert 'value="global_repo_refresh"' in rendered, (
+            "Dropdown must include option with value='global_repo_refresh'"
+        )
+        assert "Global Repo Refresh" in rendered, (
+            "Dropdown must include 'Global Repo Refresh' label"
+        )
 
     def test_dropdown_contains_add_index(self, jobs_template, base_context):
         """AC2: Dropdown includes add_index option."""
         rendered = jobs_template.render(base_context)
 
-        assert (
-            'value="add_index"' in rendered
-        ), "Dropdown must include option with value='add_index'"
+        assert 'value="add_index"' in rendered, (
+            "Dropdown must include option with value='add_index'"
+        )
         assert ">Add Index<" in rendered, "Dropdown must include 'Add Index' label"
 
     def test_dropdown_contains_sync_repository(self, jobs_template, base_context):
         """AC3: Dropdown includes sync_repository option."""
         rendered = jobs_template.render(base_context)
 
-        assert (
-            'value="sync_repository"' in rendered
-        ), "Dropdown must include option with value='sync_repository'"
-        assert (
-            ">Sync Repository<" in rendered
-        ), "Dropdown must include 'Sync Repository' label"
+        assert 'value="sync_repository"' in rendered, (
+            "Dropdown must include option with value='sync_repository'"
+        )
+        assert ">Sync Repository<" in rendered, (
+            "Dropdown must include 'Sync Repository' label"
+        )
 
 
 class TestJobsDropdownValuesMatchDatabaseValues:
@@ -118,13 +118,13 @@ class TestJobsDropdownValuesMatchDatabaseValues:
         rendered = jobs_template.render(base_context)
 
         # Must use correct value
-        assert (
-            'value="activate_repository"' in rendered
-        ), "Activate filter must use value='activate_repository' to match DB"
+        assert 'value="activate_repository"' in rendered, (
+            "Activate filter must use value='activate_repository' to match DB"
+        )
         # Must NOT use wrong value
-        assert (
-            'value="activate_repo"' not in rendered
-        ), "Filter must NOT use 'activate_repo' - it doesn't match DB value"
+        assert 'value="activate_repo"' not in rendered, (
+            "Filter must NOT use 'activate_repo' - it doesn't match DB value"
+        )
 
     def test_deactivate_filter_uses_deactivate_repository(
         self, jobs_template, base_context
@@ -133,13 +133,13 @@ class TestJobsDropdownValuesMatchDatabaseValues:
         rendered = jobs_template.render(base_context)
 
         # Must use correct value
-        assert (
-            'value="deactivate_repository"' in rendered
-        ), "Deactivate filter must use value='deactivate_repository' to match DB"
+        assert 'value="deactivate_repository"' in rendered, (
+            "Deactivate filter must use value='deactivate_repository' to match DB"
+        )
         # Must NOT use wrong value
-        assert (
-            'value="deactivate_repo"' not in rendered
-        ), "Filter must NOT use 'deactivate_repo' - it doesn't match DB value"
+        assert 'value="deactivate_repo"' not in rendered, (
+            "Filter must NOT use 'deactivate_repo' - it doesn't match DB value"
+        )
 
     def test_all_operation_types_present_in_dropdown(self, jobs_template, base_context):
         """AC6: All operation types must be present in the dropdown."""
@@ -169,9 +169,9 @@ class TestJobsDropdownSelectedState:
 
         # Check that the option has selected attribute when filter is active
         # The pattern is: value="op_type" ... selected
-        assert (
-            f'value="{op_type}"' in rendered
-        ), f"Operation type {op_type} must be in dropdown"
+        assert f'value="{op_type}"' in rendered, (
+            f"Operation type {op_type} must be in dropdown"
+        )
         # When type_filter matches, the option should be marked selected
         # We verify by checking the Jinja2 conditional rendered correctly
         select_section = rendered.split('id="job_type"')[1].split("</select>")[0]
@@ -181,6 +181,6 @@ class TestJobsDropdownSelectedState:
         ]
         assert option_line, f"Could not find option for {op_type}"
         # When filter is set, the option should have 'selected'
-        assert (
-            "selected" in option_line[0]
-        ), f"Option {op_type} should be marked selected when type_filter='{op_type}'"
+        assert "selected" in option_line[0], (
+            f"Option {op_type} should be marked selected when type_filter='{op_type}'"
+        )

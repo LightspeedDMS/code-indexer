@@ -166,12 +166,12 @@ class TestTemporalGitReconstructionE2E:
         added_result = added_results[0]
         # Verify content was reconstructed from git
         assert added_result.content, "Added file content should not be empty"
-        assert (
-            "def greet" in added_result.content
-        ), "Should contain original function definition"
-        assert (
-            original_content.strip() in added_result.content
-        ), "Should match original content"
+        assert "def greet" in added_result.content, (
+            "Should contain original function definition"
+        )
+        assert original_content.strip() in added_result.content, (
+            "Should match original content"
+        )
 
         # Find deleted file result
         deleted_results = [
@@ -182,9 +182,9 @@ class TestTemporalGitReconstructionE2E:
         deleted_result = deleted_results[0]
         # Verify content was reconstructed from parent commit
         assert deleted_result.content, "Deleted file content should not be empty"
-        assert (
-            "def greet" in deleted_result.content
-        ), "Should contain original function definition"
-        assert (
-            original_content.strip() in deleted_result.content
-        ), "Should match content from parent commit"
+        assert "def greet" in deleted_result.content, (
+            "Should contain original function definition"
+        )
+        assert original_content.strip() in deleted_result.content, (
+            "Should match content from parent commit"
+        )

@@ -91,9 +91,9 @@ class TestOrphanedDomainCreation:
         )
 
         written = (live_dep_map / "auth-domain.md").read_text()
-        assert written.startswith(
-            "---"
-        ), "Created file must start with YAML frontmatter"
+        assert written.startswith("---"), (
+            "Created file must start with YAML frontmatter"
+        )
         assert "domain: auth-domain" in written
 
     def test_created_file_has_last_refined(self, tmp_path: Path):
@@ -159,9 +159,9 @@ class TestLastRefinedTimestampSet:
         )
 
         written = (live_dep_map / "auth-domain.md").read_text()
-        assert (
-            "last_refined:" in written
-        ), "Updated file must have last_refined timestamp in frontmatter"
+        assert "last_refined:" in written, (
+            "Updated file must have last_refined timestamp in frontmatter"
+        )
 
     def test_last_refined_is_recent_timestamp(self, tmp_path: Path):
         """
@@ -196,9 +196,9 @@ class TestLastRefinedTimestampSet:
                 value = line.split(":", 1)[1].strip()
                 assert value, "last_refined must have a non-empty timestamp value"
                 # Must look like an ISO timestamp (starts with year)
-                assert value[
-                    :4
-                ].isdigit(), f"last_refined must be an ISO timestamp, got: {value!r}"
+                assert value[:4].isdigit(), (
+                    f"last_refined must be an ISO timestamp, got: {value!r}"
+                )
                 break
         else:
             pytest.fail("last_refined key not found in frontmatter")

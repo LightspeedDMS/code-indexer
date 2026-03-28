@@ -27,14 +27,14 @@ class TestDaemonExceptionLoggerIntegration:
 
             # Verify ExceptionLogger was initialized
             # ExceptionLogger uses singleton pattern, so we can check if it's initialized
-            assert (
-                ExceptionLogger._instance is not None
-            ), "ExceptionLogger should be initialized"
+            assert ExceptionLogger._instance is not None, (
+                "ExceptionLogger should be initialized"
+            )
 
             # Verify log file path is in .code-indexer/ (daemon/CLI mode location)
             assert ExceptionLogger._instance.log_file_path is not None
-            assert ".code-indexer" in str(
-                ExceptionLogger._instance.log_file_path
-            ), "Log file should be in .code-indexer/ directory for daemon mode"
+            assert ".code-indexer" in str(ExceptionLogger._instance.log_file_path), (
+                "Log file should be in .code-indexer/ directory for daemon mode"
+            )
         finally:
             os.chdir(original_cwd)

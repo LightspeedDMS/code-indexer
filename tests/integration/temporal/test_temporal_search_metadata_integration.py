@@ -102,9 +102,9 @@ class TestTemporalSearchMetadataIntegration:
             long_path = "deeply/nested/" + "directory/" * 20 + "VeryLongFileName.py"
             long_point_id = f"project:diff:longcommithash:{long_path}:0"
 
-            assert (
-                len(long_point_id) > 255
-            ), "point_id should exceed 255 chars for this test"
+            assert len(long_point_id) > 255, (
+                "point_id should exceed 255 chars for this test"
+            )
 
             point = {
                 "id": long_point_id,

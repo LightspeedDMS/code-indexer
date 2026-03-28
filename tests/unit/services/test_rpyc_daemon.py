@@ -108,7 +108,7 @@ class TestRPyCDaemon(TestCase):
                 self.assertLess(
                     cache_hit_time,
                     0.1,  # 100ms
-                    f"Cache hit took {cache_hit_time*1000:.1f}ms, requirement is <100ms",
+                    f"Cache hit took {cache_hit_time * 1000:.1f}ms, requirement is <100ms",
                 )
 
                 # Verify indexes were NOT reloaded (cache hit)
@@ -127,7 +127,7 @@ class TestRPyCDaemon(TestCase):
                 self.assertLess(
                     avg_time,
                     0.05,  # Target 50ms average for cache hits
-                    f"Average cache hit time {avg_time*1000:.1f}ms exceeds target of 50ms",
+                    f"Average cache hit time {avg_time * 1000:.1f}ms exceeds target of 50ms",
                 )
 
     def test_daemon_shutdown_properly_exits_process(self):

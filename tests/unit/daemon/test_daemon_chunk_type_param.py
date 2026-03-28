@@ -102,18 +102,18 @@ def test_daemon_passes_chunk_type_to_search_service():
         assert result == 0, "Function should return success"
 
         # Verify chunk_type was passed to RPC call
-        assert (
-            mock_conn.root.exposed_query_temporal.called
-        ), "RPC method should be called"
+        assert mock_conn.root.exposed_query_temporal.called, (
+            "RPC method should be called"
+        )
         call_kwargs = mock_conn.root.exposed_query_temporal.call_args.kwargs
 
         assert "chunk_type" in call_kwargs, (
             f"chunk_type not passed to exposed_query_temporal. "
             f"Actual kwargs: {call_kwargs}"
         )
-        assert (
-            call_kwargs["chunk_type"] == "commit_diff"
-        ), f"chunk_type value incorrect. Expected 'commit_diff', got {call_kwargs.get('chunk_type')}"
+        assert call_kwargs["chunk_type"] == "commit_diff", (
+            f"chunk_type value incorrect. Expected 'commit_diff', got {call_kwargs.get('chunk_type')}"
+        )
 
 
 if __name__ == "__main__":

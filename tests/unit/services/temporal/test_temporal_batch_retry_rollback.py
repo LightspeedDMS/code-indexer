@@ -187,9 +187,9 @@ class TestBatchRetryLogic:
                     )
 
                 # VERIFY: Batch was attempted 3 times (with retry logic)
-                assert (
-                    attempt_count[0] == 3
-                ), f"Should retry twice and succeed on 3rd attempt, got {attempt_count[0]} attempts"
+                assert attempt_count[0] == 3, (
+                    f"Should retry twice and succeed on 3rd attempt, got {attempt_count[0]} attempts"
+                )
 
                 # VERIFY: Final embeddings were stored (no partial data)
                 point_count = vector_store.count_points("code-indexer-temporal")

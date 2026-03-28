@@ -113,9 +113,9 @@ class TestUsersSqliteBackendGetSystemMcpCredentials:
 
         assert len(result) > 0
         for cred in result:
-            assert (
-                cred.get("owner") == "admin (system)"
-            ), f"Expected owner='admin (system)', got '{cred.get('owner')}'"
+            assert cred.get("owner") == "admin (system)", (
+                f"Expected owner='admin (system)', got '{cred.get('owner')}'"
+            )
 
         backend.close()
 
@@ -187,8 +187,8 @@ class TestUsersSqliteBackendGetSystemMcpCredentials:
 
         assert len(result) == 2
         # sys_cred2 created 2024-02-01 > sys_cred1 created 2024-01-01
-        assert (
-            result[0]["credential_id"] == "sys_cred2"
-        ), f"Expected sys_cred2 first (newest), got {result[0]['credential_id']}"
+        assert result[0]["credential_id"] == "sys_cred2", (
+            f"Expected sys_cred2 first (newest), got {result[0]['credential_id']}"
+        )
 
         backend.close()

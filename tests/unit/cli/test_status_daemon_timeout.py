@@ -97,17 +97,17 @@ class TestStatusDaemonTimeout:
                         signal.alarm(0)
 
                         # Should complete quickly (within 5 seconds)
-                        assert (
-                            elapsed < 5.0
-                        ), f"Status took {elapsed:.1f}s, should be <5s"
+                        assert elapsed < 5.0, (
+                            f"Status took {elapsed:.1f}s, should be <5s"
+                        )
 
                         # Should return success
                         assert result == 0, "Status should succeed with fallback"
 
                         # Should have fallen back to standalone
-                        assert (
-                            mock_standalone.call_count == 1
-                        ), "Should fallback to standalone status"
+                        assert mock_standalone.call_count == 1, (
+                            "Should fallback to standalone status"
+                        )
 
                     except TimeoutError as e:
                         # Cancel alarm
@@ -163,6 +163,6 @@ class TestStatusDaemonTimeout:
         elapsed = time.time() - start_time
 
         # Should fail quickly with custom timeout (~0.5s + retry delays)
-        assert (
-            elapsed < 1.5
-        ), f"Connection with 0.5s timeout took {elapsed:.1f}s, should be <1.5s"
+        assert elapsed < 1.5, (
+            f"Connection with 0.5s timeout took {elapsed:.1f}s, should be <1.5s"
+        )

@@ -54,9 +54,9 @@ class TestChunkTextOptimization:
                 break
 
         # Assertions
-        assert (
-            point_creation_found
-        ), "Could not find point creation logic in temporal_indexer.py"
+        assert point_creation_found, (
+            "Could not find point creation logic in temporal_indexer.py"
+        )
 
         # CRITICAL: This test FAILS until optimization is implemented
         assert chunk_text_at_root, (

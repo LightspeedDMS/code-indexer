@@ -53,15 +53,15 @@ class TestEnhancedIndexOperationMessaging:
         )  # Should be None
 
         # Should have exactly one collection message
-        assert (
-            first_collection_msg is not None
-        ), "Should have collection operation message"
-        assert (
-            second_collection_msg is None
-        ), "Should prevent duplicate collection messages"
-        assert (
-            "🗑️" in first_collection_msg
-        ), "Should use trash emoji for collection clearing"
+        assert first_collection_msg is not None, (
+            "Should have collection operation message"
+        )
+        assert second_collection_msg is None, (
+            "Should prevent duplicate collection messages"
+        )
+        assert "🗑️" in first_collection_msg, (
+            "Should use trash emoji for collection clearing"
+        )
         assert "100" in first_collection_msg, "Should show document count"
 
     def test_incremental_operation_messaging_clarity(self):
@@ -103,9 +103,9 @@ class TestEnhancedIndexOperationMessaging:
         # Should have clear incremental messaging
         assert "🆕" in incremental_message, "Should use new emoji for fresh indexing"
         assert "fresh" in incremental_message.lower(), "Should mention fresh indexing"
-        assert (
-            "no previous index" in incremental_message.lower()
-        ), "Should explain no previous index"
+        assert "no previous index" in incremental_message.lower(), (
+            "Should explain no previous index"
+        )
 
     def test_reconcile_operation_messaging_clarity(self):
         """PASSING TEST: Reconcile operation shows distinct, clear messaging.
@@ -209,12 +209,12 @@ class TestConfigurationSourceTransparency:
         display_message = generator.get_thread_count_message(context)
 
         # Should clearly indicate auto-detection
-        assert (
-            "auto-detected" in display_message
-        ), "Should clearly indicate auto-detection"
-        assert (
-            "voyage" in display_message
-        ), "Should show which provider was used for detection"
+        assert "auto-detected" in display_message, (
+            "Should clearly indicate auto-detection"
+        )
+        assert "voyage" in display_message, (
+            "Should show which provider was used for detection"
+        )
         assert "🧵" in display_message, "Should use thread emoji"
         assert "8" in display_message, "Should show thread count"
 
@@ -246,9 +246,9 @@ class TestConfigurationSourceTransparency:
         display_message = generator.get_thread_count_message(context)
 
         # Should clearly indicate user specification
-        assert (
-            "user specified" in display_message
-        ), "Should clearly indicate user specification"
+        assert "user specified" in display_message, (
+            "Should clearly indicate user specification"
+        )
         assert "16" in display_message, "Should show the user-provided value"
         assert "🧵" in display_message, "Should use thread emoji"
 
@@ -306,12 +306,12 @@ class TestHelpfulErrorMessages:
 
         # Should provide helpful error message
         assert "❌" in error_message, "Should use error emoji"
-        assert (
-            "Invalid thread count" in error_message
-        ), "Should clearly identify the problem"
-        assert (
-            str(invalid_thread_count) in error_message
-        ), "Should show the invalid value provided"
+        assert "Invalid thread count" in error_message, (
+            "Should clearly identify the problem"
+        )
+        assert str(invalid_thread_count) in error_message, (
+            "Should show the invalid value provided"
+        )
         assert "must be at least 1" in error_message, "Should explain minimum value"
         assert "positive integer" in error_message, "Should suggest valid input type"
 
@@ -336,9 +336,9 @@ class TestHelpfulErrorMessages:
         assert "cidx start" in error_message, "Should suggest the start command"
         assert "❌" in error_message, "Should use error emoji"
         assert "not available" in error_message, "Should explain the problem"
-        assert (
-            "start required services" in error_message
-        ), "Should explain what the command does"
+        assert "start required services" in error_message, (
+            "Should explain what the command does"
+        )
 
     def test_configuration_validation_error_messages(self):
         """PASSING TEST: Configuration validation shows helpful error messages.
@@ -377,9 +377,9 @@ class TestHelpfulErrorMessages:
             assert "Configuration error" in message, "Should identify as config error"
             assert error_data["field"] in message, "Should reference specific field"
             assert error_data["error"] in message, "Should explain the problem"
-            assert (
-                error_data["suggestion"] in message
-            ), "Should provide helpful suggestion"
+            assert error_data["suggestion"] in message, (
+                "Should provide helpful suggestion"
+            )
 
     def test_conflicting_flags_error_message(self):
         """PASSING TEST: Conflicting flags show clear, helpful error message.
@@ -400,6 +400,6 @@ class TestHelpfulErrorMessages:
         assert "--reconcile" in error_message, "Should mention reconcile flag"
         assert "together" in error_message, "Should explain they can't be used together"
         assert "complete reindex" in error_message, "Should explain what --clear does"
-        assert (
-            "sync with existing data" in error_message
-        ), "Should explain what --reconcile does"
+        assert "sync with existing data" in error_message, (
+            "Should explain what --reconcile does"
+        )

@@ -87,13 +87,13 @@ class TestRestApiSystemCredentials:
             client = TestClient(app, raise_server_exceptions=True)
             response = client.get("/admin/api/system-credentials")
 
-            assert (
-                response.status_code == 200
-            ), f"Expected 200, got {response.status_code}: {response.text}"
+            assert response.status_code == 200, (
+                f"Expected 200, got {response.status_code}: {response.text}"
+            )
             data = response.json()
-            assert (
-                "system_credentials" in data
-            ), f"Expected 'system_credentials' key, got: {list(data.keys())}"
+            assert "system_credentials" in data, (
+                f"Expected 'system_credentials' key, got: {list(data.keys())}"
+            )
             assert isinstance(data["system_credentials"], list)
             assert len(data["system_credentials"]) == 1
         finally:

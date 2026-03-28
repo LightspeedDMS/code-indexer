@@ -40,9 +40,9 @@ class TestTemporalMetadataOperations:
             retrieved_point_id = metadata_store.get_point_id(hash_prefix)
 
             # Then: Should return original point_id
-            assert (
-                retrieved_point_id == point_id
-            ), f"Expected point_id '{point_id}', got '{retrieved_point_id}'"
+            assert retrieved_point_id == point_id, (
+                f"Expected point_id '{point_id}', got '{retrieved_point_id}'"
+            )
 
     def test_get_point_id_returns_none_for_missing_hash(self):
         """get_point_id() returns None for non-existent hash prefix."""
@@ -156,9 +156,9 @@ class TestTemporalMetadataOperations:
             removed_count = metadata_store.cleanup_stale_metadata(valid_hashes)
 
             # Then: hash_2 should be removed
-            assert (
-                removed_count == 1
-            ), f"Expected 1 stale entry removed, got {removed_count}"
+            assert removed_count == 1, (
+                f"Expected 1 stale entry removed, got {removed_count}"
+            )
             assert metadata_store.count_entries() == 2
             assert metadata_store.get_point_id(hash_1) is not None
             assert metadata_store.get_point_id(hash_2) is None  # Removed

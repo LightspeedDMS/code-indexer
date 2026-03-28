@@ -224,7 +224,7 @@ def reconcile_temporal_index(
     # Log reconciliation summary
     logger.info(
         f"Reconciliation: {len(indexed_commits)} indexed, "
-        f"{len(missing_commits)} missing ({len(indexed_commits)*100//(len(all_commits) or 1)}% complete)"
+        f"{len(missing_commits)} missing ({len(indexed_commits) * 100 // (len(all_commits) or 1)}% complete)"
     )
 
     return missing_commits

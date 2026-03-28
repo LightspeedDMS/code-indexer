@@ -150,9 +150,9 @@ class TestGitAwareWatchHandlerTmpPrefixFiltering:
         event = _make_event("/fake/repo/.tmp_abc123_important.md")
         handler.on_created(event)
 
-        assert (
-            len(handler.pending_changes) == 0
-        ), ".tmp_ .md file must be ignored despite .md being a valid extension"
+        assert len(handler.pending_changes) == 0, (
+            ".tmp_ .md file must be ignored despite .md being a valid extension"
+        )
 
     def test_directory_events_still_ignored(self):
         """Directory events (existing behavior) must still be ignored."""
@@ -163,6 +163,6 @@ class TestGitAwareWatchHandlerTmpPrefixFiltering:
         handler.on_modified(dir_event)
         handler.on_deleted(dir_event)
 
-        assert (
-            len(handler.pending_changes) == 0
-        ), "Directory events must always be ignored"
+        assert len(handler.pending_changes) == 0, (
+            "Directory events must always be ignored"
+        )

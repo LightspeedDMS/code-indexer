@@ -41,18 +41,18 @@ class TestAsyncExecuteWithRetryExists:
     def test_async_execute_with_retry_method_exists(self):
         """DatabaseRetryHandler must have an async_execute_with_retry method."""
         handler = DatabaseRetryHandler(make_config())
-        assert hasattr(
-            handler, "async_execute_with_retry"
-        ), "DatabaseRetryHandler must have async_execute_with_retry method"
+        assert hasattr(handler, "async_execute_with_retry"), (
+            "DatabaseRetryHandler must have async_execute_with_retry method"
+        )
 
     def test_async_execute_with_retry_is_coroutine_function(self):
         """async_execute_with_retry must be an async (coroutine) method."""
         import inspect
 
         handler = DatabaseRetryHandler(make_config())
-        assert inspect.iscoroutinefunction(
-            handler.async_execute_with_retry
-        ), "async_execute_with_retry must be an async def method"
+        assert inspect.iscoroutinefunction(handler.async_execute_with_retry), (
+            "async_execute_with_retry must be an async def method"
+        )
 
 
 class TestAsyncExecuteWithRetryUsesAsyncioSleep:
@@ -80,9 +80,9 @@ class TestAsyncExecuteWithRetryUsesAsyncioSleep:
         result = asyncio.get_event_loop().run_until_complete(run_test())
 
         assert result == "success", "Should return success after retry"
-        assert (
-            len(sleep_calls) == 1
-        ), "asyncio.sleep must be called once between retry attempts"
+        assert len(sleep_calls) == 1, (
+            "asyncio.sleep must be called once between retry attempts"
+        )
 
     def test_does_not_use_time_sleep(self):
         """async_execute_with_retry must NOT call time.sleep."""
@@ -100,9 +100,9 @@ class TestAsyncExecuteWithRetryUsesAsyncioSleep:
             with patch("time.sleep") as mock_time_sleep:
                 with patch("asyncio.sleep", new_callable=AsyncMock):
                     await handler.async_execute_with_retry(failing_then_succeeding)
-                    assert (
-                        mock_time_sleep.call_count == 0
-                    ), "async_execute_with_retry must NOT call time.sleep"
+                    assert mock_time_sleep.call_count == 0, (
+                        "async_execute_with_retry must NOT call time.sleep"
+                    )
 
         asyncio.get_event_loop().run_until_complete(run_test())
 
@@ -206,15 +206,15 @@ class TestSyncExecuteWithRetryUnchanged:
             result = handler.execute_with_retry(fail_then_succeed)
 
         assert result == "sync_result"
-        assert (
-            mock_time_sleep.call_count == 1
-        ), "Sync execute_with_retry must still use time.sleep"
+        assert mock_time_sleep.call_count == 1, (
+            "Sync execute_with_retry must still use time.sleep"
+        )
 
     def test_sync_version_interface_unchanged(self):
         """Sync execute_with_retry signature is unchanged."""
         import inspect
 
         handler = DatabaseRetryHandler(make_config())
-        assert not inspect.iscoroutinefunction(
-            handler.execute_with_retry
-        ), "execute_with_retry must remain a synchronous method"
+        assert not inspect.iscoroutinefunction(handler.execute_with_retry), (
+            "execute_with_retry must remain a synchronous method"
+        )

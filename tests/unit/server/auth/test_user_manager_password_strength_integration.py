@@ -192,13 +192,13 @@ class TestUserManagerPasswordStrengthIntegration:
         for password, min_expected_entropy in test_cases:
             result = self.user_manager.validate_password_strength(password)
             if min_expected_entropy == 0:
-                assert (
-                    result["entropy"] == 0
-                ), f"Password '{password}' should have 0 entropy"
+                assert result["entropy"] == 0, (
+                    f"Password '{password}' should have 0 entropy"
+                )
             else:
-                assert (
-                    result["entropy"] >= min_expected_entropy
-                ), f"Password '{password}' should have entropy >= {min_expected_entropy}"
+                assert result["entropy"] >= min_expected_entropy, (
+                    f"Password '{password}' should have entropy >= {min_expected_entropy}"
+                )
 
     def test_multiple_password_validations_performance(self):
         """Test that multiple password validations perform well."""
@@ -217,9 +217,9 @@ class TestUserManagerPasswordStrengthIntegration:
 
         total_time = end_time - start_time
         # Should complete 30 validations in reasonable time
-        assert (
-            total_time < 1.0
-        ), f"30 password validations took {total_time:.2f}s, should be < 1.0s"
+        assert total_time < 1.0, (
+            f"30 password validations took {total_time:.2f}s, should be < 1.0s"
+        )
 
     def test_backward_compatibility_with_existing_password_validator(self):
         """Test that new system is more restrictive than old system."""
@@ -231,9 +231,9 @@ class TestUserManagerPasswordStrengthIntegration:
 
         for password in old_style_passwords:
             result = self.user_manager.validate_password_strength(password)
-            assert not result[
-                "valid"
-            ], f"Password '{password}' should be rejected by new 12-char requirement"
+            assert not result["valid"], (
+                f"Password '{password}' should be rejected by new 12-char requirement"
+            )
             assert any("12 character" in issue for issue in result["issues"])
 
     def test_error_message_formatting(self):

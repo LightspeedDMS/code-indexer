@@ -263,9 +263,9 @@ class TestBranchIsolationPerformance:
             max_points_in_request = max(
                 len(call.get("points", [])) for call in post_calls
             )
-            assert (
-                max_points_in_request > 1
-            ), "Batch requests should contain multiple point IDs, not just one."
+            assert max_points_in_request > 1, (
+                "Batch requests should contain multiple point IDs, not just one."
+            )
 
 
 class TestDeletionDetectionGitAwareness:
@@ -335,6 +335,6 @@ class TestDeletionDetectionGitAwareness:
                 mock_smart_indexer._detect_and_handle_deletions(None)
 
         # ASSERTION: SHOULD call deletion detection for non-git projects
-        assert (
-            mock_smart_indexer._detect_and_handle_deletions.call_count == 1
-        ), "Deletion detection should still work for non-git-aware projects."
+        assert mock_smart_indexer._detect_and_handle_deletions.call_count == 1, (
+            "Deletion detection should still work for non-git-aware projects."
+        )

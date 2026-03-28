@@ -34,9 +34,9 @@ class TestFileContentLimitsAuth:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/user/login" in location
-        ), f"Expected redirect to /user/login, got {location}"
+        assert "/user/login" in location, (
+            f"Expected redirect to /user/login, got {location}"
+        )
 
     def test_requires_admin_role(
         self, web_infrastructure: WebTestInfrastructure, normal_user: Dict[str, Any]
@@ -91,9 +91,9 @@ class TestFileContentLimitsDisplay:
         response = authenticated_client.get("/admin/settings/file-content-limits")
 
         assert response.status_code == 200
-        assert (
-            "File Content Limits" in response.text
-        ), "Page should have 'File Content Limits' in title"
+        assert "File Content Limits" in response.text, (
+            "Page should have 'File Content Limits' in title"
+        )
 
     def test_displays_current_config(self, authenticated_client: TestClient):
         """
@@ -110,12 +110,12 @@ class TestFileContentLimitsDisplay:
         text_lower = response.text.lower()
 
         # Should show config fields
-        assert (
-            "max" in text_lower and "token" in text_lower
-        ), "Page should show max tokens field"
-        assert (
-            "char" in text_lower and "token" in text_lower
-        ), "Page should show chars per token field"
+        assert "max" in text_lower and "token" in text_lower, (
+            "Page should show max tokens field"
+        )
+        assert "char" in text_lower and "token" in text_lower, (
+            "Page should show chars per token field"
+        )
 
     def test_displays_calculated_values(self, authenticated_client: TestClient):
         """
@@ -159,9 +159,9 @@ class TestFileContentLimitsDisplay:
             or "input" in text_lower
         ), "Page should have slider or number input"
         assert "<select" in text_lower, "Page should have dropdown for chars_per_token"
-        assert (
-            "save" in text_lower or 'type="submit"' in text_lower
-        ), "Page should have save button"
+        assert "save" in text_lower or 'type="submit"' in text_lower, (
+            "Page should have save button"
+        )
 
 
 # =============================================================================
@@ -186,9 +186,9 @@ class TestFileContentLimitsFormInputs:
         text_lower = response.text.lower()
 
         # Check for range input or number input with appropriate attributes
-        assert (
-            "min" in text_lower and "max" in text_lower
-        ), "Input should have min/max attributes"
+        assert "min" in text_lower and "max" in text_lower, (
+            "Input should have min/max attributes"
+        )
 
     def test_chars_per_token_dropdown(self, authenticated_client: TestClient):
         """
@@ -205,9 +205,9 @@ class TestFileContentLimitsFormInputs:
 
         # Should have select with options 3, 4, 5
         assert "<select" in text_lower, "Page should have dropdown"
-        assert (
-            "3" in response.text and "4" in response.text and "5" in response.text
-        ), "Dropdown should have options 3, 4, 5"
+        assert "3" in response.text and "4" in response.text and "5" in response.text, (
+            "Dropdown should have options 3, 4, 5"
+        )
 
 
 # =============================================================================
@@ -398,9 +398,9 @@ class TestFileContentLimitsValidation:
         text_lower = response.text.lower()
 
         # Should show validation error
-        assert (
-            "error" in text_lower or "invalid" in text_lower
-        ), "Should show error for invalid chars_per_token"
+        assert "error" in text_lower or "invalid" in text_lower, (
+            "Should show error for invalid chars_per_token"
+        )
 
 
 # =============================================================================
@@ -442,9 +442,9 @@ class TestFileContentLimitsFeedback:
         text_lower = response.text.lower()
 
         # Should show success message
-        assert (
-            "success" in text_lower or "saved" in text_lower
-        ), "Should display success message"
+        assert "success" in text_lower or "saved" in text_lower, (
+            "Should display success message"
+        )
 
     def test_error_message_inline(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -478,9 +478,9 @@ class TestFileContentLimitsFeedback:
         text_lower = response.text.lower()
 
         # Should show error and still have form
-        assert (
-            "error" in text_lower or "invalid" in text_lower
-        ), "Should show error message"
+        assert "error" in text_lower or "invalid" in text_lower, (
+            "Should show error message"
+        )
         assert "<form" in text_lower, "Form should still be displayed after error"
 
 

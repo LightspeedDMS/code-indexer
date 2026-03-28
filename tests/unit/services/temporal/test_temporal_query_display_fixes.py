@@ -162,9 +162,9 @@ class TestTemporalDisplayLineNumbers:
         clean_output = ansi_escape.sub("", display_output)
 
         # Verify: Should NOT contain :0-0 (the key requirement)
-        assert (
-            ":0-0" not in clean_output
-        ), f"Output should not contain ':0-0', but got: {clean_output}"
+        assert ":0-0" not in clean_output, (
+            f"Output should not contain ':0-0', but got: {clean_output}"
+        )
         # Verify: Should contain the file path
         assert "src/file.py" in clean_output
         # Verify: Should contain MODIFIED marker

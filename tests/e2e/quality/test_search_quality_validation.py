@@ -59,7 +59,7 @@ class Customer:
     email: str
     phone: str
     created_at: datetime
-    
+
     def validate_email(self) -> bool:
         """Validate customer email format."""
         return '@' in self.email and '.' in self.email.split('@')[1]
@@ -67,22 +67,22 @@ class Customer:
 
 class CustomerRepository:
     """Repository for customer database operations."""
-    
+
     def __init__(self, db_path: str):
         """Initialize repository with database connection."""
         self.db_path = db_path
         self.connection = None
-    
+
     def connect(self) -> None:
         """Establish database connection."""
         self.connection = sqlite3.connect(self.db_path)
         self.connection.row_factory = sqlite3.Row
-        
+
     def create_customer_table(self) -> None:
         """Create the customer table if it doesn't exist."""
         if not self.connection:
             raise ValueError("Database connection not established")
-            
+
         create_sql = """
         CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,12 +94,12 @@ class CustomerRepository:
         """
         self.connection.execute(create_sql)
         self.connection.commit()
-    
+
     def save_customer(self, customer: Customer) -> int:
         """Save customer to database and return generated ID."""
         if not customer.validate_email():
             raise ValueError("Invalid email format")
-            
+
         insert_sql = """
         INSERT INTO customers (name, email, phone, created_at)
         VALUES (?, ?, ?, ?)
@@ -110,13 +110,13 @@ class CustomerRepository:
         )
         self.connection.commit()
         return cursor.lastrowid
-    
+
     def find_customer_by_email(self, email: str) -> Optional[Customer]:
         """Find customer by email address."""
         select_sql = "SELECT * FROM customers WHERE email = ?"
         cursor = self.connection.execute(select_sql, (email,))
         row = cursor.fetchone()
-        
+
         if row:
             return Customer(
                 id=row['id'],
@@ -126,12 +126,12 @@ class CustomerRepository:
                 created_at=datetime.fromisoformat(row['created_at'])
             )
         return None
-    
+
     def get_all_customers(self) -> List[Customer]:
         """Retrieve all customers from database."""
         select_sql = "SELECT * FROM customers ORDER BY created_at DESC"
         cursor = self.connection.execute(select_sql)
-        
+
         customers = []
         for row in cursor.fetchall():
             customers.append(Customer(
@@ -146,18 +146,18 @@ class CustomerRepository:
 
 class CustomerService:
     """Service layer for customer operations."""
-    
+
     def __init__(self, repository: CustomerRepository):
         """Initialize service with customer repository."""
         self.repository = repository
-    
+
     def create_new_customer(self, name: str, email: str, phone: str = None) -> Customer:
         """Create and save a new customer."""
         # Check if customer already exists
         existing = self.repository.find_customer_by_email(email)
         if existing:
             raise ValueError(f"Customer with email {email} already exists")
-        
+
         # Create new customer
         customer = Customer(
             id=0,  # Will be set by database
@@ -166,29 +166,29 @@ class CustomerService:
             phone=phone.strip() if phone else None,
             created_at=datetime.now()
         )
-        
+
         # Save to database
         customer_id = self.repository.save_customer(customer)
         customer.id = customer_id
-        
+
         return customer
-    
+
     def update_customer_phone(self, email: str, new_phone: str) -> bool:
         """Update customer's phone number."""
         customer = self.repository.find_customer_by_email(email)
         if not customer:
             return False
-        
+
         update_sql = "UPDATE customers SET phone = ? WHERE email = ?"
         self.repository.connection.execute(update_sql, (new_phone, email))
         self.repository.connection.commit()
         return True
-    
+
     def search_customers_by_name(self, name_pattern: str) -> List[Customer]:
         """Search customers by name pattern."""
         search_sql = "SELECT * FROM customers WHERE name LIKE ? ORDER BY name"
         cursor = self.repository.connection.execute(search_sql, (f"%{name_pattern}%",))
-        
+
         customers = []
         for row in cursor.fetchall():
             customers.append(Customer(
@@ -206,13 +206,13 @@ def get_database_connection(db_path: str) -> sqlite3.Connection:
     """Get database connection with proper configuration."""
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
-    
+
     # Enable foreign key constraints
     connection.execute("PRAGMA foreign_keys = ON")
-    
+
     # Set timeout for busy database
     connection.execute("PRAGMA busy_timeout = 30000")
-    
+
     return connection
 
 
@@ -230,7 +230,7 @@ if __name__ == "__main__":
     db_path = "customers.db"
     repo = initialize_customer_database(db_path)
     service = CustomerService(repo)
-    
+
     try:
         # Create sample customers
         customer1 = service.create_new_customer(
@@ -238,20 +238,20 @@ if __name__ == "__main__":
             "john.doe@example.com",
             "555-1234"
         )
-        
+
         customer2 = service.create_new_customer(
             "Jane Smith",
             "jane.smith@example.com",
             "555-5678"
         )
-        
+
         print(f"Created customer: {customer1.name} ({customer1.email})")
         print(f"Created customer: {customer2.name} ({customer2.email})")
-        
+
         # Search functionality test
         search_results = service.search_customers_by_name("John")
         print(f"Found {len(search_results)} customers matching 'John'")
-        
+
     except ValueError as e:
         print(f"Error: {e}")
     finally:
@@ -283,13 +283,13 @@ import java.util.logging.Level;
 public class DatabaseConnection {
     private static final Logger LOGGER = Logger.getLogger(DatabaseConnection.class.getName());
     private static final String DEFAULT_DRIVER = "com.mysql.cj.jdbc.Driver";
-    
+
     private String jdbcUrl;
     private String username;
     private String password;
     private Properties connectionProperties;
     private Connection connection;
-    
+
     public DatabaseConnection(String jdbcUrl, String username, String password) {
         this.jdbcUrl = jdbcUrl;
         this.username = username;
@@ -297,7 +297,7 @@ public class DatabaseConnection {
         this.connectionProperties = new Properties();
         initializeDefaultProperties();
     }
-    
+
     private void initializeDefaultProperties() {
         connectionProperties.setProperty("useSSL", "true");
         connectionProperties.setProperty("serverTimezone", "UTC");
@@ -308,7 +308,7 @@ public class DatabaseConnection {
         connectionProperties.setProperty("failOverReadOnly", "false");
         connectionProperties.setProperty("maxReconnects", "3");
     }
-    
+
     /**
      * Establish database connection with retry logic.
      * @return true if connection successful, false otherwise
@@ -316,37 +316,37 @@ public class DatabaseConnection {
     public boolean connect() {
         int retryCount = 0;
         int maxRetries = 3;
-        
+
         while (retryCount < maxRetries) {
             try {
                 // Load JDBC driver
                 Class.forName(DEFAULT_DRIVER);
-                
+
                 // Create connection
                 this.connection = DriverManager.getConnection(
                     jdbcUrl, username, password
                 );
-                
+
                 // Test connection
                 if (connection.isValid(5)) {
                     LOGGER.info("Database connection established successfully");
                     return true;
                 }
-                
+
             } catch (ClassNotFoundException e) {
                 LOGGER.log(Level.SEVERE, "JDBC driver not found", e);
                 return false;
             } catch (SQLException e) {
                 retryCount++;
-                LOGGER.log(Level.WARNING, 
+                LOGGER.log(Level.WARNING,
                     String.format("Connection attempt %d failed: %s", retryCount, e.getMessage())
                 );
-                
+
                 if (retryCount >= maxRetries) {
                     LOGGER.log(Level.SEVERE, "Max connection retries exceeded", e);
                     return false;
                 }
-                
+
                 try {
                     Thread.sleep(1000 * retryCount); // Exponential backoff
                 } catch (InterruptedException ie) {
@@ -357,7 +357,7 @@ public class DatabaseConnection {
         }
         return false;
     }
-    
+
     /**
      * Execute SELECT query and return results.
      * @param sql SQL query to execute
@@ -368,18 +368,18 @@ public class DatabaseConnection {
         if (connection == null || connection.isClosed()) {
             throw new SQLException("Database connection is not available");
         }
-        
+
         List<String[]> results = new ArrayList<>();
-        
+
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             // Set parameters
             for (int i = 0; i < parameters.length; i++) {
                 statement.setObject(i + 1, parameters[i]);
             }
-            
+
             try (ResultSet resultSet = statement.executeQuery()) {
                 int columnCount = resultSet.getMetaData().getColumnCount();
-                
+
                 while (resultSet.next()) {
                     String[] row = new String[columnCount];
                     for (int i = 1; i <= columnCount; i++) {
@@ -389,10 +389,10 @@ public class DatabaseConnection {
                 }
             }
         }
-        
+
         return results;
     }
-    
+
     /**
      * Execute INSERT, UPDATE, or DELETE statement.
      * @param sql SQL statement to execute
@@ -403,18 +403,18 @@ public class DatabaseConnection {
         if (connection == null || connection.isClosed()) {
             throw new SQLException("Database connection is not available");
         }
-        
+
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (int i = 0; i < parameters.length; i++) {
                 statement.setObject(i + 1, parameters[i]);
             }
-            
+
             int rowsAffected = statement.executeUpdate();
             LOGGER.info(String.format("Query executed successfully, %d rows affected", rowsAffected));
             return rowsAffected;
         }
     }
-    
+
     /**
      * Begin database transaction.
      */
@@ -422,11 +422,11 @@ public class DatabaseConnection {
         if (connection == null || connection.isClosed()) {
             throw new SQLException("Database connection is not available");
         }
-        
+
         connection.setAutoCommit(false);
         LOGGER.info("Transaction started");
     }
-    
+
     /**
      * Commit current transaction.
      */
@@ -434,12 +434,12 @@ public class DatabaseConnection {
         if (connection == null || connection.isClosed()) {
             throw new SQLException("Database connection is not available");
         }
-        
+
         connection.commit();
         connection.setAutoCommit(true);
         LOGGER.info("Transaction committed");
     }
-    
+
     /**
      * Rollback current transaction.
      */
@@ -447,12 +447,12 @@ public class DatabaseConnection {
         if (connection == null || connection.isClosed()) {
             throw new SQLException("Database connection is not available");
         }
-        
+
         connection.rollback();
         connection.setAutoCommit(true);
         LOGGER.info("Transaction rolled back");
     }
-    
+
     /**
      * Close database connection and cleanup resources.
      */
@@ -468,7 +468,7 @@ public class DatabaseConnection {
             }
         }
     }
-    
+
     /**
      * Check if connection is still valid and active.
      * @return true if connection is valid, false otherwise
@@ -481,7 +481,7 @@ public class DatabaseConnection {
             return false;
         }
     }
-    
+
     /**
      * Get current connection instance.
      * @return Database connection
@@ -489,7 +489,7 @@ public class DatabaseConnection {
     public Connection getConnection() {
         return connection;
     }
-    
+
     /**
      * Execute batch operations for better performance.
      * @param sql SQL statement template
@@ -500,7 +500,7 @@ public class DatabaseConnection {
         if (connection == null || connection.isClosed()) {
             throw new SQLException("Database connection is not available");
         }
-        
+
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (Object[] parameters : parametersList) {
                 for (int i = 0; i < parameters.length; i++) {
@@ -508,7 +508,7 @@ public class DatabaseConnection {
                 }
                 statement.addBatch();
             }
-            
+
             int[] results = statement.executeBatch();
             LOGGER.info(String.format("Batch executed successfully, %d statements processed", results.length));
             return results;
@@ -561,15 +561,15 @@ public class DatabaseConnection {
         # Test requirements from Story 7
         # All regular chunks must be exactly 1000 characters
         for size in regular_chunks:
-            assert (
-                size == 1000
-            ), f"Regular chunk has {size} chars, expected exactly 1000"
+            assert size == 1000, (
+                f"Regular chunk has {size} chars, expected exactly 1000"
+            )
 
         # 0% of chunks under 1000 characters (except final chunks)
         under_1000_regular = sum(1 for size in regular_chunks if size < 1000)
-        assert (
-            under_1000_regular == 0
-        ), f"{under_1000_regular} regular chunks under 1000 chars"
+        assert under_1000_regular == 0, (
+            f"{under_1000_regular} regular chunks under 1000 chars"
+        )
 
         # Final chunks can be under 1000, but should not be empty
         for size in final_chunks:
@@ -580,9 +580,9 @@ public class DatabaseConnection {
 
         # Calculate average size - should be much better than old 549 average
         average_size = sum(chunk_sizes) / len(chunk_sizes)
-        assert (
-            average_size >= 800
-        ), f"Average size {average_size} should be >= 800 chars (old was 549)"
+        assert average_size >= 800, (
+            f"Average size {average_size} should be >= 800 chars (old was 549)"
+        )
 
     def test_massive_improvement_over_old_approach(self, chunker, sample_code_files):
         """Test that we have massive improvement over old AST approach.
@@ -614,14 +614,14 @@ public class DatabaseConnection {
 
         # Test massive improvement requirements
         # Should be dramatic improvement from 52% under 100 chars to near 0%
-        assert (
-            under_100_percent < 10
-        ), f"{under_100_percent}% chunks under 100 chars (old: 52%)"
+        assert under_100_percent < 10, (
+            f"{under_100_percent}% chunks under 100 chars (old: 52%)"
+        )
 
         # Should be dramatic improvement from 76.5% under 300 chars to near 0%
-        assert (
-            under_300_percent < 10
-        ), f"{under_300_percent}% chunks under 300 chars (old: 76.5%)"
+        assert under_300_percent < 10, (
+            f"{under_300_percent}% chunks under 300 chars (old: 76.5%)"
+        )
 
         # Average should be much closer to 1000 than old 549
         assert average_size > 800, f"Average size {average_size} chars (old: 549)"
@@ -650,29 +650,29 @@ public class DatabaseConnection {
                 database_connection_chunks.append(chunk)
 
         # Test that we found meaningful chunks
-        assert (
-            len(customer_method_chunks) > 0
-        ), "Should find chunks with save_customer method"
-        assert (
-            len(database_connection_chunks) > 0
-        ), "Should find chunks with database connection logic"
+        assert len(customer_method_chunks) > 0, (
+            "Should find chunks with save_customer method"
+        )
+        assert len(database_connection_chunks) > 0, (
+            "Should find chunks with database connection logic"
+        )
 
         # Test chunk quality - should contain complete method implementations
         for chunk in customer_method_chunks:
             text = chunk["text"]
             # Should contain method definition and some implementation
             assert "def save_customer" in text, "Should contain method definition"
-            assert (
-                "customer.validate_email()" in text or "INSERT INTO" in text
-            ), "Should contain method implementation"
+            assert "customer.validate_email()" in text or "INSERT INTO" in text, (
+                "Should contain method implementation"
+            )
 
         # Test context preservation
         for chunk in database_connection_chunks:
             text = chunk["text"]
             # Should have enough context to understand purpose
-            assert (
-                len(text) >= 800
-            ), f"Chunk too short ({len(text)} chars) to provide context"
+            assert len(text) >= 800, (
+                f"Chunk too short ({len(text)} chars) to provide context"
+            )
 
         # This test should initially FAIL to demonstrate the TDD approach
 
@@ -696,30 +696,30 @@ public class DatabaseConnection {
 
             # Basic validation
             assert line_start >= 1, f"Chunk {i}: line_start {line_start} should be >= 1"
-            assert (
-                line_end >= line_start
-            ), f"Chunk {i}: line_end {line_end} should be >= line_start {line_start}"
-            assert line_end <= len(
-                file_lines
-            ), f"Chunk {i}: line_end {line_end} exceeds file length {len(file_lines)}"
+            assert line_end >= line_start, (
+                f"Chunk {i}: line_end {line_end} should be >= line_start {line_start}"
+            )
+            assert line_end <= len(file_lines), (
+                f"Chunk {i}: line_end {line_end} exceeds file length {len(file_lines)}"
+            )
 
             # Test that line numbers correspond to actual chunk content
             # chunk_text = chunk['text']  # May be needed for future validation
 
             # For first chunk, should start at line 1
             if i == 0:
-                assert (
-                    line_start == 1
-                ), f"First chunk should start at line 1, got {line_start}"
+                assert line_start == 1, (
+                    f"First chunk should start at line 1, got {line_start}"
+                )
 
             # Line numbers should be sequential (within reason for overlapping chunks)
             if i > 0:
                 prev_chunk = chunks[i - 1]
                 # Due to overlap, current chunk might start before previous chunk ends
                 # but should not start too far back
-                assert (
-                    line_start <= prev_chunk["line_end"]
-                ), f"Chunk {i}: line numbers not sequential"
+                assert line_start <= prev_chunk["line_end"], (
+                    f"Chunk {i}: line numbers not sequential"
+                )
 
         # This test should initially FAIL to demonstrate TDD approach
 
@@ -750,9 +750,9 @@ public class DatabaseConnection {
                 expected_overlap_start = current_text[850:]  # Last 150 chars
                 actual_overlap = next_text[:150]  # First 150 chars of next
 
-                assert (
-                    expected_overlap_start == actual_overlap
-                ), f"Chunks {i}-{i+1}: overlap mismatch"
+                assert expected_overlap_start == actual_overlap, (
+                    f"Chunks {i}-{i + 1}: overlap mismatch"
+                )
 
         # This test should initially FAIL to demonstrate TDD approach
 

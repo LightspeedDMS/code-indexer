@@ -288,9 +288,9 @@ def test_complete_lifecycle_clean_data():
             text=True,
             timeout=120,
         )
-        assert (
-            reindex_result.returncode == 0
-        ), f"Re-index failed: {reindex_result.stderr}"
+        assert reindex_result.returncode == 0, (
+            f"Re-index failed: {reindex_result.stderr}"
+        )
 
         print("✅ Complete lifecycle test completed successfully")
 
@@ -315,9 +315,9 @@ def test_multi_project_isolation_and_search():
             text=True,
             timeout=60,
         )
-        assert (
-            init_result1.returncode == 0
-        ), f"Project 1 init failed: {init_result1.stderr}"
+        assert init_result1.returncode == 0, (
+            f"Project 1 init failed: {init_result1.stderr}"
+        )
 
         start_result1 = subprocess.run(
             ["cidx", "start", "--quiet"],
@@ -326,9 +326,9 @@ def test_multi_project_isolation_and_search():
             text=True,
             timeout=120,
         )
-        assert (
-            start_result1.returncode == 0
-        ), f"Project 1 start failed: {start_result1.stderr}"
+        assert start_result1.returncode == 0, (
+            f"Project 1 start failed: {start_result1.stderr}"
+        )
 
         index_result1 = subprocess.run(
             ["cidx", "index"],
@@ -337,9 +337,9 @@ def test_multi_project_isolation_and_search():
             text=True,
             timeout=120,
         )
-        assert (
-            index_result1.returncode == 0
-        ), f"Project 1 index failed: {index_result1.stderr}"
+        assert index_result1.returncode == 0, (
+            f"Project 1 index failed: {index_result1.stderr}"
+        )
 
         print("🔍 Multi-project test: Testing Project 1 searches...")
         calc_queries = ["add function", "factorial", "calculator"]
@@ -375,9 +375,9 @@ def test_multi_project_isolation_and_search():
             text=True,
             timeout=60,
         )
-        assert (
-            init_result2.returncode == 0
-        ), f"Project 2 init failed: {init_result2.stderr}"
+        assert init_result2.returncode == 0, (
+            f"Project 2 init failed: {init_result2.stderr}"
+        )
 
         start_result2 = subprocess.run(
             ["cidx", "start", "--quiet"],
@@ -386,9 +386,9 @@ def test_multi_project_isolation_and_search():
             text=True,
             timeout=120,
         )
-        assert (
-            start_result2.returncode == 0
-        ), f"Project 2 start failed: {start_result2.stderr}"
+        assert start_result2.returncode == 0, (
+            f"Project 2 start failed: {start_result2.stderr}"
+        )
 
         index_result2 = subprocess.run(
             ["cidx", "index"],
@@ -397,9 +397,9 @@ def test_multi_project_isolation_and_search():
             text=True,
             timeout=120,
         )
-        assert (
-            index_result2.returncode == 0
-        ), f"Project 2 index failed: {index_result2.stderr}"
+        assert index_result2.returncode == 0, (
+            f"Project 2 index failed: {index_result2.stderr}"
+        )
 
         print("🔍 Multi-project test: Testing Project 2 searches...")
         web_queries = ["web server", "route function", "authentication"]
@@ -465,9 +465,9 @@ def test_error_conditions_and_recovery():
             timeout=30,
         )
         # Should not crash, may return no results or handle gracefully
-        assert (
-            query_result.returncode == 0
-        ), "Query should not crash with non-existent term"
+        assert query_result.returncode == 0, (
+            "Query should not crash with non-existent term"
+        )
 
         # Test 2: Status should work before indexing
         print("📊 Error test: Status before indexing...")
@@ -512,9 +512,9 @@ def test_error_conditions_and_recovery():
             text=True,
             timeout=30,
         )
-        assert (
-            no_result_query.returncode == 0
-        ), "Query should handle no results gracefully"
+        assert no_result_query.returncode == 0, (
+            "Query should handle no results gracefully"
+        )
 
         # Test 6: Test query with special characters
         print("🔍 Error test: Query with special characters...")
@@ -525,9 +525,9 @@ def test_error_conditions_and_recovery():
             text=True,
             timeout=30,
         )
-        assert (
-            special_query.returncode == 0
-        ), "Query should handle special characters gracefully"
+        assert special_query.returncode == 0, (
+            "Query should handle special characters gracefully"
+        )
 
         print("✅ Error conditions and recovery test completed successfully")
 
@@ -553,9 +553,9 @@ def test_concurrent_operations_workflow():
             text=True,
             timeout=60,
         )
-        assert (
-            init_result1.returncode == 0
-        ), f"Project 1 init failed: {init_result1.stderr}"
+        assert init_result1.returncode == 0, (
+            f"Project 1 init failed: {init_result1.stderr}"
+        )
 
         start_result1 = subprocess.run(
             ["cidx", "start", "--quiet"],
@@ -564,9 +564,9 @@ def test_concurrent_operations_workflow():
             text=True,
             timeout=120,
         )
-        assert (
-            start_result1.returncode == 0
-        ), f"Project 1 start failed: {start_result1.stderr}"
+        assert start_result1.returncode == 0, (
+            f"Project 1 start failed: {start_result1.stderr}"
+        )
 
         index_result1 = subprocess.run(
             ["cidx", "index"],
@@ -575,9 +575,9 @@ def test_concurrent_operations_workflow():
             text=True,
             timeout=120,
         )
-        assert (
-            index_result1.returncode == 0
-        ), f"Project 1 index failed: {index_result1.stderr}"
+        assert index_result1.returncode == 0, (
+            f"Project 1 index failed: {index_result1.stderr}"
+        )
 
         # Test Project 1 searches
         print("🔍 Concurrent test: Testing Project 1 searches...")
@@ -625,9 +625,9 @@ def test_concurrent_operations_workflow():
             text=True,
             timeout=60,
         )
-        assert (
-            init_result2.returncode == 0
-        ), f"Project 2 init failed: {init_result2.stderr}"
+        assert init_result2.returncode == 0, (
+            f"Project 2 init failed: {init_result2.stderr}"
+        )
 
         # Services should already be running from Project 1
         start_result2 = subprocess.run(
@@ -637,9 +637,9 @@ def test_concurrent_operations_workflow():
             text=True,
             timeout=120,
         )
-        assert (
-            start_result2.returncode == 0
-        ), f"Project 2 start failed: {start_result2.stderr}"
+        assert start_result2.returncode == 0, (
+            f"Project 2 start failed: {start_result2.stderr}"
+        )
 
         index_result2 = subprocess.run(
             ["cidx", "index"],
@@ -648,9 +648,9 @@ def test_concurrent_operations_workflow():
             text=True,
             timeout=120,
         )
-        assert (
-            index_result2.returncode == 0
-        ), f"Project 2 index failed: {index_result2.stderr}"
+        assert index_result2.returncode == 0, (
+            f"Project 2 index failed: {index_result2.stderr}"
+        )
 
         # Test Project 2 searches
         print("🔍 Concurrent test: Testing Project 2 searches...")
@@ -673,7 +673,7 @@ def test_concurrent_operations_workflow():
                 text=True,
                 timeout=15,
             )
-            assert rapid_status.returncode == 0, f"Rapid status {i+1} should work"
+            assert rapid_status.returncode == 0, f"Rapid status {i + 1} should work"
 
         print("✅ Concurrent operations test completed successfully")
 

@@ -183,16 +183,16 @@ def test_retry_exhaustion_triggers_rollback_integration(tmp_path):
 
                             # Verify retry attempts were made (MAX_RETRIES = 5)
                             # Each batch should be attempted 5 times before giving up
-                            assert (
-                                batch_call_count >= 5
-                            ), f"Expected at least 5 retry attempts, got {batch_call_count}"
+                            assert batch_call_count >= 5, (
+                                f"Expected at least 5 retry attempts, got {batch_call_count}"
+                            )
 
                             # Since all batches failed, no points should be upserted
-                            assert (
-                                len(upserted_point_ids) == 0
-                            ), "No points should be upserted when all batches fail"
+                            assert len(upserted_point_ids) == 0, (
+                                "No points should be upserted when all batches fail"
+                            )
 
                             # No rollback needed since nothing was upserted
-                            assert (
-                                len(deleted_point_ids) == 0
-                            ), "No deletions needed when no points were upserted"
+                            assert len(deleted_point_ids) == 0, (
+                                "No deletions needed when no points were upserted"
+                            )

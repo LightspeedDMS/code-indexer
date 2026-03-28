@@ -695,12 +695,12 @@ class TestStreamableHTTPTransport:
             response = client.get("/mcp", headers={"Accept": "text/event-stream"})
 
             # Should return 200 with SSE content-type
-            assert (
-                response.status_code == 200
-            ), f"Expected 200, got {response.status_code}"
-            assert "text/event-stream" in response.headers.get(
-                "content-type", ""
-            ), f"Expected SSE content-type, got {response.headers.get('content-type')}"
+            assert response.status_code == 200, (
+                f"Expected 200, got {response.status_code}"
+            )
+            assert "text/event-stream" in response.headers.get("content-type", ""), (
+                f"Expected SSE content-type, got {response.headers.get('content-type')}"
+            )
         finally:
             app.dependency_overrides.clear()
 
@@ -716,28 +716,28 @@ class TestStreamableHTTPTransport:
         response = client.get("/mcp", headers={"Accept": "text/event-stream"})
 
         # Must return 401 Unauthorized
-        assert (
-            response.status_code == 401
-        ), f"Expected 401 Unauthorized per MCP spec, got {response.status_code}"
+        assert response.status_code == 401, (
+            f"Expected 401 Unauthorized per MCP spec, got {response.status_code}"
+        )
 
         # Must include WWW-Authenticate header with Bearer scheme and resource_metadata
-        assert (
-            "www-authenticate" in response.headers
-        ), f"Expected WWW-Authenticate header, got headers: {response.headers.keys()}"
+        assert "www-authenticate" in response.headers, (
+            f"Expected WWW-Authenticate header, got headers: {response.headers.keys()}"
+        )
 
         www_auth = response.headers["www-authenticate"]
-        assert www_auth.startswith(
-            "Bearer"
-        ), f"Expected Bearer scheme in WWW-Authenticate, got: {www_auth}"
-        assert (
-            'realm="mcp"' in www_auth
-        ), f"Expected realm='mcp' in WWW-Authenticate, got: {www_auth}"
-        assert (
-            "resource_metadata=" in www_auth
-        ), f"Expected resource_metadata URL in WWW-Authenticate, got: {www_auth}"
-        assert (
-            "/.well-known/oauth-protected-resource" in www_auth
-        ), f"Expected OAuth protected resource URL in WWW-Authenticate, got: {www_auth}"
+        assert www_auth.startswith("Bearer"), (
+            f"Expected Bearer scheme in WWW-Authenticate, got: {www_auth}"
+        )
+        assert 'realm="mcp"' in www_auth, (
+            f"Expected realm='mcp' in WWW-Authenticate, got: {www_auth}"
+        )
+        assert "resource_metadata=" in www_auth, (
+            f"Expected resource_metadata URL in WWW-Authenticate, got: {www_auth}"
+        )
+        assert "/.well-known/oauth-protected-resource" in www_auth, (
+            f"Expected OAuth protected resource URL in WWW-Authenticate, got: {www_auth}"
+        )
 
     def test_delete_mcp_terminates_session(self):
         """Test DELETE /mcp terminates session."""
@@ -767,12 +767,12 @@ class TestStreamableHTTPTransport:
             )
 
             # Should return 200 with terminated status
-            assert (
-                response.status_code == 200
-            ), f"Expected 200, got {response.status_code}"
-            assert (
-                response.json().get("status") == "terminated"
-            ), f"Expected status='terminated', got {response.json()}"
+            assert response.status_code == 200, (
+                f"Expected 200, got {response.status_code}"
+            )
+            assert response.json().get("status") == "terminated", (
+                f"Expected status='terminated', got {response.json()}"
+            )
         finally:
             app.dependency_overrides.clear()
 
@@ -804,9 +804,9 @@ class TestStreamableHTTPTransport:
             )
 
             # Should have Mcp-Session-Id header
-            assert (
-                "mcp-session-id" in response.headers
-            ), f"Expected Mcp-Session-Id header, got headers: {response.headers.keys()}"
+            assert "mcp-session-id" in response.headers, (
+                f"Expected Mcp-Session-Id header, got headers: {response.headers.keys()}"
+            )
 
             session_id = response.headers["mcp-session-id"]
 
@@ -815,9 +815,9 @@ class TestStreamableHTTPTransport:
 
             # Session ID should contain only visible ASCII (0x21-0x7E)
             for char in session_id:
-                assert (
-                    0x21 <= ord(char) <= 0x7E
-                ), f"Invalid character in session ID: {char} (0x{ord(char):02x})"
+                assert 0x21 <= ord(char) <= 0x7E, (
+                    f"Invalid character in session ID: {char} (0x{ord(char):02x})"
+                )
         finally:
             app.dependency_overrides.clear()
 
@@ -839,11 +839,11 @@ class TestStreamableHTTPTransport:
         )
 
         # Must return 401 for invalid token
-        assert (
-            response.status_code == 401
-        ), f"Expected 401 for invalid token, got {response.status_code}"
+        assert response.status_code == 401, (
+            f"Expected 401 for invalid token, got {response.status_code}"
+        )
 
         # Must include WWW-Authenticate header
-        assert (
-            "www-authenticate" in response.headers
-        ), "Expected WWW-Authenticate header for invalid token"
+        assert "www-authenticate" in response.headers, (
+            "Expected WWW-Authenticate header for invalid token"
+        )

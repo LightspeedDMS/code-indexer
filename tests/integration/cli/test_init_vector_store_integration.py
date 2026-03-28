@@ -72,12 +72,12 @@ class TestCidxInitVectorStoreIntegration:
         # Verify no port allocations for filesystem backend
         # project_ports should exist but have None values
         assert "project_ports" in config_data, "project_ports should exist in config"
-        assert (
-            config_data["project_ports"]["filesystem_port"] is None
-        ), "Filesystem port should be None for filesystem"
-        assert (
-            config_data["project_ports"]["data_cleaner_port"] is None
-        ), "Data cleaner port should be None for filesystem"
+        assert config_data["project_ports"]["filesystem_port"] is None, (
+            "Filesystem port should be None for filesystem"
+        )
+        assert config_data["project_ports"]["data_cleaner_port"] is None, (
+            "Data cleaner port should be None for filesystem"
+        )
 
         index_dir = test_dir / ".code-indexer" / "index"
         assert index_dir.exists(), "Backend should be initialized"

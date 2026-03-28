@@ -138,9 +138,9 @@ class TestRefreshSchedulerWriteLockSkip:
 
                 assert result["success"] is True, "Result must be success=True"
                 message = result.get("message", "")
-                assert (
-                    "skip" in message.lower() or "lock" in message.lower()
-                ), f"Result message must indicate skip due to write lock. Got: '{message}'"
+                assert "skip" in message.lower() or "lock" in message.lower(), (
+                    f"Result message must indicate skip due to write lock. Got: '{message}'"
+                )
         finally:
             scheduler.release_write_lock("cidx-meta")
 
@@ -166,9 +166,9 @@ class TestRefreshSchedulerWriteLockSkip:
             mock_mtime.assert_called_once()
 
             assert result["success"] is True
-            assert (
-                "no changes" in result.get("message", "").lower()
-            ), "When no write lock and no changes, result must indicate 'No changes detected'"
+            assert "no changes" in result.get("message", "").lower(), (
+                "When no write lock and no changes, result must indicate 'No changes detected'"
+            )
 
     def test_execute_refresh_checks_write_lock_for_git_repos_and_proceeds_when_unlocked(
         self, scheduler, golden_repos_dir, alias_manager, registry
@@ -314,13 +314,13 @@ class TestConcurrentWriterAndRefreshScheduler:
             result = scheduler._execute_refresh("cidx-meta-global")
 
             assert result["success"] is True
-            assert (
-                not mock_create.called
-            ), "CoW clone must NOT be called while write lock is held"
+            assert not mock_create.called, (
+                "CoW clone must NOT be called while write lock is held"
+            )
             message = result.get("message", "")
-            assert (
-                "skip" in message.lower() or "lock" in message.lower()
-            ), f"Refresh must indicate it was skipped. Got: '{message}'"
+            assert "skip" in message.lower() or "lock" in message.lower(), (
+                f"Refresh must indicate it was skipped. Got: '{message}'"
+            )
 
         # Step 3: Release lock (writer done)
         scheduler.release_write_lock("cidx-meta")
@@ -334,6 +334,6 @@ class TestConcurrentWriterAndRefreshScheduler:
             result2 = scheduler._execute_refresh("cidx-meta-global")
 
             assert result2["success"] is True
-            assert (
-                "no changes" in result2.get("message", "").lower()
-            ), "After lock release, refresh must proceed to mtime detection"
+            assert "no changes" in result2.get("message", "").lower(), (
+                "After lock release, refresh must proceed to mtime detection"
+            )

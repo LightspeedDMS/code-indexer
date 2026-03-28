@@ -43,9 +43,9 @@ class TestDiffTypeMarkers:
 
             # Check that [ADDED] marker was printed
             calls = [str(call) for call in mock_console.print.call_args_list]
-            assert any(
-                "[ADDED]" in str(call) for call in calls
-            ), f"Expected [ADDED] marker in output. Calls: {calls}"
+            assert any("[ADDED]" in str(call) for call in calls), (
+                f"Expected [ADDED] marker in output. Calls: {calls}"
+            )
 
     def test_display_modified_file_marker(self):
         """Test that [MODIFIED] marker is displayed for modified files."""
@@ -79,9 +79,9 @@ class TestDiffTypeMarkers:
 
             # Check that [MODIFIED] marker was printed
             calls = [str(call) for call in mock_console.print.call_args_list]
-            assert any(
-                "[MODIFIED]" in str(call) for call in calls
-            ), f"Expected [MODIFIED] marker in output. Calls: {calls}"
+            assert any("[MODIFIED]" in str(call) for call in calls), (
+                f"Expected [MODIFIED] marker in output. Calls: {calls}"
+            )
 
     def test_no_changes_in_chunk_not_displayed(self):
         """Test that [NO CHANGES IN CHUNK] is NOT displayed anymore."""
@@ -118,9 +118,9 @@ class TestDiffTypeMarkers:
 
             # Check that [NO CHANGES IN CHUNK] was NOT printed
             calls = [str(call) for call in mock_console.print.call_args_list]
-            assert not any(
-                "NO CHANGES IN CHUNK" in str(call) for call in calls
-            ), f"Should not display [NO CHANGES IN CHUNK]. Calls: {calls}"
+            assert not any("NO CHANGES IN CHUNK" in str(call) for call in calls), (
+                f"Should not display [NO CHANGES IN CHUNK]. Calls: {calls}"
+            )
 
 
 if __name__ == "__main__":

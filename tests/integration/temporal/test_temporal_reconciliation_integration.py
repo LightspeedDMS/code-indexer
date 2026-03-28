@@ -131,7 +131,7 @@ class TestTemporalReconciliationIntegration:
                     1000 + i * 1000,
                     "Test User",
                     "test@test.com",
-                    f"Commit {i+1}",
+                    f"Commit {i + 1}",
                     "",
                 )
             )
@@ -241,7 +241,7 @@ class TestTemporalReconciliationIntegration:
                     1000 + i * 1000,
                     "Test User",
                     "test@test.com",
-                    f"Commit {i+1}",
+                    f"Commit {i + 1}",
                     "",
                 )
             )
@@ -298,7 +298,7 @@ class TestTemporalReconciliationIntegration:
                     1000 + i * 1000,
                     "Test User",
                     "test@test.com",
-                    f"Commit {i+1}",
+                    f"Commit {i + 1}",
                     "",
                 )
             )
@@ -388,9 +388,9 @@ class TestTemporalReconciliationIntegration:
         hnsw_index_path = collection_path / "hnsw_index.bin"
         id_index_path = collection_path / "id_index.bin"
 
-        assert (
-            hnsw_index_path.exists()
-        ), "HNSW index should be built after reconciliation"
+        assert hnsw_index_path.exists(), (
+            "HNSW index should be built after reconciliation"
+        )
         assert id_index_path.exists(), "ID index should be built after reconciliation"
 
         # Metadata should be updated

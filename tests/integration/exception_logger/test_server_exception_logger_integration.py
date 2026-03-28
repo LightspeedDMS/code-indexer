@@ -20,15 +20,15 @@ class TestServerExceptionLoggerIntegration:
         create_app()
 
         # Verify ExceptionLogger was initialized
-        assert (
-            ExceptionLogger._instance is not None
-        ), "ExceptionLogger should be initialized"
+        assert ExceptionLogger._instance is not None, (
+            "ExceptionLogger should be initialized"
+        )
 
         # Verify log file path is in ~/.cidx-server/logs/ (server mode location)
         assert ExceptionLogger._instance.log_file_path is not None
-        assert ".cidx-server" in str(
-            ExceptionLogger._instance.log_file_path
-        ), "Log file should be in .cidx-server/logs/ directory for server mode"
-        assert "logs" in str(
-            ExceptionLogger._instance.log_file_path
-        ), "Log file should be in logs subdirectory for server mode"
+        assert ".cidx-server" in str(ExceptionLogger._instance.log_file_path), (
+            "Log file should be in .cidx-server/logs/ directory for server mode"
+        )
+        assert "logs" in str(ExceptionLogger._instance.log_file_path), (
+            "Log file should be in logs subdirectory for server mode"
+        )

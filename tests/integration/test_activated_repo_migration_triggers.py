@@ -204,9 +204,9 @@ class TestSyncTriggersMigration:
             text=True,
         )
         assert origin_result.returncode == 0
-        assert origin_result.stdout.strip().startswith(
-            "/"
-        ), "Origin should be local path"
+        assert origin_result.stdout.strip().startswith("/"), (
+            "Origin should be local path"
+        )
 
         # No golden remote should exist yet
         golden_result = subprocess.run(
@@ -292,9 +292,9 @@ class TestGitOperationsTriggerMigration:
             capture_output=True,
             text=True,
         )
-        assert origin_result.stdout.strip().startswith(
-            "/"
-        ), "Origin should be local path"
+        assert origin_result.stdout.strip().startswith("/"), (
+            "Origin should be local path"
+        )
 
         # Manually trigger migration via internal method
         # (This simulates what should happen automatically in git_push wrapper)
@@ -337,9 +337,9 @@ class TestGitOperationsTriggerMigration:
             capture_output=True,
             text=True,
         )
-        assert origin_result.stdout.strip().startswith(
-            "/"
-        ), "Origin should be local path"
+        assert origin_result.stdout.strip().startswith("/"), (
+            "Origin should be local path"
+        )
 
         # Manually trigger migration (simulates automatic trigger in git_pull)
         activated_repo_manager._detect_and_migrate_legacy_remotes(repo_dir, golden_dir)
@@ -378,9 +378,9 @@ class TestGitOperationsTriggerMigration:
             capture_output=True,
             text=True,
         )
-        assert origin_result.stdout.strip().startswith(
-            "/"
-        ), "Origin should be local path"
+        assert origin_result.stdout.strip().startswith("/"), (
+            "Origin should be local path"
+        )
 
         # Manually trigger migration (simulates automatic trigger in git_fetch)
         activated_repo_manager._detect_and_migrate_legacy_remotes(repo_dir, golden_dir)
@@ -449,9 +449,9 @@ class TestMigrationIdempotency:
         result2 = activated_repo_manager._detect_and_migrate_legacy_remotes(
             repo_dir, golden_dir
         )
-        assert (
-            result2 is False
-        ), "Second migration should return False (already migrated)"
+        assert result2 is False, (
+            "Second migration should return False (already migrated)"
+        )
 
         # Verify remotes are still correct (unchanged)
         origin_after = subprocess.run(
@@ -534,9 +534,9 @@ class TestMigrationMethodImprovements:
         )
 
         # Should complete without error (may return True or False)
-        assert isinstance(
-            result, bool
-        ), "Migration should return boolean even with missing golden origin"
+        assert isinstance(result, bool), (
+            "Migration should return boolean even with missing golden origin"
+        )
 
         # Verify it doesn't crash and creates valid remote configuration
         origin_result = subprocess.run(

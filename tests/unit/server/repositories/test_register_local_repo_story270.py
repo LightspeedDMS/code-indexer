@@ -71,9 +71,9 @@ class TestRegisterLocalRepoCidxInit:
 
         AC1: Langfuse repos get initialized at registration.
         """
-        assert not (
-            test_folder / ".code-indexer"
-        ).exists(), "Pre-condition: .code-indexer/ must not exist"
+        assert not (test_folder / ".code-indexer").exists(), (
+            "Pre-condition: .code-indexer/ must not exist"
+        )
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -94,9 +94,9 @@ class TestRegisterLocalRepoCidxInit:
         )
 
         init_call = cidx_init_calls[0]
-        assert init_call[1]["cwd"] == str(
-            test_folder
-        ), f"Expected cwd={str(test_folder)!r}, got {init_call[1]['cwd']!r}"
+        assert init_call[1]["cwd"] == str(test_folder), (
+            f"Expected cwd={str(test_folder)!r}, got {init_call[1]['cwd']!r}"
+        )
         assert init_call[1]["check"] is True
         assert init_call[1]["capture_output"] is True
 
@@ -108,9 +108,9 @@ class TestRegisterLocalRepoCidxInit:
 
         AC5: cidx init is idempotent — skip when already initialized.
         """
-        assert (
-            test_folder_with_cidx_index / ".code-indexer"
-        ).exists(), "Pre-condition: .code-indexer/ must already exist"
+        assert (test_folder_with_cidx_index / ".code-indexer").exists(), (
+            "Pre-condition: .code-indexer/ must already exist"
+        )
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -177,9 +177,9 @@ class TestRegisterLocalRepoCidxInit:
 
         assert cidx_init_idx is not None, "cidx init was not called"
         assert activation_idx is not None, "Global activation was not called"
-        assert (
-            cidx_init_idx > activation_idx
-        ), "cidx init must be called AFTER global activation"
+        assert cidx_init_idx > activation_idx, (
+            "cidx init must be called AFTER global activation"
+        )
 
     def test_register_local_repo_cidx_init_failure_is_non_blocking(
         self, golden_repo_manager, test_folder
@@ -251,9 +251,9 @@ class TestRegisterLocalRepoCidxInit:
             c for c in mock_run.call_args_list if c[0][0] == ["cidx", "init"]
         ]
         assert len(cidx_init_calls) == 1
-        assert (
-            cidx_init_calls[0][1].get("check") is True
-        ), "cidx init must use check=True to detect failures"
+        assert cidx_init_calls[0][1].get("check") is True, (
+            "cidx init must use check=True to detect failures"
+        )
 
     def test_register_local_repo_duplicate_does_not_call_cidx_init_again(
         self, golden_repo_manager, test_folder
@@ -292,6 +292,6 @@ class TestRegisterLocalRepoCidxInit:
             )
 
         # cidx init should NOT have been called again on duplicate
-        assert (
-            second_call_count == first_call_count
-        ), "cidx init must not be called again for duplicate registration"
+        assert second_call_count == first_call_count, (
+            "cidx init must not be called again for duplicate registration"
+        )

@@ -349,14 +349,14 @@ class TestMCPCredentialsAPI:
 
         # Step 3: Verify credential IMMEDIATELY fails authentication (no caching)
         user_id = mcp_manager.verify_credential(client_id, client_secret)
-        assert (
-            user_id is None
-        ), "Revoked credential should immediately fail authentication"
+        assert user_id is None, (
+            "Revoked credential should immediately fail authentication"
+        )
 
         # Step 4: Additional verification - specific revoked credential should not be in list
         list_response = client.get("/api/mcp-credentials")
         credentials = list_response.json()["credentials"]
         credential_ids = [c["credential_id"] for c in credentials]
-        assert (
-            credential_id not in credential_ids
-        ), "Revoked credential should not appear in list"
+        assert credential_id not in credential_ids, (
+            "Revoked credential should not appear in list"
+        )

@@ -191,6 +191,6 @@ class TestLanguageMapperPerformance:
         end_time = time.time()
 
         duration = end_time - start_time
-        assert (
-            duration < 0.05
-        ), f"100 unknown lookups took {duration}s, should be < 0.05s"
+        assert duration < 0.05, (
+            f"100 unknown lookups took {duration}s, should be < 0.05s"
+        )

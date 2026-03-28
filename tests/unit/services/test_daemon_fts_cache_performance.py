@@ -94,12 +94,12 @@ def test_fts_index_caching_on_second_query(test_project_with_fts):
 
     # Verify index is now cached
     assert daemon.cache_entry is not None, "Cache entry should be created"
-    assert (
-        daemon.cache_entry.tantivy_index is not None
-    ), "Tantivy index should be loaded"
-    assert (
-        daemon.cache_entry.tantivy_searcher is not None
-    ), "Tantivy searcher should be cached"
+    assert daemon.cache_entry.tantivy_index is not None, (
+        "Tantivy index should be loaded"
+    )
+    assert daemon.cache_entry.tantivy_searcher is not None, (
+        "Tantivy searcher should be cached"
+    )
 
     # Second query - should use cached index
     start_time = time.perf_counter()
@@ -107,19 +107,19 @@ def test_fts_index_caching_on_second_query(test_project_with_fts):
     second_query_time = time.perf_counter() - start_time
 
     # CRITICAL: Second query MUST be faster than first
-    print(f"\nFirst query time: {first_query_time*1000:.1f}ms")
-    print(f"Second query time: {second_query_time*1000:.1f}ms")
-    print(f"Speedup: {first_query_time/second_query_time:.1f}x")
+    print(f"\nFirst query time: {first_query_time * 1000:.1f}ms")
+    print(f"Second query time: {second_query_time * 1000:.1f}ms")
+    print(f"Speedup: {first_query_time / second_query_time:.1f}x")
 
     # This test will FAIL if caching is not working
-    assert (
-        second_query_time < first_query_time
-    ), f"Second query ({second_query_time*1000:.1f}ms) should be faster than first ({first_query_time*1000:.1f}ms)"
+    assert second_query_time < first_query_time, (
+        f"Second query ({second_query_time * 1000:.1f}ms) should be faster than first ({first_query_time * 1000:.1f}ms)"
+    )
 
     # With proper caching, second query should be <100ms
-    assert (
-        second_query_time < 0.100
-    ), f"Cached query should be <100ms, got {second_query_time*1000:.1f}ms"
+    assert second_query_time < 0.100, (
+        f"Cached query should be <100ms, got {second_query_time * 1000:.1f}ms"
+    )
 
 
 def test_fts_query_cache_hit(test_project_with_fts):
@@ -148,19 +148,19 @@ def test_fts_query_cache_hit(test_project_with_fts):
     daemon.exposed_query_fts(project_str, "hello", limit=10)
     second_time = time.perf_counter() - start_time
 
-    print(f"\nFirst query: {first_time*1000:.1f}ms")
-    print(f"Cached query: {second_time*1000:.1f}ms")
-    print(f"Speedup: {first_time/second_time:.1f}x")
+    print(f"\nFirst query: {first_time * 1000:.1f}ms")
+    print(f"Cached query: {second_time * 1000:.1f}ms")
+    print(f"Speedup: {first_time / second_time:.1f}x")
 
     # Cached query should be MUCH faster
-    assert (
-        second_time < first_time / 2
-    ), "Query cache should provide at least 2x speedup"
+    assert second_time < first_time / 2, (
+        "Query cache should provide at least 2x speedup"
+    )
 
     # Cached result should be <10ms
-    assert (
-        second_time < 0.010
-    ), f"Query cache hit should be <10ms, got {second_time*1000:.1f}ms"
+    assert second_time < 0.010, (
+        f"Query cache hit should be <10ms, got {second_time * 1000:.1f}ms"
+    )
 
 
 def test_tantivy_index_persists_across_queries(test_project_with_fts):
@@ -187,12 +187,12 @@ def test_tantivy_index_persists_across_queries(test_project_with_fts):
     searcher_obj_2 = daemon.cache_entry.tantivy_searcher
 
     # CRITICAL: Same objects should be reused
-    assert (
-        index_obj_1 is index_obj_2
-    ), "Tantivy index object should be reused across queries"
-    assert (
-        searcher_obj_1 is searcher_obj_2
-    ), "Tantivy searcher object should be reused across queries"
+    assert index_obj_1 is index_obj_2, (
+        "Tantivy index object should be reused across queries"
+    )
+    assert searcher_obj_1 is searcher_obj_2, (
+        "Tantivy searcher object should be reused across queries"
+    )
 
 
 def test_daemon_routing_fts_queries():
@@ -302,19 +302,19 @@ def test_daemon_fts_performance_benchmark(test_project_with_fts):
     cache_hit_time = time.perf_counter() - start_time
 
     print("\n=== FTS Performance Benchmark ===")
-    print(f"Cold cache (first query):  {cold_time*1000:.1f}ms")
-    print(f"Warm cache (index loaded): {warm_time*1000:.1f}ms")
-    print(f"Query cache hit:           {cache_hit_time*1000:.1f}ms")
+    print(f"Cold cache (first query):  {cold_time * 1000:.1f}ms")
+    print(f"Warm cache (index loaded): {warm_time * 1000:.1f}ms")
+    print(f"Query cache hit:           {cache_hit_time * 1000:.1f}ms")
 
     # Validate performance targets
-    assert (
-        cold_time < 2.0
-    ), f"Cold cache query should be <2000ms, got {cold_time*1000:.1f}ms"
+    assert cold_time < 2.0, (
+        f"Cold cache query should be <2000ms, got {cold_time * 1000:.1f}ms"
+    )
 
-    assert (
-        warm_time < 0.100
-    ), f"Warm cache query should be <100ms, got {warm_time*1000:.1f}ms"
+    assert warm_time < 0.100, (
+        f"Warm cache query should be <100ms, got {warm_time * 1000:.1f}ms"
+    )
 
-    assert (
-        cache_hit_time < 0.010
-    ), f"Query cache hit should be <10ms, got {cache_hit_time*1000:.1f}ms"
+    assert cache_hit_time < 0.010, (
+        f"Query cache hit should be <10ms, got {cache_hit_time * 1000:.1f}ms"
+    )

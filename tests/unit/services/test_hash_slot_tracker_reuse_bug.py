@@ -53,9 +53,9 @@ class TestHashSlotTrackerReuseBug:
 
         # DOCUMENT THE BUG: This shows what WOULD happen with buggy pattern
         # With old buggy code: hash_slot_tracker IS the same 10-slot tracker
-        assert (
-            buggy_hash_slot_tracker is chunking_tracker
-        ), "BUGGY PATTERN: This demonstrates the bug - tracker gets reused"
+        assert buggy_hash_slot_tracker is chunking_tracker, (
+            "BUGGY PATTERN: This demonstrates the bug - tracker gets reused"
+        )
 
         assert buggy_hash_slot_tracker.max_slots == 10, (
             f"BUGGY PATTERN: Tracker has wrong slot count {buggy_hash_slot_tracker.max_slots} "
@@ -85,9 +85,9 @@ class TestHashSlotTrackerReuseBug:
         )  # ALWAYS create new
 
         # ASSERTIONS: These should PASS after fix
-        assert (
-            hash_slot_tracker is not chunking_tracker
-        ), "Hash tracker should be NEW instance, not reused chunking tracker"
+        assert hash_slot_tracker is not chunking_tracker, (
+            "Hash tracker should be NEW instance, not reused chunking tracker"
+        )
 
         assert hash_slot_tracker.max_slots == vector_thread_count, (
             f"Hash tracker should have exactly {vector_thread_count} slots, "
@@ -95,9 +95,9 @@ class TestHashSlotTrackerReuseBug:
         )
 
         # Verify chunking tracker remains unchanged
-        assert (
-            chunking_tracker.max_slots == 10
-        ), "Chunking tracker should still have 10 slots (not affected by hash phase)"
+        assert chunking_tracker.max_slots == 10, (
+            "Chunking tracker should still have 10 slots (not affected by hash phase)"
+        )
 
     def test_buggy_reuse_causes_wrong_slot_count(self):
         """
@@ -132,9 +132,9 @@ class TestHashSlotTrackerReuseBug:
             f"(reused from chunking), should be {hashing_thread_count}"
         )
 
-        assert (
-            buggy_hash_slot_tracker is chunking_tracker
-        ), "BUGGY PATTERN: Hash tracker IS the chunking tracker (wrong - should be independent)"
+        assert buggy_hash_slot_tracker is chunking_tracker, (
+            "BUGGY PATTERN: Hash tracker IS the chunking tracker (wrong - should be independent)"
+        )
 
     def test_fix_prevents_frozen_slots(self):
         """
@@ -170,13 +170,12 @@ class TestHashSlotTrackerReuseBug:
         )
 
         assert max(acquired_slots) == vector_thread_count - 1, (
-            f"Max slot should be {vector_thread_count - 1}, "
-            f"got {max(acquired_slots)}"
+            f"Max slot should be {vector_thread_count - 1}, got {max(acquired_slots)}"
         )
 
-        assert (
-            min(acquired_slots) == 0
-        ), f"Min slot should be 0, got {min(acquired_slots)}"
+        assert min(acquired_slots) == 0, (
+            f"Min slot should be 0, got {min(acquired_slots)}"
+        )
 
         # Verify no slots beyond thread count
         assert all(0 <= slot < vector_thread_count for slot in acquired_slots), (

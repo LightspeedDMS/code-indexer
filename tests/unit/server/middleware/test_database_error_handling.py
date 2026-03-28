@@ -134,9 +134,9 @@ class TestDatabaseErrorHandling:
 
         for i, (actual, expected) in enumerate(zip(delays, expected_delays)):
             # Allow some variance in timing (±50ms)
-            assert (
-                abs(actual - expected) < 0.05
-            ), f"Retry {i + 1} delay {actual:.3f}s not close to expected {expected:.3f}s"
+            assert abs(actual - expected) < 0.05, (
+                f"Retry {i + 1} delay {actual:.3f}s not close to expected {expected:.3f}s"
+            )
 
     def test_database_error_response_format_transient(
         self, error_handler: GlobalErrorHandler, mock_request: Request
@@ -379,9 +379,9 @@ class TestDatabaseErrorHandling:
         max_with_jitter = expected_base * (1 + retry_handler.config.jitter_factor)
 
         for delay in delays:
-            assert (
-                expected_base <= delay <= max_with_jitter
-            ), f"Delay {delay} should be between {expected_base} and {max_with_jitter}"
+            assert expected_base <= delay <= max_with_jitter, (
+                f"Delay {delay} should be between {expected_base} and {max_with_jitter}"
+            )
 
     def test_retry_timing_without_mocks(
         self, error_handler: GlobalErrorHandler, mock_request: Request

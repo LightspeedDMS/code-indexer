@@ -267,6 +267,6 @@ class TestFastPathPerformance:
         # Verify performance target
         # NOTE: This test focuses on fast path logic, not full startup time
         # Full startup includes entry point overhead measured separately
-        assert (
-            elapsed_ms < 100
-        ), f"Fast path execution took {elapsed_ms:.1f}ms (target: <100ms)"
+        assert elapsed_ms < 100, (
+            f"Fast path execution took {elapsed_ms:.1f}ms (target: <100ms)"
+        )

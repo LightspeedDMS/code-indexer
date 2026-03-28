@@ -81,9 +81,9 @@ class TestFractionalLifetimeFix:
 
         # Additional verification: value should be non-zero positive integer
         assert refresh_expires_in > 0, "expires_in must be positive"
-        assert refresh_expires_in == int(
-            refresh_expires_in
-        ), "expires_in must not have fractional part"
+        assert refresh_expires_in == int(refresh_expires_in), (
+            "expires_in must not have fractional part"
+        )
 
     @pytest.mark.parametrize(
         "lifetime_days",
@@ -187,9 +187,9 @@ class TestFractionalLifetimeFix:
         )
 
         # Verify minimum protection is working
-        assert (
-            refresh_expires_in >= 1
-        ), "Non-zero lifetime should result in at least 1 second"
+        assert refresh_expires_in >= 1, (
+            "Non-zero lifetime should result in at least 1 second"
+        )
 
 
 # TDD VERDICT: 🔴 RED PHASE

@@ -934,7 +934,7 @@ class TestProgressIndication:
             if delay >= 2.0:
                 # Call progress callback multiple times during long sleep
                 for i in range(int(delay // 2)):
-                    progress_callback(f"Waiting... ({i+1}/{int(delay//2)})", 1, 1)
+                    progress_callback(f"Waiting... ({i + 1}/{int(delay // 2)})", 1, 1)
                     time.sleep(0.01)  # Small actual delay for testing
 
         with patch("time.sleep", side_effect=mock_sleep):
@@ -957,7 +957,7 @@ class TestProgressIndication:
 
             # Simulate progress updates
             for i in range(3):
-                progress.update(task, completed=i + 1, description=f"Retry {i+1}/3")
+                progress.update(task, completed=i + 1, description=f"Retry {i + 1}/3")
 
         # Should complete without errors
         assert True

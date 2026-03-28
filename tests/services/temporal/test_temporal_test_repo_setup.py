@@ -127,7 +127,7 @@ class TestCommitHistory:
         ]
         for i, (commit, expected_date) in enumerate(zip(commits, expected_dates)):
             commit_date = commit["date"][:19]
-            assert commit_date == expected_date, f"Commit {i+1} date mismatch"
+            assert commit_date == expected_date, f"Commit {i + 1} date mismatch"
 
     def test_commit_messages(self) -> None:
         """AC 7: Commit messages are descriptive."""
@@ -147,7 +147,7 @@ class TestCommitHistory:
             "Large refactoring",
         ]
         for i, (commit, expected_msg) in enumerate(zip(commits, expected_messages)):
-            assert commit["message"] == expected_msg, f"Commit {i+1} message mismatch"
+            assert commit["message"] == expected_msg, f"Commit {i + 1} message mismatch"
 
 
 class TestFileChanges:
@@ -217,9 +217,9 @@ class TestFileChanges:
             parts = line.split("\t")
             if len(parts) == 3 and parts[0] != "-":
                 changes[parts[2]] = int(parts[0]) + int(parts[1])
-        assert (
-            changes.get("src/api.py", 0) >= 200
-        ), "api.py should have 200+ line changes"
-        assert (
-            changes.get("src/auth.py", 0) >= 150
-        ), "auth.py should have 150+ line changes"
+        assert changes.get("src/api.py", 0) >= 200, (
+            "api.py should have 200+ line changes"
+        )
+        assert changes.get("src/auth.py", 0) >= 150, (
+            "auth.py should have 150+ line changes"
+        )

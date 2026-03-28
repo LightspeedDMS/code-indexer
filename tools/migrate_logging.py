@@ -234,7 +234,9 @@ def migrate_file(file_path: Path) -> Tuple[int, str]:
                 new_lines.append(new_call)
                 migrations += 1
             except Exception as e:
-                print(f"  Warning: Could not migrate line {i+1}: {e}", file=sys.stderr)
+                print(
+                    f"  Warning: Could not migrate line {i + 1}: {e}", file=sys.stderr
+                )
                 new_lines.append(line)
         else:
             new_lines.append(line)

@@ -224,21 +224,21 @@ class TestHNSWSearchPath:
 
         # 2. HNSW-specific timing metrics should be present
         assert "hnsw_search_ms" in timing, "HNSW search timing should be present"
-        assert (
-            timing.get("hnsw_search_ms", 0) > 0
-        ), "HNSW search should have non-zero time"
+        assert timing.get("hnsw_search_ms", 0) > 0, (
+            "HNSW search should have non-zero time"
+        )
 
         # 3. Results should be returned
         assert len(results) > 0, "Should return search results"
 
         # 4. Results should have proper structure
         assert all("payload" in r for r in results), "All results should have payload"
-        assert all(
-            "content" in r.get("payload", {}) for r in results
-        ), "All results should have content"
-        assert all(
-            "staleness" in r for r in results
-        ), "All results should have staleness"
+        assert all("content" in r.get("payload", {}) for r in results), (
+            "All results should have content"
+        )
+        assert all("staleness" in r for r in results), (
+            "All results should have staleness"
+        )
 
 
 class TestHNSWIndexBuildParameters:

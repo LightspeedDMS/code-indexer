@@ -100,18 +100,18 @@ class TestAuthorEmailInPayload:
         commit_diff_payloads = [
             p for p in captured_payloads if p.get("type") == "commit_diff"
         ]
-        assert (
-            len(commit_diff_payloads) > 0
-        ), f"No commit_diff payloads found. Found types: {[p.get('type') for p in captured_payloads]}"
+        assert len(commit_diff_payloads) > 0, (
+            f"No commit_diff payloads found. Found types: {[p.get('type') for p in captured_payloads]}"
+        )
 
         for payload in commit_diff_payloads:
             assert "author_email" in payload, "author_email missing from payload"
-            assert (
-                payload["author_email"] == "test@example.com"
-            ), f"Expected test@example.com, got {payload.get('author_email')}"
-            assert (
-                payload["author_name"] == "Test Author"
-            ), f"Expected Test Author, got {payload.get('author_name')}"
+            assert payload["author_email"] == "test@example.com", (
+                f"Expected test@example.com, got {payload.get('author_email')}"
+            )
+            assert payload["author_name"] == "Test Author", (
+                f"Expected Test Author, got {payload.get('author_name')}"
+            )
 
 
 class TestModifiedDiffLineNumbers:
@@ -170,9 +170,9 @@ class TestModifiedDiffLineNumbers:
                         break
 
             # Test expects NO line numbers for modified diffs
-            assert (
-                not found_line_number
-            ), "Modified diff should not show line numbers, but found them in output"
+            assert not found_line_number, (
+                "Modified diff should not show line numbers, but found them in output"
+            )
 
     def test_added_file_display_shows_line_numbers(self):
         """Test that added files still show line numbers."""
@@ -215,6 +215,6 @@ class TestModifiedDiffLineNumbers:
                     found_line_numbers = True
                     break
 
-            assert (
-                found_line_numbers
-            ), "Added files should show line numbers, but none found"
+            assert found_line_numbers, (
+                "Added files should show line numbers, but none found"
+            )

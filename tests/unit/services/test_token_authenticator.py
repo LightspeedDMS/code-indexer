@@ -95,9 +95,9 @@ class TestTokenAuthenticatorResolveToken:
             f"but got '{resolved_token}' (likely encrypted gibberish)"
         )
         # Additional assertion: Ensure we didn't get base64-encoded encrypted data
-        assert not resolved_token.startswith(
-            "eyJ"
-        ), "Resolved token appears to be encrypted (base64-encoded)"
+        assert not resolved_token.startswith("eyJ"), (
+            "Resolved token appears to be encrypted (base64-encoded)"
+        )
 
     def test_resolve_token_priority_env_over_file(self, mock_home):
         """
@@ -168,9 +168,9 @@ class TestTokenAuthenticatorResolveToken:
             resolved_token = TokenAuthenticator.resolve_token("github")
 
             # Assert: Should return None
-            assert (
-                resolved_token is None
-            ), "Should return None when no token is configured"
+            assert resolved_token is None, (
+                "Should return None when no token is configured"
+            )
 
     def test_resolve_token_handles_corrupted_file_gracefully(self, mock_home):
         """
@@ -185,9 +185,9 @@ class TestTokenAuthenticatorResolveToken:
             resolved_token = TokenAuthenticator.resolve_token("github")
 
             # Assert: Should return None, not raise exception
-            assert (
-                resolved_token is None
-            ), "Should return None gracefully for corrupted file"
+            assert resolved_token is None, (
+                "Should return None gracefully for corrupted file"
+            )
 
     def test_resolve_token_environment_variable_names(self, mock_home):
         """

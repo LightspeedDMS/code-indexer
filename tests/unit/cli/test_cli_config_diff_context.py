@@ -25,9 +25,9 @@ class TestConfigDiffContext:
         )
 
         if expect_failure:
-            assert (
-                result.returncode != 0
-            ), f"Command should have failed: {' '.join(cmd)}"
+            assert result.returncode != 0, (
+                f"Command should have failed: {' '.join(cmd)}"
+            )
         else:
             if result.returncode != 0:
                 print(f"STDOUT: {result.stdout}")

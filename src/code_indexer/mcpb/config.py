@@ -70,8 +70,7 @@ class BridgeConfig:
         # Log level validation (Story #517)
         if self.log_level not in VALID_LOG_LEVELS:
             raise ValueError(
-                f"log_level must be one of {VALID_LOG_LEVELS}. "
-                f"Got: {self.log_level}"
+                f"log_level must be one of {VALID_LOG_LEVELS}. Got: {self.log_level}"
             )
 
         # Strip trailing slash from server_url

@@ -158,11 +158,7 @@ class TestParseConflictMarkers:
         service = _get_service()
 
         conflict_content = (
-            "<<<<<<< HEAD\n"
-            "ours\n"
-            "=======\n"
-            "theirs\n"
-            ">>>>>>> my-feature-branch\n"
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> my-feature-branch\n"
         )
         (tmp_path / "conflict.py").write_text(conflict_content)
 
@@ -177,13 +173,7 @@ class TestParseConflictMarkers:
         service = _get_service()
 
         conflict_content = (
-            "<<<<<<< HEAD\n"
-            "alpha\n"
-            "beta\n"
-            "=======\n"
-            "gamma\n"
-            "delta\n"
-            ">>>>>>> feature\n"
+            "<<<<<<< HEAD\nalpha\nbeta\n=======\ngamma\ndelta\n>>>>>>> feature\n"
         )
         (tmp_path / "conflict.py").write_text(conflict_content)
 

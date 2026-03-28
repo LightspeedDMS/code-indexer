@@ -87,14 +87,14 @@ class TestBatchIncrementalUpdate:
         # Verify HNSW was built
         collection_path = temp_store.base_path / collection_name
         hnsw_manager = HNSWIndexManager(vector_dim=128)
-        assert hnsw_manager.index_exists(
-            collection_path
-        ), "Initial HNSW index should exist"
+        assert hnsw_manager.index_exists(collection_path), (
+            "Initial HNSW index should exist"
+        )
         initial_stats = hnsw_manager.get_index_stats(collection_path)
         assert initial_stats is not None, "Index stats should exist"
-        assert (
-            initial_stats["vector_count"] == 100
-        ), "Initial index should have 100 vectors"
+        assert initial_stats["vector_count"] == 100, (
+            "Initial index should have 100 vectors"
+        )
 
         # Step 2: Modify 10 files (10% change rate)
         # Generate new vectors for modified files
@@ -127,9 +127,9 @@ class TestBatchIncrementalUpdate:
         incremental_time = time.time() - start_incremental
 
         # Verify incremental update was used (not full rebuild)
-        assert (
-            result_incremental.get("hnsw_update") == "incremental"
-        ), f"Should use incremental update for 10% change rate, got: {result_incremental}"
+        assert result_incremental.get("hnsw_update") == "incremental", (
+            f"Should use incremental update for 10% change rate, got: {result_incremental}"
+        )
 
         # Step 4: Measure full rebuild time for comparison
         # Force full rebuild by clearing HNSW and rebuilding
@@ -143,9 +143,9 @@ class TestBatchIncrementalUpdate:
 
         # Full rebuild should have 100 unique vectors (the modified ones)
         # Note: We may have more due to how files are stored on disk
-        assert (
-            rebuild_count >= 100
-        ), f"Full rebuild should index at least 100 vectors, got {rebuild_count}"
+        assert rebuild_count >= 100, (
+            f"Full rebuild should index at least 100 vectors, got {rebuild_count}"
+        )
 
         # Step 5: Verify performance improvement
         # Allow some variance but should be at least 1.4x faster
@@ -158,9 +158,9 @@ class TestBatchIncrementalUpdate:
 
         # Relaxed threshold for CI environments (1.2x to account for timing variance and CPU load)
         # Manual testing shows 3.6x speedup, but CI can be slower due to resource contention
-        assert (
-            speedup >= 1.2
-        ), f"Incremental update should be at least 1.2x faster (got {speedup:.2f}x)"
+        assert speedup >= 1.2, (
+            f"Incremental update should be at least 1.2x faster (got {speedup:.2f}x)"
+        )
 
         # Step 6: Verify search results are correct
         # Query the incrementally updated index
@@ -259,9 +259,9 @@ class TestBatchIncrementalUpdate:
         stats = hnsw_manager.get_index_stats(collection_path)
         assert stats is not None, "Index stats should exist"
         # Total vectors: 10 initial + 5 new = 15 (deletes are soft deletes)
-        assert (
-            stats["vector_count"] == 15
-        ), f"Expected 15 vectors, got {stats['vector_count']}"
+        assert stats["vector_count"] == 15, (
+            f"Expected 15 vectors, got {stats['vector_count']}"
+        )
 
         # Step 7: Verify search results reflect changes
         index = hnsw_manager.load_index(collection_path, max_elements=200)
@@ -278,12 +278,12 @@ class TestBatchIncrementalUpdate:
         result_ids_deleted, _ = hnsw_manager.query(
             index, query_vec_deleted, collection_path, k=10
         )
-        assert (
-            ids[8] not in result_ids_deleted
-        ), "Deleted vector should not appear in results"
-        assert (
-            ids[9] not in result_ids_deleted
-        ), "Deleted vector should not appear in results"
+        assert ids[8] not in result_ids_deleted, (
+            "Deleted vector should not appear in results"
+        )
+        assert ids[9] not in result_ids_deleted, (
+            "Deleted vector should not appear in results"
+        )
 
         # Query with new vector - should find newly added point
         query_vec_new = vectors[10]
@@ -355,9 +355,9 @@ class TestBatchIncrementalUpdate:
         result = temp_store.end_indexing(collection_name)
 
         # Verify incremental was used
-        assert (
-            result.get("hnsw_update") == "incremental"
-        ), f"Should use incremental update for 20% change rate, got: {result}"
+        assert result.get("hnsw_update") == "incremental", (
+            f"Should use incremental update for 20% change rate, got: {result}"
+        )
 
         # Verify search works correctly
         index = hnsw_manager.load_index(collection_path, max_elements=200)
@@ -437,9 +437,9 @@ class TestWatchModeRealTimeUpdates:
         # Step 4: Verify update time < 100ms
         print(f"\nWatch mode update time: {update_time * 1000:.2f}ms")
         # Relaxed for CI - allow up to 200ms
-        assert (
-            update_time < 0.2
-        ), f"Watch mode update should be < 200ms (got {update_time * 1000:.2f}ms)"
+        assert update_time < 0.2, (
+            f"Watch mode update should be < 200ms (got {update_time * 1000:.2f}ms)"
+        )
 
         # Step 5: Query immediately should return fresh results
         # Reload index to get the updated version
@@ -449,16 +449,16 @@ class TestWatchModeRealTimeUpdates:
         )
 
         # The new file should be found in results (might not be exact match due to normalization)
-        assert (
-            "new_file.py" in result_ids
-        ), f"Newly added file should be immediately queryable, got: {result_ids}"
+        assert "new_file.py" in result_ids, (
+            f"Newly added file should be immediately queryable, got: {result_ids}"
+        )
 
         # Verify it's a close match (allow some tolerance for vector operations)
         if "new_file.py" in result_ids:
             idx = result_ids.index("new_file.py")
-            assert (
-                distances[idx] < 0.1
-            ), f"New file should have high similarity to itself, got distance: {distances[idx]}"
+            assert distances[idx] < 0.1, (
+                f"New file should have high similarity to itself, got distance: {distances[idx]}"
+            )
 
     def test_watch_mode_multiple_updates(
         self,
@@ -534,6 +534,6 @@ class TestWatchModeRealTimeUpdates:
             result_ids, distances = hnsw_manager.query(
                 index, query_vec, collection_path, k=15
             )
-            assert (
-                f"watch_file_{i}.py" in result_ids
-            ), f"Watch file {i} should be found in results, got: {result_ids}"
+            assert f"watch_file_{i}.py" in result_ids, (
+                f"Watch file {i} should be found in results, got: {result_ids}"
+            )

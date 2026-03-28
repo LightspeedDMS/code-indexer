@@ -41,16 +41,16 @@ import org.springframework.beans.factory.annotation.Autowired;
  */
 @Service
 public class TestService {
-    
+
     @Autowired
     private DataRepository dataRepository;
-    
+
     @Autowired
     private ValidationService validationService;
-    
+
     private static final String DEFAULT_STATUS = "ACTIVE";
     private static final int MAX_BATCH_SIZE = 100;
-    
+
     /**
      * Process a batch of items with comprehensive error handling.
      * This method demonstrates complex business logic that should
@@ -62,11 +62,11 @@ public class TestService {
             if (items == null || items.isEmpty()) {
                 return ProcessingResult.failure("No items to process");
             }
-            
+
             if (items.size() > MAX_BATCH_SIZE) {
                 return ProcessingResult.failure("Batch size exceeds maximum");
             }
-            
+
             // Validate each item
             List<ValidationError> errors = new ArrayList<>();
             for (InputItem item : items) {
@@ -75,16 +75,16 @@ public class TestService {
                     errors.addAll(validation.getErrors());
                 }
             }
-            
+
             if (!errors.isEmpty()) {
                 return ProcessingResult.failure("Validation failed", errors);
             }
-            
+
             // Process items
             List<ProcessedItem> processedItems = new ArrayList<>();
             int successCount = 0;
             int failureCount = 0;
-            
+
             for (InputItem item : items) {
                 try {
                     ProcessedItem processed = processItem(item);
@@ -95,21 +95,21 @@ public class TestService {
                     failureCount++;
                 }
             }
-            
+
             // Save processed items
             if (!processedItems.isEmpty()) {
                 dataRepository.saveAll(processedItems);
             }
-            
+
             return ProcessingResult.success(
                 successCount, failureCount, processedItems);
-                
+
         } catch (Exception e) {
             logger.error("Critical error in batch processing", e);
             return ProcessingResult.failure("Internal processing error");
         }
     }
-    
+
     private ProcessedItem processItem(InputItem item) throws ProcessingException {
         // Complex item processing logic
         ProcessedItem processed = new ProcessedItem();
@@ -117,17 +117,17 @@ public class TestService {
         processed.setData(transformData(item.getData()));
         processed.setStatus(DEFAULT_STATUS);
         processed.setProcessedAt(LocalDateTime.now());
-        
+
         // Apply business rules
         if (item.getType() == ItemType.PREMIUM) {
             processed = applyPremiumProcessing(processed);
         } else if (item.getType() == ItemType.STANDARD) {
             processed = applyStandardProcessing(processed);
         }
-        
+
         return processed;
     }
-    
+
     private ProcessedItem applyPremiumProcessing(ProcessedItem item) {
         item.setPriority(Priority.HIGH);
         item.setExpirationDays(365);
@@ -135,23 +135,23 @@ public class TestService {
         item.addFeature("priority_handling");
         return item;
     }
-    
+
     private ProcessedItem applyStandardProcessing(ProcessedItem item) {
         item.setPriority(Priority.NORMAL);
         item.setExpirationDays(90);
         item.addFeature("standard_support");
         return item;
     }
-    
+
     private String transformData(String inputData) {
         if (inputData == null || inputData.trim().isEmpty()) {
             return "";
         }
-        
+
         // Complex transformation logic
         StringBuilder result = new StringBuilder();
         String[] parts = inputData.split(",");
-        
+
         for (int i = 0; i < parts.length; i++) {
             String part = parts[i].trim();
             if (!part.isEmpty()) {
@@ -161,7 +161,7 @@ public class TestService {
                 result.append(part.toUpperCase());
             }
         }
-        
+
         return result.toString();
     }
 }
@@ -194,14 +194,14 @@ class ProcessingConfig:
 class DataProcessor:
     \"\"\"
     Advanced data processor with async capabilities.
-    
+
     This processor handles large-scale data operations with:
     - Asynchronous batch processing
     - Comprehensive error handling and retries
     - Performance monitoring and logging
     - Configurable caching layer
     \"\"\"
-    
+
     def __init__(self, config: ProcessingConfig):
         self.config = config
         self.stats = {
@@ -212,38 +212,38 @@ class DataProcessor:
             'start_time': datetime.now()
         }
         self.cache = {} if config.enable_caching else None
-        
+
     async def process_data_async(self, data_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         \"\"\"
         Process data items asynchronously with batching and error handling.
-        
+
         Args:
             data_items: List of data items to process
-            
+
         Returns:
             Processing results with statistics and processed data
         \"\"\"
         try:
             logger.info(f"Starting async processing of {len(data_items)} items")
-            
+
             # Split into batches
             batches = [
-                data_items[i:i + self.config.batch_size] 
+                data_items[i:i + self.config.batch_size]
                 for i in range(0, len(data_items), self.config.batch_size)
             ]
-            
+
             # Process batches concurrently
             tasks = [
-                self._process_batch_with_retry(batch, batch_idx) 
+                self._process_batch_with_retry(batch, batch_idx)
                 for batch_idx, batch in enumerate(batches)
             ]
-            
+
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             # Collect results
             all_processed = []
             total_errors = []
-            
+
             for batch_idx, result in enumerate(results):
                 if isinstance(result, Exception):
                     logger.error(f"Batch {batch_idx} failed completely: {result}")
@@ -255,13 +255,13 @@ class DataProcessor:
                 else:
                     all_processed.extend(result.get('processed', []))
                     total_errors.extend(result.get('errors', []))
-            
+
             # Update statistics
             self.stats['processed_items'] += len(all_processed)
             self.stats['failed_items'] += len(total_errors)
-            
+
             processing_time = (datetime.now() - self.stats['start_time']).total_seconds()
-            
+
             return {
                 'success': True,
                 'processed_items': all_processed,
@@ -272,7 +272,7 @@ class DataProcessor:
                 'cache_hit_ratio': self.stats['cache_hits'] / max(1, self.stats['cache_hits'] + self.stats['cache_misses']),
                 'stats': self.stats.copy()
             }
-            
+
         except Exception as e:
             logger.error(f"Critical error in async processing: {e}")
             return {
@@ -281,16 +281,16 @@ class DataProcessor:
                 'processed_items': [],
                 'error_count': len(data_items)
             }
-    
+
     async def _process_batch_with_retry(self, batch: List[Dict[str, Any]], batch_idx: int) -> Dict[str, Any]:
         \"\"\"Process a batch with retry logic.\"\"\"
         for attempt in range(self.config.max_retries):
             try:
                 logger.debug(f"Processing batch {batch_idx}, attempt {attempt + 1}")
-                
+
                 processed_items = []
                 errors = []
-                
+
                 for item_idx, item in enumerate(batch):
                     try:
                         processed = await self._process_single_item(item)
@@ -303,34 +303,34 @@ class DataProcessor:
                             'error': str(e),
                             'item_data': item
                         })
-                
+
                 return {
                     'processed': processed_items,
                     'errors': errors,
                     'batch_idx': batch_idx,
                     'attempt': attempt + 1
                 }
-                
+
             except Exception as e:
                 logger.warning(f"Batch {batch_idx} attempt {attempt + 1} failed: {e}")
                 if attempt == self.config.max_retries - 1:
                     raise
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
-    
+
     async def _process_single_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
         \"\"\"Process a single data item with caching.\"\"\"
         item_id = item.get('id', 'unknown')
-        
+
         # Check cache
         if self.cache and item_id in self.cache:
             self.stats['cache_hits'] += 1
             return self.cache[item_id]
-        
+
         self.stats['cache_misses'] += 1
-        
+
         # Simulate processing time
         await asyncio.sleep(0.001)  # 1ms processing time
-        
+
         # Transform the item
         processed = {
             'id': item_id,
@@ -339,7 +339,7 @@ class DataProcessor:
             'transformations_applied': [],
             'metadata': {}
         }
-        
+
         # Apply transformations based on item type
         if item.get('type') == 'financial':
             processed = await self._apply_financial_transformations(processed)
@@ -347,13 +347,13 @@ class DataProcessor:
             processed = await self._apply_personal_data_transformations(processed)
         else:
             processed = await self._apply_default_transformations(processed)
-        
+
         # Cache result
         if self.cache:
             self.cache[item_id] = processed
-        
+
         return processed
-    
+
     async def _apply_financial_transformations(self, item: Dict[str, Any]) -> Dict[str, Any]:
         \"\"\"Apply financial data specific transformations.\"\"\"
         item['transformations_applied'].extend([
@@ -517,13 +517,13 @@ class DataProcessor:
 
                 # Verify chunk text follows fixed-size rules
                 if i < len(submitted_chunks) - 1:  # Not the last chunk
-                    assert (
-                        len(text) == 1000
-                    ), f"Chunk {i} should be exactly 1000 chars, got {len(text)}"
+                    assert len(text) == 1000, (
+                        f"Chunk {i} should be exactly 1000 chars, got {len(text)}"
+                    )
                 else:  # Last chunk
-                    assert (
-                        0 < len(text) <= 1000
-                    ), f"Last chunk should be 1-1000 chars, got {len(text)}"
+                    assert 0 < len(text) <= 1000, (
+                        f"Last chunk should be 1-1000 chars, got {len(text)}"
+                    )
 
                 # Verify metadata completeness
                 required_fields = [
@@ -593,17 +593,17 @@ class DataProcessor:
                     next_chunk = chunk_texts[i + 1]
 
                     # Verify current chunk is 1000 characters
-                    assert (
-                        len(current_chunk) == 1000
-                    ), f"Chunk {i} should be 1000 chars, got {len(current_chunk)}"
+                    assert len(current_chunk) == 1000, (
+                        f"Chunk {i} should be 1000 chars, got {len(current_chunk)}"
+                    )
 
                     # Verify 150-character overlap
                     current_ending = current_chunk[-150:]
                     next_beginning = next_chunk[:150]
 
-                    assert (
-                        current_ending == next_beginning
-                    ), f"Overlap mismatch between chunks {i} and {i+1} in processing pipeline"
+                    assert current_ending == next_beginning, (
+                        f"Overlap mismatch between chunks {i} and {i + 1} in processing pipeline"
+                    )
 
     def test_chunking_performance_in_pipeline(
         self, mock_config, mock_embedding_provider, mock_vector_store_client
@@ -659,9 +659,9 @@ class DataProcessor:
                 total_time = float(total_time) + file_time
 
                 # Per-file performance assertions
-                assert (
-                    file_time < 1.0
-                ), f"Processing {file_path.name} took {file_time:.3f}s, expected < 1.0s"
+                assert file_time < 1.0, (
+                    f"Processing {file_path.name} took {file_time:.3f}s, expected < 1.0s"
+                )
 
                 chunks_per_second = (
                     len(chunks) / file_time if file_time > 0 else float("inf")
@@ -673,9 +673,9 @@ class DataProcessor:
 
         # Overall performance
         overall_rate = total_chunks / total_time if total_time > 0 else float("inf")
-        assert (
-            overall_rate > 100
-        ), f"Overall processing rate too slow: {overall_rate:.0f} chunks/sec"
+        assert overall_rate > 100, (
+            f"Overall processing rate too slow: {overall_rate:.0f} chunks/sec"
+        )
 
         print(
             f"Pipeline performance: {total_chunks} chunks in {total_time:.3f}s "
@@ -785,9 +785,9 @@ class DataProcessor:
                     )
 
                     # Verify path is correctly set
-                    assert (
-                        filename in metadata["path"]
-                    ), f"Path metadata incorrect for {filename}: {metadata['path']}"
+                    assert filename in metadata["path"], (
+                        f"Path metadata incorrect for {filename}: {metadata['path']}"
+                    )
 
                 print(
                     f"File type test passed for {filename}: "

@@ -196,9 +196,9 @@ class TestCorrelationIDSearchability:
 
         # Assert: Log entry found with correct correlation ID
         assert "logs" in result, "Expected 'logs' key in query result"
-        assert (
-            len(result["logs"]) == 1
-        ), f"Expected 1 log entry, got {len(result['logs'])}"
+        assert len(result["logs"]) == 1, (
+            f"Expected 1 log entry, got {len(result['logs'])}"
+        )
 
         log_entry = result["logs"][0]
         assert log_entry["correlation_id"] == test_correlation_id
@@ -248,9 +248,9 @@ class TestCorrelationIDSearchability:
         result = log_aggregator.query(correlation_id=test_correlation_id)
 
         # Assert: All log entries found with same correlation ID
-        assert (
-            len(result["logs"]) == 3
-        ), f"Expected 3 log entries, got {len(result['logs'])}"
+        assert len(result["logs"]) == 3, (
+            f"Expected 3 log entries, got {len(result['logs'])}"
+        )
 
         # Verify all entries have the same correlation ID
         for log_entry in result["logs"]:

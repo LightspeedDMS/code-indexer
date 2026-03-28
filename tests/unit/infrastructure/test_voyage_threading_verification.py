@@ -35,10 +35,10 @@ def function_{i}():
 
 class TestClass_{i}:
     '''Test class {i}'''
-    
+
     def method_1(self):
         return "Method implementation"
-    
+
     def method_2(self):
         return "Another method"
 """
@@ -94,9 +94,9 @@ class TestClass_{i}:
     def test_voyage_ai_thread_count_from_config(self):
         """Test that thread count comes from config.json setting."""
         # Thread count now comes from config.json, not provider defaults
-        assert (
-            self.config.voyage_ai.parallel_requests == 8
-        ), f"Expected 8 from config.json, got {self.config.voyage_ai.parallel_requests}"
+        assert self.config.voyage_ai.parallel_requests == 8, (
+            f"Expected 8 from config.json, got {self.config.voyage_ai.parallel_requests}"
+        )
 
     @pytest.mark.unit
     def test_clear_command_uses_high_throughput_processor(self):
@@ -144,12 +144,12 @@ class TestClass_{i}:
             )
 
         # Verify high-throughput processor was called directly
-        assert (
-            high_throughput_called
-        ), "High-throughput processor should be called for full index"
-        assert (
-            vector_thread_count_used == 8
-        ), f"Expected thread count of 8, got {vector_thread_count_used}"
+        assert high_throughput_called, (
+            "High-throughput processor should be called for full index"
+        )
+        assert vector_thread_count_used == 8, (
+            f"Expected thread count of 8, got {vector_thread_count_used}"
+        )
 
     @pytest.mark.unit
     def test_high_throughput_processor_receives_thread_count_for_full_index(self):
@@ -223,14 +223,14 @@ class TestClass_{i}:
         params = sig.parameters
 
         # Verify vector_thread_count parameter exists
-        assert (
-            "vector_thread_count" in params
-        ), "process_branch_changes_high_throughput should have vector_thread_count parameter"
+        assert "vector_thread_count" in params, (
+            "process_branch_changes_high_throughput should have vector_thread_count parameter"
+        )
 
         # Verify it has a default value
-        assert (
-            params["vector_thread_count"].default is not inspect.Parameter.empty
-        ), "vector_thread_count should have a default value"
+        assert params["vector_thread_count"].default is not inspect.Parameter.empty, (
+            "vector_thread_count should have a default value"
+        )
 
     def teardown_method(self):
         """Cleanup test environment."""

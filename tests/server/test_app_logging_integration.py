@@ -65,9 +65,9 @@ class TestSQLiteLogHandlerIntegration:
                     h for h in root_logger.handlers if isinstance(h, SQLiteLogHandler)
                 ]
 
-                assert (
-                    len(sqlite_handlers) > 0
-                ), "SQLiteLogHandler not attached to root logger"
+                assert len(sqlite_handlers) > 0, (
+                    "SQLiteLogHandler not attached to root logger"
+                )
 
                 # Verify handler uses correct database path
                 handler = sqlite_handlers[0]

@@ -154,9 +154,9 @@ class TestBuildRefinementPromptFormat:
         )
         # First non-empty line should be a markdown heading
         lines = [line for line in prompt.splitlines() if line.strip()]
-        assert lines[0].startswith(
-            "#"
-        ), f"Prompt should start with a markdown heading, got: {lines[0]!r}"
+        assert lines[0].startswith("#"), (
+            f"Prompt should start with a markdown heading, got: {lines[0]!r}"
+        )
 
     def test_prompt_is_editorial_not_authorial(self, tmp_path):
         """Prompt must frame the task as fact-checking, not rewriting."""

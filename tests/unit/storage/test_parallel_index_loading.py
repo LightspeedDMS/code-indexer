@@ -346,9 +346,9 @@ class TestPerformanceRequirements:
         )
 
         # Verify meaningful embedding delay was present
-        assert (
-            embedding_ms >= 350
-        ), f"Embedding should take ~400ms, got {embedding_ms:.1f}ms"
+        assert embedding_ms >= 350, (
+            f"Embedding should take ~400ms, got {embedding_ms:.1f}ms"
+        )
 
         # If we have meaningful improvement (>10ms), great! If not, at least verify
         # the parallel path executed correctly

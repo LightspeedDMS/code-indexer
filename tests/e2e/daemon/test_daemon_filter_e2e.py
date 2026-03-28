@@ -109,14 +109,14 @@ def test_authenticate_user():
             output = result.stdout
 
             # CRITICAL ASSERTION: No test files in results
-            assert (
-                "test_auth.py" not in output
-            ), "test_auth.py should be excluded by --exclude-path filter"
+            assert "test_auth.py" not in output, (
+                "test_auth.py should be excluded by --exclude-path filter"
+            )
 
             # Verify src file IS included
-            assert (
-                "main.py" in output or "src" in output
-            ), "main.py should be included in results"
+            assert "main.py" in output or "src" in output, (
+                "main.py should be included in results"
+            )
 
         finally:
             # Cleanup: stop daemon

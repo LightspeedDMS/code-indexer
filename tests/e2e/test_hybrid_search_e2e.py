@@ -150,9 +150,9 @@ def format_timestamp(ts):
         # Assert - verify ordering (FTS before semantic)
         fts_index = output.index("FULL-TEXT")
         semantic_index = output.index("SEMANTIC")
-        assert (
-            fts_index < semantic_index
-        ), "FTS results should appear before semantic results"
+        assert fts_index < semantic_index, (
+            "FTS results should appear before semantic results"
+        )
 
         # Assert - verify separator exists between sections
         separator_section = output[fts_index:semantic_index]

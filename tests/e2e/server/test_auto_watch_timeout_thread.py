@@ -52,9 +52,9 @@ class TestAutoWatchTimeoutThreadE2E:
             manager._check_timeouts()
 
             # Watch should be stopped after timeout check
-            assert (
-                manager.is_watching(repo_path) is False
-            ), "Timeout checker failed to auto-stop watch after timeout"
+            assert manager.is_watching(repo_path) is False, (
+                "Timeout checker failed to auto-stop watch after timeout"
+            )
 
             # Verify stop_watch was called by timeout checker
             mock_watch_instance.stop_watch.assert_called_once()
@@ -94,9 +94,9 @@ class TestAutoWatchTimeoutThreadE2E:
             manager._check_timeouts()
 
             # Watch should STILL be running (activity kept it alive)
-            assert (
-                manager.is_watching(repo_path) is True
-            ), "Timeout checker incorrectly stopped active watch"
+            assert manager.is_watching(repo_path) is True, (
+                "Timeout checker incorrectly stopped active watch"
+            )
 
             mock_watch_instance.stop_watch.assert_not_called()
 
@@ -112,12 +112,12 @@ class TestAutoWatchTimeoutThreadE2E:
         manager = AutoWatchManager(auto_watch_enabled=True, default_timeout=5)
 
         # Background thread should be running after init
-        assert hasattr(
-            manager, "_timeout_thread"
-        ), "AutoWatchManager missing _timeout_thread attribute"
-        assert (
-            manager._timeout_thread.is_alive()
-        ), "Background thread not running after initialization"
+        assert hasattr(manager, "_timeout_thread"), (
+            "AutoWatchManager missing _timeout_thread attribute"
+        )
+        assert manager._timeout_thread.is_alive(), (
+            "Background thread not running after initialization"
+        )
 
         # Shutdown should stop thread
         manager.shutdown()
@@ -125,6 +125,6 @@ class TestAutoWatchTimeoutThreadE2E:
         # Wait for thread to terminate
         manager._timeout_thread.join(timeout=2)
 
-        assert (
-            not manager._timeout_thread.is_alive()
-        ), "Background thread still running after shutdown"
+        assert not manager._timeout_thread.is_alive(), (
+            "Background thread still running after shutdown"
+        )

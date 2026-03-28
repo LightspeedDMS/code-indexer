@@ -8734,9 +8734,9 @@ async def unified_login_sso(
             safe_redirect = decoded_redirect
 
     # Store state with code_verifier and redirect_to using OIDC state manager
-    assert (
-        oidc_routes.state_manager is not None
-    ), "state_manager must be initialized when oidc_manager is enabled"
+    assert oidc_routes.state_manager is not None, (
+        "state_manager must be initialized when oidc_manager is enabled"
+    )
     state_data = {
         "code_verifier": code_verifier,
     }
@@ -8753,13 +8753,13 @@ async def unified_login_sso(
     else:
         callback_url = str(request.base_url).rstrip("/") + "/auth/sso/callback"
     oidc_manager = oidc_routes.oidc_manager
-    assert (
-        oidc_manager is not None
-    ), "oidc_manager must be initialized when SSO login is invoked"
+    assert oidc_manager is not None, (
+        "oidc_manager must be initialized when SSO login is invoked"
+    )
     provider = oidc_manager.provider
-    assert (
-        provider is not None
-    ), "oidc provider must be initialized when SSO login is invoked"
+    assert provider is not None, (
+        "oidc provider must be initialized when SSO login is invoked"
+    )
     oidc_auth_url = provider.get_authorization_url(
         state=state_token, redirect_uri=callback_url, code_challenge=code_challenge
     )

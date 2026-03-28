@@ -37,9 +37,9 @@ class TestTemporalPathFilterE2E:
         assert ".py" in output, f"Expected Python files in output: {output}"
 
         # Should not be empty results
-        assert (
-            "Found 0 results" not in output and "No results" not in output.lower()
-        ), f"Expected non-empty results: {output}"
+        assert "Found 0 results" not in output and "No results" not in output.lower(), (
+            f"Expected non-empty results: {output}"
+        )
 
     def test_temporal_query_with_exact_path_filter(self):
         """E2E: Temporal query with exact path filter returns specific file."""
@@ -65,9 +65,9 @@ class TestTemporalPathFilterE2E:
 
         output = result.stdout
         # Should find the specific file
-        assert (
-            "test_temporal_indexing_e2e.py" in output
-        ), f"Expected specific file in output: {output}"
+        assert "test_temporal_indexing_e2e.py" in output, (
+            f"Expected specific file in output: {output}"
+        )
 
     def test_temporal_query_with_wildcard_path_filter(self):
         """E2E: Temporal query with wildcard path filter (tests/**/*.py) returns test files."""
@@ -150,9 +150,9 @@ class TestTemporalPathFilterE2E:
         output = result.stdout
         # If results found, should be Python source files
         if "Found 0" not in output:
-            assert (
-                "src/" in output or ".py" in output
-            ), f"Expected Python src files: {output}"
+            assert "src/" in output or ".py" in output, (
+                f"Expected Python src files: {output}"
+            )
 
     def test_temporal_query_without_path_filter_returns_all(self):
         """E2E: Temporal query without path filter returns results from all paths."""
@@ -175,6 +175,6 @@ class TestTemporalPathFilterE2E:
         # We check stdout for results instead of exit code
         output = result.stdout
         # Should find results from various paths
-        assert "Found" in output and (
-            "results" in output or "Found 5" in output
-        ), f"Expected results in output: {output}"
+        assert "Found" in output and ("results" in output or "Found 5" in output), (
+            f"Expected results in output: {output}"
+        )

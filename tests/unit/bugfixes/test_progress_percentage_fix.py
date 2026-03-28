@@ -67,23 +67,23 @@ class TestProgressPercentageFix:
             display = console_buffer.getvalue()
 
             # Verify display is not empty
-            assert (
-                len(display.strip()) > 0
-            ), f"Display should not be empty for {current}/{total}"
+            assert len(display.strip()) > 0, (
+                f"Display should not be empty for {current}/{total}"
+            )
 
             # Verify it contains the correct progress information
-            assert (
-                f"{current}/{total} files" in display
-            ), f"Should show '{current}/{total} files' in display"
+            assert f"{current}/{total} files" in display, (
+                f"Should show '{current}/{total} files' in display"
+            )
 
             # Calculate actual percentage from display
             calculated_percentage = (current / total * 100) if total > 0 else 0
 
             # Verify the percentage in the display content
             percentage_text = f"{calculated_percentage:.0f}%"
-            assert (
-                percentage_text in display
-            ), f"Should show correct percentage {percentage_text} in display"
+            assert percentage_text in display, (
+                f"Should show correct percentage {percentage_text} in display"
+            )
 
             print(
                 f"  ✅ {current}/{total} files -> {calculated_percentage:.1f}% (expected ~{expected_percentage:.1f}%)"
@@ -137,9 +137,9 @@ class TestProgressPercentageFix:
 
         # Both displays should show the same progress information
         assert "14/134 files" in display1, "First display should show correct progress"
-        assert (
-            "14/134 files" in display2
-        ), "Second display should maintain progress state"
+        assert "14/134 files" in display2, (
+            "Second display should maintain progress state"
+        )
 
         # Both should show the correct percentage (10.4%)
         assert "10%" in display1, "First display should show ~10%"

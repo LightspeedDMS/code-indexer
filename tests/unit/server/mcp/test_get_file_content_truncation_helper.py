@@ -118,9 +118,9 @@ class TestMcpHandlerSkipTruncation:
 
             mock_file_service.get_file_content.assert_called_once()
             call_kwargs = mock_file_service.get_file_content.call_args[1]
-            assert (
-                call_kwargs.get("skip_truncation") is True
-            ), "MCP handler MUST call FileService with skip_truncation=True"
+            assert call_kwargs.get("skip_truncation") is True, (
+                "MCP handler MUST call FileService with skip_truncation=True"
+            )
 
     def test_handler_calls_by_path_with_skip_truncation_true(self, mock_user):
         """Verify MCP handler calls get_file_content_by_path with skip_truncation=True."""

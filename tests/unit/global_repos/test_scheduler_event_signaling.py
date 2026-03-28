@@ -74,9 +74,9 @@ class TestSchedulerEventSignaling:
 
         # Verify stop completed quickly (not 30 seconds)
         # Should complete in <1 second with Event signaling
-        assert (
-            stop_duration < 1.0
-        ), f"stop() took {stop_duration:.2f}s, expected <1s with Event signaling"
+        assert stop_duration < 1.0, (
+            f"stop() took {stop_duration:.2f}s, expected <1s with Event signaling"
+        )
 
         assert not scheduler.is_running()
 
@@ -90,23 +90,23 @@ class TestSchedulerEventSignaling:
         scheduler = scheduler_setup
 
         # Verify scheduler has _stop_event attribute (Event-based implementation)
-        assert hasattr(
-            scheduler, "_stop_event"
-        ), "Scheduler must have _stop_event threading.Event"
+        assert hasattr(scheduler, "_stop_event"), (
+            "Scheduler must have _stop_event threading.Event"
+        )
 
         # Verify it's a threading.Event instance
-        assert isinstance(
-            scheduler._stop_event, threading.Event
-        ), "_stop_event must be a threading.Event instance"
+        assert isinstance(scheduler._stop_event, threading.Event), (
+            "_stop_event must be a threading.Event instance"
+        )
 
         # Start scheduler
         scheduler.start()
         time.sleep(0.5)
 
         # Verify event is not set while running
-        assert (
-            not scheduler._stop_event.is_set()
-        ), "Event should not be set while running"
+        assert not scheduler._stop_event.is_set(), (
+            "Event should not be set while running"
+        )
 
         # Stop scheduler
         scheduler.stop()

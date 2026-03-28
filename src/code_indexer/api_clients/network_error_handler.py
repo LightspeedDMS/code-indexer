@@ -572,7 +572,7 @@ class NetworkErrorHandler:
                             i > 0
                         ):  # Don't call progress on first chunk since we called it above
                             progress_callback(
-                                f"Waiting... ({i+1}/{chunks})",
+                                f"Waiting... ({i + 1}/{chunks})",
                                 attempt + 1,
                                 config.max_retries,
                             )

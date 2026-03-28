@@ -1080,9 +1080,9 @@ class TestRefreshSchedulerIndexReconciliation:
                 and call[0][0][0] == "cidx"
                 and "scip" in call[0][0]
             ]
-            assert (
-                len(scip_calls) > 0
-            ), f"cidx scip generate should be called when enable_scip=True. All calls: {[call[0][0] for call in mock_run.call_args_list if len(call[0]) > 0]}"
+            assert len(scip_calls) > 0, (
+                f"cidx scip generate should be called when enable_scip=True. All calls: {[call[0][0] for call in mock_run.call_args_list if len(call[0]) > 0]}"
+            )
 
             # Verify the scip command was: ["cidx", "scip", "generate"]
             scip_command = scip_calls[0][0][0]
@@ -1163,9 +1163,9 @@ class TestRefreshSchedulerIndexReconciliation:
                 and call[0][0][0] == "cidx"
                 and "scip" in call[0][0]
             ]
-            assert (
-                len(scip_calls) == 0
-            ), "cidx scip generate should NOT be called when enable_scip=False"
+            assert len(scip_calls) == 0, (
+                "cidx scip generate should NOT be called when enable_scip=False"
+            )
 
     def test_refresh_uses_configured_scip_timeout(self, tmp_path) -> None:
         """AC4: _create_new_index should use cidx_scip_generate_timeout from ServerResourceConfig."""
@@ -1240,9 +1240,9 @@ class TestRefreshSchedulerIndexReconciliation:
 
             # Verify: SCIP command used custom timeout
             assert len(captured_timeouts) == 1, "Should have captured one SCIP timeout"
-            assert (
-                captured_timeouts[0] == 3000
-            ), f"Expected timeout=3000, got {captured_timeouts[0]}"
+            assert captured_timeouts[0] == 3000, (
+                f"Expected timeout=3000, got {captured_timeouts[0]}"
+            )
 
     def test_refresh_scip_failure_raises_runtime_error(self, tmp_path) -> None:
         """AC5: SCIP generation failures should raise RuntimeError and fail the refresh."""
@@ -1379,15 +1379,15 @@ class TestRefreshSchedulerIndexReconciliation:
             first_call = reconciliation_calls[0]
             assert first_call[0] == "reconcile"
             assert first_call[1] == "test-repo-global"
-            assert (
-                first_call[2]["temporal"] is False
-            ), "Should detect temporal missing at START"
+            assert first_call[2]["temporal"] is False, (
+                "Should detect temporal missing at START"
+            )
 
             # Verify: Registry updated to match filesystem (temporal disabled)
             repo_info = registry.get_global_repo("test-repo-global")
-            assert (
-                repo_info["enable_temporal"] is False
-            ), "Registry should be updated at START"
+            assert repo_info["enable_temporal"] is False, (
+                "Registry should be updated at START"
+            )
 
     def test_refresh_reconciles_at_end(self, tmp_path, monkeypatch) -> None:
         """AC6: _execute_refresh should call _reconcile_registry_with_filesystem at END."""
@@ -1467,9 +1467,9 @@ class TestRefreshSchedulerIndexReconciliation:
                 scheduler._execute_refresh("test-repo-global")
 
                 # Verify: Reconciliation called at START and END
-                assert (
-                    len(reconciliation_calls) >= 2
-                ), "Should call reconciliation at START+END"
+                assert len(reconciliation_calls) >= 2, (
+                    "Should call reconciliation at START+END"
+                )
 
                 # Verify START call detected no temporal (from repo_dir)
                 first_call = reconciliation_calls[0]
@@ -1479,12 +1479,12 @@ class TestRefreshSchedulerIndexReconciliation:
                 last_call = reconciliation_calls[-1]
                 assert last_call[0] == "reconcile"
                 assert last_call[1] == "test-repo-global"
-                assert (
-                    last_call[2]["temporal"] is True
-                ), "Should detect temporal present at END (from new index)"
+                assert last_call[2]["temporal"] is True, (
+                    "Should detect temporal present at END (from new index)"
+                )
 
                 # Verify: Registry updated to match filesystem (temporal enabled)
                 repo_info = registry.get_global_repo("test-repo-global")
-                assert (
-                    repo_info["enable_temporal"] is True
-                ), "Registry should be updated at END"
+                assert repo_info["enable_temporal"] is True, (
+                    "Registry should be updated at END"
+                )

@@ -71,9 +71,9 @@ class TestLogsPostgresBackendProtocol:
         # Verify all protocol methods are present on the class
         required_methods = ["insert_log", "query_logs", "cleanup_old_logs", "close"]
         for method in required_methods:
-            assert hasattr(
-                LogsPostgresBackend, method
-            ), f"LogsPostgresBackend must have method: {method}"
+            assert hasattr(LogsPostgresBackend, method), (
+                f"LogsPostgresBackend must have method: {method}"
+            )
 
         # Verify the class is structurally compatible with the protocol
         protocol_attrs = None
@@ -86,9 +86,9 @@ class TestLogsPostgresBackendProtocol:
 
         if protocol_attrs:
             missing = set(protocol_attrs) - set(dir(LogsPostgresBackend))
-            assert (
-                not missing
-            ), f"LogsPostgresBackend is missing protocol attributes: {missing}"
+            assert not missing, (
+                f"LogsPostgresBackend is missing protocol attributes: {missing}"
+            )
 
     def test_logs_postgres_backend_has_close_noop(self):
         """close() method must exist (pool lifecycle is managed externally)."""
@@ -96,9 +96,9 @@ class TestLogsPostgresBackendProtocol:
             LogsPostgresBackend,
         )
 
-        assert callable(
-            getattr(LogsPostgresBackend, "close", None)
-        ), "LogsPostgresBackend must have a callable close() method"
+        assert callable(getattr(LogsPostgresBackend, "close", None)), (
+            "LogsPostgresBackend must have a callable close() method"
+        )
 
     def test_logs_postgres_backend_is_imported_by_factory(self):
         """StorageFactory must be able to import LogsPostgresBackend lazily."""

@@ -104,9 +104,9 @@ class TestSCIPVerificationStderr:
         result = runner.invoke(scip_generate, [])
 
         # Assertions
-        assert (
-            result.exit_code == 1
-        ), "Should exit with error code when verification fails"
+        assert result.exit_code == 1, (
+            "Should exit with error code when verification fails"
+        )
 
         # CRITICAL: Verification error messages must be in stderr
         assert result.stderr, "stderr should not be empty when verification fails"
@@ -114,11 +114,11 @@ class TestSCIPVerificationStderr:
             "Verification FAILED" in result.stderr
             or "verification errors" in result.stderr
         ), f"Expected verification error in stderr, got: {result.stderr}"
-        assert (
-            "Symbol count mismatch" in result.stderr
-        ), f"Expected specific error in stderr, got: {result.stderr}"
+        assert "Symbol count mismatch" in result.stderr, (
+            f"Expected specific error in stderr, got: {result.stderr}"
+        )
 
         # Success messages should stay in stdout
-        assert (
-            "Successfully generated SCIP" in result.stdout
-        ), "Generation success message should be in stdout"
+        assert "Successfully generated SCIP" in result.stdout, (
+            "Generation success message should be in stdout"
+        )

@@ -263,9 +263,9 @@ class TestPerformSemanticSearchFilterConditions:
 
         assert filter_conditions is not None
         filter_str = str(filter_conditions)
-        assert (
-            "language" in filter_str
-        ), f"Expected 'language' in filter_conditions: {filter_conditions}"
+        assert "language" in filter_str, (
+            f"Expected 'language' in filter_conditions: {filter_conditions}"
+        )
 
     @patch("src.code_indexer.server.services.search_service.ConfigManager")
     @patch("src.code_indexer.server.services.search_service.BackendFactory")

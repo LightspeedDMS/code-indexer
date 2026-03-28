@@ -93,9 +93,9 @@ class TestDaemonStartup:
             # Second daemon should exit with error
             stdout, stderr = proc2.communicate(timeout=5)
             assert proc2.returncode != 0, "Second daemon should fail to start"
-            assert (
-                b"already running" in stderr.lower()
-            ), "Should indicate daemon already running"
+            assert b"already running" in stderr.lower(), (
+                "Should indicate daemon already running"
+            )
 
         finally:
             # Cleanup

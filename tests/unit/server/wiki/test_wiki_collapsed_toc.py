@@ -43,9 +43,9 @@ class TestBuildSidebarTreeNormalization:
             result = svc.build_sidebar_tree(Path(tmpdir), "test-repo")
             assert len(result) > 0
             group = result[0]
-            assert (
-                "Uncategorized" in group["categories"]
-            ), "Article without category must be placed in 'Uncategorized' category"
+            assert "Uncategorized" in group["categories"], (
+                "Article without category must be placed in 'Uncategorized' category"
+            )
             articles_in_uncategorized = group["categories"]["Uncategorized"]
             paths = [a["path"] for a in articles_in_uncategorized]
             assert "readme" in paths
@@ -58,9 +58,9 @@ class TestBuildSidebarTreeNormalization:
             assert len(result) > 0
             group = result[0]
             # After normalization, articles list must be empty
-            assert (
-                group.get("articles", []) == []
-            ), "group['articles'] must be empty - all articles go through group['categories']"
+            assert group.get("articles", []) == [], (
+                "group['articles'] must be empty - all articles go through group['categories']"
+            )
 
     def test_categorized_article_goes_to_named_category(self, svc):
         """Article with 'category: Guides' front matter → 'Guides' category."""
@@ -70,9 +70,9 @@ class TestBuildSidebarTreeNormalization:
             )
             result = svc.build_sidebar_tree(Path(tmpdir), "test-repo")
             group = result[0]
-            assert (
-                "Guides" in group["categories"]
-            ), "Article with category:'Guides' must appear in 'Guides' category"
+            assert "Guides" in group["categories"], (
+                "Article with category:'Guides' must appear in 'Guides' category"
+            )
             paths = [a["path"] for a in group["categories"]["Guides"]]
             assert "guide" in paths
 
@@ -187,9 +187,9 @@ class TestBuildSidebarTreeNormalization:
             )
             result = svc.build_sidebar_tree(Path(tmpdir), "test-repo")
             for group in result:
-                assert (
-                    group.get("articles", []) == []
-                ), f"Group '{group['name']}' still has top-level articles - must use categories only"
+                assert group.get("articles", []) == [], (
+                    f"Group '{group['name']}' still has top-level articles - must use categories only"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +256,9 @@ class TestArticlePageHasNoTopLevelArticleLoop:
             assert resp.status_code == 200
             html = resp.text
             # Must have sidebar-category elements (categories are rendered)
-            assert (
-                "sidebar-category" in html
-            ), "Expected .sidebar-category elements for all articles including uncategorized"
+            assert "sidebar-category" in html, (
+                "Expected .sidebar-category elements for all articles including uncategorized"
+            )
 
     def test_no_orphan_sidebar_items_outside_category(self):
         """All sidebar article links must be inside a .sidebar-category block.
@@ -273,9 +273,9 @@ class TestArticlePageHasNoTopLevelArticleLoop:
             assert resp.status_code == 200
             html = resp.text
             # The 'Uncategorized' category name must appear in the sidebar
-            assert (
-                "Uncategorized" in html
-            ), "Expected 'Uncategorized' label in sidebar for articles without category front matter"
+            assert "Uncategorized" in html, (
+                "Expected 'Uncategorized' label in sidebar for articles without category front matter"
+            )
 
 
 class TestSidebarCategoryCollapsedByDefault:
@@ -346,9 +346,9 @@ class TestSidebarChevronIndicators:
             resp = client.get("/wiki/test-repo/article")
             assert resp.status_code == 200
             html = resp.text
-            assert (
-                "data-section-id" in html
-            ), "Expected data-section-id attribute on sidebar-category elements for sessionStorage"
+            assert "data-section-id" in html, (
+                "Expected data-section-id attribute on sidebar-category elements for sessionStorage"
+            )
 
 
 class TestSidebarNoInlineOnclick:
@@ -371,9 +371,9 @@ class TestSidebarNoInlineOnclick:
 
             # Find all sidebar-category-header divs
             pattern = r'class="sidebar-category-header"[^>]*onclick'
-            assert not re.search(
-                pattern, html
-            ), "sidebar-category-header must not have inline onclick - use JS event listeners"
+            assert not re.search(pattern, html), (
+                "sidebar-category-header must not have inline onclick - use JS event listeners"
+            )
 
     def test_sidebar_group_header_has_no_inline_onclick(self):
         """sidebar-group-header must not have inline onclick attribute."""
@@ -391,9 +391,9 @@ class TestSidebarNoInlineOnclick:
             import re
 
             pattern = r'class="sidebar-group-header"[^>]*onclick'
-            assert not re.search(
-                pattern, html
-            ), "sidebar-group-header must not have inline onclick - use JS event listeners"
+            assert not re.search(pattern, html), (
+                "sidebar-group-header must not have inline onclick - use JS event listeners"
+            )
 
 
 class TestSidebarCurrentPathDataAttribute:
@@ -411,9 +411,9 @@ class TestSidebarCurrentPathDataAttribute:
             assert resp.status_code == 200
             html = resp.text
             # The active article must be marked with 'active' class
-            assert (
-                "active" in html
-            ), "Expected active class on current article's sidebar link"
+            assert "active" in html, (
+                "Expected active class on current article's sidebar link"
+            )
 
 
 class TestWikiServiceSidebarTreeStructure:

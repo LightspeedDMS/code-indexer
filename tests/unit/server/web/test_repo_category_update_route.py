@@ -75,12 +75,12 @@ def admin_session_cookie(client):
     )
 
     # Should redirect to /admin/ on success
-    assert (
-        response.status_code == 303
-    ), f"Login failed with status {response.status_code}"
-    assert (
-        response.headers.get("location") == "/admin/"
-    ), f"Unexpected redirect: {response.headers.get('location')}"
+    assert response.status_code == 303, (
+        f"Login failed with status {response.status_code}"
+    )
+    assert response.headers.get("location") == "/admin/", (
+        f"Unexpected redirect: {response.headers.get('location')}"
+    )
 
     # Extract session cookie from response
     session_cookies = response.cookies
@@ -145,9 +145,9 @@ def test_update_repo_category_with_valid_data_succeeds(
     )
 
     # Assert: Success response
-    assert (
-        response.status_code == 200
-    ), f"Expected 200, got {response.status_code}: {response.text[:200]}"
+    assert response.status_code == 200, (
+        f"Expected 200, got {response.status_code}: {response.text[:200]}"
+    )
 
     # Verify database update
     repo = backend.get_repo("test-repo")
@@ -187,9 +187,9 @@ def test_update_repo_category_to_unassigned(
     )
 
     # Assert: Success response
-    assert (
-        response.status_code == 200
-    ), f"Expected 200, got {response.status_code}: {response.text[:200]}"
+    assert response.status_code == 200, (
+        f"Expected 200, got {response.status_code}: {response.text[:200]}"
+    )
 
     # Verify database update
     repo = backend.get_repo("test-repo")

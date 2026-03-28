@@ -144,9 +144,9 @@ class TestMCPAuthenticationBasicAuth:
 
         # Should succeed (200) not fail with 401
         assert response.status_code != 401, "MCP Basic auth should not return 401"
-        assert (
-            response.status_code == 200
-        ), "MCP endpoint should return 200 with valid auth"
+        assert response.status_code == 200, (
+            "MCP endpoint should return 200 with valid auth"
+        )
 
     def test_basic_auth_with_invalid_client_id(self, client, mcp_credential):
         """
@@ -272,9 +272,9 @@ class TestMCPAuthenticationClientSecretPost:
 
         # Should succeed (200) not fail with 401
         assert response.status_code != 401, "client_secret_post should not return 401"
-        assert (
-            response.status_code == 200
-        ), "MCP endpoint should return 200 with valid credentials"
+        assert response.status_code == 200, (
+            "MCP endpoint should return 200 with valid credentials"
+        )
 
     def test_client_secret_post_with_invalid_client_id(self, client, mcp_credential):
         """

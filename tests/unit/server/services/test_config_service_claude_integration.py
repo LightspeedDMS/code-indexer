@@ -97,9 +97,9 @@ class TestGetAllSettingsSubscriptionFields:
         settings = service.get_all_settings()
 
         assert "claude_cli" in settings
-        assert (
-            "llm_creds_provider_url" in settings["claude_cli"]
-        ), "llm_creds_provider_url missing from claude_cli dict"
+        assert "llm_creds_provider_url" in settings["claude_cli"], (
+            "llm_creds_provider_url missing from claude_cli dict"
+        )
 
     def test_get_all_settings_llm_creds_provider_url_reflects_value(self, tmp_path):
         """Test that llm_creds_provider_url reflects the configured value."""
@@ -126,19 +126,19 @@ class TestGetAllSettingsSubscriptionFields:
 
         settings = service.get_all_settings()
 
-        assert (
-            "llm_creds_provider_api_key" in settings["claude_cli"]
-        ), "llm_creds_provider_api_key missing from claude_cli dict"
+        assert "llm_creds_provider_api_key" in settings["claude_cli"], (
+            "llm_creds_provider_api_key missing from claude_cli dict"
+        )
         api_key_value = settings["claude_cli"]["llm_creds_provider_api_key"]
         assert api_key_value is not None
         # Must be masked - should not contain the full key
-        assert (
-            "sk-secret-key-12345" != api_key_value
-        ), "llm_creds_provider_api_key must be masked in get_all_settings() output"
+        assert "sk-secret-key-12345" != api_key_value, (
+            "llm_creds_provider_api_key must be masked in get_all_settings() output"
+        )
         # Should end with *** masking
-        assert api_key_value.endswith(
-            "***"
-        ), f"Expected masked key ending with ***, got: {api_key_value}"
+        assert api_key_value.endswith("***"), (
+            f"Expected masked key ending with ***, got: {api_key_value}"
+        )
 
     def test_get_all_settings_llm_creds_provider_api_key_none_when_empty(
         self, tmp_path
@@ -160,9 +160,9 @@ class TestGetAllSettingsSubscriptionFields:
         settings = service.get_all_settings()
 
         assert "claude_cli" in settings
-        assert (
-            "llm_creds_provider_consumer_id" in settings["claude_cli"]
-        ), "llm_creds_provider_consumer_id missing from claude_cli dict"
+        assert "llm_creds_provider_consumer_id" in settings["claude_cli"], (
+            "llm_creds_provider_consumer_id missing from claude_cli dict"
+        )
 
     def test_get_all_settings_llm_creds_provider_consumer_id_reflects_value(
         self, tmp_path

@@ -186,9 +186,9 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
                 with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     scheduler._execute_refresh(alias_name)
 
-        assert (
-            len(mtime_calls) == 1
-        ), "_has_local_changes must be called exactly once for local:// repos"
+        assert len(mtime_calls) == 1, (
+            "_has_local_changes must be called exactly once for local:// repos"
+        )
         _, called_alias = mtime_calls[0]
         assert called_alias == alias_name
 

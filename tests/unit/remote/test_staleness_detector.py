@@ -304,9 +304,9 @@ class TestStalenessDetector:
         end_time = time.time()
 
         processing_time = (end_time - start_time) * 1000  # Convert to milliseconds
-        assert (
-            processing_time < 100
-        ), f"Staleness detection took {processing_time}ms, exceeds 100ms limit"
+        assert processing_time < 100, (
+            f"Staleness detection took {processing_time}ms, exceeds 100ms limit"
+        )
         assert len(results) == 50
 
     def test_visual_indicators_fresh_results(self, staleness_detector):
@@ -715,14 +715,14 @@ class TestTimezoneIndependentComparison:
     def test_utc_timestamp_normalization_method_exists(self, staleness_detector):
         """Test that UTC normalization method exists and is accessible."""
         # This test will fail until we implement the normalize_to_utc method
-        assert hasattr(
-            staleness_detector, "normalize_to_utc"
-        ), "normalize_to_utc method not found"
+        assert hasattr(staleness_detector, "normalize_to_utc"), (
+            "normalize_to_utc method not found"
+        )
 
         # Method should be callable
-        assert callable(
-            getattr(staleness_detector, "normalize_to_utc")
-        ), "normalize_to_utc is not callable"
+        assert callable(getattr(staleness_detector, "normalize_to_utc")), (
+            "normalize_to_utc is not callable"
+        )
 
     def test_utc_normalization_local_system_timezone(self, staleness_detector):
         """Test UTC normalization converts local system time to UTC correctly."""
@@ -753,9 +753,9 @@ class TestTimezoneIndependentComparison:
 
         # The normalized timestamp should be the same as the input for consistency
         # since timestamp() already returns UTC seconds since epoch
-        assert (
-            utc_timestamp == raw_file_timestamp
-        ), "UTC normalization should preserve timestamp value for consistency"
+        assert utc_timestamp == raw_file_timestamp, (
+            "UTC normalization should preserve timestamp value for consistency"
+        )
 
         # But verify the semantic conversion is working by checking the datetime interpretation
         original_local_aware = datetime.datetime.fromtimestamp(
@@ -800,9 +800,9 @@ class TestTimezoneIndependentComparison:
         assert isinstance(utc_timestamp, float), "UTC timestamp should be a float"
 
         # Verify the method can handle timezone specifications without errors
-        assert (
-            utc_timestamp == eastern_timestamp
-        ), "For consistency, normalized timestamp should equal input"
+        assert utc_timestamp == eastern_timestamp, (
+            "For consistency, normalized timestamp should equal input"
+        )
 
     def test_local_file_mtime_utc_conversion(self, staleness_detector, project_root):
         """Test that local file mtime is converted to UTC before comparison."""
@@ -821,9 +821,9 @@ class TestTimezoneIndependentComparison:
 
         # Local mtime should now be in UTC
         utc_dt = datetime.datetime.fromtimestamp(local_mtime, tz=datetime.timezone.utc)
-        assert (
-            utc_dt.tzinfo == datetime.timezone.utc
-        ), "Local file mtime not converted to UTC"
+        assert utc_dt.tzinfo == datetime.timezone.utc, (
+            "Local file mtime not converted to UTC"
+        )
 
     def test_cross_timezone_consistency_same_modification(
         self, staleness_detector, project_root
@@ -874,9 +874,9 @@ class TestTimezoneIndependentComparison:
         eastern_result = results_eastern[0]
         pacific_result = results_pacific[0]
 
-        assert (
-            eastern_result.is_stale == pacific_result.is_stale
-        ), "Staleness differs across timezones"
+        assert eastern_result.is_stale == pacific_result.is_stale, (
+            "Staleness differs across timezones"
+        )
         assert (
             abs(
                 (eastern_result.staleness_delta_seconds or 0)
@@ -925,12 +925,12 @@ class TestTimezoneIndependentComparison:
             utc_after, tz=datetime.timezone.utc
         )
 
-        assert (
-            before_utc_dt.tzinfo == datetime.timezone.utc
-        ), "Before DST not converted to UTC"
-        assert (
-            after_utc_dt.tzinfo == datetime.timezone.utc
-        ), "After DST not converted to UTC"
+        assert before_utc_dt.tzinfo == datetime.timezone.utc, (
+            "Before DST not converted to UTC"
+        )
+        assert after_utc_dt.tzinfo == datetime.timezone.utc, (
+            "After DST not converted to UTC"
+        )
 
         # Time difference should account for DST change
         # March 9 to March 11 is 2 days, but because of DST spring forward,
@@ -944,9 +944,9 @@ class TestTimezoneIndependentComparison:
         actual_diff_seconds = time_diff.total_seconds()
         expected_diff_seconds = expected_diff.total_seconds()
 
-        assert (
-            abs(actual_diff_seconds - expected_diff_seconds) <= 3600
-        ), f"DST handling incorrect: actual={actual_diff_seconds}, expected={expected_diff_seconds}"
+        assert abs(actual_diff_seconds - expected_diff_seconds) <= 3600, (
+            f"DST handling incorrect: actual={actual_diff_seconds}, expected={expected_diff_seconds}"
+        )
 
     def test_timezone_conversion_error_handling(self, staleness_detector):
         """Test graceful handling of timezone conversion errors."""
@@ -971,9 +971,9 @@ class TestTimezoneIndependentComparison:
             result = staleness_detector.normalize_to_utc(
                 valid_timestamp, source_timezone="Invalid/Timezone"
             )
-            assert result is None or isinstance(
-                result, float
-            ), "Invalid timezone should be handled gracefully"
+            assert result is None or isinstance(result, float), (
+                "Invalid timezone should be handled gracefully"
+            )
         except Exception as e:
             pytest.fail(
                 f"normalize_to_utc should handle invalid timezone gracefully: {e}"
@@ -1019,15 +1019,15 @@ class TestTimezoneIndependentComparison:
         processing_time = (end_time - start_time) * 1000  # milliseconds
 
         # Should still meet original <100ms requirement with UTC conversion
-        assert (
-            processing_time < 100
-        ), f"UTC conversion caused performance regression: {processing_time}ms"
+        assert processing_time < 100, (
+            f"UTC conversion caused performance regression: {processing_time}ms"
+        )
 
         # UTC conversion overhead should be minimal (<10ms per 20 operations = <0.5ms per operation)
         per_operation_time = processing_time / len(query_results)
-        assert (
-            per_operation_time < 10
-        ), f"UTC conversion overhead too high: {per_operation_time}ms per operation"
+        assert per_operation_time < 10, (
+            f"UTC conversion overhead too high: {per_operation_time}ms per operation"
+        )
 
         assert len(results) == 20
 
@@ -1055,9 +1055,9 @@ class TestTimezoneIndependentComparison:
         )
 
         # Should be valid UTC timestamp
-        assert (
-            indexed_dt.tzinfo == datetime.timezone.utc
-        ), "Remote timestamp not in UTC format"
+        assert indexed_dt.tzinfo == datetime.timezone.utc, (
+            "Remote timestamp not in UTC format"
+        )
 
         # Should be reasonable recent time (within last day)
         time_diff = abs(current_utc - query_result.indexed_timestamp)
@@ -1096,9 +1096,9 @@ class TestTimezoneIndependentComparison:
         # Should include timezone metadata for debugging
         assert hasattr(result, "timezone_info"), "Timezone metadata not included"
         assert result.timezone_info is not None, "Timezone metadata is None"
-        assert (
-            "local_timezone" in result.timezone_info
-        ), "Local timezone not in metadata"
-        assert (
-            "utc_normalized" in result.timezone_info
-        ), "UTC normalization flag not in metadata"
+        assert "local_timezone" in result.timezone_info, (
+            "Local timezone not in metadata"
+        )
+        assert "utc_normalized" in result.timezone_info, (
+            "UTC normalization flag not in metadata"
+        )

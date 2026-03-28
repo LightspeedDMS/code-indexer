@@ -116,21 +116,21 @@ This is critical functionality for development workflows."""
         ), f"Subject line not found in commit message. Got: {commit.message[:100]}"
 
         # Verify multi-paragraph content is preserved
-        assert (
-            "Technical Details:" in commit.message
-        ), f"Multi-paragraph message not preserved. Got: {commit.message[:200]}"
+        assert "Technical Details:" in commit.message, (
+            f"Multi-paragraph message not preserved. Got: {commit.message[:200]}"
+        )
 
-        assert (
-            "Architecture Changes:" in commit.message
-        ), f"Multi-paragraph message not preserved. Got: {commit.message[:200]}"
+        assert "Architecture Changes:" in commit.message, (
+            f"Multi-paragraph message not preserved. Got: {commit.message[:200]}"
+        )
 
         # Verify pipe character in message didn't break parsing
-        assert (
-            "prevents thrashing" in commit.message
-        ), f"Content after pipe character was truncated. Got: {commit.message[:200]}"
+        assert "prevents thrashing" in commit.message, (
+            f"Content after pipe character was truncated. Got: {commit.message[:200]}"
+        )
 
         # Verify it's not truncated to first line
         first_line = "feat: implement watch mode | add real-time indexing"
-        assert (
-            len(commit.message) > len(first_line) * 2
-        ), f"Message appears truncated to first line only ({len(commit.message)} chars)"
+        assert len(commit.message) > len(first_line) * 2, (
+            f"Message appears truncated to first line only ({len(commit.message)} chars)"
+        )

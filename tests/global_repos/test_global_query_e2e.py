@@ -221,15 +221,15 @@ class TestGlobalQueryE2E:
             )
 
             # Verify: Query succeeded and returned results
-            assert (
-                result.returncode == 0
-            ), f"Query failed: stdout={result.stdout}, stderr={result.stderr}"
-            assert (
-                "authenticate_user" in result.stdout
-            ), f"Expected function not found in results: {result.stdout}"
-            assert (
-                "auth.py" in result.stdout
-            ), f"Expected file not found in results: {result.stdout}"
+            assert result.returncode == 0, (
+                f"Query failed: stdout={result.stdout}, stderr={result.stderr}"
+            )
+            assert "authenticate_user" in result.stdout, (
+                f"Expected function not found in results: {result.stdout}"
+            )
+            assert "auth.py" in result.stdout, (
+                f"Expected file not found in results: {result.stdout}"
+            )
 
 
 # NOTE: The actual MCP/REST query integration will be tested after CLI implementation.

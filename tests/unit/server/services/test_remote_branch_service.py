@@ -236,9 +236,9 @@ class TestRemoteBranchService:
         # Verify no UPPERCASE issue-tracker patterns in result
         # Pattern matches JIRA-style keys: ABC-123, SCM-1234, etc.
         for branch in result.branches:
-            assert not ISSUE_TRACKER_PATTERN.search(
-                branch
-            ), f"Branch '{branch}' should have been filtered (matches issue-tracker pattern)"
+            assert not ISSUE_TRACKER_PATTERN.search(branch), (
+                f"Branch '{branch}' should have been filtered (matches issue-tracker pattern)"
+            )
 
     def test_fetch_branches_invalid_url_returns_error(self):
         """Test that invalid/inaccessible URLs return error."""

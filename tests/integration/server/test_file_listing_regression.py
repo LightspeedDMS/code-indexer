@@ -44,9 +44,9 @@ class TestFileListingSignatureRegression:
         )
 
         # Should not crash with 500 error
-        assert (
-            response.status_code != 500
-        ), f"Server crashed with signature error: {response.json()}"
+        assert response.status_code != 500, (
+            f"Server crashed with signature error: {response.json()}"
+        )
 
         # Should return either 200 (repo exists) or 404 (repo doesn't exist)
         # but not 500 (server error)

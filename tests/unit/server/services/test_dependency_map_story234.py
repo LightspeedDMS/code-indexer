@@ -186,12 +186,12 @@ class TestTruncationGuardAC3:
 
         # Confirm existing body is large (> 500 chars)
         existing_body = FULL_DOMAIN_CONTENT.split("---\n\n", 1)[-1]
-        assert (
-            len(existing_body) > 500
-        ), f"Test setup: body should be >500 chars, got {len(existing_body)}"
-        assert (
-            len(CHANGE_SUMMARY_RESPONSE) < len(existing_body) * 0.5
-        ), "Test setup: short response should be < 50% of existing body"
+        assert len(existing_body) > 500, (
+            f"Test setup: body should be >500 chars, got {len(existing_body)}"
+        )
+        assert len(CHANGE_SUMMARY_RESPONSE) < len(existing_body) * 0.5, (
+            "Test setup: short response should be < 50% of existing body"
+        )
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
@@ -219,9 +219,9 @@ class TestTruncationGuardAC3:
             f"Expected preserved content ({len(original_content)} chars), "
             f"but file changed to ({len(result_content)} chars)"
         )
-        assert (
-            CHANGE_SUMMARY_RESPONSE not in result_content
-        ), "Short summary-only response should NOT appear in file after truncation guard fires"
+        assert CHANGE_SUMMARY_RESPONSE not in result_content, (
+            "Short summary-only response should NOT appear in file after truncation guard fires"
+        )
 
     def test_truncation_guard_logs_warning(self, tmp_path: Path, caplog):
         """
@@ -297,9 +297,9 @@ class TestTruncationGuardAC3:
 
         # At exactly 50%, guard should NOT fire — file should be updated
         result_content = domain_file.read_text()
-        assert (
-            response_at_50_pct in result_content
-        ), "At exactly 50% threshold, truncation guard should NOT fire"
+        assert response_at_50_pct in result_content, (
+            "At exactly 50% threshold, truncation guard should NOT fire"
+        )
 
 
 class TestLegitimateShortUpdatesAC4:
@@ -318,9 +318,9 @@ class TestLegitimateShortUpdatesAC4:
         # Verify small domain body is <= 500 chars (guard should not fire)
         parts = SMALL_DOMAIN_CONTENT.split("---\n\n", 1)
         existing_body = parts[-1] if len(parts) > 1 else SMALL_DOMAIN_CONTENT
-        assert (
-            len(existing_body) <= 500
-        ), f"Test setup: SMALL_DOMAIN_CONTENT body should be <=500 chars, got {len(existing_body)}"
+        assert len(existing_body) <= 500, (
+            f"Test setup: SMALL_DOMAIN_CONTENT body should be <=500 chars, got {len(existing_body)}"
+        )
 
         short_but_valid_response = (
             "# Domain Analysis: tiny-domain\n\n## Overview\n\nUpdated content."
@@ -344,9 +344,9 @@ class TestLegitimateShortUpdatesAC4:
 
         # File should be updated (guard did not fire)
         result_content = domain_file.read_text()
-        assert (
-            short_but_valid_response in result_content
-        ), "Small domains should accept short responses (guard only applies when body > 500 chars)"
+        assert short_but_valid_response in result_content, (
+            "Small domains should accept short responses (guard only applies when body > 500 chars)"
+        )
 
     def test_large_domain_accepts_proportional_long_response(self, tmp_path: Path):
         """
@@ -375,13 +375,13 @@ class TestLegitimateShortUpdatesAC4:
         )
 
         result_content = domain_file.read_text()
-        assert (
-            UPDATED_FULL_RESPONSE in result_content
-        ), "Full proportional response should update the file normally"
+        assert UPDATED_FULL_RESPONSE in result_content, (
+            "Full proportional response should update the file normally"
+        )
         # Confirm key sections of updated response are present
-        assert (
-            "voyage-3-large" in result_content
-        ), "Updated content should contain the new analysis details"
+        assert "voyage-3-large" in result_content, (
+            "Updated content should contain the new analysis details"
+        )
 
     def test_empty_existing_content_does_not_crash(self, tmp_path: Path):
         """
@@ -440,9 +440,9 @@ class TestLegitimateShortUpdatesAC4:
         )
 
         result_content = domain_file.read_text()
-        assert (
-            proportional_response in result_content
-        ), "Proportional update to no-frontmatter file should succeed"
+        assert proportional_response in result_content, (
+            "Proportional update to no-frontmatter file should succeed"
+        )
 
 
 class TestFrontmatterTimestampAC1:

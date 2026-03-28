@@ -29,9 +29,9 @@ class TestDeprecatedSemanticOptionsRemoval:
         # Check if it's the right kind of failure - should be option error, not internal error
         if result.exception:
             # Should be a UsageError from Click for unknown option, not TypeError
-            assert not isinstance(
-                result.exception, TypeError
-            ), "Should reject option, not fail with internal TypeError"
+            assert not isinstance(result.exception, TypeError), (
+                "Should reject option, not fail with internal TypeError"
+            )
 
         # The output should indicate the option is not recognized
         output_text = result.output if result.output else str(result.exception)
@@ -141,9 +141,9 @@ class TestDeprecatedSemanticOptionsRemoval:
         ]
 
         for option in deprecated_options:
-            assert (
-                option not in help_text
-            ), f"Deprecated option {option} found in help text"
+            assert option not in help_text, (
+                f"Deprecated option {option} found in help text"
+            )
 
     def test_query_help_text_no_semantic_filtering_section(self):
         """Verify query help text does not have semantic filtering section."""
@@ -177,9 +177,9 @@ class TestDeprecatedSemanticOptionsRemoval:
         ]
 
         for pattern in deprecated_example_patterns:
-            assert (
-                pattern not in help_text
-            ), f"Deprecated example pattern '{pattern}' found in help text"
+            assert pattern not in help_text, (
+                f"Deprecated example pattern '{pattern}' found in help text"
+            )
 
 
 class TestDebugFilesRemoval:
@@ -194,9 +194,9 @@ class TestDebugFilesRemoval:
         project_root = Path(__file__).parent.parent.parent.parent
         debug_file = project_root / "debug" / "test_async_api_implementation.py"
 
-        assert not os.path.exists(
-            debug_file
-        ), f"Debug file {debug_file} should be removed"
+        assert not os.path.exists(debug_file), (
+            f"Debug file {debug_file} should be removed"
+        )
 
     def test_debug_async_api_no_auth_file_removed(self):
         """Verify debug/test_async_api_no_auth.py has been removed."""
@@ -207,6 +207,6 @@ class TestDebugFilesRemoval:
         project_root = Path(__file__).parent.parent.parent.parent
         debug_file = project_root / "debug" / "test_async_api_no_auth.py"
 
-        assert not os.path.exists(
-            debug_file
-        ), f"Debug file {debug_file} should be removed"
+        assert not os.path.exists(debug_file), (
+            f"Debug file {debug_file} should be removed"
+        )

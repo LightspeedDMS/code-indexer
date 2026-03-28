@@ -59,9 +59,9 @@ class TestNSISScriptStructure:
             "RefreshToken",
         ]
         for var in required_vars:
-            assert re.search(
-                rf"Var\s+{var}", nsis_script_content
-            ), f"Missing variable declaration: {var}"
+            assert re.search(rf"Var\s+{var}", nsis_script_content), (
+                f"Missing variable declaration: {var}"
+            )
 
     def test_has_installer_metadata(self, nsis_script_content):
         """Script has installer metadata (name, outfile, etc.)."""

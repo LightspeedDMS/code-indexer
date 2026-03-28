@@ -65,9 +65,9 @@ class TestTruncationHelperSyncMethods:
         helper = TruncationHelper(payload_cache, content_limits)
 
         # Verify truncate_and_cache is NOT a coroutine function
-        assert not inspect.iscoroutinefunction(
-            helper.truncate_and_cache
-        ), "truncate_and_cache() should be sync, not async"
+        assert not inspect.iscoroutinefunction(helper.truncate_and_cache), (
+            "truncate_and_cache() should be sync, not async"
+        )
 
 
 class TestTruncationHelperSyncBehavior:

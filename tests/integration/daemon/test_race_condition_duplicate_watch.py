@@ -90,9 +90,9 @@ class TestRaceConditionDuplicateWatch:
         error_response = next(
             resp[1] for resp in responses if resp[1]["status"] == "error"
         )
-        assert (
-            "already running" in error_response.get("message", "").lower()
-        ), f"Error message should indicate 'already running', got: {error_response.get('message')}"
+        assert "already running" in error_response.get("message", "").lower(), (
+            f"Error message should indicate 'already running', got: {error_response.get('message')}"
+        )
 
         # Verify only ONE watch handler exists
         assert service.watch_handler is not None, "Watch handler should exist"
@@ -194,9 +194,9 @@ class TestRaceConditionDuplicateWatch:
 
         # Verify only ONE watch handler exists
         assert service.watch_handler is not None, "One watch handler should exist"
-        assert (
-            service.watch_thread is not None and service.watch_thread.is_alive()
-        ), "One watch thread should be running"
+        assert service.watch_thread is not None and service.watch_thread.is_alive(), (
+            "One watch thread should be running"
+        )
 
         # Stop watch
         service.exposed_watch_stop(str(project_path))
@@ -241,9 +241,9 @@ class TestRaceConditionDuplicateWatch:
             callback=None,
             debounce_seconds=1.0,
         )
-        assert (
-            response2["status"] == "success"
-        ), "New watch should be allowed after cleanup"
+        assert response2["status"] == "success", (
+            "New watch should be allowed after cleanup"
+        )
 
         # Stop second watch
         service.exposed_watch_stop(str(project_path))
@@ -268,9 +268,9 @@ class TestRaceConditionDuplicateWatch:
         response = service.exposed_watch_stop(str(project_path))
 
         # Should return error (not crash)
-        assert (
-            response["status"] == "error"
-        ), "Should return error for non-running watch"
-        assert (
-            "no watch running" in response.get("message", "").lower()
-        ), f"Error message should indicate no watch running, got: {response.get('message')}"
+        assert response["status"] == "error", (
+            "Should return error for non-running watch"
+        )
+        assert "no watch running" in response.get("message", "").lower(), (
+            f"Error message should indicate no watch running, got: {response.get('message')}"
+        )

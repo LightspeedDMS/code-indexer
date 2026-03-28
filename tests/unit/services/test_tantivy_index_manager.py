@@ -94,9 +94,9 @@ class TestTantivyIndexManager:
 
             # Get the writer and check heap size configuration
             heap_size = manager.get_writer_heap_size()
-            assert (
-                heap_size == 1_000_000_000
-            ), "IndexWriter should use fixed 1GB heap size"
+            assert heap_size == 1_000_000_000, (
+                "IndexWriter should use fixed 1GB heap size"
+            )
 
     def test_add_document_to_index(self):
         """Test adding a document to the FTS index."""
@@ -372,9 +372,9 @@ class TestTantivyIndexManager:
 
             # Must return the path exactly once (deduplicated)
             result = manager.get_all_indexed_paths()
-            assert result == [
-                shared_path
-            ], f"Expected exactly ['{shared_path}'], got {result}"
+            assert result == [shared_path], (
+                f"Expected exactly ['{shared_path}'], got {result}"
+            )
 
     def test_get_all_indexed_paths_empty_index(self):
         """get_all_indexed_paths() returns empty list when index has no documents."""
@@ -1218,12 +1218,12 @@ class TestBuildSearchQueryBoolean:
 
             # Should find documents from both files
             paths = [r["path"] for r in results]
-            assert any(
-                "auth.py" in p for p in paths
-            ), f"Expected auth.py in results for 'authenticate OR login', got: {paths}"
-            assert any(
-                "login.py" in p for p in paths
-            ), f"Expected login.py in results for 'authenticate OR login', got: {paths}"
+            assert any("auth.py" in p for p in paths), (
+                f"Expected auth.py in results for 'authenticate OR login', got: {paths}"
+            )
+            assert any("login.py" in p for p in paths), (
+                f"Expected login.py in results for 'authenticate OR login', got: {paths}"
+            )
 
     def test_search_non_boolean_unchanged(self):
         """Full search() with 'hello world' (no boolean ops) returns only docs with both terms."""
@@ -1232,9 +1232,9 @@ class TestBuildSearchQueryBoolean:
 
             # "hello world" — neither term exists in our test docs, so 0 results
             results = manager.search(query_text="hello world", edit_distance=0)
-            assert (
-                results == []
-            ), f"Expected no results for 'hello world' with AND semantics, got: {results}"
+            assert results == [], (
+                f"Expected no results for 'hello world' with AND semantics, got: {results}"
+            )
 
     def test_compound_not_query_returns_valid_query(self):
         """Compound 'authenticate NOT token' routes through boolean parse_query path.

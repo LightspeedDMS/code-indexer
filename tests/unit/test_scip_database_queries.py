@@ -61,7 +61,9 @@ def test_max_depth_cap_at_3(caplog):
         # Verify warning was logged
         assert any(
             "capping at 3" in record.message.lower() for record in caplog.records
-        ), f"Expected warning about depth cap. Got logs: {[r.message for r in caplog.records]}"
+        ), (
+            f"Expected warning about depth cap. Got logs: {[r.message for r in caplog.records]}"
+        )
 
         # Verify depth was actually capped (query should have used max_depth=3)
         # This is validated indirectly - if depth wasn't capped, the query would take much longer
@@ -112,9 +114,9 @@ def test_index_migration_creates_all_indexes():
         ]
 
         for expected_idx in expected_indexes:
-            assert (
-                expected_idx in indexes
-            ), f"Index {expected_idx} not found. Found: {indexes}"
+            assert expected_idx in indexes, (
+                f"Index {expected_idx} not found. Found: {indexes}"
+            )
 
         conn.close()
 
@@ -157,9 +159,9 @@ def test_index_migration_is_idempotent():
         cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index'")
         count_second = cursor.fetchone()[0]
 
-        assert (
-            count_first == count_second
-        ), f"Index count changed: {count_first} -> {count_second}"
+        assert count_first == count_second, (
+            f"Index count changed: {count_first} -> {count_second}"
+        )
 
         # Run migration third time (should still not error)
         ensure_indexes_created(conn)
@@ -230,15 +232,15 @@ def test_database_backend_auto_runs_migration():
         ]
 
         for expected_idx in expected_indexes:
-            assert (
-                expected_idx in indexes
-            ), f"Index {expected_idx} not created. Found: {indexes}"
+            assert expected_idx in indexes, (
+                f"Index {expected_idx} not created. Found: {indexes}"
+            )
 
         # Verify version was updated to 2
         updated_version = get_scip_db_version(config_path)
-        assert (
-            updated_version == 2
-        ), f"Version should be 2 after migration, got {updated_version}"
+        assert updated_version == 2, (
+            f"Version should be 2 after migration, got {updated_version}"
+        )
 
         backend.conn.close()
 
@@ -257,9 +259,9 @@ def test_database_backend_auto_runs_migration():
         cursor = backend2.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index'")
         index_count_after = cursor.fetchone()[0]
-        assert (
-            index_count_after == index_count_before
-        ), "Index count should not change on second initialization (fast path)"
+        assert index_count_after == index_count_before, (
+            "Index count should not change on second initialization (fast path)"
+        )
 
         backend2.conn.close()
 
@@ -313,9 +315,9 @@ def test_migration_flow_with_version_persistence():
         # Verify indexes were created
         cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index'")
         index_count = cursor.fetchone()[0]
-        assert (
-            index_count == 5
-        ), f"Expected 5 indexes after migration, got {index_count}"
+        assert index_count == 5, (
+            f"Expected 5 indexes after migration, got {index_count}"
+        )
 
         # Simulate config update (would be done by caller)
         config_mgr = ConfigManager(config_path)
@@ -343,9 +345,9 @@ def test_migration_flow_with_version_persistence():
 
         # Verify index count unchanged (idempotent)
         cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index'")
-        assert (
-            cursor.fetchone()[0] == 5
-        ), "Index count should remain 5 after idempotent migration"
+        assert cursor.fetchone()[0] == 5, (
+            "Index count should remain 5 after idempotent migration"
+        )
 
         conn.close()
 
@@ -971,7 +973,7 @@ class TestFindDefinition:
 
             # PERFORMANCE ASSERTION: Must complete in <5ms
             assert elapsed < 0.005, (
-                f"Definition lookup took {elapsed*1000:.1f}ms, exceeds 5ms target. "
+                f"Definition lookup took {elapsed * 1000:.1f}ms, exceeds 5ms target. "
                 f"Current implementation using LIKE queries causes full table scan. "
                 f"Expected: FTS5 index usage for <5ms performance."
             )
@@ -1112,7 +1114,7 @@ class TestFindReferences:
 
             # PERFORMANCE ASSERTION: Must complete in <10ms
             assert elapsed < 0.010, (
-                f"Reference search took {elapsed*1000:.1f}ms, exceeds 10ms target. "
+                f"Reference search took {elapsed * 1000:.1f}ms, exceeds 10ms target. "
                 f"Current implementation using LIKE queries causes full table scan. "
                 f"Expected: FTS5 index usage for <10ms performance."
             )
@@ -1157,7 +1159,7 @@ class TestGetDependencies:
 
             # PERFORMANCE ASSERTION: Must complete in <20ms
             assert elapsed < 0.020, (
-                f"Depth=1 dependency query took {elapsed*1000:.1f}ms, exceeds 20ms target. "
+                f"Depth=1 dependency query took {elapsed * 1000:.1f}ms, exceeds 20ms target. "
                 f"Expected: <20ms for 150x speedup over protobuf baseline."
             )
         finally:
@@ -1193,13 +1195,13 @@ class TestGetDependencies:
             elapsed = time.perf_counter() - start
 
             # Verify correctness
-            assert isinstance(
-                results, list
-            ), "Should return list of transitive dependencies"
+            assert isinstance(results, list), (
+                "Should return list of transitive dependencies"
+            )
 
             # PERFORMANCE ASSERTION: Must complete in <50ms
             assert elapsed < 0.050, (
-                f"Depth=2 dependency query took {elapsed*1000:.1f}ms, exceeds 50ms target. "
+                f"Depth=2 dependency query took {elapsed * 1000:.1f}ms, exceeds 50ms target. "
                 f"Expected: <50ms for 100x speedup over protobuf baseline."
             )
         finally:
@@ -1357,14 +1359,14 @@ class TestGetDependencies:
             )
 
             # Should INCLUDE Method kind
-            assert (
-                callee_method in result_symbols
-            ), f"Method kind symbol not found in results! Results: {result_symbols}"
+            assert callee_method in result_symbols, (
+                f"Method kind symbol not found in results! Results: {result_symbols}"
+            )
 
             # Verify correct number of results (3: 2 NULL + 1 Method)
-            assert (
-                len(results) == 3
-            ), f"Expected 3 results (2 NULL + 1 Method), got {len(results)}"
+            assert len(results) == 3, (
+                f"Expected 3 results (2 NULL + 1 Method), got {len(results)}"
+            )
 
         finally:
             conn.close()
@@ -1407,7 +1409,7 @@ class TestGetDependents:
 
             # PERFORMANCE ASSERTION: Must complete in <20ms
             assert elapsed < 0.020, (
-                f"Depth=1 dependent query took {elapsed*1000:.1f}ms, exceeds 20ms target. "
+                f"Depth=1 dependent query took {elapsed * 1000:.1f}ms, exceeds 20ms target. "
                 f"Expected: <20ms for 150x speedup over protobuf baseline."
             )
         finally:
@@ -1443,13 +1445,13 @@ class TestGetDependents:
             elapsed = time.perf_counter() - start
 
             # Verify correctness
-            assert isinstance(
-                results, list
-            ), "Should return list of transitive dependents"
+            assert isinstance(results, list), (
+                "Should return list of transitive dependents"
+            )
 
             # PERFORMANCE ASSERTION: Must complete in <50ms
             assert elapsed < 0.050, (
-                f"Depth=2 dependent query took {elapsed*1000:.1f}ms, exceeds 50ms target. "
+                f"Depth=2 dependent query took {elapsed * 1000:.1f}ms, exceeds 50ms target. "
                 f"Expected: <50ms for 100x speedup over protobuf baseline."
             )
         finally:
@@ -1607,14 +1609,14 @@ class TestGetDependents:
             )
 
             # Should INCLUDE Method kind
-            assert (
-                caller_method in result_symbols
-            ), f"Method kind symbol not found in results! Results: {result_symbols}"
+            assert caller_method in result_symbols, (
+                f"Method kind symbol not found in results! Results: {result_symbols}"
+            )
 
             # Verify correct number of results (3: 2 NULL + 1 Method)
-            assert (
-                len(results) == 3
-            ), f"Expected 3 results (2 NULL + 1 Method), got {len(results)}"
+            assert len(results) == 3, (
+                f"Expected 3 results (2 NULL + 1 Method), got {len(results)}"
+            )
 
         finally:
             conn.close()
@@ -1684,9 +1686,9 @@ class TestGetDependents:
             result_symbols = {r["symbol_name"] for r in results}
 
             assert deps["imported"] in result_symbols, "Import dependency missing"
-            assert (
-                deps["accessed"] in result_symbols
-            ), "Attribute access dependency missing"
+            assert deps["accessed"] in result_symbols, (
+                "Attribute access dependency missing"
+            )
             assert deps["assigned"] in result_symbols, "Variable dependency missing"
             assert deps["called"] in result_symbols, "Function call dependency missing"
 
@@ -1738,9 +1740,9 @@ class TestGetDependents:
 
             # Verify all 3 dependents returned
             result_names = {r["symbol_name"] for r in results}
-            assert (
-                len(result_names) == 3
-            ), f"Expected 3 dependents, got {len(result_names)}"
+            assert len(result_names) == 3, (
+                f"Expected 3 dependents, got {len(result_names)}"
+            )
 
             # Performance assertion
             assert elapsed < 1.0, (
@@ -1778,9 +1780,9 @@ class TestGetDependents:
 
             # Verify all 3 dependencies returned
             result_names = {r["symbol_name"] for r in results}
-            assert (
-                len(result_names) == 3
-            ), f"Expected 3 dependencies, got {len(result_names)}"
+            assert len(result_names) == 3, (
+                f"Expected 3 dependencies, got {len(result_names)}"
+            )
 
             # Performance assertion
             assert elapsed < 1.0, (
@@ -1869,18 +1871,18 @@ class TestQueryEngineIntegration:
         engine = SCIPQueryEngine(scip_file)
 
         # VERIFY database backend is being used (not protobuf fallback)
-        assert hasattr(
-            engine, "db_path"
-        ), "Engine should have db_path attribute when database exists"
-        assert hasattr(
-            engine, "db_conn"
-        ), "Engine should have db_conn attribute when database exists"
-        assert (
-            engine.db_path == manager.db_path
-        ), "Engine should use correct database path"
-        assert (
-            engine.db_conn is not None
-        ), "Engine should have active database connection"
+        assert hasattr(engine, "db_path"), (
+            "Engine should have db_path attribute when database exists"
+        )
+        assert hasattr(engine, "db_conn"), (
+            "Engine should have db_conn attribute when database exists"
+        )
+        assert engine.db_path == manager.db_path, (
+            "Engine should use correct database path"
+        )
+        assert engine.db_conn is not None, (
+            "Engine should have active database connection"
+        )
 
         # Test find_definition() uses database backend
         results = engine.find_definition("TestClass", exact=True)
@@ -1989,9 +1991,9 @@ class TestQueryEngineIntegration:
         engine = SCIPQueryEngine(scip_file)
 
         # CRITICAL ASSERTION: trace_call_chain() method must be exposed
-        assert hasattr(
-            engine, "trace_call_chain"
-        ), "SCIPQueryEngine must expose trace_call_chain() method (AC5 violation)"
+        assert hasattr(engine, "trace_call_chain"), (
+            "SCIPQueryEngine must expose trace_call_chain() method (AC5 violation)"
+        )
 
         # Test trace_call_chain() delegation
         chains = engine.trace_call_chain(
@@ -2000,9 +2002,9 @@ class TestQueryEngineIntegration:
 
         # Verify results structure
         assert isinstance(chains, list), "Should return list of CallChain objects"
-        assert (
-            len(chains) > 0
-        ), "Should find at least one path from FunctionA to FunctionC"
+        assert len(chains) > 0, (
+            "Should find at least one path from FunctionA to FunctionC"
+        )
 
         # Verify CallChain structure
         chain = chains[0]
@@ -2011,9 +2013,9 @@ class TestQueryEngineIntegration:
         assert hasattr(chain, "has_cycle"), "CallChain must have 'has_cycle' attribute"
 
         # Verify path correctness
-        assert (
-            len(chain.path) == 3
-        ), f"Expected 3 symbols in path, got {len(chain.path)}"
+        assert len(chain.path) == 3, (
+            f"Expected 3 symbols in path, got {len(chain.path)}"
+        )
         assert chain.length == 2, f"Expected length 2, got {chain.length}"
         assert chain.has_cycle is False, f"Expected no cycle, got {chain.has_cycle}"
 
@@ -2184,7 +2186,7 @@ class TestAnalyzeImpact:
 
             # PERFORMANCE ASSERTION: Must complete in <200ms
             assert elapsed < 0.200, (
-                f"Impact analysis (depth=3) took {elapsed*1000:.1f}ms, exceeds 200ms target. "
+                f"Impact analysis (depth=3) took {elapsed * 1000:.1f}ms, exceeds 200ms target. "
                 f"Expected: <200ms for 150x speedup over protobuf baseline."
             )
         finally:
@@ -2284,16 +2286,16 @@ class TestAnalyzeImpact:
 
             # ASSERTION: Caller.use_process() should appear ONCE (not twice)
             # Even though both Base.process() and Derived.process() are queried via backend merging
-            assert (
-                len(results) == 1
-            ), f"Expected 1 result (src/caller.py), got {len(results)}"
+            assert len(results) == 1, (
+                f"Expected 1 result (src/caller.py), got {len(results)}"
+            )
             assert results[0]["file_path"] == "src/caller.py"
-            assert (
-                results[0]["symbol_count"] == 1
-            ), f"Expected symbol_count=1 (deduplicated), got {results[0]['symbol_count']}"
-            assert (
-                caller_use in results[0]["symbols"]
-            ), f"Expected '{caller_use}' in symbols, got {results[0]['symbols']}"
+            assert results[0]["symbol_count"] == 1, (
+                f"Expected symbol_count=1 (deduplicated), got {results[0]['symbol_count']}"
+            )
+            assert caller_use in results[0]["symbols"], (
+                f"Expected '{caller_use}' in symbols, got {results[0]['symbols']}"
+            )
 
         finally:
             conn.close()
@@ -2375,9 +2377,9 @@ class TestAnalyzeImpact:
             assert results[0]["file_path"] == "src/caller.py"
 
             # CRITICAL: Symbol name with commas must be intact (not split)
-            assert (
-                len(results[0]["symbols"]) == 1
-            ), f"Expected 1 symbol (not split on commas), got {len(results[0]['symbols'])}: {results[0]['symbols']}"
+            assert len(results[0]["symbols"]) == 1, (
+                f"Expected 1 symbol (not split on commas), got {len(results[0]['symbols'])}: {results[0]['symbols']}"
+            )
 
             assert results[0]["symbols"][0] == dependent_symbol, (
                 f"Expected '{dependent_symbol}', got '{results[0]['symbols'][0]}'. "
@@ -2500,18 +2502,18 @@ class TestTraceCallChain:
 
             result = results[0]
             assert result["length"] == 1, f"Expected length 1, got {result['length']}"
-            assert (
-                result["has_cycle"] is False
-            ), f"Expected no cycle, got {result['has_cycle']}"
-            assert (
-                len(result["path"]) == 2
-            ), f"Expected 2 symbols in path, got {len(result['path'])}"
-            assert (
-                "EntryPoint" in result["path"][0]
-            ), f"Expected EntryPoint in path[0], got {result['path'][0]}"
-            assert (
-                "MiddleFunc" in result["path"][1]
-            ), f"Expected MiddleFunc in path[1], got {result['path'][1]}"
+            assert result["has_cycle"] is False, (
+                f"Expected no cycle, got {result['has_cycle']}"
+            )
+            assert len(result["path"]) == 2, (
+                f"Expected 2 symbols in path, got {len(result['path'])}"
+            )
+            assert "EntryPoint" in result["path"][0], (
+                f"Expected EntryPoint in path[0], got {result['path'][0]}"
+            )
+            assert "MiddleFunc" in result["path"][1], (
+                f"Expected MiddleFunc in path[1], got {result['path'][1]}"
+            )
 
         finally:
             conn.close()
@@ -2542,21 +2544,21 @@ class TestTraceCallChain:
 
             result = results[0]
             assert result["length"] == 2, f"Expected length 2, got {result['length']}"
-            assert (
-                result["has_cycle"] is False
-            ), f"Expected no cycle, got {result['has_cycle']}"
-            assert (
-                len(result["path"]) == 3
-            ), f"Expected 3 symbols in path, got {len(result['path'])}"
-            assert (
-                "EntryPoint" in result["path"][0]
-            ), f"Expected EntryPoint in path[0], got {result['path'][0]}"
-            assert (
-                "MiddleFunc" in result["path"][1]
-            ), f"Expected MiddleFunc in path[1], got {result['path'][1]}"
-            assert (
-                "TargetFunc" in result["path"][2]
-            ), f"Expected TargetFunc in path[2], got {result['path'][2]}"
+            assert result["has_cycle"] is False, (
+                f"Expected no cycle, got {result['has_cycle']}"
+            )
+            assert len(result["path"]) == 3, (
+                f"Expected 3 symbols in path, got {len(result['path'])}"
+            )
+            assert "EntryPoint" in result["path"][0], (
+                f"Expected EntryPoint in path[0], got {result['path'][0]}"
+            )
+            assert "MiddleFunc" in result["path"][1], (
+                f"Expected MiddleFunc in path[1], got {result['path'][1]}"
+            )
+            assert "TargetFunc" in result["path"][2], (
+                f"Expected TargetFunc in path[2], got {result['path'][2]}"
+            )
 
         finally:
             conn.close()
@@ -2660,19 +2662,19 @@ class TestTraceCallChain:
             assert len(results) == 2, f"Expected 2 paths, got {len(results)}"
 
             # Both paths should have length 2
-            assert all(
-                r["length"] == 2 for r in results
-            ), f"Expected all paths with length 2, got {[r['length'] for r in results]}"
+            assert all(r["length"] == 2 for r in results), (
+                f"Expected all paths with length 2, got {[r['length'] for r in results]}"
+            )
             assert all(r["has_cycle"] is False for r in results), "Expected no cycles"
 
             # Check that we have both paths (order may vary)
             path_middles = [r["path"][1] for r in results]
-            assert any(
-                "Middle1" in p for p in path_middles
-            ), f"Expected Middle1 in paths, got {path_middles}"
-            assert any(
-                "Middle2" in p for p in path_middles
-            ), f"Expected Middle2 in paths, got {path_middles}"
+            assert any("Middle1" in p for p in path_middles), (
+                f"Expected Middle1 in paths, got {path_middles}"
+            )
+            assert any("Middle2" in p for p in path_middles), (
+                f"Expected Middle2 in paths, got {path_middles}"
+            )
 
         finally:
             conn.close()
@@ -2770,18 +2772,18 @@ class TestTraceCallChain:
             assert len(results) == 2, f"Expected 2 paths, got {len(results)}"
 
             # First result should be shortest path (direct)
-            assert (
-                results[0]["length"] == 1
-            ), f"Expected length 1 for first path, got {results[0]['length']}"
+            assert results[0]["length"] == 1, (
+                f"Expected length 1 for first path, got {results[0]['length']}"
+            )
             assert results[0]["has_cycle"] is False, "Expected no cycle in direct path"
 
             # Second result should show cyclic path
-            assert (
-                results[1]["length"] == 3
-            ), f"Expected length 3 for cyclic path, got {results[1]['length']}"
-            assert (
-                results[1]["has_cycle"] is True
-            ), f"Expected has_cycle=True for cyclic path, got {results[1]['has_cycle']}"
+            assert results[1]["length"] == 3, (
+                f"Expected length 3 for cyclic path, got {results[1]['length']}"
+            )
+            assert results[1]["has_cycle"] is True, (
+                f"Expected has_cycle=True for cyclic path, got {results[1]['has_cycle']}"
+            )
             # Verify path includes cycle: A -> B -> C -> B
             assert len(results[1]["path"]) == 4, "Expected 4 symbols in cyclic path"
             assert "A#" in results[1]["path"][0]
@@ -3012,15 +3014,15 @@ class TestTraceCallChainV2BidirectionalBFS:
 
             # Verify all paths start with DaemonService
             for chain in chains:
-                assert (
-                    "CIDXDaemonService#" in chain["path"][0]
-                ), f"Path should start with DaemonService: {chain['path'][0]}"
+                assert "CIDXDaemonService#" in chain["path"][0], (
+                    f"Path should start with DaemonService: {chain['path'][0]}"
+                )
 
             # Verify all paths end with _is_text_file
             for chain in chains:
-                assert (
-                    "_is_text_file()." in chain["path"][-1]
-                ), f"Path should end with _is_text_file: {chain['path'][-1]}"
+                assert "_is_text_file()." in chain["path"][-1], (
+                    f"Path should end with _is_text_file: {chain['path'][-1]}"
+                )
 
         finally:
             conn.close()
@@ -3107,9 +3109,9 @@ class TestTraceCallChainV2BidirectionalBFS:
             assert lengths == sorted(lengths), f"Paths not sorted by length: {lengths}"
 
             # Verify shortest path is 2 hops (symbol_references finds more direct paths than call_graph)
-            assert (
-                chains[0]["length"] == 2
-            ), f"Shortest path should be 2 hops, got {chains[0]['length']}"
+            assert chains[0]["length"] == 2, (
+                f"Shortest path should be 2 hops, got {chains[0]['length']}"
+            )
 
         finally:
             conn.close()
@@ -3149,9 +3151,9 @@ class TestTraceCallChainV2BidirectionalBFS:
 
             # Verify no cycles in any path
             for chain in chains:
-                assert (
-                    chain["has_cycle"] is False
-                ), f"Path should not have cycles: {chain}"
+                assert chain["has_cycle"] is False, (
+                    f"Path should not have cycles: {chain}"
+                )
 
         finally:
             conn.close()
@@ -3512,15 +3514,15 @@ class TestDependenciesHybridClassLevelBug:
 
             # Verify UserRepository found
             repo_deps = [d for d in deps if "UserRepository" in d["symbol_name"]]
-            assert (
-                len(repo_deps) >= 1
-            ), f"Expected UserRepository, got: {[d['symbol_name'] for d in deps]}"
+            assert len(repo_deps) >= 1, (
+                f"Expected UserRepository, got: {[d['symbol_name'] for d in deps]}"
+            )
 
             # Verify relationship type
             relationships = {d["relationship"] for d in repo_deps}
-            assert (
-                "import" in relationships or "calls" in relationships
-            ), f"Expected import/calls relationship, got: {relationships}"
+            assert "import" in relationships or "calls" in relationships, (
+                f"Expected import/calls relationship, got: {relationships}"
+            )
 
         finally:
             conn.close()
@@ -3577,9 +3579,9 @@ class TestDependenciesHybridClassLevelBug:
             )
 
             # Inner has NO dependencies in this test scenario
-            assert (
-                len(deps) == 0
-            ), f"Expected 0 dependencies (Inner has no references), got {len(deps)}: {dep_symbols}"
+            assert len(deps) == 0, (
+                f"Expected 0 dependencies (Inner has no references), got {len(deps)}: {dep_symbols}"
+            )
 
         finally:
             conn.close()
@@ -3623,12 +3625,12 @@ class TestDependenciesHybridClassLevelBug:
 
         # Test 1: Expand UserController CLASS (ID=1) to methods
         usercontroller_methods = backend._expand_class_to_methods(1)
-        assert (
-            len(usercontroller_methods) > 0
-        ), "UserController CLASS should expand to methods"
-        assert (
-            1 not in usercontroller_methods
-        ), "Expanded list should NOT include class ID itself"
+        assert len(usercontroller_methods) > 0, (
+            "UserController CLASS should expand to methods"
+        )
+        assert 1 not in usercontroller_methods, (
+            "Expanded list should NOT include class ID itself"
+        )
 
         # Verify methods include getUser and listUsers
         import sqlite3
@@ -3642,21 +3644,21 @@ class TestDependenciesHybridClassLevelBug:
             usercontroller_methods,
         )
         method_names = [row[0] for row in cursor.fetchall()]
-        assert any(
-            "getUser" in name for name in method_names
-        ), f"Expected getUser in methods, got: {method_names}"
-        assert any(
-            "listUsers" in name for name in method_names
-        ), f"Expected listUsers in methods, got: {method_names}"
+        assert any("getUser" in name for name in method_names), (
+            f"Expected getUser in methods, got: {method_names}"
+        )
+        assert any("listUsers" in name for name in method_names), (
+            f"Expected listUsers in methods, got: {method_names}"
+        )
 
         # Test 2: Expand UserRepository INTERFACE (ID=8) to abstract methods
         userrepo_methods = backend._expand_class_to_methods(8)
-        assert (
-            len(userrepo_methods) > 0
-        ), "UserRepository INTERFACE should expand to methods"
-        assert (
-            8 not in userrepo_methods
-        ), "Expanded list should NOT include interface ID itself"
+        assert len(userrepo_methods) > 0, (
+            "UserRepository INTERFACE should expand to methods"
+        )
+        assert 8 not in userrepo_methods, (
+            "Expanded list should NOT include interface ID itself"
+        )
 
         cursor.execute(
             "SELECT name FROM symbols WHERE id IN ({})".format(
@@ -3665,9 +3667,9 @@ class TestDependenciesHybridClassLevelBug:
             userrepo_methods,
         )
         repo_method_names = [row[0] for row in cursor.fetchall()]
-        assert any(
-            "findById" in name for name in repo_method_names
-        ), f"Expected findById in methods, got: {repo_method_names}"
+        assert any("findById" in name for name in repo_method_names), (
+            f"Expected findById in methods, got: {repo_method_names}"
+        )
 
         # Test 3: METHOD symbol should NOT expand (return as-is)
         method_ids = backend._expand_class_to_methods(5)  # UserController#getUser
@@ -3731,9 +3733,9 @@ def test_trace_call_chain_java_mock_bug():
         # Verify call_graph has data (evidence it should work)
         cursor.execute("SELECT COUNT(*) FROM call_graph")
         call_graph_count = cursor.fetchone()[0]
-        assert (
-            call_graph_count > 0
-        ), f"call_graph table should have data, got {call_graph_count}"
+        assert call_graph_count > 0, (
+            f"call_graph table should have data, got {call_graph_count}"
+        )
 
         # Verify symbol_references has fewer rows (evidence of bug)
         cursor.execute("SELECT COUNT(*) FROM symbol_references")
@@ -3939,12 +3941,12 @@ def test_trace_call_chain_v2_batched_multiple_sources_and_targets():
             if len(path) == 3
         )
 
-        assert (
-            chain1_found
-        ), f"Chain 1 (methodA->methodC->targetX) not found in: {paths}"
-        assert (
-            chain2_found
-        ), f"Chain 2 (methodB->methodD->targetY) not found in: {paths}"
+        assert chain1_found, (
+            f"Chain 1 (methodA->methodC->targetX) not found in: {paths}"
+        )
+        assert chain2_found, (
+            f"Chain 2 (methodB->methodD->targetY) not found in: {paths}"
+        )
 
         conn.close()
 
@@ -4040,9 +4042,9 @@ def test_trace_call_chain_v2_batched_uses_symbol_references():
 
         # Assertions: Should find the chain via symbol_references
         assert error_msg is None, f"Query should not error: {error_msg}"
-        assert (
-            len(results) >= 1
-        ), f"Expected at least 1 chain using symbol_references, got {len(results)}"
+        assert len(results) >= 1, (
+            f"Expected at least 1 chain using symbol_references, got {len(results)}"
+        )
 
         # Verify the chain contains DaemonService#start and _is_text_file
         paths = [r["path"] for r in results]
@@ -4052,6 +4054,8 @@ def test_trace_call_chain_v2_batched_uses_symbol_references():
             if len(path) == 2
         )
 
-        assert chain_found, f"Expected chain DaemonService#start() -> _is_text_file() not found in: {paths}"
+        assert chain_found, (
+            f"Expected chain DaemonService#start() -> _is_text_file() not found in: {paths}"
+        )
 
         conn.close()

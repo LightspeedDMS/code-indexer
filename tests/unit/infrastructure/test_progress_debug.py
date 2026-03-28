@@ -36,10 +36,10 @@ def function_{i}():
 
 class TestClass_{i}:
     '''Test class {i}'''
-    
+
     def method_1(self):
         return "Method implementation"
-    
+
     def method_2(self):
         return "Another method"
 """
@@ -151,7 +151,7 @@ class TestClass_{i}:
                         # Simulate chunks for this file
                         for chunk_idx in range(3):  # 3 chunks per file
                             chunk_count += 1
-                            info = f"{chunk_count}/{total_chunks} files ({chunk_count/total_chunks*100:.1f}%) | 150.0 emb/s | 2 threads | {file_path.name}"
+                            info = f"{chunk_count}/{total_chunks} files ({chunk_count / total_chunks * 100:.1f}%) | 150.0 emb/s | 2 threads | {file_path.name}"
                             callback(chunk_count, total_chunks, file_path, info=info)
 
                 # Return realistic stats that match the progress calls
@@ -293,7 +293,7 @@ class TestClass_{i}:
                     total_files = len(self.test_files)
                     for i, file_path in enumerate(self.test_files):
                         current = i + 1
-                        info = f"{current}/{total_files} files ({current/total_files*100:.1f}%) | 200.0 emb/s | 2 threads | {file_path.name}"
+                        info = f"{current}/{total_files} files ({current / total_files * 100:.1f}%) | 200.0 emb/s | 2 threads | {file_path.name}"
                         callback(current, total_files, file_path, info=info)
 
                 # Return realistic processing results

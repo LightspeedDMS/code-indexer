@@ -231,7 +231,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
         # AFTER FIX: All batches should be ≤ 1,000 items
         for i, size in enumerate(submitted_batch_sizes):
             self.assertLessEqual(
-                size, 1000, f"Batch {i+1} has {size} items, exceeds 1,000 item limit"
+                size, 1000, f"Batch {i + 1} has {size} items, exceeds 1,000 item limit"
             )
 
         # Verify all chunks were processed (1,331 diffs + 1 commit message)

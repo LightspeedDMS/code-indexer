@@ -247,9 +247,9 @@ class TestProviderAwareNaming:
         collection_name = store.resolve_collection_name(mock_config, mock_provider)
 
         # Should use model name (/ and : replaced, - is valid in filesystem)
-        assert (
-            collection_name == "voyage-code-3"
-        ), "Collection name should be based on model name"
+        assert collection_name == "voyage-code-3", (
+            "Collection name should be based on model name"
+        )
 
 
 class TestMultipleProviderCoexistence:
@@ -404,14 +404,14 @@ class TestQuantizationAdaptation:
             hex_path = quantizer.quantize_vector(vector, projection_matrix)
 
             # Verify hex path is always 32 characters (regardless of input dimensions)
-            assert (
-                len(hex_path) == 32
-            ), f"Hex path should be 32 chars for {input_dims}-dim input"
+            assert len(hex_path) == 32, (
+                f"Hex path should be 32 chars for {input_dims}-dim input"
+            )
 
             # Verify hex path contains only valid hex characters
-            assert all(
-                c in "0123456789abcdef" for c in hex_path
-            ), "Hex path should contain only hex characters"
+            assert all(c in "0123456789abcdef" for c in hex_path), (
+                "Hex path should contain only hex characters"
+            )
 
 
 class TestDimensionValidation:
@@ -499,9 +499,9 @@ class TestEmbeddingModelMetadata:
         # Retrieve and verify metadata
         point = store.get_point(point_id, collection_name)
         assert point is not None
-        assert (
-            point["payload"]["embedding_model"] == embedding_model
-        ), "Embedding model should be stored in payload"
+        assert point["payload"]["embedding_model"] == embedding_model, (
+            "Embedding model should be stored in payload"
+        )
 
     def test_create_point_includes_embedding_model(self, tmp_path: Path):
         """AC11: create_point() helper includes embedding_model in payload."""
@@ -560,9 +560,9 @@ class TestProviderAgnosticImplementation:
 
         # The real test: verify code uses generic dimension parameters
         assert "vector_size" in source, "Should use generic vector_size parameter"
-        assert (
-            "input_dim" in source or "vector_size" in source
-        ), "Should use dimension-agnostic parameters"
+        assert "input_dim" in source or "vector_size" in source, (
+            "Should use dimension-agnostic parameters"
+        )
 
     def test_vector_store_works_with_arbitrary_dimensions(self, tmp_path: Path):
         """AC12,13: All existing embedding providers work unchanged, no provider-specific code."""
@@ -617,12 +617,12 @@ class TestCollectionMetadata:
             # Get collection info
             info = store.get_collection_info(collection_name)
 
-            assert (
-                "vector_size" in info
-            ), "Collection metadata should include vector_size"
-            assert (
-                info["vector_size"] == vector_size
-            ), f"vector_size should match {vector_size}"
+            assert "vector_size" in info, (
+                "Collection metadata should include vector_size"
+            )
+            assert info["vector_size"] == vector_size, (
+                f"vector_size should match {vector_size}"
+            )
 
 
 class TestEndToEndMultiProvider:
@@ -734,6 +734,6 @@ class TestEndToEndMultiProvider:
         collections = store.list_collections()
         assert voyageai_collection not in collections
         assert voyage_collection in collections
-        assert (
-            store.count_points(voyage_collection) == 5
-        ), "Deleting one collection should not affect others"
+        assert store.count_points(voyage_collection) == 5, (
+            "Deleting one collection should not affect others"
+        )

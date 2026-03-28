@@ -339,9 +339,9 @@ class TestDatabaseConsistencyDuringCancellation:
 
                 # All upsert operations should have succeeded (no partial batches)
                 for batch in mock_filesystem.upsert_calls:
-                    assert (
-                        len(batch) > 0
-                    ), "Empty batch should not be sent to Filesystem"
+                    assert len(batch) > 0, (
+                        "Empty batch should not be sent to Filesystem"
+                    )
 
 
 if __name__ == "__main__":

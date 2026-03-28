@@ -508,9 +508,9 @@ class TestAC4OmniHandlersAccessControl:
             call_args = mock_expand.call_args
             # Check that user was passed (either positional or keyword)
             all_args = list(call_args.args) + list(call_args.kwargs.values())
-            assert (
-                user in all_args
-            ), "_expand_wildcard_patterns must be called with user parameter"
+            assert user in all_args, (
+                "_expand_wildcard_patterns must be called with user parameter"
+            )
 
     def test_omni_search_code_filters_repo_aliases(self):
         """_omni_search_code must pass user to _expand_wildcard_patterns."""
@@ -543,9 +543,9 @@ class TestAC4OmniHandlersAccessControl:
         if mock_expand.called:
             call_args = mock_expand.call_args
             all_args = list(call_args.args) + list(call_args.kwargs.values())
-            assert (
-                user in all_args
-            ), "_expand_wildcard_patterns must be called with user parameter"
+            assert user in all_args, (
+                "_expand_wildcard_patterns must be called with user parameter"
+            )
 
 
 # ===========================================================================
@@ -597,9 +597,9 @@ class TestAC5CompositeRepoValidation:
             "manage_composite_repository must deny creation when golden_repo_aliases "
             "contains an unauthorized repo ('secret-repo')"
         )
-        assert "Access denied" in data.get(
-            "error", ""
-        ), f"Error message must indicate access denial. Got: {data.get('error', '')}"
+        assert "Access denied" in data.get("error", ""), (
+            f"Error message must indicate access denial. Got: {data.get('error', '')}"
+        )
 
     def test_composite_create_allows_all_authorized_components(self):
         """Creating composite repo with all authorized components must succeed."""
@@ -773,9 +773,9 @@ class TestAC6CidxMetaFiltering:
 
         # Verify via source inspection that search_code calls filter_cidx_meta_results
         source = inspect.getsource(handlers.search_code)
-        assert (
-            "filter_cidx_meta_results" in source
-        ), "search_code must call filter_cidx_meta_results for cidx-meta queries"
+        assert "filter_cidx_meta_results" in source, (
+            "search_code must call filter_cidx_meta_results for cidx-meta queries"
+        )
 
 
 # ===========================================================================

@@ -42,9 +42,9 @@ class TestThreadCountCalculation:
         # The 8 workers can occupy between 0-10 slots depending on timing
 
         # This proves get_slot_count() is WRONG for reporting thread count
-        assert (
-            slot_tracker.max_slots == 10
-        ), "Slot tracker has 10 slots (8 threads + 2 buffer)"
+        assert slot_tracker.max_slots == 10, (
+            "Slot tracker has 10 slots (8 threads + 2 buffer)"
+        )
         assert slot_tracker.get_slot_count() != vector_thread_count or (
             slot_tracker.get_slot_count() == 0
         ), "get_slot_count() returns occupied slots (0-10), not threads (8)"
@@ -122,15 +122,15 @@ class TestThreadCountCalculation:
 
         # WRONG approach (current bug)
         wrong_thread_count = slot_tracker.get_slot_count()
-        assert (
-            wrong_thread_count == 0
-        ), "Wrong: get_slot_count() returns 0 initially, but we have 8 threads!"
+        assert wrong_thread_count == 0, (
+            "Wrong: get_slot_count() returns 0 initially, but we have 8 threads!"
+        )
 
         # CORRECT approach (fix)
         correct_thread_count = vector_thread_count
-        assert (
-            correct_thread_count == 8
-        ), "Correct: Use vector_thread_count directly for accurate reporting"
+        assert correct_thread_count == 8, (
+            "Correct: Use vector_thread_count directly for accurate reporting"
+        )
 
 
 class TestHashPhaseVsIndexingPhase:
@@ -220,6 +220,6 @@ class TestBugReproduction:
         assert correct_thread_count == 8, "Fix: shows 8 threads (correct)"
 
         # This explains the user's observation
-        assert (
-            buggy_thread_count != correct_thread_count
-        ), "Bug: Reported 10 threads instead of 8"
+        assert buggy_thread_count != correct_thread_count, (
+            "Bug: Reported 10 threads instead of 8"
+        )

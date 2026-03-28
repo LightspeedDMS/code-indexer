@@ -139,6 +139,6 @@ class TestFilterParsingPerformance:
             # CRITICAL ASSERTION: PathFilterBuilder should be instantiated ONCE, not 3 times
             # BEFORE FIX: This will fail with call_count=3 (once per result)
             # AFTER FIX: call_count=1 (once before loop)
-            assert (
-                mock_path_filter_builder_class.call_count == 1
-            ), f"PathFilterBuilder should be instantiated ONCE, not {mock_path_filter_builder_class.call_count} times"
+            assert mock_path_filter_builder_class.call_count == 1, (
+                f"PathFilterBuilder should be instantiated ONCE, not {mock_path_filter_builder_class.call_count} times"
+            )

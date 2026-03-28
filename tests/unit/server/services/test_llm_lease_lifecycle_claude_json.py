@@ -175,9 +175,9 @@ class TestApiKeyWritesClaudeJson:
 
         config = json.loads(claude_json.read_text())
         assert config.get("apiKey") == "sk-ant-api03-test-key"
-        assert (
-            config.get("someOtherField") == "keep-me"
-        ), "existing fields must be preserved"
+        assert config.get("someOtherField") == "keep-me", (
+            "existing fields must be preserved"
+        )
         assert config.get("version") == 42, "existing fields must be preserved"
 
     def test_stop_with_api_key_clears_claude_json_api_key(self, tmp_path):
@@ -192,9 +192,9 @@ class TestApiKeyWritesClaudeJson:
 
         if claude_json.exists():
             config = json.loads(claude_json.read_text())
-            assert (
-                "apiKey" not in config
-            ), "apiKey must be removed from claude.json after stop"
+            assert "apiKey" not in config, (
+                "apiKey must be removed from claude.json after stop"
+            )
 
     def test_stop_with_api_key_preserves_other_claude_json_fields(self, tmp_path):
         """stop() must only remove apiKey, not other fields in claude.json."""
@@ -268,6 +268,6 @@ class TestOAuthStopClearsClaudeJson:
 
         if claude_json.exists():
             config = json.loads(claude_json.read_text())
-            assert (
-                "apiKey" not in config
-            ), "OAuth stop() must clear stale apiKey from claude.json"
+            assert "apiKey" not in config, (
+                "OAuth stop() must clear stale apiKey from claude.json"
+            )

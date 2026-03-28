@@ -207,9 +207,9 @@ class TestGitDeltaFilteringWithBinaryJunk:
             for f in all_delta_files
             if Path(f).suffix.lstrip(".") in PRODUCTION_BINARY_EXTENSIONS
         ]
-        assert (
-            unexpected == []
-        ), f"Binary files leaked into committed_files: {unexpected}"
+        assert unexpected == [], (
+            f"Binary files leaked into committed_files: {unexpected}"
+        )
 
         # All 5 source files MUST be in delta (FAILS currently due to Bug 1)
         found_source = [

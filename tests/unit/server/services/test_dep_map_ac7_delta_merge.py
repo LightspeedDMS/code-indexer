@@ -40,9 +40,9 @@ class TestBuildDeltaMergePromptClonePaths:
             domain_list=["auth", "billing"],
         )
 
-        assert (
-            "/repos/auth-svc" in prompt
-        ), "clone_path must appear in prompt for changed repos"
+        assert "/repos/auth-svc" in prompt, (
+            "clone_path must appear in prompt for changed repos"
+        )
 
     def test_includes_clone_path_for_new_repos(self, tmp_path):
         """AC7: Prompt includes clone_path for new repos."""
@@ -58,9 +58,9 @@ class TestBuildDeltaMergePromptClonePaths:
             domain_list=["auth"],
         )
 
-        assert (
-            "/repos/new-svc" in prompt
-        ), "clone_path must appear in prompt for new repos"
+        assert "/repos/new-svc" in prompt, (
+            "clone_path must appear in prompt for new repos"
+        )
 
     def test_includes_search_code_guidance(self, tmp_path):
         """AC7: Prompt includes guidance about search_code MCP tool."""
@@ -117,9 +117,9 @@ class TestInvokeDeltaMergeAllowedTools:
         elif "allowed_tools" in kwargs:
             allowed_tools_value = kwargs["allowed_tools"]
 
-        assert (
-            allowed_tools_value is not None
-        ), "allowed_tools must be passed to _invoke_claude_cli"
-        assert "search_code" in str(
-            allowed_tools_value
-        ), f"allowed_tools must contain search_code, got: {allowed_tools_value}"
+        assert allowed_tools_value is not None, (
+            "allowed_tools must be passed to _invoke_claude_cli"
+        )
+        assert "search_code" in str(allowed_tools_value), (
+            f"allowed_tools must contain search_code, got: {allowed_tools_value}"
+        )

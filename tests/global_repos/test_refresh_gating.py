@@ -243,9 +243,9 @@ class TestBackPropagation:
 
         assert len(final_next_refreshes) == len(aliases)
         # After 3 cycles of random jitter, probability of all identical is ~0
-        assert (
-            len(set(final_next_refreshes)) > 1
-        ), "Expected timestamps to diverge after 3 jitter cycles"
+        assert len(set(final_next_refreshes)) > 1, (
+            "Expected timestamps to diverge after 3 jitter cycles"
+        )
 
     def test_back_propagated_value_within_jitter_bounds(self, tmp_path):
         """
@@ -263,9 +263,9 @@ class TestBackPropagation:
             lower = now + refresh_interval - max_jitter
             upper = now + refresh_interval + max_jitter
 
-            assert (
-                new_nr >= lower - 0.001
-            ), f"next_refresh {new_nr} below lower bound {lower}"
-            assert (
-                new_nr <= upper + 0.001
-            ), f"next_refresh {new_nr} above upper bound {upper}"
+            assert new_nr >= lower - 0.001, (
+                f"next_refresh {new_nr} below lower bound {lower}"
+            )
+            assert new_nr <= upper + 0.001, (
+                f"next_refresh {new_nr} above upper bound {upper}"
+            )

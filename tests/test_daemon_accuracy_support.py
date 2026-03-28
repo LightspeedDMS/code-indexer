@@ -99,6 +99,6 @@ class TestDaemonAccuracySupport:
                     # Verify that vector_store.search was called with ef=200
                     mock_vector_store.search.assert_called_once()
                     call_kwargs = mock_vector_store.search.call_args[1]
-                    assert (
-                        call_kwargs.get("ef") == 200
-                    ), f"Expected ef=200 for high accuracy, got {call_kwargs.get('ef')}"
+                    assert call_kwargs.get("ef") == 200, (
+                        f"Expected ef=200 for high accuracy, got {call_kwargs.get('ef')}"
+                    )

@@ -74,9 +74,9 @@ class TestChatbotLayoutStructure:
         """Test: chat-input-container form must exist."""
         soup = BeautifulSoup(template_content, "html.parser")
         input_container = soup.find(class_="chat-input-container")
-        assert (
-            input_container is not None
-        ), "Must have chat-input-container for input box"
+        assert input_container is not None, (
+            "Must have chat-input-container for input box"
+        )
 
 
 class TestLayoutConstraints:
@@ -138,7 +138,9 @@ class TestLayoutConstraints:
         # Must have max-height or height constraint
         has_height_constraint = "max-height:" in rule or "height:" in rule
 
-        assert has_height_constraint, ".chat-messages must have max-height to constrain height and enable internal scrolling"
+        assert has_height_constraint, (
+            ".chat-messages must have max-height to constrain height and enable internal scrolling"
+        )
 
     def test_chat_messages_has_overflow_y_auto(self, style_content):
         """Test: chat-messages must have overflow-y: auto for scrolling."""
@@ -157,9 +159,9 @@ class TestLayoutConstraints:
 
     def test_chat_area_uses_flexbox_for_pinned_input(self, style_content):
         """Test: research-chat-area must use flexbox to support pinned input."""
-        assert (
-            ".research-chat-area" in style_content
-        ), "Must have .research-chat-area CSS"
+        assert ".research-chat-area" in style_content, (
+            "Must have .research-chat-area CSS"
+        )
 
         # Extract the chat-area rule
         pattern = r"\.research-chat-area\s*{[^}]*}"
@@ -169,9 +171,9 @@ class TestLayoutConstraints:
         rule = match.group(0)
 
         # Should use flexbox
-        assert (
-            "display:" in rule or "flex" in rule
-        ), ".research-chat-area should use flexbox for layout control"
+        assert "display:" in rule or "flex" in rule, (
+            ".research-chat-area should use flexbox for layout control"
+        )
 
     def test_chat_container_uses_flexbox_column(self, style_content):
         """Test: chat-container must use flex-direction column for vertical layout."""
@@ -243,9 +245,9 @@ class TestInputPinning:
         )
 
         assert has_messages, "chat-container must contain chat-messages"
-        assert (
-            has_input
-        ), "chat-container must contain chat-input-container as sibling to messages"
+        assert has_input, (
+            "chat-container must contain chat-input-container as sibling to messages"
+        )
 
 
 class TestResponsiveDesign:

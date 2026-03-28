@@ -89,12 +89,12 @@ class TestTelemetryAppIntegration:
                 # Use LifespanManager to properly trigger FastAPI lifespan events
                 async with LifespanManager(app):
                     # When disabled, telemetry_manager should be None
-                    assert hasattr(
-                        app.state, "telemetry_manager"
-                    ), "telemetry_manager attribute should exist on app.state"
-                    assert (
-                        app.state.telemetry_manager is None
-                    ), "telemetry_manager should be None when disabled"
+                    assert hasattr(app.state, "telemetry_manager"), (
+                        "telemetry_manager attribute should exist on app.state"
+                    )
+                    assert app.state.telemetry_manager is None, (
+                        "telemetry_manager should be None when disabled"
+                    )
 
             asyncio.run(check_telemetry_state())
 
@@ -150,15 +150,15 @@ class TestTelemetryAppIntegration:
                 # Use LifespanManager to properly trigger FastAPI lifespan events
                 async with LifespanManager(app):
                     # Assert telemetry_manager is set on app.state
-                    assert hasattr(
-                        app.state, "telemetry_manager"
-                    ), "telemetry_manager not set on app.state"
-                    assert (
-                        app.state.telemetry_manager is not None
-                    ), "telemetry_manager should not be None when enabled"
-                    assert (
-                        app.state.telemetry_manager.is_initialized is True
-                    ), "telemetry_manager should be initialized when enabled"
+                    assert hasattr(app.state, "telemetry_manager"), (
+                        "telemetry_manager not set on app.state"
+                    )
+                    assert app.state.telemetry_manager is not None, (
+                        "telemetry_manager should not be None when enabled"
+                    )
+                    assert app.state.telemetry_manager.is_initialized is True, (
+                        "telemetry_manager should be initialized when enabled"
+                    )
 
             asyncio.run(check_telemetry_state())
 
@@ -209,22 +209,22 @@ class TestTelemetryAppIntegration:
                 # Use LifespanManager to properly trigger FastAPI lifespan events
                 async with LifespanManager(app):
                     # Capture reference before shutdown
-                    assert hasattr(
-                        app.state, "telemetry_manager"
-                    ), "telemetry_manager not set on app.state"
+                    assert hasattr(app.state, "telemetry_manager"), (
+                        "telemetry_manager not set on app.state"
+                    )
                     telemetry_manager_ref = app.state.telemetry_manager
-                    assert (
-                        telemetry_manager_ref is not None
-                    ), "telemetry_manager should not be None when enabled"
-                    assert (
-                        telemetry_manager_ref.is_initialized is True
-                    ), "telemetry_manager should be initialized before shutdown"
+                    assert telemetry_manager_ref is not None, (
+                        "telemetry_manager should not be None when enabled"
+                    )
+                    assert telemetry_manager_ref.is_initialized is True, (
+                        "telemetry_manager should be initialized before shutdown"
+                    )
 
                 # After context manager exits, lifespan shutdown runs
                 # Verify telemetry manager was properly cleaned up
-                assert (
-                    telemetry_manager_ref.is_initialized is False
-                ), "telemetry_manager should be shutdown after app closes"
+                assert telemetry_manager_ref.is_initialized is False, (
+                    "telemetry_manager should be shutdown after app closes"
+                )
 
             asyncio.run(check_shutdown())
 
@@ -272,14 +272,14 @@ class TestTelemetryEnvironmentOverrides:
                 # Use LifespanManager to properly trigger FastAPI lifespan events
                 async with LifespanManager(app):
                     # With env override, telemetry should be enabled
-                    assert hasattr(
-                        app.state, "telemetry_manager"
-                    ), "telemetry_manager not set on app.state"
-                    assert (
-                        app.state.telemetry_manager is not None
-                    ), "telemetry_manager should not be None when env var enables it"
-                    assert (
-                        app.state.telemetry_manager.is_initialized is True
-                    ), "telemetry_manager should be initialized when env var enables it"
+                    assert hasattr(app.state, "telemetry_manager"), (
+                        "telemetry_manager not set on app.state"
+                    )
+                    assert app.state.telemetry_manager is not None, (
+                        "telemetry_manager should not be None when env var enables it"
+                    )
+                    assert app.state.telemetry_manager.is_initialized is True, (
+                        "telemetry_manager should be initialized when env var enables it"
+                    )
 
             asyncio.run(check_env_override())

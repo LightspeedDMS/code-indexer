@@ -93,9 +93,9 @@ class TestCICDRoutesRegistration:
         """Test that exactly 12 CI/CD routes are registered."""
         routes = [route.path for route in app_with_cicd_router.routes]
         cicd_routes = [r for r in routes if r.startswith("/api/cicd/")]
-        assert (
-            len(cicd_routes) == 12
-        ), f"Expected 12 routes, found {len(cicd_routes)}: {cicd_routes}"
+        assert len(cicd_routes) == 12, (
+            f"Expected 12 routes, found {len(cicd_routes)}: {cicd_routes}"
+        )
 
 
 class TestCICDRoutesHTTPMethods:

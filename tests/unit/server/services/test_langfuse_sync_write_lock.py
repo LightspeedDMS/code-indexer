@@ -99,9 +99,9 @@ class TestSyncAcquiresWriteLockBeforeRefreshTrigger:
         for c in acquire_calls:
             if (c[0][0] if c[0] else c[1].get("alias")) == expected_repo:
                 owner = c[1].get("owner_name") or (c[0][1] if len(c[0]) > 1 else None)
-                assert (
-                    owner == "langfuse_sync"
-                ), f"Expected owner_name='langfuse_sync' but got '{owner}'"
+                assert owner == "langfuse_sync", (
+                    f"Expected owner_name='langfuse_sync' but got '{owner}'"
+                )
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
     def test_sync_releases_write_lock_after_refresh(
@@ -139,9 +139,9 @@ class TestSyncAcquiresWriteLockBeforeRefreshTrigger:
         for c in release_calls:
             if (c[0][0] if c[0] else c[1].get("alias")) == expected_repo:
                 owner = c[1].get("owner_name") or (c[0][1] if len(c[0]) > 1 else None)
-                assert (
-                    owner == "langfuse_sync"
-                ), f"Expected owner_name='langfuse_sync' in release but got '{owner}'"
+                assert owner == "langfuse_sync", (
+                    f"Expected owner_name='langfuse_sync' in release but got '{owner}'"
+                )
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
     def test_sync_releases_write_lock_on_refresh_failure(
@@ -177,9 +177,9 @@ class TestSyncAcquiresWriteLockBeforeRefreshTrigger:
             c[0][0] if c[0] else c[1].get("alias")
             for c in mock_scheduler.acquire_write_lock.call_args_list
         ]
-        assert (
-            expected_repo in acquire_aliases
-        ), f"Expected acquire_write_lock called with '{expected_repo}', got: {acquire_aliases}"
+        assert expected_repo in acquire_aliases, (
+            f"Expected acquire_write_lock called with '{expected_repo}', got: {acquire_aliases}"
+        )
 
         # Lock must be released even though trigger raised
         release_aliases = [
@@ -262,15 +262,15 @@ class TestSyncAcquiresWriteLockBeforeRefreshTrigger:
             for c in mock_scheduler.release_write_lock.call_args_list
         ]
 
-        assert (
-            alice_repo in acquire_aliases
-        ), f"Expected acquire for '{alice_repo}', got: {acquire_aliases}"
-        assert (
-            bob_repo in acquire_aliases
-        ), f"Expected acquire for '{bob_repo}', got: {acquire_aliases}"
-        assert (
-            alice_repo in release_aliases
-        ), f"Expected release for '{alice_repo}', got: {release_aliases}"
-        assert (
-            bob_repo in release_aliases
-        ), f"Expected release for '{bob_repo}', got: {release_aliases}"
+        assert alice_repo in acquire_aliases, (
+            f"Expected acquire for '{alice_repo}', got: {acquire_aliases}"
+        )
+        assert bob_repo in acquire_aliases, (
+            f"Expected acquire for '{bob_repo}', got: {acquire_aliases}"
+        )
+        assert alice_repo in release_aliases, (
+            f"Expected release for '{alice_repo}', got: {release_aliases}"
+        )
+        assert bob_repo in release_aliases, (
+            f"Expected release for '{bob_repo}', got: {release_aliases}"
+        )

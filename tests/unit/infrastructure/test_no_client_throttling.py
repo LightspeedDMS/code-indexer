@@ -23,36 +23,36 @@ class TestNoClientThrottling:
             client = VoyageAIClient(config)
 
             # Should not have rate_limiter attribute
-            assert not hasattr(
-                client, "rate_limiter"
-            ), "Client should not have rate_limiter"
+            assert not hasattr(client, "rate_limiter"), (
+                "Client should not have rate_limiter"
+            )
 
             # Should not have throttling callback
-            assert not hasattr(
-                client, "throttling_callback"
-            ), "Client should not have throttling_callback"
-            assert not hasattr(
-                client, "set_throttling_callback"
-            ), "Client should not have set_throttling_callback method"
+            assert not hasattr(client, "throttling_callback"), (
+                "Client should not have throttling_callback"
+            )
+            assert not hasattr(client, "set_throttling_callback"), (
+                "Client should not have set_throttling_callback method"
+            )
 
     def test_voyage_ai_config_has_no_rate_limiting_fields(self):
         """VoyageAI config should not have rate limiting fields."""
         config = VoyageAIConfig()
 
         # Should not have rate limiting fields
-        assert not hasattr(
-            config, "requests_per_minute"
-        ), "Config should not have requests_per_minute"
-        assert not hasattr(
-            config, "tokens_per_minute"
-        ), "Config should not have tokens_per_minute"
+        assert not hasattr(config, "requests_per_minute"), (
+            "Config should not have requests_per_minute"
+        )
+        assert not hasattr(config, "tokens_per_minute"), (
+            "Config should not have tokens_per_minute"
+        )
 
         # Should still have retry configuration
         assert hasattr(config, "max_retries"), "Config should still have max_retries"
         assert hasattr(config, "retry_delay"), "Config should still have retry_delay"
-        assert hasattr(
-            config, "exponential_backoff"
-        ), "Config should still have exponential_backoff"
+        assert hasattr(config, "exponential_backoff"), (
+            "Config should still have exponential_backoff"
+        )
 
     def test_vector_calculation_manager_has_no_client_throttling(self):
         """VectorCalculationManager should not have client-side throttling."""
@@ -60,27 +60,27 @@ class TestNoClientThrottling:
         manager = VectorCalculationManager(mock_provider, thread_count=2)
 
         # Should not have CLIENT-side throttling attributes
-        assert not hasattr(
-            manager, "throttling_detection_window"
-        ), "Manager should not have throttling_detection_window"
-        assert not hasattr(
-            manager, "recent_wait_events"
-        ), "Manager should not have recent_wait_events"
-        assert not hasattr(
-            manager, "record_client_wait_time"
-        ), "Manager should not have record_client_wait_time method"
+        assert not hasattr(manager, "throttling_detection_window"), (
+            "Manager should not have throttling_detection_window"
+        )
+        assert not hasattr(manager, "recent_wait_events"), (
+            "Manager should not have recent_wait_events"
+        )
+        assert not hasattr(manager, "record_client_wait_time"), (
+            "Manager should not have record_client_wait_time method"
+        )
 
         # SERVER-side throttling detection is allowed for monitoring purposes
         # These help detect when the API is throttling us
-        assert hasattr(
-            manager, "record_server_throttle"
-        ), "Manager should have server throttle detection for monitoring"
+        assert hasattr(manager, "record_server_throttle"), (
+            "Manager should have server throttle detection for monitoring"
+        )
 
         # Stats should include server throttling status for display purposes
         stats = manager.get_stats()
-        assert hasattr(
-            stats, "throttling_status"
-        ), "Stats should have server throttling status for display"
+        assert hasattr(stats, "throttling_status"), (
+            "Stats should have server throttling status for display"
+        )
 
     def test_rate_limiter_class_does_not_exist(self):
         """The RateLimiter class should be completely removed."""
@@ -93,24 +93,24 @@ class TestNoClientThrottling:
         from code_indexer.services.vector_calculation_manager import ThrottlingStatus
 
         # Should only have server-side throttling indicators
-        assert hasattr(
-            ThrottlingStatus, "FULL_SPEED"
-        ), "Should have FULL_SPEED indicator"
-        assert hasattr(
-            ThrottlingStatus, "SERVER_THROTTLED"
-        ), "Should have SERVER_THROTTLED indicator"
+        assert hasattr(ThrottlingStatus, "FULL_SPEED"), (
+            "Should have FULL_SPEED indicator"
+        )
+        assert hasattr(ThrottlingStatus, "SERVER_THROTTLED"), (
+            "Should have SERVER_THROTTLED indicator"
+        )
 
         # Should NOT have client-side throttling indicators
-        assert not hasattr(
-            ThrottlingStatus, "CLIENT_THROTTLED"
-        ), "Should not have CLIENT_THROTTLED"
+        assert not hasattr(ThrottlingStatus, "CLIENT_THROTTLED"), (
+            "Should not have CLIENT_THROTTLED"
+        )
 
         # Verify the enum only has the expected values
         status_values = set(status.name for status in ThrottlingStatus)
         expected_values = {"FULL_SPEED", "SERVER_THROTTLED"}
-        assert (
-            status_values == expected_values
-        ), f"Expected {expected_values}, got {status_values}"
+        assert status_values == expected_values, (
+            f"Expected {expected_values}, got {status_values}"
+        )
 
     def test_no_throttling_related_imports_in_indexers(self):
         """Indexer classes should not import throttling-related code."""
@@ -118,9 +118,9 @@ class TestNoClientThrottling:
         from code_indexer.services.smart_indexer import SmartIndexer
 
         # Should be able to import without any throttling-related issues
-        assert (
-            SmartIndexer is not None
-        ), "SmartIndexer should be importable without throttling dependencies"
+        assert SmartIndexer is not None, (
+            "SmartIndexer should be importable without throttling dependencies"
+        )
 
 
 if __name__ == "__main__":

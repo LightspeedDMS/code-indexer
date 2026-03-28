@@ -109,9 +109,9 @@ class TestBackgroundJobManagerConcurrencyLimit:
         time.sleep(2.0)
 
         # Maximum concurrent jobs should never exceed the limit (2)
-        assert (
-            max(concurrent_count) <= 2
-        ), f"Concurrent count exceeded limit: {concurrent_count}"
+        assert max(concurrent_count) <= 2, (
+            f"Concurrent count exceeded limit: {concurrent_count}"
+        )
 
     # ==========================================================================
     # AC3: Jobs exceeding limit stay in PENDING until slot available
@@ -370,9 +370,9 @@ class TestBackgroundJobManagerConcurrencyLimit:
         time.sleep(5.0)
 
         # Verify limit was never exceeded
-        assert (
-            max_observed_concurrent[0] <= 3
-        ), f"Limit exceeded: max concurrent was {max_observed_concurrent[0]}"
+        assert max_observed_concurrent[0] <= 3, (
+            f"Limit exceeded: max concurrent was {max_observed_concurrent[0]}"
+        )
 
         # Verify all jobs completed
         for job_id in job_ids:

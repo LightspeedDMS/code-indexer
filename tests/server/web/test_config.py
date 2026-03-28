@@ -34,9 +34,9 @@ class TestConfigDisplay:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_config_page_renders(self, authenticated_client: TestClient):
         """
@@ -49,9 +49,9 @@ class TestConfigDisplay:
         response = authenticated_client.get("/admin/config")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Configuration - CIDX Admin" in response.text
-        ), "Page title should be 'Configuration - CIDX Admin'"
+        assert "Configuration - CIDX Admin" in response.text, (
+            "Page title should be 'Configuration - CIDX Admin'"
+        )
 
     def test_config_sections_present(self, authenticated_client: TestClient):
         """
@@ -85,12 +85,12 @@ class TestConfigDisplay:
 
         assert response.status_code == 200
         # Details/summary elements provide native collapsible behavior
-        assert (
-            "<details" in response.text.lower()
-        ), "Page should use <details> elements for collapsible sections"
-        assert (
-            "<summary" in response.text.lower()
-        ), "Page should use <summary> elements for collapsible section headers"
+        assert "<details" in response.text.lower(), (
+            "Page should use <details> elements for collapsible sections"
+        )
+        assert "<summary" in response.text.lower(), (
+            "Page should use <summary> elements for collapsible section headers"
+        )
 
 
 # =============================================================================
@@ -154,14 +154,14 @@ class TestConfigFieldTypes:
 
         # Check for various input types
         # Boolean fields should have checkbox
-        assert (
-            'type="checkbox"' in text_lower or 'type="number"' in text_lower
-        ), "Page should have checkbox or number inputs"
+        assert 'type="checkbox"' in text_lower or 'type="number"' in text_lower, (
+            "Page should have checkbox or number inputs"
+        )
         # Number fields should have number inputs
         # String fields should have text inputs
-        assert (
-            'type="text"' in text_lower or 'type="number"' in text_lower
-        ), "Page should have text or number inputs"
+        assert 'type="text"' in text_lower or 'type="number"' in text_lower, (
+            "Page should have text or number inputs"
+        )
 
     def test_config_validation(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -224,9 +224,9 @@ class TestConfigSectionContents:
         # Server settings fields
         assert "host" in text_lower, "Server Settings should have Host field"
         assert "port" in text_lower, "Server Settings should have Port field"
-        assert (
-            "workers" in text_lower or "log" in text_lower
-        ), "Server Settings should have Workers or Log Level field"
+        assert "workers" in text_lower or "log" in text_lower, (
+            "Server Settings should have Workers or Log Level field"
+        )
 
     def test_indexing_settings_fields(self, authenticated_client: TestClient):
         """
@@ -330,9 +330,9 @@ class TestConfigReset:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "reset" in text_lower and "default" in text_lower
-        ), "Page should have 'Reset to Defaults' button"
+        assert "reset" in text_lower and "default" in text_lower, (
+            "Page should have 'Reset to Defaults' button"
+        )
 
     def test_config_reset_post_restores_defaults(
         self,
@@ -436,9 +436,9 @@ class TestConfigPartial:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
 
     def test_config_partial_requires_auth(self, web_client: TestClient):
         """
@@ -475,9 +475,9 @@ class TestOIDCConfig:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "oidc" in text_lower or "sso" in text_lower
-        ), "Page should have OIDC/SSO section"
+        assert "oidc" in text_lower or "sso" in text_lower, (
+            "Page should have OIDC/SSO section"
+        )
 
     def test_oidc_save_success(
         self, web_infrastructure: WebTestInfrastructure, admin_user: Dict[str, Any]
@@ -522,15 +522,15 @@ class TestOIDCConfig:
         text_lower = response.text.lower()
 
         # Should NOT show error message
-        assert (
-            "invalid section" not in text_lower
-        ), "Should not show 'invalid section' error"
-        assert (
-            "error" not in text_lower or "success" in text_lower
-        ), "Should not show error without success"
+        assert "invalid section" not in text_lower, (
+            "Should not show 'invalid section' error"
+        )
+        assert "error" not in text_lower or "success" in text_lower, (
+            "Should not show error without success"
+        )
 
         # Should show success message (being more specific)
         assert "success" in text_lower, "Should show success message"
-        assert (
-            "oidc" in text_lower or "saved" in text_lower
-        ), "Success message should mention OIDC or saved"
+        assert "oidc" in text_lower or "saved" in text_lower, (
+            "Success message should mention OIDC or saved"
+        )

@@ -537,9 +537,9 @@ class FileListingService:
         pagination_hint = ""
         if requires_pagination:
             if truncated:
-                assert (
-                    truncated_at_line is not None
-                ), "truncated_at_line must be set when truncated=True"
+                assert truncated_at_line is not None, (
+                    "truncated_at_line must be set when truncated=True"
+                )
                 pagination_hint = f"Content truncated at line {truncated_at_line} due to token limit. Use offset={truncated_at_line + 1} to continue reading."
             else:
                 next_offset = effective_offset + returned_lines

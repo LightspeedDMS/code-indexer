@@ -126,12 +126,12 @@ class TestResumeAndIncrementalBugs:
 
                     stats1 = indexer.smart_index(force_full=False)  # Not forcing full
 
-                    assert stats1.files_processed == len(
-                        test_files
-                    ), "First run should process all files"
-                    assert (
-                        len(first_run_calls) == 1
-                    ), "Should have called index_branch_changes once"
+                    assert stats1.files_processed == len(test_files), (
+                        "First run should process all files"
+                    )
+                    assert len(first_run_calls) == 1, (
+                        "Should have called index_branch_changes once"
+                    )
                     print(f"✅ First run processed {stats1.files_processed} files")
 
                 # Wait a bit to ensure different timestamps
@@ -296,9 +296,9 @@ class TestResumeAndIncrementalBugs:
                     with pytest.raises(KeyboardInterrupt):
                         indexer.smart_index(force_full=False)
 
-                    assert (
-                        len(cancelled_run_calls) == 1
-                    ), "Should have attempted indexing before cancellation"
+                    assert len(cancelled_run_calls) == 1, (
+                        "Should have attempted indexing before cancellation"
+                    )
                     print("✅ First run was cancelled as expected")
 
                 # Check metadata state after cancellation

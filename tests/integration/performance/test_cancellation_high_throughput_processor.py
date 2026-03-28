@@ -145,16 +145,16 @@ class TestHighThroughputProcessorCancellation:
                         processing_time = time.time() - start_time
 
                         # Should complete quickly due to cancellation
-                        assert (
-                            processing_time < 2.0
-                        ), f"Processing took {processing_time:.2f}s, expected < 2.0s"
+                        assert processing_time < 2.0, (
+                            f"Processing took {processing_time:.2f}s, expected < 2.0s"
+                        )
 
                         # Should have received cancellation signal
                         assert len(callback_calls) >= 2
                         # Check that we have at least 2 callbacks and cancellation occurred
-                        assert (
-                            processor.cancelled
-                        ), "Processor should be marked as cancelled"
+                        assert processor.cancelled, (
+                            "Processor should be marked as cancelled"
+                        )
 
     def test_cancellation_prevents_further_processing(self):
         """Test that cancellation prevents further chunk processing."""
@@ -359,9 +359,9 @@ class TestHighThroughputProcessorCancellation:
                             # Completed work should have been preserved
                             if upsert_calls:
                                 total_upserted = sum(upsert_calls)
-                                assert (
-                                    total_upserted > 0
-                                ), "Some chunks should have been upserted"
+                                assert total_upserted > 0, (
+                                    "Some chunks should have been upserted"
+                                )
 
                             # Stats should reflect the work that was completed
                             assert stats is not None

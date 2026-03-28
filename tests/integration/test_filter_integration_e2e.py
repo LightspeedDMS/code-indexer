@@ -173,9 +173,9 @@ class TestFilterIntegrationE2E:
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         # Should complete within 5ms
-        assert (
-            elapsed_ms < 5.0
-        ), f"Conflict detection took {elapsed_ms:.2f}ms (limit: 5ms)"
+        assert elapsed_ms < 5.0, (
+            f"Conflict detection took {elapsed_ms:.2f}ms (limit: 5ms)"
+        )
 
         # Should not find conflicts (these are compatible filters)
         assert len(conflicts) == 0

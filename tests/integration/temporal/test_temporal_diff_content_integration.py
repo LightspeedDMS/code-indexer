@@ -160,9 +160,9 @@ class TestTemporalDiffContentIntegration:
                 if "login" in content.lower():
                     found_login_diff = True
                     # Should be a diff with + prefix
-                    assert (
-                        "+" in content or "-" in content
-                    ), f"Result doesn't look like a diff: {content}"
+                    assert "+" in content or "-" in content, (
+                        f"Result doesn't look like a diff: {content}"
+                    )
                     break
 
             assert found_login_diff, (

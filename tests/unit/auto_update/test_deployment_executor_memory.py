@@ -369,7 +369,7 @@ class TestEnsureSwapFile:
         import logging
 
         fstab_with_swap = (
-            "UUID=abc123 / ext4 defaults 1 1\n" "/swapfile none swap sw 0 0\n"
+            "UUID=abc123 / ext4 defaults 1 1\n/swapfile none swap sw 0 0\n"
         )
 
         with patch("subprocess.run") as mock_run:
@@ -395,9 +395,9 @@ class TestEnsureSwapFile:
         # Verify tee -a was NOT called
         for c in mock_run.call_args_list:
             cmd = c[0][0]
-            assert not (
-                cmd == ["sudo", "tee", "-a", "/etc/fstab"]
-            ), "tee -a /etc/fstab should NOT be called when /swapfile already in fstab"
+            assert not (cmd == ["sudo", "tee", "-a", "/etc/fstab"]), (
+                "tee -a /etc/fstab should NOT be called when /swapfile already in fstab"
+            )
 
     def test_swap_fstab_append_failure_non_fatal(self, executor, caplog):
         """
@@ -612,12 +612,12 @@ class TestExecuteWiring:
             with caplog.at_level(logging.WARNING):
                 result = executor.execute()
 
-        assert (
-            result is True
-        ), "execute() must return True even when _ensure_memory_overcommit fails"
-        assert (
-            swap_was_called
-        ), "_ensure_swap_file must still be called after memory overcommit failure"
+        assert result is True, (
+            "execute() must return True even when _ensure_memory_overcommit fails"
+        )
+        assert swap_was_called, (
+            "_ensure_swap_file must still be called after memory overcommit failure"
+        )
         assert any("DEPLOY-GENERAL-099" in r.message for r in caplog.records)
 
     def test_execute_continues_on_swap_file_failure(self, tmp_path, caplog):
@@ -651,7 +651,7 @@ class TestExecuteWiring:
             with caplog.at_level(logging.WARNING):
                 result = executor.execute()
 
-        assert (
-            result is True
-        ), "execute() must return True even when _ensure_swap_file fails"
+        assert result is True, (
+            "execute() must return True even when _ensure_swap_file fails"
+        )
         assert any("DEPLOY-GENERAL-100" in r.message for r in caplog.records)

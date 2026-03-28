@@ -134,9 +134,9 @@ function calculateProduct(a, b) {
                                 if "file_extension" in payload:
                                     # Verify file_extension doesn't have a dot
                                     ext = payload["file_extension"]
-                                    assert not ext.startswith(
-                                        "."
-                                    ), f"file_extension should not start with dot, got: {ext}"
+                                    assert not ext.startswith("."), (
+                                        f"file_extension should not start with dot, got: {ext}"
+                                    )
                                     points_found = True
                                     break
                 if points_found:

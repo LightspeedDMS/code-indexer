@@ -24,9 +24,9 @@ class TestTreeSitterDependencyRemoval:
             content = f.read()
 
         # This should fail initially
-        assert (
-            "tree-sitter-language-pack" not in content
-        ), "tree-sitter-language-pack dependency should be removed from requirements.txt"
+        assert "tree-sitter-language-pack" not in content, (
+            "tree-sitter-language-pack dependency should be removed from requirements.txt"
+        )
 
     def test_no_tree_sitter_imports_in_codebase(self):
         """Test that no files in src/ directory contain tree-sitter imports."""
@@ -65,9 +65,9 @@ class TestSemanticChunkingInfrastructureRemoval:
         )
 
         # This should fail initially
-        assert (
-            not semantic_chunker_path.exists()
-        ), "semantic_chunker.py file should be deleted"
+        assert not semantic_chunker_path.exists(), (
+            "semantic_chunker.py file should be deleted"
+        )
 
     def test_base_tree_sitter_parser_deleted(self):
         """Test that base_tree_sitter_parser.py file is deleted."""
@@ -77,9 +77,9 @@ class TestSemanticChunkingInfrastructureRemoval:
         )
 
         # This should fail initially
-        assert (
-            not base_parser_path.exists()
-        ), "base_tree_sitter_parser.py file should be deleted"
+        assert not base_parser_path.exists(), (
+            "base_tree_sitter_parser.py file should be deleted"
+        )
 
     def test_language_parser_files_deleted(self):
         """Test that all 21 language-specific parser files are deleted."""
@@ -117,9 +117,9 @@ class TestSemanticChunkingInfrastructureRemoval:
                 existing_parsers.append(str(parser_path))
 
         # This should fail initially
-        assert (
-            len(existing_parsers) == 0
-        ), f"These language parser files should be deleted: {existing_parsers}"
+        assert len(existing_parsers) == 0, (
+            f"These language parser files should be deleted: {existing_parsers}"
+        )
 
     def test_no_semantic_chunking_imports(self):
         """Test that no files import semantic chunking classes."""
@@ -170,9 +170,9 @@ class TestConfigurationChanges:
                 content = f.read()
 
             # This should fail initially
-            assert (
-                "use_semantic_chunking" not in content
-            ), "use_semantic_chunking should be removed from config.py"
+            assert "use_semantic_chunking" not in content, (
+                "use_semantic_chunking should be removed from config.py"
+            )
 
     def test_processor_no_semantic_chunker_logic(self):
         """Test that processor.py no longer contains semantic chunker logic."""
@@ -221,9 +221,9 @@ class TestApplicationBuilds:
                     import_errors.append(f"{module_name}: {str(e)}")
 
         # This should fail initially if tree-sitter dependencies remain
-        assert (
-            len(import_errors) == 0
-        ), f"Found import errors related to tree-sitter/semantic: {import_errors}"
+        assert len(import_errors) == 0, (
+            f"Found import errors related to tree-sitter/semantic: {import_errors}"
+        )
 
     def test_indexing_processor_imports_cleanly(self):
         """Test that processor module can be imported without semantic dependencies."""

@@ -258,9 +258,9 @@ class TestSemanticSearchServiceFiltersWired:
 
         # filter_conditions should be absent or empty dict when no filters given
         filter_conds = call_kwargs.kwargs.get("filter_conditions", {})
-        assert (
-            not filter_conds
-        ), f"Expected no filter_conditions when no filters set, got: {filter_conds}"
+        assert not filter_conds, (
+            f"Expected no filter_conditions when no filters set, got: {filter_conds}"
+        )
 
     @patch("code_indexer.server.services.search_service.BackendFactory")
     @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")

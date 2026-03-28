@@ -261,14 +261,14 @@ class TestAddIndexFtsCommand:
         cmds = self._capture_subprocess_calls(registered_manager, repo_path, "fts")
 
         index_cmds = [c for c in cmds if c[:2] == ["cidx", "index"]]
-        assert (
-            index_cmds
-        ), f"No 'cidx index' command issued for fts index type. Commands: {cmds}"
+        assert index_cmds, (
+            f"No 'cidx index' command issued for fts index type. Commands: {cmds}"
+        )
 
         fts_cmd = index_cmds[0]
-        assert (
-            "--rebuild-fts-index" in fts_cmd
-        ), f"FTS index must use '--rebuild-fts-index'. Got: {fts_cmd}"
+        assert "--rebuild-fts-index" in fts_cmd, (
+            f"FTS index must use '--rebuild-fts-index'. Got: {fts_cmd}"
+        )
 
     def test_fts_index_does_not_use_clear_flag(self, registered_manager, repo_path):
         """FTS rebuild must NOT include --clear (that is for semantic only)."""
@@ -278,9 +278,9 @@ class TestAddIndexFtsCommand:
         assert index_cmds, f"No 'cidx index' command captured. Commands: {cmds}"
 
         fts_cmd = index_cmds[0]
-        assert (
-            "--clear" not in fts_cmd
-        ), f"FTS rebuild must not include --clear. Got: {fts_cmd}"
+        assert "--clear" not in fts_cmd, (
+            f"FTS rebuild must not include --clear. Got: {fts_cmd}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -358,9 +358,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued for temporal index type."
         temporal_cmd = cmds[0]
-        assert (
-            "--clear" in temporal_cmd
-        ), f"AC1: temporal rebuild must include '--clear'. Got: {temporal_cmd}"
+        assert "--clear" in temporal_cmd, (
+            f"AC1: temporal rebuild must include '--clear'. Got: {temporal_cmd}"
+        )
 
     def test_temporal_index_uses_index_commits_flag(
         self, registered_manager, repo_path
@@ -370,9 +370,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued for temporal index type."
         temporal_cmd = cmds[0]
-        assert (
-            "--index-commits" in temporal_cmd
-        ), f"AC1: temporal rebuild must include '--index-commits'. Got: {temporal_cmd}"
+        assert "--index-commits" in temporal_cmd, (
+            f"AC1: temporal rebuild must include '--index-commits'. Got: {temporal_cmd}"
+        )
 
     def test_temporal_no_max_commits_when_options_none(
         self, registered_manager, repo_path
@@ -389,9 +389,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued for temporal index type."
         temporal_cmd = cmds[0]
-        assert (
-            "--max-commits" not in temporal_cmd
-        ), f"AC2: no max_commits when temporal_options is None. Got: {temporal_cmd}"
+        assert "--max-commits" not in temporal_cmd, (
+            f"AC2: no max_commits when temporal_options is None. Got: {temporal_cmd}"
+        )
 
     def test_temporal_no_max_commits_when_options_empty(
         self, registered_manager, repo_path
@@ -403,9 +403,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued for temporal index type."
         temporal_cmd = cmds[0]
-        assert (
-            "--max-commits" not in temporal_cmd
-        ), f"AC2: no max_commits for empty temporal_options. Got: {temporal_cmd}"
+        assert "--max-commits" not in temporal_cmd, (
+            f"AC2: no max_commits for empty temporal_options. Got: {temporal_cmd}"
+        )
 
     def test_temporal_with_max_commits_option(self, registered_manager, repo_path):
         """AC4: when temporal_options has max_commits, the command includes --max-commits N."""
@@ -415,13 +415,13 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued."
         temporal_cmd = cmds[0]
-        assert (
-            "--max-commits" in temporal_cmd
-        ), f"AC4: max_commits=500 must produce '--max-commits'. Got: {temporal_cmd}"
+        assert "--max-commits" in temporal_cmd, (
+            f"AC4: max_commits=500 must produce '--max-commits'. Got: {temporal_cmd}"
+        )
         idx = temporal_cmd.index("--max-commits")
-        assert (
-            temporal_cmd[idx + 1] == "500"
-        ), f"AC4: '--max-commits' must be followed by '500'. Got: {temporal_cmd}"
+        assert temporal_cmd[idx + 1] == "500", (
+            f"AC4: '--max-commits' must be followed by '500'. Got: {temporal_cmd}"
+        )
 
     def test_temporal_with_diff_context_option(self, registered_manager, repo_path):
         """AC4: when temporal_options has diff_context, the command includes --diff-context N."""
@@ -431,9 +431,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued."
         temporal_cmd = cmds[0]
-        assert (
-            "--diff-context" in temporal_cmd
-        ), f"AC4: diff_context=10 must produce '--diff-context'. Got: {temporal_cmd}"
+        assert "--diff-context" in temporal_cmd, (
+            f"AC4: diff_context=10 must produce '--diff-context'. Got: {temporal_cmd}"
+        )
         idx = temporal_cmd.index("--diff-context")
         assert temporal_cmd[idx + 1] == "10"
 
@@ -447,9 +447,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued."
         temporal_cmd = cmds[0]
-        assert (
-            "--since-date" in temporal_cmd
-        ), f"AC4: since_date='2024-01-01' must produce '--since-date'. Got: {temporal_cmd}"
+        assert "--since-date" in temporal_cmd, (
+            f"AC4: since_date='2024-01-01' must produce '--since-date'. Got: {temporal_cmd}"
+        )
         idx = temporal_cmd.index("--since-date")
         assert temporal_cmd[idx + 1] == "2024-01-01"
 
@@ -463,9 +463,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued."
         temporal_cmd = cmds[0]
-        assert (
-            "--all-branches" in temporal_cmd
-        ), f"AC4: all_branches=True must produce '--all-branches'. Got: {temporal_cmd}"
+        assert "--all-branches" in temporal_cmd, (
+            f"AC4: all_branches=True must produce '--all-branches'. Got: {temporal_cmd}"
+        )
 
     def test_temporal_all_branches_false_omits_flag(
         self, registered_manager, repo_path
@@ -479,9 +479,9 @@ class TestAddIndexTemporalCommand:
 
         assert cmds, "No 'cidx index' command issued."
         temporal_cmd = cmds[0]
-        assert (
-            "--all-branches" not in temporal_cmd
-        ), f"AC4: all_branches=False must NOT produce '--all-branches'. Got: {temporal_cmd}"
+        assert "--all-branches" not in temporal_cmd, (
+            f"AC4: all_branches=False must NOT produce '--all-branches'. Got: {temporal_cmd}"
+        )
 
     def test_temporal_full_options_command(self, registered_manager, repo_path):
         """
@@ -535,18 +535,18 @@ class TestTemporalIndexOptionsModel:
         from code_indexer.server.models.api_models import TemporalIndexOptions
 
         opts = TemporalIndexOptions()
-        assert hasattr(
-            opts, "all_branches"
-        ), "AC3: TemporalIndexOptions must have 'all_branches' field"
+        assert hasattr(opts, "all_branches"), (
+            "AC3: TemporalIndexOptions must have 'all_branches' field"
+        )
 
     def test_model_all_branches_defaults_to_false(self):
         """all_branches must default to False when not specified."""
         from code_indexer.server.models.api_models import TemporalIndexOptions
 
         opts = TemporalIndexOptions()
-        assert (
-            opts.all_branches is False
-        ), f"AC3: all_branches must default to False. Got: {opts.all_branches}"
+        assert opts.all_branches is False, (
+            f"AC3: all_branches must default to False. Got: {opts.all_branches}"
+        )
 
     def test_model_all_branches_can_be_set_true(self):
         """all_branches can be set to True."""
@@ -604,9 +604,9 @@ class TestTemporalOptionsPersistence:
     def test_update_temporal_options_method_exists(self, tmp_path):
         """GoldenRepoMetadataSqliteBackend must have update_temporal_options method."""
         backend = self._make_backend(tmp_path)
-        assert hasattr(
-            backend, "update_temporal_options"
-        ), "GoldenRepoMetadataSqliteBackend must have 'update_temporal_options' method"
+        assert hasattr(backend, "update_temporal_options"), (
+            "GoldenRepoMetadataSqliteBackend must have 'update_temporal_options' method"
+        )
 
     def test_update_temporal_options_persists_and_retrieves(self, tmp_path):
         """Saved temporal_options can be read back from the database."""

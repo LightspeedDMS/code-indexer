@@ -216,9 +216,9 @@ class TestHNSWIncrementalBatch:
 
         # Incremental should be notably faster (at least 2x)
         # Note: In real scenarios with 10K vectors, this would be 5-10x
-        assert (
-            incremental_time < full_rebuild_time / 2
-        ), f"Incremental ({incremental_time:.2f}s) should be faster than full rebuild ({full_rebuild_time:.2f}s)"
+        assert incremental_time < full_rebuild_time / 2, (
+            f"Incremental ({incremental_time:.2f}s) should be faster than full rebuild ({full_rebuild_time:.2f}s)"
+        )
 
         # Verify incremental mode was used
         assert result.get("hnsw_update") == "incremental"
@@ -273,9 +273,9 @@ class TestHNSWIncrementalBatch:
         assert result["status"] == "ok"
         assert result.get("hnsw_update") == "incremental"
         # Should be fast for 10 new vectors out of 1000
-        assert (
-            incremental_time < 3.0
-        ), f"Temporal incremental update took {incremental_time:.2f}s, expected < 3s"
+        assert incremental_time < 3.0, (
+            f"Temporal incremental update took {incremental_time:.2f}s, expected < 3s"
+        )
 
     # === AC4: Auto-Detection of Incremental vs Full Rebuild ===
 

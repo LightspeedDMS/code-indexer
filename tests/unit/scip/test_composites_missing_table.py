@@ -110,18 +110,18 @@ class TestFindTargetDefinitionMissingCallGraph:
         error_messages = [
             r.message for r in caplog.records if r.levelno >= logging.ERROR
         ]
-        assert (
-            not error_messages
-        ), f"Expected no ERROR-level log messages, but got: {error_messages}"
+        assert not error_messages, (
+            f"Expected no ERROR-level log messages, but got: {error_messages}"
+        )
 
         debug_messages = [
             r.message
             for r in caplog.records
             if r.levelno == logging.DEBUG and "incomplete schema" in r.message
         ]
-        assert (
-            len(debug_messages) >= 1
-        ), "Expected at least one DEBUG-level 'incomplete schema' message"
+        assert len(debug_messages) >= 1, (
+            "Expected at least one DEBUG-level 'incomplete schema' message"
+        )
 
     def test_no_exception_raised_for_missing_call_graph(self, tmp_path):
         """_find_target_definition must not raise when call_graph is missing."""
@@ -163,18 +163,18 @@ class TestBfsTraverseDependentsMissingCallGraph:
         error_messages = [
             r.message for r in caplog.records if r.levelno >= logging.ERROR
         ]
-        assert (
-            not error_messages
-        ), f"Expected no ERROR-level log messages, but got: {error_messages}"
+        assert not error_messages, (
+            f"Expected no ERROR-level log messages, but got: {error_messages}"
+        )
 
         debug_messages = [
             r.message
             for r in caplog.records
             if r.levelno == logging.DEBUG and "incomplete schema" in r.message
         ]
-        assert (
-            len(debug_messages) >= 1
-        ), "Expected at least one DEBUG-level 'incomplete schema' message"
+        assert len(debug_messages) >= 1, (
+            "Expected at least one DEBUG-level 'incomplete schema' message"
+        )
 
     def test_no_exception_raised_for_missing_call_graph(self, tmp_path):
         """_bfs_traverse_dependents must not raise when call_graph is missing."""
@@ -331,6 +331,6 @@ class TestValidScipDbStillWorks:
         error_messages = [
             r.message for r in caplog.records if r.levelno >= logging.ERROR
         ]
-        assert (
-            not error_messages
-        ), f"Expected no ERROR-level logs with real fixture, but got: {error_messages}"
+        assert not error_messages, (
+            f"Expected no ERROR-level logs with real fixture, but got: {error_messages}"
+        )

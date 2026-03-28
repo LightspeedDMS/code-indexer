@@ -603,9 +603,9 @@ class TestIssueManager:
 
         # Count occurrences of "Created by CIDX Server"
         identity_count = captured_body.count("**Created by CIDX Server**")
-        assert (
-            identity_count == 1
-        ), f"Expected exactly 1 server identity section, found {identity_count}"
+        assert identity_count == 1, (
+            f"Expected exactly 1 server identity section, found {identity_count}"
+        )
 
         # Verify Scan ID appears exactly once
         scan_id_count = captured_body.count("test-scan-012")
@@ -614,9 +614,9 @@ class TestIssueManager:
         # Verify no duplicate "Server Name" or "Server IP" fields
         server_name_count = captured_body.count("Server Name:")
         server_ip_count = captured_body.count("Server IP:")
-        assert (
-            server_name_count == 1
-        ), f"Expected 'Server Name:' once, found {server_name_count} times"
-        assert (
-            server_ip_count == 1
-        ), f"Expected 'Server IP:' once, found {server_ip_count} times"
+        assert server_name_count == 1, (
+            f"Expected 'Server Name:' once, found {server_name_count} times"
+        )
+        assert server_ip_count == 1, (
+            f"Expected 'Server IP:' once, found {server_ip_count} times"
+        )

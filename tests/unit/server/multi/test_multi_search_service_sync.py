@@ -44,9 +44,9 @@ class TestMultiSearchServiceSyncInterface:
         service = MultiSearchService(config)
 
         # Verify search is NOT a coroutine function (async)
-        assert not inspect.iscoroutinefunction(
-            service.search
-        ), "search() should be sync, not async"
+        assert not inspect.iscoroutinefunction(service.search), (
+            "search() should be sync, not async"
+        )
 
     def test_search_returns_response_directly(self):
         """MultiSearchService.search() should return response directly without await.
@@ -84,9 +84,9 @@ class TestMultiSearchServiceSyncInterface:
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        assert not inspect.iscoroutinefunction(
-            service._search_threaded
-        ), "_search_threaded() should be sync"
+        assert not inspect.iscoroutinefunction(service._search_threaded), (
+            "_search_threaded() should be sync"
+        )
 
     def test_search_regex_subprocess_is_synchronous(self):
         """MultiSearchService._search_regex_subprocess() should be synchronous.
@@ -99,9 +99,9 @@ class TestMultiSearchServiceSyncInterface:
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        assert not inspect.iscoroutinefunction(
-            service._search_regex_subprocess
-        ), "_search_regex_subprocess() should be sync"
+        assert not inspect.iscoroutinefunction(service._search_regex_subprocess), (
+            "_search_regex_subprocess() should be sync"
+        )
 
     def test_execute_parallel_search_is_synchronous(self):
         """MultiSearchService._execute_parallel_search() should be synchronous.
@@ -114,9 +114,9 @@ class TestMultiSearchServiceSyncInterface:
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        assert not inspect.iscoroutinefunction(
-            service._execute_parallel_search
-        ), "_execute_parallel_search() should be sync"
+        assert not inspect.iscoroutinefunction(service._execute_parallel_search), (
+            "_execute_parallel_search() should be sync"
+        )
 
 
 class TestMultiSearchServiceThreadPoolRetained:

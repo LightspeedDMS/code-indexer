@@ -170,9 +170,9 @@ class TestDeleteGroupTransactionRollback:
         count_after = cursor.fetchone()[0]
         conn.close()
 
-        assert (
-            count_before == count_after
-        ), "No changes should occur for non-existent group"
+        assert count_before == count_after, (
+            "No changes should occur for non-existent group"
+        )
 
     def test_rollback_when_default_group(self, group_manager, temp_db_path):
         """Test that no partial changes occur when trying to delete default group."""
@@ -323,9 +323,9 @@ class TestDeleteGroupLookupWithinTransaction:
             ):
                 group_manager.delete_group(group.id)
 
-        assert (
-            len(get_group_calls) == 0
-        ), f"delete_group() should NOT call get_group(). Found {len(get_group_calls)} calls."
+        assert len(get_group_calls) == 0, (
+            f"delete_group() should NOT call get_group(). Found {len(get_group_calls)} calls."
+        )
         assert len(get_user_count_calls) == 0, (
             f"delete_group() should NOT call get_user_count_in_group(). "
             f"Found {len(get_user_count_calls)} calls."

@@ -132,7 +132,9 @@ def test_display_always_gets_fresh_slot_data():
         or "new_file2.py" in display2_text
         or "new_file3.py" in display2_text
         or "new_file4.py" in display2_text
-    ), f"Display should show NEW files from slot_tracker, not cached old files. Got: {display2_text}"
+    ), (
+        f"Display should show NEW files from slot_tracker, not cached old files. Got: {display2_text}"
+    )
 
     # Also verify we're NOT showing the old files that were replaced
     # (Some old files like file3.py, file5.py may still be there - only check replaced ones)
@@ -242,6 +244,6 @@ def test_multiple_display_refreshes_stay_fresh():
         display_text = render_buffer.getvalue()
 
         # CRITICAL: Display should show the LATEST file for this round
-        assert (
-            f"updated_round_{refresh_round}.py" in display_text
-        ), f"Round {refresh_round}: Display should show updated file, not cached old file. Got: {display_text}"
+        assert f"updated_round_{refresh_round}.py" in display_text, (
+            f"Round {refresh_round}: Display should show updated file, not cached old file. Got: {display_text}"
+        )

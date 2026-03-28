@@ -526,9 +526,9 @@ class TestFilePermissionsCheck:
             for record in caplog.records
             if "permission" in record.message.lower() or "600" in record.message
         ]
-        assert (
-            len(permission_warnings) > 0
-        ), "Should warn about insecure file permissions"
+        assert len(permission_warnings) > 0, (
+            "Should warn about insecure file permissions"
+        )
 
     def test_load_config_no_warning_if_permissions_600(self, tmp_path, caplog):
         """Test that no warning is logged if config file permissions are 0600."""
@@ -561,9 +561,9 @@ class TestFilePermissionsCheck:
             for record in caplog.records
             if "permission" in record.message.lower() and "600" in record.message
         ]
-        assert (
-            len(permission_warnings) == 0
-        ), "Should not warn about secure file permissions"
+        assert len(permission_warnings) == 0, (
+            "Should not warn about secure file permissions"
+        )
 
 
 class TestDefaultFunctionRepoAliasConstant:

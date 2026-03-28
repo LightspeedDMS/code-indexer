@@ -87,9 +87,9 @@ class TestHashPhaseStaleTrackerFix:
 
         # Verify fix: tracker should be cleared
         assert progress_manager.slot_tracker is None, "Stale slot tracker not cleared"
-        assert (
-            len(progress_manager._concurrent_files) == 2
-        ), "Concurrent files not stored"
+        assert len(progress_manager._concurrent_files) == 2, (
+            "Concurrent files not stored"
+        )
         assert progress_manager._concurrent_files == hash_files
 
     def test_concurrent_files_used_when_slot_tracker_none(self):

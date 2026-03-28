@@ -96,9 +96,9 @@ class TestDaemonFilterBuilding:
 
             # CRITICAL ASSERTION: Result should be filtered out by exclude_paths
             # File path contains "test", so it should be excluded
-            assert (
-                len(results) == 0
-            ), "Results should be filtered out by exclude_paths pattern"
+            assert len(results) == 0, (
+                "Results should be filtered out by exclude_paths pattern"
+            )
 
     def test_daemon_builds_language_filter_from_raw_params(self):
         """Daemon builds language inclusion filter from raw languages parameter."""
@@ -290,14 +290,14 @@ class TestDaemonFilterBuilding:
 
             # Verify
             assert filter_conditions is not None, "filter_conditions should not be None"
-            assert isinstance(
-                filter_conditions, dict
-            ), "filter_conditions should be dict"
+            assert isinstance(filter_conditions, dict), (
+                "filter_conditions should be dict"
+            )
 
             # Should have both must (language) and must_not (exclude_paths)
-            assert (
-                "must" in filter_conditions
-            ), f"Should have must array, got: {filter_conditions}"
-            assert (
-                "must_not" in filter_conditions
-            ), f"Should have must_not array, got: {filter_conditions}"
+            assert "must" in filter_conditions, (
+                f"Should have must array, got: {filter_conditions}"
+            )
+            assert "must_not" in filter_conditions, (
+                f"Should have must_not array, got: {filter_conditions}"
+            )

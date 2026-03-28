@@ -355,9 +355,9 @@ class TestInitialSchemaSql:
         sql_path = self._get_sql_file_path()
         content = sql_path.read_text().upper()
 
-        assert (
-            "TIMESTAMPTZ" in content
-        ), "PostgreSQL schema should use TIMESTAMPTZ for timestamp columns"
+        assert "TIMESTAMPTZ" in content, (
+            "PostgreSQL schema should use TIMESTAMPTZ for timestamp columns"
+        )
 
     def test_initial_schema_uses_jsonb_for_json_columns(self) -> None:
         """
@@ -379,12 +379,12 @@ class TestInitialSchemaSql:
         sql_path = self._get_sql_file_path()
         content = sql_path.read_text().upper()
 
-        assert (
-            "SERIAL" in content
-        ), "PostgreSQL schema should use SERIAL for auto-increment columns"
-        assert (
-            "AUTOINCREMENT" not in content
-        ), "PostgreSQL schema must not use SQLite AUTOINCREMENT keyword"
+        assert "SERIAL" in content, (
+            "PostgreSQL schema should use SERIAL for auto-increment columns"
+        )
+        assert "AUTOINCREMENT" not in content, (
+            "PostgreSQL schema must not use SQLite AUTOINCREMENT keyword"
+        )
 
 
 class TestModuleEntryPoint:
@@ -405,9 +405,9 @@ class TestModuleEntryPoint:
 
         runner_path = Path(spec.origin)
         content = runner_path.read_text()
-        assert (
-            '__name__ == "__main__"' in content or "if __name__ ==" in content
-        ), "runner.py must have a __main__ entry point"
+        assert '__name__ == "__main__"' in content or "if __name__ ==" in content, (
+            "runner.py must have a __main__ entry point"
+        )
 
     def test_connection_string_argument_is_required(self) -> None:
         """

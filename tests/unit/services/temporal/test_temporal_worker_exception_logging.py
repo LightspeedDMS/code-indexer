@@ -198,7 +198,9 @@ def test_worker_exception_is_logged_and_propagated(tmp_path, caplog):
             and "abc123d" in record.message  # Commit hash prefix (first 7 chars)
             and "Failed to index commit" in record.message
             for record in caplog.records
-        ), f"Expected ERROR log with commit hash not found. Logs: {[r.message for r in caplog.records]}"
+        ), (
+            f"Expected ERROR log with commit hash not found. Logs: {[r.message for r in caplog.records]}"
+        )
 
         # Verify: Check that the log includes exception info
         error_logs = [r for r in caplog.records if r.levelname == "ERROR"]

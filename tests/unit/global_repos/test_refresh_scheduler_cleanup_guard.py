@@ -134,9 +134,9 @@ class TestCleanupGuard:
         # Master path must NOT be scheduled for cleanup
         for call_args in mock_cleanup_manager.schedule_cleanup.call_args_list:
             path_arg = call_args[0][0]
-            assert (
-                path_arg != master_path
-            ), f"Master golden repo was scheduled for cleanup: {path_arg}"
+            assert path_arg != master_path, (
+                f"Master golden repo was scheduled for cleanup: {path_arg}"
+            )
 
     def test_cleanup_not_called_at_all_when_master_is_current_target(
         self, scheduler, golden_repos_dir, mock_cleanup_manager, mock_registry

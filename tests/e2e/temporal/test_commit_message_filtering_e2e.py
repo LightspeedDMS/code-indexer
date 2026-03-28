@@ -140,19 +140,23 @@ class TestCommitMessageFilteringE2E:
             assert (
                 "[COMMIT MESSAGE MATCH]" in full_output
                 or "[commit message match]" in full_output.lower()
-            ), f"Expected '[COMMIT MESSAGE MATCH]' label in results, but output was: {result.stdout}"
+            ), (
+                f"Expected '[COMMIT MESSAGE MATCH]' label in results, but output was: {result.stdout}"
+            )
 
             # 3. Results should contain commit message text (when not using --quiet)
             assert (
                 "authentication" in full_output.lower()
                 or "Add authentication module" in full_output
-            ), f"Expected 'authentication' or commit message text in results, but output was: {result.stdout}"
+            ), (
+                f"Expected 'authentication' or commit message text in results, but output was: {result.stdout}"
+            )
 
             # 3. Results should NOT contain file diff content
             # (File diff content like "def authenticate_user():" should NOT appear)
-            assert (
-                "def authenticate_user" not in result.stdout
-            ), f"Results should not contain file diff content, but found file code in: {result.stdout}"
+            assert "def authenticate_user" not in result.stdout, (
+                f"Results should not contain file diff content, but found file code in: {result.stdout}"
+            )
 
             # 4. Query with --chunk-type commit_diff should return DIFFERENT results
             diff_result = subprocess.run(
@@ -175,7 +179,9 @@ class TestCommitMessageFilteringE2E:
             assert (
                 "def authenticate_user" in diff_result.stdout
                 or len(diff_result.stdout.strip()) > 0
-            ), f"--chunk-type diff should return file diff content, but got: {diff_result.stdout}"
+            ), (
+                f"--chunk-type diff should return file diff content, but got: {diff_result.stdout}"
+            )
 
             print(
                 "\n✅ AC3 validated: --chunk-type commit_message successfully filters to commit messages only"

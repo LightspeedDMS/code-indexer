@@ -182,12 +182,12 @@ class TestGetCidxMetaReadPath:
             result = service._get_cidx_meta_read_path()
 
             # Must return versioned path, NOT the live path from get_actual_repo_path
-            assert result == Path(
-                versioned_path
-            ), f"Expected versioned path {versioned_path}, got {result}"
-            assert result != Path(
-                live_path
-            ), "Must not return the stale live path from get_actual_repo_path()"
+            assert result == Path(versioned_path), (
+                f"Expected versioned path {versioned_path}, got {result}"
+            )
+            assert result != Path(live_path), (
+                "Must not return the stale live path from get_actual_repo_path()"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,12 +302,12 @@ class TestDomainServiceGetDepMapDir:
 
             # Must read from versioned path (backend), NOT from stale live path (stale-domain)
             domain_names = [d["name"] for d in result["domains"]]
-            assert (
-                "backend" in domain_names
-            ), "get_domain_list() must read from versioned cidx-meta path"
-            assert (
-                "stale-domain" not in domain_names
-            ), "get_domain_list() must NOT read from stale live path"
+            assert "backend" in domain_names, (
+                "get_domain_list() must read from versioned cidx-meta path"
+            )
+            assert "stale-domain" not in domain_names, (
+                "get_domain_list() must NOT read from stale live path"
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,9 +364,9 @@ class TestGetActivatedReposReadsFromVersionedPath:
             # Description should come from versioned path
             assert len(result) == 1
             description = result[0]["description_summary"]
-            assert (
-                description == "Versioned description for my-repo"
-            ), f"Expected versioned description, got: {description}"
+            assert description == "Versioned description for my-repo", (
+                f"Expected versioned description, got: {description}"
+            )
 
 
 class TestIdentifyAffectedDomainsReadsFromVersionedPath:
@@ -419,6 +419,6 @@ class TestIdentifyAffectedDomainsReadsFromVersionedPath:
             )
 
             # Must find "backend" domain from versioned _index.md
-            assert (
-                "backend" in affected
-            ), f"Expected 'backend' domain from versioned _index.md, got: {affected}"
+            assert "backend" in affected, (
+                f"Expected 'backend' domain from versioned _index.md, got: {affected}"
+            )

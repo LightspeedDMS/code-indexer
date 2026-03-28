@@ -110,9 +110,9 @@ class TestPostgresModeSkipsMigratedDatabases:
         result_file_names = {r.file_name for r in results}
 
         for migrated_db in POSTGRES_MIGRATED_DATABASES:
-            assert (
-                migrated_db not in result_file_names
-            ), f"Migrated database '{migrated_db}' should not appear in postgres mode"
+            assert migrated_db not in result_file_names, (
+                f"Migrated database '{migrated_db}' should not appear in postgres mode"
+            )
 
     def test_postgres_mode_total_count_is_reduced(self, tmp_path):
         """
@@ -244,7 +244,9 @@ class TestAllDatabasesMigratedToPostgres:
         local_only_dbs = (
             set(DATABASE_DISPLAY_NAMES.keys()) - POSTGRES_MIGRATED_DATABASES
         )
-        assert not local_only_dbs, f"All databases should be PG-migrated, but found local-only: {local_only_dbs}"
+        assert not local_only_dbs, (
+            f"All databases should be PG-migrated, but found local-only: {local_only_dbs}"
+        )
 
     def test_postgres_mode_skips_all_sqlite_checks(self, tmp_path):
         """In postgres mode, no SQLite health checks are performed — only PG check."""
@@ -269,9 +271,9 @@ class TestAllDatabasesMigratedToPostgres:
             results = service.get_all_database_health()
 
         result_file_names = {r.file_name for r in results}
-        assert result_file_names == {
-            "postgresql"
-        }, f"In PG mode, only PostgreSQL check should run, got: {result_file_names}"
+        assert result_file_names == {"postgresql"}, (
+            f"In PG mode, only PostgreSQL check should run, got: {result_file_names}"
+        )
 
     def test_oauth_db_is_postgres_migrated(self):
         """oauth.db is now in POSTGRES_MIGRATED_DATABASES."""

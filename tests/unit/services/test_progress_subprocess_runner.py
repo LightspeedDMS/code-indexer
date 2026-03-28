@@ -160,9 +160,7 @@ class TestRunWithPopenProgress:
         )
 
         script = (
-            "import sys\n"
-            'sys.stderr.write("something went wrong\\n")\n'
-            "sys.exit(1)\n"
+            'import sys\nsys.stderr.write("something went wrong\\n")\nsys.exit(1)\n'
         )
         command = [sys.executable, "-c", script]
         all_stdout = []

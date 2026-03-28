@@ -34,9 +34,9 @@ class TestReposListDisplay:
             303,
         ], f"Expected redirect, got {response.status_code}"
         location = response.headers.get("location", "")
-        assert (
-            "/admin/login" in location
-        ), f"Expected redirect to /admin/login, got {location}"
+        assert "/admin/login" in location, (
+            f"Expected redirect to /admin/login, got {location}"
+        )
 
     def test_repos_page_renders(self, authenticated_client: TestClient):
         """
@@ -49,9 +49,9 @@ class TestReposListDisplay:
         response = authenticated_client.get("/admin/repos")
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
-        assert (
-            "Activated Repositories - CIDX Admin" in response.text
-        ), "Page title should be 'Activated Repositories - CIDX Admin'"
+        assert "Activated Repositories - CIDX Admin" in response.text, (
+            "Page title should be 'Activated Repositories - CIDX Admin'"
+        )
 
     def test_repos_empty_state(self, authenticated_client: TestClient):
         """
@@ -66,9 +66,9 @@ class TestReposListDisplay:
 
         assert response.status_code == 200
         text_lower = response.text.lower()
-        assert (
-            "no activated repositories" in text_lower
-        ), "Should show 'No activated repositories' message when empty"
+        assert "no activated repositories" in text_lower, (
+            "Should show 'No activated repositories' message when empty"
+        )
 
     def test_repos_table_columns(self, authenticated_client: TestClient):
         """
@@ -89,9 +89,9 @@ class TestReposListDisplay:
         assert "user" in text_lower, "Table should have User column"
         assert "golden" in text_lower, "Table should have Golden Repo column"
         # Activated or date should be present
-        assert (
-            "activated" in text_lower or "date" in text_lower
-        ), "Table should have Activated Date column"
+        assert "activated" in text_lower or "date" in text_lower, (
+            "Table should have Activated Date column"
+        )
         assert "status" in text_lower, "Table should have Status column"
         assert "actions" in text_lower, "Table should have Actions column"
 
@@ -133,12 +133,12 @@ class TestReposFiltering:
         text_lower = response.text.lower()
 
         # Check for search input
-        assert (
-            'type="search"' in text_lower or 'type="text"' in text_lower
-        ), "Page should have a search input"
-        assert (
-            "search" in text_lower or "filter" in text_lower
-        ), "Page should have search functionality"
+        assert 'type="search"' in text_lower or 'type="text"' in text_lower, (
+            "Page should have a search input"
+        )
+        assert "search" in text_lower or "filter" in text_lower, (
+            "Page should have search functionality"
+        )
 
     def test_repos_has_golden_repo_filter(self, authenticated_client: TestClient):
         """
@@ -154,9 +154,9 @@ class TestReposFiltering:
         text_lower = response.text.lower()
 
         # Check for golden repo filter select
-        assert (
-            "golden" in text_lower and "select" in text_lower
-        ), "Page should have a Golden Repo filter dropdown"
+        assert "golden" in text_lower and "select" in text_lower, (
+            "Page should have a Golden Repo filter dropdown"
+        )
 
     def test_repos_has_user_filter(self, authenticated_client: TestClient):
         """
@@ -393,9 +393,9 @@ class TestRepoStatusDisplay:
         # Even with no repos, the template should be ready for status display
         text = response.text
         # Check that page has proper structure for showing status
-        assert (
-            "<table" in text.lower() or "status" in text.lower()
-        ), "Page should have structure for status display"
+        assert "<table" in text.lower() or "status" in text.lower(), (
+            "Page should have structure for status display"
+        )
 
 
 # =============================================================================
@@ -418,9 +418,9 @@ class TestReposPartial:
 
         assert response.status_code == 200, f"Expected 200, got {response.status_code}"
         # Should be an HTML fragment, not a full page
-        assert (
-            "<html>" not in response.text.lower()
-        ), "Partial should not contain full HTML structure"
+        assert "<html>" not in response.text.lower(), (
+            "Partial should not contain full HTML structure"
+        )
 
     def test_partials_require_auth(self, web_client: TestClient):
         """

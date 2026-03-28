@@ -2144,9 +2144,9 @@ class TestIteration11Fix3SkipGarbageWrite:
 
         # Verify domain file was NOT written (FIX 3)
         domain_file = staging_dir / "test-domain.md"
-        assert (
-            not domain_file.exists()
-        ), "Domain file should NOT be written when both attempts fail quality checks"
+        assert not domain_file.exists(), (
+            "Domain file should NOT be written when both attempts fail quality checks"
+        )
 
     @patch("subprocess.run")
     def test_writes_file_when_retry_succeeds(self, mock_subprocess, tmp_path):
@@ -2322,12 +2322,12 @@ class TestIteration13HookThresholdFix:
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
         # For large domain (5 repos), thresholds should be (7, 17) not (15, 30)
-        assert (
-            '[ "$C" -gt 17 ]' in bash_script
-        ), "Late threshold should be 17 for large domain"
-        assert (
-            '[ "$C" -gt 7 ]' in bash_script
-        ), "Early threshold should be 7 for large domain"
+        assert '[ "$C" -gt 17 ]' in bash_script, (
+            "Late threshold should be 17 for large domain"
+        )
+        assert '[ "$C" -gt 7 ]' in bash_script, (
+            "Early threshold should be 7 for large domain"
+        )
 
     @patch("subprocess.run")
     def test_hook_thresholds_small_max_turns(self, mock_subprocess, tmp_path):
@@ -2917,9 +2917,9 @@ class TestIteration14PurposeDrivenHooks:
         # Verify allowed_tools="" (write-only mode)
         if "--allowedTools" in retry_cmd:
             tools_idx = retry_cmd.index("--allowedTools")
-            assert (
-                retry_cmd[tools_idx + 1] == ""
-            ), "Retry should use allowed_tools='' (write-only)"
+            assert retry_cmd[tools_idx + 1] == "", (
+                "Retry should use allowed_tools='' (write-only)"
+            )
 
         # Verify retry prompt includes write-focused language
         retry_prompt = retry_call[1]["input"]
@@ -3072,9 +3072,9 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract the "Repository Filesystem Locations" section where repos should be sorted
         repo_section_start = prompt.find("## Repository Filesystem Locations")
-        assert (
-            repo_section_start >= 0
-        ), "Repository Filesystem Locations section not found"
+        assert repo_section_start >= 0, (
+            "Repository Filesystem Locations section not found"
+        )
         next_section_start = prompt.find("##", repo_section_start + 10)
         if next_section_start >= 0:
             repo_section = prompt[repo_section_start:next_section_start]
@@ -3087,9 +3087,9 @@ class TestIteration15InsideOutAndConciseness:
         small_idx = repo_section.find("small-repo")
 
         # Verify repos appear in size-descending order in the Repository Filesystem Locations section
-        assert (
-            large_idx < medium_idx < small_idx
-        ), f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
+        assert large_idx < medium_idx < small_idx, (
+            f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
+        )
 
     @patch("subprocess.run")
     def test_standard_prompt_has_output_template(self, mock_subprocess, tmp_path):
@@ -3509,9 +3509,9 @@ We use adobe for graphics processing.
             for row in lines
             if row.startswith("| ") and "Source Domain" not in row and "---|" not in row
         ]
-        assert (
-            len(table_rows) == 2
-        ), f"Expected 2 table rows for bidirectional edges, got {len(table_rows)}"
+        assert len(table_rows) == 2, (
+            f"Expected 2 table rows for bidirectional edges, got {len(table_rows)}"
+        )
 
     def test_build_cross_domain_graph_summary(self, tmp_path):
         """Test that summary shows correct edge count and standalone list."""
@@ -3763,9 +3763,9 @@ Standalone domain.
                 sources.append(parts[0])
 
         # Verify alphabetical order
-        assert sources == sorted(
-            sources
-        ), f"Sources not alphabetically sorted: {sources}"
+        assert sources == sorted(sources), (
+            f"Sources not alphabetically sorted: {sources}"
+        )
 
     def test_build_cross_domain_graph_negation_filter(self, tmp_path):
         """Test that structured table edges are detected; prose negation does not suppress them."""

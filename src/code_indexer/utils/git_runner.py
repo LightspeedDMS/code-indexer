@@ -252,8 +252,7 @@ def _log_git_failure(
 
         # Create a descriptive exception message
         failure_msg = (
-            f"Git command failed (attempt {attempt}/{max_attempts}): "
-            f"{' '.join(cmd)}"
+            f"Git command failed (attempt {attempt}/{max_attempts}): {' '.join(cmd)}"
         )
 
         # Create a new exception with context for logging

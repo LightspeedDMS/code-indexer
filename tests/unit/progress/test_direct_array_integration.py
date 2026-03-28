@@ -43,31 +43,31 @@ def test_end_to_end_direct_array_integration():
     display_lines = progress_manager.get_display_lines_from_tracker(slot_tracker)
 
     # Verify all files are displayed
-    assert (
-        len(display_lines) == 3
-    ), f"Expected 3 display lines, got {len(display_lines)}"
+    assert len(display_lines) == 3, (
+        f"Expected 3 display lines, got {len(display_lines)}"
+    )
 
     # Verify content is correct
-    assert any(
-        "file_1.py" in line for line in display_lines
-    ), "file_1.py should be in display"
-    assert any(
-        "file_2.js" in line for line in display_lines
-    ), "file_2.js should be in display"
-    assert any(
-        "file_3.md" in line for line in display_lines
-    ), "file_3.md should be in display"
+    assert any("file_1.py" in line for line in display_lines), (
+        "file_1.py should be in display"
+    )
+    assert any("file_2.js" in line for line in display_lines), (
+        "file_2.js should be in display"
+    )
+    assert any("file_3.md" in line for line in display_lines), (
+        "file_3.md should be in display"
+    )
 
     # Verify status formatting
-    assert any(
-        "chunking..." in line for line in display_lines
-    ), "chunking status should be formatted"
-    assert any(
-        "vectorizing..." in line for line in display_lines
-    ), "vectorizing status should be formatted"
-    assert any(
-        "finalizing..." in line for line in display_lines
-    ), "finalizing status should be formatted"
+    assert any("chunking..." in line for line in display_lines), (
+        "chunking status should be formatted"
+    )
+    assert any("vectorizing..." in line for line in display_lines), (
+        "vectorizing status should be formatted"
+    )
+    assert any("finalizing..." in line for line in display_lines), (
+        "finalizing status should be formatted"
+    )
 
     # Test real-time updates (no stale data)
     slot_tracker.update_slot(slot_ids[0], FileStatus.COMPLETE)
@@ -75,17 +75,17 @@ def test_end_to_end_direct_array_integration():
     updated_display_lines = progress_manager.get_display_lines_from_tracker(
         slot_tracker
     )
-    assert any(
-        "complete ✓" in line for line in updated_display_lines
-    ), "Status should update immediately"
+    assert any("complete ✓" in line for line in updated_display_lines), (
+        "Status should update immediately"
+    )
 
     # Test slot cleanup
     slot_tracker.release_slot(slot_ids[1])
 
     final_display_lines = progress_manager.get_display_lines_from_tracker(slot_tracker)
-    assert (
-        len(final_display_lines) == 3
-    ), "Released slot should stay visible for better UX"
+    assert len(final_display_lines) == 3, (
+        "Released slot should stay visible for better UX"
+    )
     # Released file should still be displayed in COMPLETE state for user feedback
 
 
@@ -114,15 +114,15 @@ def test_array_scanning_range():
     # Verify display finds files at all positions
     display_lines = progress_manager.get_array_display_lines(slot_tracker, max_slots)
 
-    assert len(display_lines) >= len(
-        test_positions
-    ), f"Should find at least {len(test_positions)} files across slot range"
+    assert len(display_lines) >= len(test_positions), (
+        f"Should find at least {len(test_positions)} files across slot range"
+    )
 
     # Verify scanning covers the full range (0 to threadcount+1)
     all_lines = progress_manager.get_display_lines_from_tracker(slot_tracker)
-    assert len(all_lines) >= len(
-        test_positions
-    ), "Array scanning should find files across full range"
+    assert len(all_lines) >= len(test_positions), (
+        "Array scanning should find files across full range"
+    )
 
 
 def test_single_data_structure_consistency():
@@ -143,13 +143,13 @@ def test_single_data_structure_consistency():
     method3_lines = progress_manager.get_array_display_lines(slot_tracker, 14)
 
     # All methods should return the same data (single source of truth)
-    assert (
-        len(method1_lines) == len(method2_lines) == len(method3_lines) == 1
-    ), "All display methods should return the same data"
+    assert len(method1_lines) == len(method2_lines) == len(method3_lines) == 1, (
+        "All display methods should return the same data"
+    )
 
-    assert (
-        method1_lines[0] == method2_lines[0] == method3_lines[0]
-    ), "All display methods should return identical content"
+    assert method1_lines[0] == method2_lines[0] == method3_lines[0], (
+        "All display methods should return identical content"
+    )
 
     # Update in tracker should be reflected immediately in all methods
     slot_tracker.update_slot(slot_id, FileStatus.COMPLETE)
@@ -160,11 +160,11 @@ def test_single_data_structure_consistency():
 
     # All should show the updated status immediately
     for lines in [updated1, updated2, updated3]:
-        assert any(
-            "complete ✓" in line for line in lines
-        ), "All display methods should show updated status immediately"
+        assert any("complete ✓" in line for line in lines), (
+            "All display methods should show updated status immediately"
+        )
 
     # Content should still be identical across all methods
-    assert (
-        updated1[0] == updated2[0] == updated3[0]
-    ), "Updated content should be identical across all methods"
+    assert updated1[0] == updated2[0] == updated3[0], (
+        "Updated content should be identical across all methods"
+    )

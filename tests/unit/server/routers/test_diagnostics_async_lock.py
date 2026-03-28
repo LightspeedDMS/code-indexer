@@ -24,9 +24,9 @@ class TestGenerateDescriptionsSyncHelperExists:
         """A _generate_descriptions_sync helper must be importable."""
         from code_indexer.server.routers.diagnostics import _generate_descriptions_sync
 
-        assert callable(
-            _generate_descriptions_sync
-        ), "_generate_descriptions_sync must be a callable function"
+        assert callable(_generate_descriptions_sync), (
+            "_generate_descriptions_sync must be a callable function"
+        )
 
     def test_sync_helper_returns_response_type(self):
         """_generate_descriptions_sync must return GenerateMissingDescriptionsResponse."""
@@ -43,9 +43,9 @@ class TestGenerateDescriptionsSyncHelperExists:
 
         result = _generate_descriptions_sync(mock_state)
 
-        assert isinstance(
-            result, GenerateMissingDescriptionsResponse
-        ), "_generate_descriptions_sync must return GenerateMissingDescriptionsResponse"
+        assert isinstance(result, GenerateMissingDescriptionsResponse), (
+            "_generate_descriptions_sync must return GenerateMissingDescriptionsResponse"
+        )
 
     def test_sync_helper_lock_prevents_concurrent_execution(self):
         """The threading.Lock in _generate_descriptions_sync prevents concurrent runs."""
@@ -59,9 +59,9 @@ class TestGenerateDescriptionsSyncHelperExists:
         try:
             # Lock is now held - a second acquisition must fail
             second_acquire = _generate_descriptions_lock.acquire(blocking=False)
-            assert (
-                not second_acquire
-            ), "Lock must prevent concurrent execution - second acquire must fail"
+            assert not second_acquire, (
+                "Lock must prevent concurrent execution - second acquire must fail"
+            )
         finally:
             _generate_descriptions_lock.release()
 
@@ -77,9 +77,9 @@ class TestGenerateMissingDescriptionsUsesExecutor:
         )
 
         # The handler must be an async function
-        assert inspect.iscoroutinefunction(
-            generate_missing_descriptions
-        ), "generate_missing_descriptions must remain async def"
+        assert inspect.iscoroutinefunction(generate_missing_descriptions), (
+            "generate_missing_descriptions must remain async def"
+        )
 
     def test_handler_uses_run_in_executor_via_event_loop(self):
         """
@@ -131,12 +131,12 @@ class TestGenerateMissingDescriptionsUsesExecutor:
 
         _result = asyncio.get_event_loop().run_until_complete(run_test())
 
-        assert (
-            len(executor_called_with_sync_helper) > 0
-        ), "generate_missing_descriptions must call run_in_executor to offload blocking work"
-        assert (
-            executor_called_with_sync_helper[0] is _generate_descriptions_sync
-        ), "run_in_executor must be called with _generate_descriptions_sync as the function"
+        assert len(executor_called_with_sync_helper) > 0, (
+            "generate_missing_descriptions must call run_in_executor to offload blocking work"
+        )
+        assert executor_called_with_sync_helper[0] is _generate_descriptions_sync, (
+            "run_in_executor must be called with _generate_descriptions_sync as the function"
+        )
 
     def test_second_concurrent_call_returns_empty_response_without_blocking(self):
         """

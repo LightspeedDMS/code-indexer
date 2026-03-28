@@ -128,9 +128,9 @@ def initialized_repo_semantic_only(git_test_repo):
     # Verify only semantic index exists
     index_base = git_test_repo / ".code-indexer/index"
     assert (index_base / "code-indexer-HEAD").exists(), "Semantic index not found"
-    assert not (
-        index_base / "code-indexer-temporal"
-    ).exists(), "Temporal index should not exist"
+    assert not (index_base / "code-indexer-temporal").exists(), (
+        "Temporal index should not exist"
+    )
 
     yield git_test_repo
 
@@ -175,15 +175,15 @@ class TestWatchModeAutoDetection:
             output = stdout + stderr
 
             # Verify detection messages
-            assert (
-                "Detected 2 index(es) to watch" in output
-            ), f"Should detect 2 indexes. Output: {output}"
-            assert (
-                "Semantic index" in output
-            ), f"Should mention semantic index. Output: {output}"
-            assert (
-                "Temporal index" in output
-            ), f"Should mention temporal index. Output: {output}"
+            assert "Detected 2 index(es) to watch" in output, (
+                f"Should detect 2 indexes. Output: {output}"
+            )
+            assert "Semantic index" in output, (
+                f"Should mention semantic index. Output: {output}"
+            )
+            assert "Temporal index" in output, (
+                f"Should mention temporal index. Output: {output}"
+            )
 
         finally:
             if watch_proc.poll() is None:
@@ -225,15 +225,15 @@ class TestWatchModeAutoDetection:
             output = stdout + stderr
 
             # Verify detection messages
-            assert (
-                "Detected 1 index(es) to watch" in output
-            ), f"Should detect 1 index. Output: {output}"
-            assert (
-                "Semantic index" in output
-            ), f"Should mention semantic index. Output: {output}"
-            assert (
-                "Temporal index" not in output
-            ), f"Should NOT mention temporal index. Output: {output}"
+            assert "Detected 1 index(es) to watch" in output, (
+                f"Should detect 1 index. Output: {output}"
+            )
+            assert "Semantic index" in output, (
+                f"Should mention semantic index. Output: {output}"
+            )
+            assert "Temporal index" not in output, (
+                f"Should NOT mention temporal index. Output: {output}"
+            )
 
         finally:
             if watch_proc.poll() is None:
@@ -310,13 +310,13 @@ class TestWatchModeGitCommitDetection:
             updated_progress = json.loads(progress_file.read_text())
             updated_commits = set(updated_progress.get("completed_commits", []))
 
-            assert (
-                len(updated_commits) == 2
-            ), f"Should have 2 commits indexed. Got: {len(updated_commits)}"
+            assert len(updated_commits) == 2, (
+                f"Should have 2 commits indexed. Got: {len(updated_commits)}"
+            )
             new_commits = updated_commits - initial_commits
-            assert (
-                len(new_commits) == 1
-            ), f"Should have 1 new commit. Got: {new_commits}"
+            assert len(new_commits) == 1, (
+                f"Should have 1 new commit. Got: {new_commits}"
+            )
 
             # Get the new commit hash
             result = subprocess.run(
@@ -327,9 +327,9 @@ class TestWatchModeGitCommitDetection:
                 check=True,
             )
             latest_commit = result.stdout.strip()
-            assert (
-                latest_commit in updated_commits
-            ), f"Latest commit {latest_commit} should be in progress file"
+            assert latest_commit in updated_commits, (
+                f"Latest commit {latest_commit} should be in progress file"
+            )
 
             # Verify new commit is searchable (query temporal index)
             query_result = subprocess.run(
@@ -339,12 +339,12 @@ class TestWatchModeGitCommitDetection:
                 text=True,
                 timeout=30,
             )
-            assert (
-                query_result.returncode == 0
-            ), f"Temporal query failed: {query_result.stderr}"
-            assert (
-                "new_feature" in query_result.stdout.lower()
-            ), "New commit should be searchable"
+            assert query_result.returncode == 0, (
+                f"Temporal query failed: {query_result.stderr}"
+            )
+            assert "new_feature" in query_result.stdout.lower(), (
+                "New commit should be searchable"
+            )
 
         finally:
             if watch_proc.poll() is None:
@@ -410,14 +410,14 @@ class TestWatchModeGitCommitDetection:
             import re
 
             commit_patterns = re.findall(r"[0-9a-f]{8}", output)
-            assert (
-                len(commit_patterns) > 0
-            ), f"Should show commit hashes in progress. Output: {output}"
+            assert len(commit_patterns) > 0, (
+                f"Should show commit hashes in progress. Output: {output}"
+            )
 
             # Should mention indexing activity
-            assert (
-                "commit" in output.lower() or "indexing" in output.lower()
-            ), f"Should mention indexing activity. Output: {output}"
+            assert "commit" in output.lower() or "indexing" in output.lower(), (
+                f"Should mention indexing activity. Output: {output}"
+            )
 
         finally:
             if watch_proc.poll() is None:
@@ -460,6 +460,6 @@ class TestWatchModeNoIndexes:
 
         # Watch mode should exit immediately
         output = result.stdout + result.stderr
-        assert (
-            "No indexes found" in output or "no indexes" in output.lower()
-        ), f"Should show no indexes warning. Output: {output}"
+        assert "No indexes found" in output or "no indexes" in output.lower(), (
+            f"Should show no indexes warning. Output: {output}"
+        )

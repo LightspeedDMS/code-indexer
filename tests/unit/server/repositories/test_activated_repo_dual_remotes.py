@@ -619,9 +619,9 @@ class TestSyncWithGoldenRemote:
         fetch_call = fetch_calls[0]
         assert "git" in fetch_call[0][0]
         assert "fetch" in fetch_call[0][0]
-        assert (
-            "golden" in fetch_call[0][0]
-        ), f"Expected 'golden' remote, got: {fetch_call[0][0]}"
-        assert (
-            "origin" not in fetch_call[0][0] or "golden" in fetch_call[0][0]
-        ), "Should use 'golden' not 'origin'"
+        assert "golden" in fetch_call[0][0], (
+            f"Expected 'golden' remote, got: {fetch_call[0][0]}"
+        )
+        assert "origin" not in fetch_call[0][0] or "golden" in fetch_call[0][0], (
+            "Should use 'golden' not 'origin'"
+        )

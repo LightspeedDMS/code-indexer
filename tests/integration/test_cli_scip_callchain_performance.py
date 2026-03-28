@@ -40,11 +40,10 @@ def test_callchain_uses_fast_database_primitive():
 
     # Verify successful execution
     assert result.exit_code == 0, (
-        f"Command failed with exit code {result.exit_code}\n"
-        f"Output:\n{result.output}"
+        f"Command failed with exit code {result.exit_code}\nOutput:\n{result.output}"
     )
 
     # Verify output format (at least one chain found)
-    assert (
-        "call chain" in result.output.lower()
-    ), f"Expected 'call chain' in output, got:\n{result.output}"
+    assert "call chain" in result.output.lower(), (
+        f"Expected 'call chain' in output, got:\n{result.output}"
+    )

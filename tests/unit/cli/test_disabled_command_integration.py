@@ -39,9 +39,9 @@ class TestEndToEndCommandModeEnforcement:
                 result = runner.invoke(cli, [command])
 
                 # Should exit with error
-                assert (
-                    result.exit_code != 0
-                ), f"Command '{command}' should fail in {mode} mode"
+                assert result.exit_code != 0, (
+                    f"Command '{command}' should fail in {mode} mode"
+                )
 
                 # Should contain helpful error message
                 assert command in result.output.lower()
@@ -75,9 +75,9 @@ class TestEndToEndCommandModeEnforcement:
                         result = runner.invoke(cli, ["--version"])
 
                     # Should work without error
-                    assert (
-                        result.exit_code == 0
-                    ), f"Command '{command}' should work in {mode} mode"
+                    assert result.exit_code == 0, (
+                        f"Command '{command}' should work in {mode} mode"
+                    )
 
     def test_query_command_blocked_in_uninitialized_mode(self):
         """Test that query command is properly blocked in uninitialized mode."""
@@ -282,9 +282,9 @@ class TestCommandCompatibilityMatrixIntegrity:
         ]
 
         for command in essential_commands:
-            assert (
-                command in COMMAND_COMPATIBILITY
-            ), f"Command '{command}' missing from compatibility matrix"
+            assert command in COMMAND_COMPATIBILITY, (
+                f"Command '{command}' missing from compatibility matrix"
+            )
 
     def test_compatibility_matrix_logical_consistency(self):
         """Test logical consistency of the compatibility matrix."""
@@ -304,9 +304,9 @@ class TestCommandCompatibilityMatrixIntegrity:
 
             # Commands that require initialization should not work in uninitialized mode
             if command_name in ["query", "start", "stop", "index", "watch", "status"]:
-                assert not compatibility.get(
-                    "uninitialized", True
-                ), f"Command '{command_name}' should not work in uninitialized mode"
+                assert not compatibility.get("uninitialized", True), (
+                    f"Command '{command_name}' should not work in uninitialized mode"
+                )
 
     def test_help_and_version_always_available(self):
         """Test that help and version are always available as required."""
