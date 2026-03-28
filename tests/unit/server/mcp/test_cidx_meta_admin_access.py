@@ -6,7 +6,11 @@ TDD: Tests written FIRST before implementation (red phase).
 
 from unittest.mock import MagicMock, patch
 
-from code_indexer.server.mcp.handlers import browse_directory, get_file_content, list_files
+from code_indexer.server.mcp.handlers import (
+    browse_directory,
+    get_file_content,
+    list_files,
+)
 
 from .conftest import extract_mcp_data, make_file_service_with_cidx_meta
 
@@ -68,9 +72,7 @@ class TestAdminFullAccessToCidxMeta:
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
                 return_value=access_filtering_service,
             ):
-                result = browse_directory(
-                    {"repository_alias": "cidx-meta"}, admin_user
-                )
+                result = browse_directory({"repository_alias": "cidx-meta"}, admin_user)
 
         data = extract_mcp_data(result)
         assert data["success"] is True

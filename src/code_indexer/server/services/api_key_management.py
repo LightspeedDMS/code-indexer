@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import httpx
 from code_indexer.server.logging_utils import format_error_log
@@ -185,7 +185,9 @@ class ApiKeySyncService:
                 and claude_config.claude_auth_mode == "subscription"
             )
         except Exception as exc:
-            logger.warning("Failed to check subscription mode, defaulting to api_key: %s", exc)
+            logger.warning(
+                "Failed to check subscription mode, defaulting to api_key: %s", exc
+            )
             return False
 
     def _is_voyageai_key_synced(self, api_key: str) -> bool:
@@ -356,7 +358,10 @@ class ApiKeyConnectivityTester:
                 "claude",
                 "--print",
                 "Say hello in exactly one word",
-                env={**{k: v for k, v in os.environ.items() if k != "CLAUDECODE"}, "ANTHROPIC_API_KEY": api_key},
+                env={
+                    **{k: v for k, v in os.environ.items() if k != "CLAUDECODE"},
+                    "ANTHROPIC_API_KEY": api_key,
+                },
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -609,7 +614,7 @@ class ApiKeyAutoSeeder:
         if self._claude_json_path.exists():
             try:
                 config = json.loads(self._claude_json_path.read_text())
-                json_key = config.get("apiKey")
+                json_key = cast(Optional[str], config.get("apiKey"))
                 if json_key:
                     return json_key
             except (json.JSONDecodeError, IOError):

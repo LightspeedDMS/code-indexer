@@ -257,11 +257,15 @@ class TraceStateManager:
                         f"for user {username} (requested session: {session_id})"
                     )
                 else:
-                    logger.warning(f"end_trace called for unknown session: {session_id}")
+                    logger.warning(
+                        f"end_trace called for unknown session: {session_id}"
+                    )
                     return None
 
             if effective_session_id not in self._session_trace_stacks:
-                logger.warning(f"end_trace called for unknown session: {effective_session_id}")
+                logger.warning(
+                    f"end_trace called for unknown session: {effective_session_id}"
+                )
                 return None
 
             stack = self._session_trace_stacks[effective_session_id]
@@ -278,7 +282,9 @@ class TraceStateManager:
             if not stack and username and username in self._username_to_session:
                 del self._username_to_session[username]
 
-            logger.info(f"Ended trace {context.trace_id} for session {effective_session_id}")
+            logger.info(
+                f"Ended trace {context.trace_id} for session {effective_session_id}"
+            )
 
         # Story #185: Update trace with output, metadata (outcome, intel), and tags
         # Build metadata updates

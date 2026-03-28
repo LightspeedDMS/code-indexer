@@ -92,9 +92,14 @@ class TestConfigServiceDataRetentionUpdateHandler:
         config_manager.save_config(config_manager.create_default_config())
 
         config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("data_retention", "operational_logs_retention_hours", 336)
+        config_service.update_setting(
+            "data_retention", "operational_logs_retention_hours", 336
+        )
 
-        assert config_service.get_config().data_retention_config.operational_logs_retention_hours == 336
+        assert (
+            config_service.get_config().data_retention_config.operational_logs_retention_hours
+            == 336
+        )
 
     def test_update_audit_logs_retention_hours(self, tmp_path):
         """update_setting should update audit_logs_retention_hours."""
@@ -104,9 +109,14 @@ class TestConfigServiceDataRetentionUpdateHandler:
         config_manager.save_config(config_manager.create_default_config())
 
         config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("data_retention", "audit_logs_retention_hours", 4320)
+        config_service.update_setting(
+            "data_retention", "audit_logs_retention_hours", 4320
+        )
 
-        assert config_service.get_config().data_retention_config.audit_logs_retention_hours == 4320
+        assert (
+            config_service.get_config().data_retention_config.audit_logs_retention_hours
+            == 4320
+        )
 
     def test_update_sync_jobs_retention_hours(self, tmp_path):
         """update_setting should update sync_jobs_retention_hours."""
@@ -116,9 +126,14 @@ class TestConfigServiceDataRetentionUpdateHandler:
         config_manager.save_config(config_manager.create_default_config())
 
         config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("data_retention", "sync_jobs_retention_hours", 480)
+        config_service.update_setting(
+            "data_retention", "sync_jobs_retention_hours", 480
+        )
 
-        assert config_service.get_config().data_retention_config.sync_jobs_retention_hours == 480
+        assert (
+            config_service.get_config().data_retention_config.sync_jobs_retention_hours
+            == 480
+        )
 
     def test_update_dep_map_history_retention_hours(self, tmp_path):
         """update_setting should update dep_map_history_retention_hours."""
@@ -128,9 +143,14 @@ class TestConfigServiceDataRetentionUpdateHandler:
         config_manager.save_config(config_manager.create_default_config())
 
         config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("data_retention", "dep_map_history_retention_hours", 1080)
+        config_service.update_setting(
+            "data_retention", "dep_map_history_retention_hours", 1080
+        )
 
-        assert config_service.get_config().data_retention_config.dep_map_history_retention_hours == 1080
+        assert (
+            config_service.get_config().data_retention_config.dep_map_history_retention_hours
+            == 1080
+        )
 
     def test_update_background_jobs_retention_hours(self, tmp_path):
         """update_setting should update background_jobs_retention_hours."""
@@ -140,9 +160,14 @@ class TestConfigServiceDataRetentionUpdateHandler:
         config_manager.save_config(config_manager.create_default_config())
 
         config_service = ConfigService(str(tmp_path))
-        config_service.update_setting("data_retention", "background_jobs_retention_hours", 360)
+        config_service.update_setting(
+            "data_retention", "background_jobs_retention_hours", 360
+        )
 
-        assert config_service.get_config().data_retention_config.background_jobs_retention_hours == 360
+        assert (
+            config_service.get_config().data_retention_config.background_jobs_retention_hours
+            == 360
+        )
 
     def test_update_cleanup_interval_hours(self, tmp_path):
         """update_setting should update cleanup_interval_hours."""
@@ -154,7 +179,10 @@ class TestConfigServiceDataRetentionUpdateHandler:
         config_service = ConfigService(str(tmp_path))
         config_service.update_setting("data_retention", "cleanup_interval_hours", 6)
 
-        assert config_service.get_config().data_retention_config.cleanup_interval_hours == 6
+        assert (
+            config_service.get_config().data_retention_config.cleanup_interval_hours
+            == 6
+        )
 
     def test_update_unknown_key_raises_value_error(self, tmp_path):
         """update_setting with unknown data_retention key should raise ValueError."""

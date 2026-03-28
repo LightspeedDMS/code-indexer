@@ -55,9 +55,7 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
                 return_value=access_filtering_service,
             ):
-                result = browse_directory(
-                    {"repository_alias": "cidx-meta"}, power_user
-                )
+                result = browse_directory({"repository_alias": "cidx-meta"}, power_user)
 
         data = extract_mcp_data(result)
         assert data["success"] is True

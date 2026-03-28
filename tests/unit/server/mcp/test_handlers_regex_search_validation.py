@@ -24,10 +24,7 @@ def mock_user():
 @pytest.fixture
 def base_args():
     """Base arguments for regex_search with required parameters."""
-    return {
-        "repository_alias": "test-repo-global",
-        "pattern": "test.*pattern"
-    }
+    return {"repository_alias": "test-repo-global", "pattern": "test.*pattern"}
 
 
 class TestRegexSearchInputValidation:
@@ -40,10 +37,17 @@ class TestRegexSearchInputValidation:
         args = {**base_args, "include_patterns": 123.45}
 
         # Mock dependencies to reach validation code
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers._resolve_repo_path', return_value="/tmp/test/repo"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/tmp/test/repo",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -63,10 +67,17 @@ class TestRegexSearchInputValidation:
         args = {**base_args, "include_patterns": "*.py"}
 
         # Mock dependencies to reach validation code
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers._resolve_repo_path', return_value="/tmp/test/repo"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/tmp/test/repo",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -86,10 +97,17 @@ class TestRegexSearchInputValidation:
         args = {**base_args, "exclude_patterns": 456.78}
 
         # Mock dependencies to reach validation code
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers._resolve_repo_path', return_value="/tmp/test/repo"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/tmp/test/repo",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -109,10 +127,17 @@ class TestRegexSearchInputValidation:
         args = {**base_args, "exclude_patterns": "*.pyc"}
 
         # Mock dependencies to reach validation code
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers._resolve_repo_path', return_value="/tmp/test/repo"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/tmp/test/repo",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -132,7 +157,7 @@ class TestRegexSearchInputValidation:
         args = {
             **base_args,
             "include_patterns": ["*.py", "*.js"],
-            "exclude_patterns": ["*.pyc", "*.min.js"]
+            "exclude_patterns": ["*.pyc", "*.min.js"],
         }
 
         # Mock the underlying service to avoid actual search
@@ -143,11 +168,20 @@ class TestRegexSearchInputValidation:
         mock_result.search_engine = "test"
         mock_result.search_time_ms = 100
 
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers._resolve_repo_path', return_value="/tmp/test/repo"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'), \
-             patch('code_indexer.global_repos.regex_search.RegexSearchService') as mock_service_class:
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/tmp/test/repo",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+            patch(
+                "code_indexer.global_repos.regex_search.RegexSearchService"
+            ) as mock_service_class,
+        ):
             mock_service = AsyncMock()
             mock_service.search = AsyncMock(return_value=mock_result)
             mock_service_class.return_value = mock_service
@@ -162,8 +196,12 @@ class TestRegexSearchInputValidation:
         # If validation passed, error should not mention patterns validation
         if not parsed.get("success"):
             error_msg = parsed.get("error", "")
-            assert not ("include_patterns" in error_msg.lower() and "list" in error_msg.lower())
-            assert not ("exclude_patterns" in error_msg.lower() and "list" in error_msg.lower())
+            assert not (
+                "include_patterns" in error_msg.lower() and "list" in error_msg.lower()
+            )
+            assert not (
+                "exclude_patterns" in error_msg.lower() and "list" in error_msg.lower()
+            )
 
     @pytest.mark.asyncio
     async def test_none_patterns_succeeds(self, mock_user, base_args):
@@ -179,11 +217,20 @@ class TestRegexSearchInputValidation:
         mock_result.search_engine = "test"
         mock_result.search_time_ms = 100
 
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers._resolve_repo_path', return_value="/tmp/test/repo"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'), \
-             patch('code_indexer.global_repos.regex_search.RegexSearchService') as mock_service_class:
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_repo_path",
+                return_value="/tmp/test/repo",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+            patch(
+                "code_indexer.global_repos.regex_search.RegexSearchService"
+            ) as mock_service_class,
+        ):
             mock_service = AsyncMock()
             mock_service.search = AsyncMock(return_value=mock_result)
             mock_service_class.return_value = mock_service
@@ -198,8 +245,12 @@ class TestRegexSearchInputValidation:
         # If validation passed, error should not mention patterns validation
         if not parsed.get("success"):
             error_msg = parsed.get("error", "")
-            assert not ("include_patterns" in error_msg.lower() and "list" in error_msg.lower())
-            assert not ("exclude_patterns" in error_msg.lower() and "list" in error_msg.lower())
+            assert not (
+                "include_patterns" in error_msg.lower() and "list" in error_msg.lower()
+            )
+            assert not (
+                "exclude_patterns" in error_msg.lower() and "list" in error_msg.lower()
+            )
 
 
 class TestRegexSearchOmniValidation:
@@ -217,13 +268,17 @@ class TestRegexSearchOmniValidation:
         args = {
             "repository_alias": ["repo1-global", "repo2-global"],
             "pattern": "test.*",
-            "include_patterns": "*.py"  # Should be list, not string
+            "include_patterns": "*.py",  # Should be list, not string
         }
 
         # Mock dependencies
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -243,13 +298,17 @@ class TestRegexSearchOmniValidation:
         args = {
             "repository_alias": ["repo1-global", "repo2-global"],
             "pattern": "test.*",
-            "exclude_patterns": "*.pyc"  # Should be list, not string
+            "exclude_patterns": "*.pyc",  # Should be list, not string
         }
 
         # Mock dependencies
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -269,13 +328,17 @@ class TestRegexSearchOmniValidation:
         args = {
             "repository_alias": ["repo1-global", "repo2-global"],
             "pattern": "test.*",
-            "include_patterns": 123.45
+            "include_patterns": 123.45,
         }
 
         # Mock dependencies
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -295,13 +358,17 @@ class TestRegexSearchOmniValidation:
         args = {
             "repository_alias": ["repo1-global", "repo2-global"],
             "pattern": "test.*",
-            "exclude_patterns": 456.78
+            "exclude_patterns": 456.78,
         }
 
         # Mock dependencies
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'):
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+        ):
             # WHEN: handle_regex_search is called
             result = await handle_regex_search(args, mock_user)
 
@@ -322,16 +389,27 @@ class TestRegexSearchOmniValidation:
             "repository_alias": ["repo1-global", "repo2-global"],
             "pattern": "test.*",
             "include_patterns": ["*.py", "*.js"],
-            "exclude_patterns": ["*.pyc"]
+            "exclude_patterns": ["*.pyc"],
         }
 
         # Mock the omni-search to avoid actual execution
-        with patch('code_indexer.server.mcp.handlers._get_golden_repos_dir', return_value="/tmp/test"), \
-             patch('code_indexer.server.mcp.handlers.get_config_service'), \
-             patch('code_indexer.server.mcp.handlers._omni_regex_search') as mock_omni:
-
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value="/tmp/test",
+            ),
+            patch("code_indexer.server.mcp.handlers.get_config_service"),
+            patch("code_indexer.server.mcp.handlers._omni_regex_search") as mock_omni,
+        ):
             mock_omni.return_value = {
-                "content": [{"type": "text", "text": json.dumps({"success": True, "total_results": 0, "results": []})}]
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {"success": True, "total_results": 0, "results": []}
+                        ),
+                    }
+                ]
             }
 
             # WHEN: handle_regex_search is called
@@ -344,5 +422,9 @@ class TestRegexSearchOmniValidation:
         # Should not fail with validation error
         if not parsed.get("success"):
             error_msg = parsed.get("error", "")
-            assert not ("include_patterns" in error_msg.lower() and "list" in error_msg.lower())
-            assert not ("exclude_patterns" in error_msg.lower() and "list" in error_msg.lower())
+            assert not (
+                "include_patterns" in error_msg.lower() and "list" in error_msg.lower()
+            )
+            assert not (
+                "exclude_patterns" in error_msg.lower() and "list" in error_msg.lower()
+            )

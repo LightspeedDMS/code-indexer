@@ -12,7 +12,6 @@ Tests markdown-to-HTML conversion with:
 - XSS prevention
 """
 
-
 from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
 )

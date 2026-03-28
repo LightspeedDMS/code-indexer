@@ -48,8 +48,7 @@ FULL_DOMAIN_CONTENT = (
     "participating_repos:\n"
     "  - auth-service\n"
     "  - token-validator\n"
-    "---\n\n"
-    + FULL_DOMAIN_BODY
+    "---\n\n" + FULL_DOMAIN_BODY
 )
 
 SAMPLE_DOMAINS_JSON = [

@@ -112,7 +112,9 @@ class TestDataRetentionConfigPersistence:
 class TestDataRetentionConfigMigration:
     """AC5: Migration from old BackgroundJobsConfig.cleanup_max_age_hours."""
 
-    def test_migration_carries_cleanup_max_age_hours_to_background_jobs_retention(self, tmp_path):
+    def test_migration_carries_cleanup_max_age_hours_to_background_jobs_retention(
+        self, tmp_path
+    ):
         """Old config with cleanup_max_age_hours should migrate to background_jobs_retention_hours."""
         config_data = {
             "server_dir": str(tmp_path),

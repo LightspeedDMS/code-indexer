@@ -262,13 +262,13 @@ class SelfMonitoringService:
                 remaining_seconds = interval_seconds - elapsed_seconds
                 if remaining_seconds <= 0:
                     logger.info(
-                        f"Last scan was {elapsed_seconds/60:.1f} minutes ago "
-                        f"(cadence: {interval_seconds/60:.1f} minutes), running immediately"
+                        f"Last scan was {elapsed_seconds / 60:.1f} minutes ago "
+                        f"(cadence: {interval_seconds / 60:.1f} minutes), running immediately"
                     )
                     return 0.0
                 logger.info(
-                    f"Last scan was {elapsed_seconds/60:.1f} minutes ago, "
-                    f"waiting {remaining_seconds/60:.1f} minutes before first scan"
+                    f"Last scan was {elapsed_seconds / 60:.1f} minutes ago, "
+                    f"waiting {remaining_seconds / 60:.1f} minutes before first scan"
                 )
                 return remaining_seconds
             except Exception as e:
@@ -328,14 +328,14 @@ class SelfMonitoringService:
 
             if remaining_seconds <= 0:
                 logger.info(
-                    f"Last scan was {elapsed_seconds/60:.1f} minutes ago "
-                    f"(cadence: {interval_seconds/60:.1f} minutes), running immediately"
+                    f"Last scan was {elapsed_seconds / 60:.1f} minutes ago "
+                    f"(cadence: {interval_seconds / 60:.1f} minutes), running immediately"
                 )
                 return 0.0
 
             logger.info(
-                f"Last scan was {elapsed_seconds/60:.1f} minutes ago, "
-                f"waiting {remaining_seconds/60:.1f} minutes before first scan"
+                f"Last scan was {elapsed_seconds / 60:.1f} minutes ago, "
+                f"waiting {remaining_seconds / 60:.1f} minutes before first scan"
             )
             return remaining_seconds
 

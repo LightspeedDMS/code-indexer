@@ -55,6 +55,7 @@ def _as_dict(pairs):
 
 def _make_wiki_config(**kwargs):
     from code_indexer.server.utils.config_manager import WikiConfig
+
     return WikiConfig(**kwargs)
 
 
@@ -202,9 +203,7 @@ class TestUnlistedFieldsAlphabetical:
 
     def test_ac3_unlisted_fields_appended_alphabetically(self, svc):
         """AC3: created,modified listed -> article_number,author,visibility appended alpha."""
-        wiki_config = _make_wiki_config(
-            metadata_display_order="created,modified"
-        )
+        wiki_config = _make_wiki_config(metadata_display_order="created,modified")
         cache = _make_cache()
         metadata = {
             "article_number": "KA-00001",
@@ -234,9 +233,7 @@ class TestUnlistedFieldsAlphabetical:
 
     def test_ac3_no_unlisted_fields_when_all_listed(self, svc):
         """AC3: When all fields are listed, nothing is appended."""
-        wiki_config = _make_wiki_config(
-            metadata_display_order="author,created"
-        )
+        wiki_config = _make_wiki_config(metadata_display_order="author,created")
         cache = _make_cache()
         metadata = {
             "author": "Alice",
@@ -275,7 +272,9 @@ class TestDisabledArticleNumberIgnoredInOrder:
         d = _as_dict(result)
         assert "Salesforce Article" not in d
 
-    def test_ac4_other_listed_fields_still_appear_when_article_number_disabled(self, svc):
+    def test_ac4_other_listed_fields_still_appear_when_article_number_disabled(
+        self, svc
+    ):
         """AC4: Other fields in order string still appear even when article_number disabled."""
         wiki_config = _make_wiki_config(
             enable_article_number=False,
@@ -416,9 +415,7 @@ class TestNonexistentFieldsInOrder:
 
     def test_ac8_nonexistent_fields_do_not_raise(self, svc):
         """AC8: Nonexistent fields in order string cause no exception."""
-        wiki_config = _make_wiki_config(
-            metadata_display_order="fake_key,created"
-        )
+        wiki_config = _make_wiki_config(metadata_display_order="fake_key,created")
         cache = _make_cache()
         metadata = {"created": "2024-01-01"}
         # Must not raise
@@ -441,9 +438,7 @@ class TestConfigRoundTrip:
         from dataclasses import asdict
         from code_indexer.server.utils.config_manager import WikiConfig
 
-        original = WikiConfig(
-            metadata_display_order="author,visibility,created"
-        )
+        original = WikiConfig(metadata_display_order="author,visibility,created")
         serialized = json.dumps(asdict(original))
         restored = WikiConfig(**json.loads(serialized))
         assert restored.metadata_display_order == "author,visibility,created"
@@ -489,7 +484,9 @@ class TestConfigRoundTrip:
             manager = ServerConfigManager(tmpdir)
             loaded = manager.load_config()
             assert isinstance(loaded.wiki_config, WikiConfig)
-            assert loaded.wiki_config.metadata_display_order == "author,visibility,created"
+            assert (
+                loaded.wiki_config.metadata_display_order == "author,visibility,created"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -613,9 +610,7 @@ class TestRealViewsOrdering:
 
     def test_ac13_real_views_zero_not_injected(self, svc):
         """AC13: real_views=0 -> 'Views' not in result (unchanged from current behavior)."""
-        wiki_config = _make_wiki_config(
-            metadata_display_order="real_views,created"
-        )
+        wiki_config = _make_wiki_config(metadata_display_order="real_views,created")
         cache = _make_cache(view_count=0)
         metadata = {"created": "2024-01-01"}
         result = svc.prepare_metadata_context(
@@ -645,7 +640,9 @@ class TestConfigServiceDisplayOrderSetting:
             svc._update_wiki_setting(
                 config, "metadata_display_order", "author,visibility,created"
             )
-            assert config.wiki_config.metadata_display_order == "author,visibility,created"
+            assert (
+                config.wiki_config.metadata_display_order == "author,visibility,created"
+            )
 
     def test_config_service_saves_empty_metadata_display_order(self):
         """AC10: _update_wiki_setting handles empty string for metadata_display_order."""
@@ -658,7 +655,9 @@ class TestConfigServiceDisplayOrderSetting:
             svc._update_wiki_setting(config, "metadata_display_order", "")
             assert config.wiki_config.metadata_display_order == ""
 
-    def test_config_service_metadata_display_order_unknown_key_still_raises_for_others(self):
+    def test_config_service_metadata_display_order_unknown_key_still_raises_for_others(
+        self,
+    ):
         """AC10: Other unknown keys still raise ValueError."""
         from code_indexer.server.services.config_service import ConfigService
         from code_indexer.server.utils.config_manager import ServerConfig

@@ -30,7 +30,9 @@ def _init_db(tmp_path: Path) -> tuple[str, GlobalReposSqliteBackend]:
     return str(db_path), backend
 
 
-def _register_one_repo(backend: GlobalReposSqliteBackend, alias: str = "test-repo-global") -> None:
+def _register_one_repo(
+    backend: GlobalReposSqliteBackend, alias: str = "test-repo-global"
+) -> None:
     """Register a single repo in the backend."""
     backend.register_repo(
         alias_name=alias,
@@ -153,8 +155,17 @@ class TestSchemaMigration:
         """)
         conn.execute(
             "INSERT INTO global_repos VALUES (?,?,?,?,?,?,?,?,?)",
-            ("old-repo-global", "old-repo", "https://github.com/t/r.git",
-             "/idx", "2025-01-01T00:00:00", "2025-01-01T00:00:00", 0, None, 0),
+            (
+                "old-repo-global",
+                "old-repo",
+                "https://github.com/t/r.git",
+                "/idx",
+                "2025-01-01T00:00:00",
+                "2025-01-01T00:00:00",
+                0,
+                None,
+                0,
+            ),
         )
         conn.commit()
         conn.close()
@@ -191,8 +202,17 @@ class TestSchemaMigration:
         """)
         conn.execute(
             "INSERT INTO global_repos VALUES (?,?,?,?,?,?,?,?,?)",
-            ("migrated-repo-global", "migrated-repo", "https://github.com/t/r.git",
-             "/idx", "2025-01-01T00:00:00", "2025-01-01T00:00:00", 0, None, 0),
+            (
+                "migrated-repo-global",
+                "migrated-repo",
+                "https://github.com/t/r.git",
+                "/idx",
+                "2025-01-01T00:00:00",
+                "2025-01-01T00:00:00",
+                0,
+                None,
+                0,
+            ),
         )
         conn.commit()
         conn.close()

@@ -130,7 +130,10 @@ class TestCheckSSHKeys:
                 result = await service.check_ssh_keys()
 
         assert result.status == DiagnosticStatus.NOT_CONFIGURED
-        assert "not installed" in result.message.lower() or "not found" in result.message.lower()
+        assert (
+            "not installed" in result.message.lower()
+            or "not found" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
     async def test_ssh_keys_host_key_verification_failed(self):
@@ -153,7 +156,10 @@ class TestCheckSSHKeys:
                 result = await service.check_ssh_keys()
 
         assert result.status == DiagnosticStatus.ERROR
-        assert "verification" in result.message.lower() or "error" in result.message.lower()
+        assert (
+            "verification" in result.message.lower()
+            or "error" in result.message.lower()
+        )
 
 
 class TestSSHTimeoutConstant:

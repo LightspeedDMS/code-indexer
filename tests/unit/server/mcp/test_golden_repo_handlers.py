@@ -143,7 +143,9 @@ class TestRefreshGoldenRepoHandler:
         mcp_params = {"alias": "test-repo"}
 
         mock_scheduler = MagicMock()
-        mock_scheduler.trigger_refresh_for_repo = MagicMock(return_value="test-job-id-11111")
+        mock_scheduler.trigger_refresh_for_repo = MagicMock(
+            return_value="test-job-id-11111"
+        )
 
         with patch("code_indexer.server.app.golden_repo_manager") as mock_manager:
             mock_manager.golden_repos = {"test-repo": MagicMock()}
@@ -195,7 +197,9 @@ class TestRefreshGoldenRepoHandlerViaScheduler:
         mcp_params = {"alias": "my-repo"}
 
         mock_scheduler = MagicMock()
-        mock_scheduler.trigger_refresh_for_repo = MagicMock(return_value="sched-job-001")
+        mock_scheduler.trigger_refresh_for_repo = MagicMock(
+            return_value="sched-job-001"
+        )
 
         mock_golden_repos = {"my-repo": MagicMock()}
 

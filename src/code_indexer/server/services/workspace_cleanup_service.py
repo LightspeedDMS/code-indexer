@@ -270,8 +270,7 @@ class WorkspaceCleanupService:
             shutil.rmtree(workspace_path)
 
             logger.info(
-                f"Deleted workspace {workspace_path.name}, "
-                f"reclaimed {size:,} bytes",
+                f"Deleted workspace {workspace_path.name}, reclaimed {size:,} bytes",
                 extra={"correlation_id": get_correlation_id()},
             )
 

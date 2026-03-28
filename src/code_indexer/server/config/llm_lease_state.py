@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Encryption constants — same as delegation_config.py for consistency
 PBKDF2_ITERATIONS = 100000
-AES_KEY_SIZE = 32   # 256 bits
+AES_KEY_SIZE = 32  # 256 bits
 AES_BLOCK_SIZE = 16  # 128 bits
 
 _STATE_FILENAME = "llm_lease_state.json"
@@ -42,7 +42,7 @@ class LlmLeaseState:
 
     lease_id: str
     credential_id: str
-    credential_type: str = "oauth"   # "oauth" | "api_key"
+    credential_type: str = "oauth"  # "oauth" | "api_key"
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ class LlmLeaseStateManager:
 
         unpadder = padding.PKCS7(AES_BLOCK_SIZE * 8).unpadder()
         plaintext_bytes = unpadder.update(padded) + unpadder.finalize()
-        return plaintext_bytes.decode("utf-8")
+        return str(plaintext_bytes.decode("utf-8"))
 
     # ------------------------------------------------------------------
     # Public API
@@ -144,11 +144,13 @@ class LlmLeaseStateManager:
         """
         self._server_dir.mkdir(parents=True, exist_ok=True)
 
-        plaintext = json.dumps({
-            "lease_id": state.lease_id,
-            "credential_id": state.credential_id,
-            "credential_type": state.credential_type,
-        })
+        plaintext = json.dumps(
+            {
+                "lease_id": state.lease_id,
+                "credential_id": state.credential_id,
+                "credential_type": state.credential_type,
+            }
+        )
         encrypted_blob = self._encrypt(plaintext)
 
         # Wrap in a JSON envelope so the file is clearly identifiable

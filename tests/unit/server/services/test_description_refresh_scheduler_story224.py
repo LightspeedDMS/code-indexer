@@ -32,7 +32,9 @@ class TestReindexRemovedFromDescriptionRefreshScheduler:
             ServerConfig,
             ClaudeIntegrationConfig,
         )
-        from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+        from code_indexer.server.storage.database_manager import (
+            DatabaseConnectionManager,
+        )
 
         # Create minimal database with required schema
         db_file = tmp_path / "test.db"
@@ -88,7 +90,9 @@ class TestReindexRemovedFromDescriptionRefreshScheduler:
 
         # Verify the .md file was written (core functionality preserved)
         md_file = meta_dir / "test-repo.md"
-        assert md_file.exists(), "_update_description_file must still write the .md file"
+        assert (
+            md_file.exists()
+        ), "_update_description_file must still write the .md file"
         assert md_file.read_text() == content
 
         # Verify NO cidx calls were made

@@ -58,7 +58,9 @@ class WikiService:
             logger.warning("Failed to parse front matter, treating as plain content")
             return {}, content
 
-    def _strip_header_block(self, content: str, metadata: Dict[str, Any] = None) -> str:
+    def _strip_header_block(
+        self, content: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
         """Strip structured header block fields (Article Number/Title/Status) from body.
 
         Summary is preserved in the body. Extracted values are merged into metadata
@@ -135,7 +137,7 @@ class WikiService:
         md.enable(["table", "strikethrough"])
         html = md.render(content)
         html = self._add_heading_ids(html)
-        return html
+        return str(html)
 
     def _add_heading_ids(self, html: str) -> str:
         """Add IDs to heading elements for anchor link support."""
@@ -154,11 +156,11 @@ class WikiService:
         """Rewrite relative image paths to wiki _assets route."""
 
         def rewrite_src(match: re.Match) -> str:
-            prefix = match.group(1)
-            src = match.group(2)
-            suffix = match.group(3)
+            prefix = str(match.group(1))
+            src = str(match.group(2))
+            suffix = str(match.group(3))
             if src.startswith(("http://", "https://", "/wiki/")):
-                return match.group(0)
+                return str(match.group(0))
             clean_path = re.sub(r"^(\.\./)+", "", src)
             return f"{prefix}/wiki/{repo_alias}/_assets/{clean_path}{suffix}"
 
@@ -319,9 +321,7 @@ class WikiService:
 
         # Apply display order when wiki_config specifies a non-empty order string
         order_str = (
-            wiki_config.metadata_display_order
-            if wiki_config is not None
-            else ""
+            wiki_config.metadata_display_order if wiki_config is not None else ""
         )
         if order_str and order_str.strip():
             keyed = self._apply_display_order(keyed, order_str)
@@ -330,9 +330,7 @@ class WikiService:
         return [(label, value) for _key, label, value in keyed]
 
     @staticmethod
-    def _apply_display_order(
-        keyed: List[tuple], order_str: str
-    ) -> List[tuple]:
+    def _apply_display_order(keyed: List[tuple], order_str: str) -> List[tuple]:
         """Re-order keyed (key, label, value) list according to order_str.
 
         order_str is a comma-separated list of metadata field keys.
@@ -425,9 +423,9 @@ class WikiService:
         """Rewrite inter-article links in rendered HTML."""
 
         def _rewrite_href(match: re.Match) -> str:
-            full_tag = match.group(0)
-            quote_char = match.group(2)
-            href = match.group(3)
+            full_tag = str(match.group(0))
+            quote_char = str(match.group(2))
+            href = str(match.group(3))
             if href.startswith("#"):
                 return full_tag
             if href.startswith(("http://", "https://")):

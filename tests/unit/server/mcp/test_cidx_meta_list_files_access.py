@@ -102,4 +102,3 @@ class TestListFilesCidxMetaAccessFiltering:
         data = extract_mcp_data(result)
         assert data["success"] is True
         assert len(data["files"]) == 4  # all files returned when no service
-

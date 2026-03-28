@@ -88,7 +88,9 @@ def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
     return repo_root
 
 
-def migrate_legacy_cidx_meta(golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str) -> None:
+def migrate_legacy_cidx_meta(
+    golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str
+) -> None:
     """
     Migrate cidx-meta from legacy special-case to regular golden repo.
 
@@ -151,7 +153,9 @@ def migrate_legacy_cidx_meta(golden_repo_manager: "GoldenRepoManager", golden_re
             )
 
 
-def bootstrap_cidx_meta(golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str) -> None:
+def bootstrap_cidx_meta(
+    golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str
+) -> None:
     """
     Bootstrap cidx-meta as a regular golden repo on fresh installations.
 
@@ -228,7 +232,9 @@ def bootstrap_cidx_meta(golden_repo_manager: "GoldenRepoManager", golden_repos_d
         )
 
 
-def register_langfuse_golden_repos(golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str) -> None:
+def register_langfuse_golden_repos(
+    golden_repo_manager: "GoldenRepoManager", golden_repos_dir: str
+) -> None:
     """
     Register any unregistered Langfuse trace folders as golden repos.
 

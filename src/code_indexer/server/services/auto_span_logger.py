@@ -137,11 +137,7 @@ class AutoSpanLogger:
 
         # Story #136 follow-up: Auto-trace creation
         # Story #185: Use tool name directly as trace name (not "Auto-trace: {tool_name}")
-        if (
-            self.config.enabled
-            and self.config.auto_trace_enabled
-            and trace_ctx is None
-        ):
+        if self.config.enabled and self.config.auto_trace_enabled and trace_ctx is None:
             # No active trace - auto-create one
             try:
                 trace_ctx = self.trace_manager.start_trace(

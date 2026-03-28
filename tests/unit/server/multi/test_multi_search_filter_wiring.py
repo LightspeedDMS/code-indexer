@@ -131,45 +131,51 @@ class TestMultiSearchServiceFilterWiring:
     def test_search_semantic_passes_language(self):
         """_search_semantic_sync should pass language= to SemanticSearchRequest."""
         source = self._get_search_semantic_source()
-        assert "language=request.language" in source, (
-            "SemanticSearchRequest construction must include language=request.language"
-        )
+        assert (
+            "language=request.language" in source
+        ), "SemanticSearchRequest construction must include language=request.language"
 
     def test_search_semantic_passes_path_filter(self):
         """_search_semantic_sync should pass path_filter= to SemanticSearchRequest."""
         source = self._get_search_semantic_source()
-        assert "path_filter=request.path_filter" in source, (
-            "SemanticSearchRequest construction must include path_filter=request.path_filter"
-        )
+        assert (
+            "path_filter=request.path_filter" in source
+        ), "SemanticSearchRequest construction must include path_filter=request.path_filter"
 
     def test_search_semantic_passes_exclude_language(self):
         """_search_semantic_sync should pass exclude_language= to SemanticSearchRequest."""
         source = self._get_search_semantic_source()
-        assert "exclude_language=request.exclude_language" in source, (
-            "SemanticSearchRequest construction must include exclude_language=request.exclude_language"
-        )
+        assert (
+            "exclude_language=request.exclude_language" in source
+        ), "SemanticSearchRequest construction must include exclude_language=request.exclude_language"
 
     def test_search_semantic_passes_exclude_path(self):
         """_search_semantic_sync should pass exclude_path= to SemanticSearchRequest."""
         source = self._get_search_semantic_source()
-        assert "exclude_path=request.exclude_path" in source, (
-            "SemanticSearchRequest construction must include exclude_path=request.exclude_path"
-        )
+        assert (
+            "exclude_path=request.exclude_path" in source
+        ), "SemanticSearchRequest construction must include exclude_path=request.exclude_path"
 
     def test_search_semantic_passes_accuracy(self):
         """_search_semantic_sync should pass accuracy= to SemanticSearchRequest."""
         source = self._get_search_semantic_source()
-        assert "accuracy=request.accuracy" in source, (
-            "SemanticSearchRequest construction must include accuracy=request.accuracy"
-        )
+        assert (
+            "accuracy=request.accuracy" in source
+        ), "SemanticSearchRequest construction must include accuracy=request.accuracy"
 
     def test_search_semantic_passes_all_filters(self):
         """_search_semantic_sync should pass ALL filter fields to SemanticSearchRequest."""
         source = self._get_search_semantic_source()
-        for field in ["language", "path_filter", "exclude_language", "exclude_path", "accuracy"]:
-            assert f"{field}=request.{field}" in source, (
-                f"SemanticSearchRequest construction must include {field}=request.{field}"
-            )
+        for field in [
+            "language",
+            "path_filter",
+            "exclude_language",
+            "exclude_path",
+            "accuracy",
+        ]:
+            assert (
+                f"{field}=request.{field}" in source
+            ), f"SemanticSearchRequest construction must include {field}=request.{field}"
 
 
 class TestOmniSearchHandlerFilterWiring:
@@ -187,20 +193,20 @@ class TestOmniSearchHandlerFilterWiring:
     def test_omni_search_passes_exclude_language(self):
         """_omni_search_code should pass exclude_language to MultiSearchRequest."""
         source = self._get_omni_search_source()
-        assert 'exclude_language=params.get("exclude_language")' in source, (
-            "MultiSearchRequest construction must include exclude_language from params"
-        )
+        assert (
+            'exclude_language=params.get("exclude_language")' in source
+        ), "MultiSearchRequest construction must include exclude_language from params"
 
     def test_omni_search_passes_exclude_path(self):
         """_omni_search_code should pass exclude_path to MultiSearchRequest."""
         source = self._get_omni_search_source()
-        assert 'exclude_path=params.get("exclude_path")' in source, (
-            "MultiSearchRequest construction must include exclude_path from params"
-        )
+        assert (
+            'exclude_path=params.get("exclude_path")' in source
+        ), "MultiSearchRequest construction must include exclude_path from params"
 
     def test_omni_search_passes_accuracy(self):
         """_omni_search_code should pass accuracy to MultiSearchRequest."""
         source = self._get_omni_search_source()
-        assert 'accuracy=params.get("accuracy"' in source, (
-            "MultiSearchRequest construction must include accuracy from params"
-        )
+        assert (
+            'accuracy=params.get("accuracy"' in source
+        ), "MultiSearchRequest construction must include accuracy from params"

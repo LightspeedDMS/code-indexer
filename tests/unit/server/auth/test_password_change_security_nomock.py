@@ -134,7 +134,7 @@ class TestPasswordChangeSecurityReal:
                     "new_password": "NewPassword456!",
                 },
             )
-            assert response.status_code == 401, f"Attempt {i+1} should return 401"
+            assert response.status_code == 401, f"Attempt {i + 1} should return 401"
 
         # 5th attempt should trigger rate limiting
         response = client.put(

@@ -126,9 +126,14 @@ class AccessFilteringService:
             The normalized repository alias, or empty string if not found
         """
         if isinstance(result, dict):
-            alias = str(result.get("repository_alias", "") or result.get("source_repo", ""))
+            alias = str(
+                result.get("repository_alias", "") or result.get("source_repo", "")
+            )
         else:
-            alias = str(getattr(result, "repository_alias", "") or getattr(result, "source_repo", ""))
+            alias = str(
+                getattr(result, "repository_alias", "")
+                or getattr(result, "source_repo", "")
+            )
         # Strip -global suffix to match stored repo names in access control
         if alias.endswith("-global"):
             alias = alias[: -len("-global")]

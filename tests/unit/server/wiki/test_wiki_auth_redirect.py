@@ -3,6 +3,7 @@
 Tests verify that get_wiki_user_hybrid() catches 401 from get_current_user_hybrid and
 issues a 303 redirect to /login?redirect_to=<current_path> instead of returning raw JSON.
 """
+
 import inspect
 from unittest.mock import MagicMock, patch
 
@@ -95,8 +96,10 @@ class TestGetWikiUserHybridRedirectBehavior:
 
         location = exc_info.value.headers["Location"]
         # The redirect_to param must contain the full path (URL-encoded)
-        assert "/wiki/sf-kb-wiki/Customer/some-article" in location or \
-               "%2Fwiki%2Fsf-kb-wiki%2FCustomer%2Fsome-article" in location
+        assert (
+            "/wiki/sf-kb-wiki/Customer/some-article" in location
+            or "%2Fwiki%2Fsf-kb-wiki%2FCustomer%2Fsome-article" in location
+        )
 
     def test_redirect_preserves_query_string(self):
         from code_indexer.server.wiki.routes import get_wiki_user_hybrid
@@ -245,8 +248,12 @@ class TestGetWikiUserHybridRealCallPath:
 
         # Patch user_manager in dependencies so _hybrid_auth_impl doesn't blow up on None check
         mock_user_manager = MagicMock()
-        with patch("code_indexer.server.auth.dependencies.user_manager", mock_user_manager):
-            with patch("code_indexer.server.auth.dependencies.jwt_manager", MagicMock()):
+        with patch(
+            "code_indexer.server.auth.dependencies.user_manager", mock_user_manager
+        ):
+            with patch(
+                "code_indexer.server.auth.dependencies.jwt_manager", MagicMock()
+            ):
                 with pytest.raises(HTTPException) as exc_info:
                     get_wiki_user_hybrid(request)
 
@@ -270,8 +277,12 @@ class TestGetWikiUserHybridRealCallPath:
         request = self._make_minimal_request("/wiki/my-repo/article")
 
         mock_user_manager = MagicMock()
-        with patch("code_indexer.server.auth.dependencies.user_manager", mock_user_manager):
-            with patch("code_indexer.server.auth.dependencies.jwt_manager", MagicMock()):
+        with patch(
+            "code_indexer.server.auth.dependencies.user_manager", mock_user_manager
+        ):
+            with patch(
+                "code_indexer.server.auth.dependencies.jwt_manager", MagicMock()
+            ):
                 with pytest.raises(HTTPException) as exc_info:
                     get_wiki_user_hybrid(request)
 

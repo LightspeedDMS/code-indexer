@@ -59,7 +59,9 @@ def main():
             success = deployment_executor.execute()
 
             if success:
-                deployment_executor._write_status_file("success", "Deployment completed")
+                deployment_executor._write_status_file(
+                    "success", "Deployment completed"
+                )
                 # Restart CIDX server after successful deployment
                 deployment_executor.restart_server()
                 logger.info(

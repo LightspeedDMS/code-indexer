@@ -47,7 +47,9 @@ class TestDeltaAnalysisJobRegistration:
         service.run_delta_analysis()
 
         jobs = job_tracker.get_recent_jobs()
-        dep_map_jobs = [j for j in jobs if j["operation_type"] == "dependency_map_delta"]
+        dep_map_jobs = [
+            j for j in jobs if j["operation_type"] == "dependency_map_delta"
+        ]
         assert len(dep_map_jobs) == 1
 
     def test_delta_analysis_job_uses_system_username(
@@ -76,7 +78,9 @@ class TestDeltaAnalysisJobRegistration:
         service.run_delta_analysis()
 
         jobs = job_tracker.get_recent_jobs()
-        dep_map_jobs = [j for j in jobs if j["operation_type"] == "dependency_map_delta"]
+        dep_map_jobs = [
+            j for j in jobs if j["operation_type"] == "dependency_map_delta"
+        ]
         assert dep_map_jobs[0]["username"] == "system"
 
 
@@ -109,7 +113,9 @@ class TestDeltaAnalysisStatusTransitions:
         service.run_delta_analysis()
 
         jobs = job_tracker.get_recent_jobs()
-        dep_map_jobs = [j for j in jobs if j["operation_type"] == "dependency_map_delta"]
+        dep_map_jobs = [
+            j for j in jobs if j["operation_type"] == "dependency_map_delta"
+        ]
         assert len(dep_map_jobs) == 1
         assert dep_map_jobs[0]["status"] == "completed"
 
@@ -140,7 +146,9 @@ class TestDeltaAnalysisStatusTransitions:
         service.run_delta_analysis()
 
         jobs = job_tracker.get_recent_jobs()
-        dep_map_jobs = [j for j in jobs if j["operation_type"] == "dependency_map_delta"]
+        dep_map_jobs = [
+            j for j in jobs if j["operation_type"] == "dependency_map_delta"
+        ]
         assert len(dep_map_jobs) == 1
         assert dep_map_jobs[0]["status"] == "completed"
 
@@ -265,7 +273,9 @@ class TestDeltaAnalysisFailureReporting:
             service.run_delta_analysis()
 
         jobs = job_tracker.get_recent_jobs()
-        dep_map_jobs = [j for j in jobs if j["operation_type"] == "dependency_map_delta"]
+        dep_map_jobs = [
+            j for j in jobs if j["operation_type"] == "dependency_map_delta"
+        ]
         assert len(dep_map_jobs) == 1
         assert dep_map_jobs[0]["status"] == "failed"
 
@@ -297,7 +307,9 @@ class TestDeltaAnalysisFailureReporting:
             service.run_delta_analysis()
 
         jobs = job_tracker.get_recent_jobs()
-        dep_map_jobs = [j for j in jobs if j["operation_type"] == "dependency_map_delta"]
+        dep_map_jobs = [
+            j for j in jobs if j["operation_type"] == "dependency_map_delta"
+        ]
         assert "DB error" in dep_map_jobs[0]["error"]
 
     def test_delta_analysis_stores_error_in_sqlite(

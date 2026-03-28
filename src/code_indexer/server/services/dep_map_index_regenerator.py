@@ -17,7 +17,7 @@ Algorithm:
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
 from code_indexer.server.services.dep_map_file_utils import (
@@ -79,7 +79,7 @@ class IndexRegenerator:
 
     def _load_domains_json(self, output_dir: Path) -> List[Dict[str, Any]]:
         """Load _domains.json, returning empty list if missing or invalid."""
-        return _load_domains_json_util(output_dir)
+        return cast(List[Dict[str, Any]], _load_domains_json_util(output_dir))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Catalog building
@@ -105,9 +105,8 @@ class IndexRegenerator:
                 continue
 
             frontmatter = self._parse_yaml_frontmatter_from_file(md_file)
-            description = (
-                domain.get("description", "")
-                or (frontmatter.get("description", "") if frontmatter else "")
+            description = domain.get("description", "") or (
+                frontmatter.get("description", "") if frontmatter else ""
             )
             repos = self._get_repos_for_domain(domain, frontmatter)
             rows.append((name, description, len(repos)))
@@ -160,11 +159,11 @@ class IndexRegenerator:
 
     def _parse_yaml_frontmatter(self, content: str) -> Optional[Dict[str, Any]]:
         """Parse YAML frontmatter block from markdown content."""
-        return _parse_yaml_frontmatter_util(content)
+        return cast(Optional[Dict[str, Any]], _parse_yaml_frontmatter_util(content))
 
     def _parse_simple_yaml(self, lines: List[str]) -> Dict[str, Any]:
         """Parse a simplified YAML structure from frontmatter lines."""
-        return _parse_simple_yaml_util(lines)
+        return cast(Dict[str, Any], _parse_simple_yaml_util(lines))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Repo resolution helper
@@ -220,12 +219,14 @@ class IndexRegenerator:
 
         # Build repos_analyzed YAML list
         repos_yaml = "\n".join(f"  - {r}" for r in repos) if repos else ""
-        repos_analyzed_block = f"repos_analyzed:\n{repos_yaml}" if repos else "repos_analyzed: []"
+        repos_analyzed_block = (
+            f"repos_analyzed:\n{repos_yaml}" if repos else "repos_analyzed: []"
+        )
 
         frontmatter = (
             f"---\n"
             f"schema_version: 1.0\n"
-            f"last_analyzed: \"{now}\"\n"
+            f'last_analyzed: "{now}"\n'
             f"repos_analyzed_count: {len(repos)}\n"
             f"domains_count: {domain_count}\n"
             f"{repos_analyzed_block}\n"
@@ -239,8 +240,7 @@ class IndexRegenerator:
             "|---|---|---|\n"
         )
         catalog_body = "\n".join(
-            f"| {name} | {desc} | {count} |"
-            for name, desc, count in catalog_rows
+            f"| {name} | {desc} | {count} |" for name, desc, count in catalog_rows
         )
         if not catalog_rows:
             catalog_body = "_No domains._"
@@ -248,13 +248,10 @@ class IndexRegenerator:
 
         # Repo-to-Domain Matrix table
         matrix_header = (
-            "## Repo-to-Domain Matrix\n\n"
-            "| Repository | Domain |\n"
-            "|---|---|\n"
+            "## Repo-to-Domain Matrix\n\n| Repository | Domain |\n|---|---|\n"
         )
         matrix_body = "\n".join(
-            f"| {repo} | {domain} |"
-            for repo, domain in sorted(matrix_rows)
+            f"| {repo} | {domain} |" for repo, domain in sorted(matrix_rows)
         )
         if not matrix_rows:
             matrix_body = "_No repositories._"

@@ -198,9 +198,7 @@ class TestGuardGlobalSuffixStripping:
         """repository_alias with -global suffix is checked against base name."""
         user = _make_user("restricted_user")
         # Accessible repos stored without -global suffix
-        svc = _make_access_service(
-            accessible_repos={"code-indexer"}, is_admin=False
-        )
+        svc = _make_access_service(accessible_repos={"code-indexer"}, is_admin=False)
 
         # "code-indexer-global" should strip to "code-indexer" — allowed
         _check_repository_access(
@@ -213,9 +211,7 @@ class TestGuardGlobalSuffixStripping:
     def test_guard_handles_alias_without_global_suffix(self):
         """repository_alias without -global suffix is checked as-is."""
         user = _make_user("restricted_user")
-        svc = _make_access_service(
-            accessible_repos={"code-indexer"}, is_admin=False
-        )
+        svc = _make_access_service(accessible_repos={"code-indexer"}, is_admin=False)
 
         # "code-indexer" checked directly — allowed
         _check_repository_access(
@@ -278,9 +274,7 @@ class TestGuardParameterPriority:
         """When both repository_alias and alias are present, repository_alias takes priority."""
         user = _make_user("restricted_user")
         # Only "primary-repo" is accessible; "secondary-repo" is not
-        svc = _make_access_service(
-            accessible_repos={"primary-repo"}, is_admin=False
-        )
+        svc = _make_access_service(accessible_repos={"primary-repo"}, is_admin=False)
 
         # repository_alias points to allowed repo, alias points to forbidden repo.
         # Since repository_alias is checked first and is allowed, no error raised.

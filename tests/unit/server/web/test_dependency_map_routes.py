@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 def app():
     """Create FastAPI app with minimal startup."""
     from code_indexer.server.app import app as _app
+
     return _app
 
 
@@ -144,7 +145,9 @@ class TestJobStatusPartialEndpoint:
         )
         assert response.status_code in [302, 303, 401, 403]
 
-    def test_job_status_partial_contains_health_info(self, client, admin_session_cookie):
+    def test_job_status_partial_contains_health_info(
+        self, client, admin_session_cookie
+    ):
         """AC2: Job status partial contains health badge information."""
         response = client.get(
             "/admin/partials/depmap-job-status",
@@ -154,13 +157,18 @@ class TestJobStatusPartialEndpoint:
         # Should contain some health state text from the health model.
         # Includes 5-state model states plus Story #342 content health states.
         health_states = [
-            "Healthy", "Disabled", "Running", "Unhealthy", "Degraded",
-            "Needs Repair", "Critical",
+            "Healthy",
+            "Disabled",
+            "Running",
+            "Unhealthy",
+            "Degraded",
+            "Needs Repair",
+            "Critical",
         ]
         content = response.text
-        assert any(state in content for state in health_states), (
-            f"No health state found in response. Content: {content[:500]}"
-        )
+        assert any(
+            state in content for state in health_states
+        ), f"No health state found in response. Content: {content[:500]}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,7 +179,9 @@ class TestJobStatusPartialEndpoint:
 class TestMainPageJobStatusVisibility:
     """AC2: Main page renders job status section container for admin."""
 
-    def test_main_page_has_job_status_container_for_admin(self, client, admin_session_cookie):
+    def test_main_page_has_job_status_container_for_admin(
+        self, client, admin_session_cookie
+    ):
         """AC2: Admin sees the job status section on the main page."""
         response = client.get("/admin/dependency-map", cookies=admin_session_cookie)
         assert response.status_code == 200
@@ -196,7 +206,9 @@ class TestHtmxPartialAutoRefresh:
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
 
-    def test_partial_has_htmx_trigger_attribute_or_content(self, client, admin_session_cookie):
+    def test_partial_has_htmx_trigger_attribute_or_content(
+        self, client, admin_session_cookie
+    ):
         """AC5: Partial HTML includes hx-get pointing back to itself for polling."""
         response = client.get(
             "/admin/partials/depmap-job-status",
@@ -264,7 +276,9 @@ class TestTriggerEndpoint:
         )
         assert response.status_code in [400, 422]
 
-    def test_trigger_json_response_has_required_keys(self, client, admin_session_cookie):
+    def test_trigger_json_response_has_required_keys(
+        self, client, admin_session_cookie
+    ):
         """AC6: JSON response contains success or error key."""
         response = client.post(
             "/admin/dependency-map/trigger",
@@ -309,7 +323,9 @@ class TestRepoCoveragePartialEndpoint:
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
 
-    def test_coverage_partial_contains_table_structure(self, client, admin_session_cookie):
+    def test_coverage_partial_contains_table_structure(
+        self, client, admin_session_cookie
+    ):
         """AC1: Coverage partial contains HTML table."""
         response = client.get(
             "/admin/partials/depmap-repo-coverage",
@@ -364,7 +380,9 @@ class TestRepoCoveragePartialEndpoint:
 class TestDomainExplorerPartialEndpoint:
     """Story #214: GET /admin/partials/depmap-domain-explorer."""
 
-    def test_domain_explorer_partial_loads_for_admin(self, client, admin_session_cookie):
+    def test_domain_explorer_partial_loads_for_admin(
+        self, client, admin_session_cookie
+    ):
         """AC1: Admin can load the domain explorer partial."""
         response = client.get(
             "/admin/partials/depmap-domain-explorer",
@@ -381,7 +399,9 @@ class TestDomainExplorerPartialEndpoint:
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
 
-    def test_domain_explorer_partial_contains_domain_list(self, client, admin_session_cookie):
+    def test_domain_explorer_partial_contains_domain_list(
+        self, client, admin_session_cookie
+    ):
         """AC2: Contains the domain list panel structure."""
         response = client.get(
             "/admin/partials/depmap-domain-explorer",
@@ -390,7 +410,9 @@ class TestDomainExplorerPartialEndpoint:
         assert response.status_code == 200
         assert "domain-list" in response.text
 
-    def test_domain_explorer_partial_contains_search(self, client, admin_session_cookie):
+    def test_domain_explorer_partial_contains_search(
+        self, client, admin_session_cookie
+    ):
         """AC2: Contains search input."""
         response = client.get(
             "/admin/partials/depmap-domain-explorer",
@@ -407,7 +429,9 @@ class TestDomainExplorerPartialEndpoint:
         )
         assert response.status_code in [302, 303, 401, 403]
 
-    def test_main_page_has_domain_explorer_container(self, client, admin_session_cookie):
+    def test_main_page_has_domain_explorer_container(
+        self, client, admin_session_cookie
+    ):
         """AC1: Main page has HTMX container for domain explorer."""
         response = client.get("/admin/dependency-map", cookies=admin_session_cookie)
         assert response.status_code == 200
@@ -442,14 +466,18 @@ class TestDomainDetailPartialEndpoint:
         )
         assert response.status_code in [302, 303, 401, 403]
 
-    def test_domain_detail_nonexistent_returns_fallback(self, client, admin_session_cookie):
+    def test_domain_detail_nonexistent_returns_fallback(
+        self, client, admin_session_cookie
+    ):
         """AC3: Nonexistent domain returns fallback 'Domain not found' message."""
         response = client.get(
             "/admin/partials/depmap-domain-detail/definitely-not-a-real-domain",
             cookies=admin_session_cookie,
         )
         assert response.status_code == 200
-        assert "not found" in response.text.lower() or "Domain not found" in response.text
+        assert (
+            "not found" in response.text.lower() or "Domain not found" in response.text
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -480,7 +508,9 @@ class TestConfigServiceWiring:
 
         captured = {}
 
-        def capturing_dashboard_service_init(self_inner, tracking_backend, config_manager, dependency_map_service):
+        def capturing_dashboard_service_init(
+            self_inner, tracking_backend, config_manager, dependency_map_service
+        ):
             captured["config_manager"] = config_manager
 
         with (
@@ -502,13 +532,15 @@ class TestConfigServiceWiring:
                 return_value=None,
             ),
         ):
-            from code_indexer.server.web.dependency_map_routes import _get_dashboard_service
+            from code_indexer.server.web.dependency_map_routes import (
+                _get_dashboard_service,
+            )
 
             _get_dashboard_service()
 
-        assert "config_manager" in captured, (
-            "_get_dashboard_service() did not construct DependencyMapDashboardService"
-        )
+        assert (
+            "config_manager" in captured
+        ), "_get_dashboard_service() did not construct DependencyMapDashboardService"
         assert captured["config_manager"] is mock_config_service, (
             "config_manager argument must be config_service (ConfigService), "
             "not config_service.config_manager (ServerConfigManager). "
@@ -659,12 +691,12 @@ class TestGetKnownRepoNamesOrphanFiltering:
             golden_repos_aliases=["backend"],  # multimodal-mock intentionally absent
         )
         result = _call_get_known_repo_names(server_dir)
-        assert "multimodal-mock" not in result, (
-            f"Orphan 'multimodal-mock' should be excluded but was in result: {result}"
-        )
-        assert "backend" in result, (
-            f"Legitimate 'backend' should be included but was missing: {result}"
-        )
+        assert (
+            "multimodal-mock" not in result
+        ), f"Orphan 'multimodal-mock' should be excluded but was in result: {result}"
+        assert (
+            "backend" in result
+        ), f"Legitimate 'backend' should be included but was missing: {result}"
 
     def test_excludes_repos_only_in_golden_repos_metadata(self, tmp_path):
         """
@@ -678,9 +710,9 @@ class TestGetKnownRepoNamesOrphanFiltering:
             golden_repos_aliases=["backend", "not-activated-repo"],
         )
         result = _call_get_known_repo_names(server_dir)
-        assert "not-activated-repo" not in result, (
-            f"'not-activated-repo' should be excluded but was in result: {result}"
-        )
+        assert (
+            "not-activated-repo" not in result
+        ), f"'not-activated-repo' should be excluded but was in result: {result}"
         assert result == {"backend"}, f"Expected only 'backend', got: {result}"
 
     def test_returns_empty_set_when_no_overlap(self, tmp_path):
@@ -716,25 +748,43 @@ def _make_fake_dep_map_service(repo_list=None, enrich_adds_fields=True):
 
     if repo_list is None:
         repo_list = [
-            {"alias": "alpha", "clone_path": "/fake/alpha", "description_summary": "Alpha repo"},
-            {"alias": "beta", "clone_path": "/fake/beta", "description_summary": "Beta repo"},
+            {
+                "alias": "alpha",
+                "clone_path": "/fake/alpha",
+                "description_summary": "Alpha repo",
+            },
+            {
+                "alias": "beta",
+                "clone_path": "/fake/beta",
+                "description_summary": "Beta repo",
+            },
         ]
 
     # Capture the arguments passed to run_pass_2_per_domain
     captured_calls = []
 
     class FakeAnalyzer:
-        def run_pass_2_per_domain(self, staging_dir, domain, domain_list, repo_list,
-                                  max_turns, previous_domain_dir, journal_path):
-            captured_calls.append({
-                "staging_dir": staging_dir,
-                "domain": domain,
-                "domain_list": domain_list,
-                "repo_list": repo_list,
-                "max_turns": max_turns,
-                "previous_domain_dir": previous_domain_dir,
-                "journal_path": journal_path,
-            })
+        def run_pass_2_per_domain(
+            self,
+            staging_dir,
+            domain,
+            domain_list,
+            repo_list,
+            max_turns,
+            previous_domain_dir,
+            journal_path,
+        ):
+            captured_calls.append(
+                {
+                    "staging_dir": staging_dir,
+                    "domain": domain,
+                    "domain_list": domain_list,
+                    "repo_list": repo_list,
+                    "max_turns": max_turns,
+                    "previous_domain_dir": previous_domain_dir,
+                    "journal_path": journal_path,
+                }
+            )
             # Write a non-empty domain file so the closure returns True
             (staging_dir / f"{domain['name']}.md").write_text("# content")
 
@@ -775,12 +825,21 @@ class TestBuildDomainAnalyzerCapturesRepoList:
         from code_indexer.server.web.dependency_map_routes import _build_domain_analyzer
 
         expected_repos = [
-            {"alias": "repo-x", "clone_path": "/x", "description_summary": "X",
-             "file_count": 5, "total_bytes": 500},
+            {
+                "alias": "repo-x",
+                "clone_path": "/x",
+                "description_summary": "X",
+                "file_count": 5,
+                "total_bytes": 500,
+            },
         ]
         service, captured_calls = _make_fake_dep_map_service(repo_list=expected_repos)
 
-        domain = {"name": "test-domain", "description": "d", "participating_repos": ["repo-x"]}
+        domain = {
+            "name": "test-domain",
+            "description": "d",
+            "participating_repos": ["repo-x"],
+        }
         domain_list = [domain]
 
         analyzer = _build_domain_analyzer(service, tmp_path)
@@ -793,15 +852,15 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         call = captured_calls[0]
         # Must NOT be empty list -- must be the captured list from service
-        assert call["repo_list"] != [], (
-            "repo_list passed to run_pass_2_per_domain must not be empty []"
-        )
-        assert len(call["repo_list"]) == 1, (
-            f"Expected 1 repo in list, got {len(call['repo_list'])}"
-        )
-        assert call["repo_list"][0]["alias"] == "repo-x", (
-            f"Expected repo-x, got {call['repo_list'][0]['alias']}"
-        )
+        assert (
+            call["repo_list"] != []
+        ), "repo_list passed to run_pass_2_per_domain must not be empty []"
+        assert (
+            len(call["repo_list"]) == 1
+        ), f"Expected 1 repo in list, got {len(call['repo_list'])}"
+        assert (
+            call["repo_list"][0]["alias"] == "repo-x"
+        ), f"Expected repo-x, got {call['repo_list'][0]['alias']}"
 
     def test_analyzer_ignores_executor_empty_list_uses_captured(self, tmp_path):
         """
@@ -820,9 +879,9 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         assert len(captured_calls) == 1
         # repo_list in the call must NOT be [] (the bug value)
-        assert captured_calls[0]["repo_list"] != [], (
-            "Bug 1 regression: repo_list is still [] -- fix not applied"
-        )
+        assert (
+            captured_calls[0]["repo_list"] != []
+        ), "Bug 1 regression: repo_list is still [] -- fix not applied"
 
     def test_analyzer_uses_non_empty_repo_list_when_provided_by_caller(self, tmp_path):
         """
@@ -833,8 +892,13 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         service, captured_calls = _make_fake_dep_map_service()
         caller_repo_list = [
-            {"alias": "override-repo", "clone_path": "/o", "description_summary": "O",
-             "file_count": 3, "total_bytes": 300},
+            {
+                "alias": "override-repo",
+                "clone_path": "/o",
+                "description_summary": "O",
+                "file_count": 3,
+                "total_bytes": 300,
+            },
         ]
 
         domain = {"name": "d2", "description": "desc", "participating_repos": []}
@@ -845,9 +909,9 @@ class TestBuildDomainAnalyzerCapturesRepoList:
 
         assert len(captured_calls) == 1
         # The caller's list should be used (not the captured one)
-        assert captured_calls[0]["repo_list"] == caller_repo_list, (
-            "When executor provides non-empty repo_list, it should be used"
-        )
+        assert (
+            captured_calls[0]["repo_list"] == caller_repo_list
+        ), "When executor provides non-empty repo_list, it should be used"
 
 
 class TestBuildDomainAnalyzerPreviousDomainDir:
@@ -874,9 +938,9 @@ class TestBuildDomainAnalyzerPreviousDomainDir:
 
         assert len(captured_calls) == 1
         call = captured_calls[0]
-        assert call["previous_domain_dir"] is not None, (
-            "Bug 2 regression: previous_domain_dir is None -- fix not applied"
-        )
+        assert (
+            call["previous_domain_dir"] is not None
+        ), "Bug 2 regression: previous_domain_dir is None -- fix not applied"
         assert call["previous_domain_dir"] == output_dir, (
             f"previous_domain_dir should be {output_dir}, "
             f"got {call['previous_domain_dir']}"

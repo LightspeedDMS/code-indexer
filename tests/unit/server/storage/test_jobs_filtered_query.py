@@ -72,18 +72,22 @@ class TestListJobsFilteredBasicStructure:
 
     def test_method_exists_on_backend(self, backend) -> None:
         """list_jobs_filtered() must exist on BackgroundJobsSqliteBackend."""
-        assert hasattr(backend, "list_jobs_filtered"), (
-            "BackgroundJobsSqliteBackend must have list_jobs_filtered() method"
-        )
+        assert hasattr(
+            backend, "list_jobs_filtered"
+        ), "BackgroundJobsSqliteBackend must have list_jobs_filtered() method"
 
     def test_returns_tuple_of_list_and_count(self, backend) -> None:
         """list_jobs_filtered() must return (List[Dict], int) tuple."""
         result = backend.list_jobs_filtered()
         assert isinstance(result, tuple), "Must return a tuple"
-        assert len(result) == 2, "Tuple must have exactly 2 elements: (jobs, total_count)"
+        assert (
+            len(result) == 2
+        ), "Tuple must have exactly 2 elements: (jobs, total_count)"
         jobs, total_count = result
         assert isinstance(jobs, list), "First element must be a list"
-        assert isinstance(total_count, int), "Second element must be an int (total count)"
+        assert isinstance(
+            total_count, int
+        ), "Second element must be an int (total count)"
 
     def test_empty_database_returns_empty_list_and_zero_count(self, backend) -> None:
         """AC12: Empty state - no jobs returns ([], 0)."""
@@ -99,9 +103,19 @@ class TestListJobsFilteredBasicStructure:
         job = jobs[0]
         # Keys that must be present (same as _row_to_dict produces)
         required_keys = {
-            "job_id", "operation_type", "status", "created_at",
-            "started_at", "completed_at", "result", "error", "progress",
-            "username", "is_admin", "cancelled", "repo_alias",
+            "job_id",
+            "operation_type",
+            "status",
+            "created_at",
+            "started_at",
+            "completed_at",
+            "result",
+            "error",
+            "progress",
+            "username",
+            "is_admin",
+            "cancelled",
+            "repo_alias",
         }
         missing = required_keys - set(job.keys())
         assert not missing, f"Job dict missing keys: {missing}"
@@ -121,7 +135,9 @@ class TestListJobsFilteredByStatus:
         assert len(jobs) == 2, f"Expected 2 completed jobs, got {len(jobs)}"
         assert total_count == 2, f"Expected total_count=2, got {total_count}"
         for job in jobs:
-            assert job["status"] == "completed", f"Got non-completed job: {job['status']}"
+            assert (
+                job["status"] == "completed"
+            ), f"Got non-completed job: {job['status']}"
 
     def test_status_filter_failed_returns_only_failed(self, backend) -> None:
         """AC2: Status filter 'failed' returns only failed jobs."""
@@ -284,9 +300,7 @@ class TestListJobsFilteredExcludeIds:
         _save_job(backend, "job-1", "completed")
         _save_job(backend, "job-2", "failed")
 
-        jobs, total_count = backend.list_jobs_filtered(
-            exclude_ids={"job-1", "job-2"}
-        )
+        jobs, total_count = backend.list_jobs_filtered(exclude_ids={"job-1", "job-2"})
         assert jobs == []
         assert total_count == 0
 
@@ -336,9 +350,9 @@ class TestListJobsFilteredPagination:
 
         jobs, total_count = backend.list_jobs_filtered(limit=5, offset=0)
         assert len(jobs) == 5
-        assert total_count == 20, (
-            f"total_count must reflect all 20 matching jobs, got {total_count}"
-        )
+        assert (
+            total_count == 20
+        ), f"total_count must reflect all 20 matching jobs, got {total_count}"
 
     def test_pagination_last_page_has_fewer_results(self, backend) -> None:
         """AC6: Last page may have fewer results than page_size."""
@@ -387,12 +401,19 @@ class TestListJobsFilteredOrdering:
     def test_results_ordered_by_created_at_desc(self, backend) -> None:
         """Results are ordered by created_at descending (newest first)."""
         base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        _save_job(backend, "job-old", "completed",
-                  created_at=(base).isoformat())
-        _save_job(backend, "job-mid", "completed",
-                  created_at=(base + timedelta(hours=1)).isoformat())
-        _save_job(backend, "job-new", "completed",
-                  created_at=(base + timedelta(hours=2)).isoformat())
+        _save_job(backend, "job-old", "completed", created_at=(base).isoformat())
+        _save_job(
+            backend,
+            "job-mid",
+            "completed",
+            created_at=(base + timedelta(hours=1)).isoformat(),
+        )
+        _save_job(
+            backend,
+            "job-new",
+            "completed",
+            created_at=(base + timedelta(hours=2)).isoformat(),
+        )
 
         jobs, _ = backend.list_jobs_filtered()
         assert jobs[0]["job_id"] == "job-new"
@@ -420,16 +441,28 @@ class TestListJobsFilteredAllCombined:
             )
         # Some non-matching jobs
         _save_job(
-            backend, "job-other-type", "completed",
-            operation_type="add_golden_repo", username="alice", repo_alias="my-repo",
+            backend,
+            "job-other-type",
+            "completed",
+            operation_type="add_golden_repo",
+            username="alice",
+            repo_alias="my-repo",
         )
         _save_job(
-            backend, "job-other-user", "completed",
-            operation_type="sync_repository", username="bob", repo_alias="my-repo",
+            backend,
+            "job-other-user",
+            "completed",
+            operation_type="sync_repository",
+            username="bob",
+            repo_alias="my-repo",
         )
         _save_job(
-            backend, "job-other-status", "failed",
-            operation_type="sync_repository", username="alice", repo_alias="my-repo",
+            backend,
+            "job-other-status",
+            "failed",
+            operation_type="sync_repository",
+            username="alice",
+            repo_alias="my-repo",
         )
 
         # Exclude 2 jobs that are "in memory"

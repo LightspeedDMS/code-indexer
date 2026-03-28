@@ -17,8 +17,14 @@ Fix: sync_project() must trigger refresh per-user-repo, not per-project.
 import pytest
 from unittest.mock import Mock, patch
 
-from code_indexer.server.services.langfuse_trace_sync_service import LangfuseTraceSyncService
-from code_indexer.server.utils.config_manager import LangfuseConfig, LangfusePullProject, ServerConfig
+from code_indexer.server.services.langfuse_trace_sync_service import (
+    LangfuseTraceSyncService,
+)
+from code_indexer.server.utils.config_manager import (
+    LangfuseConfig,
+    LangfusePullProject,
+    ServerConfig,
+)
 
 
 @pytest.fixture
@@ -77,7 +83,10 @@ class TestSyncProjectTriggersPerUserRefresh:
 
         # One trace from a specific user
         traces_page1 = [_make_trace("trace-001", "seba.battig@lightspeeddms.com")]
-        mock_client.fetch_traces_page.side_effect = [traces_page1, []]  # page 1 has data, page 2 empty
+        mock_client.fetch_traces_page.side_effect = [
+            traces_page1,
+            [],
+        ]  # page 1 has data, page 2 empty
 
         service.sync_project(
             host="https://example.com",
@@ -87,7 +96,9 @@ class TestSyncProjectTriggersPerUserRefresh:
 
         # The project-level alias must NOT be used for refresh
         project_level_alias = "langfuse_Claude_Code-global"
-        trigger_calls = [str(c) for c in mock_scheduler.trigger_refresh_for_repo.call_args_list]
+        trigger_calls = [
+            str(c) for c in mock_scheduler.trigger_refresh_for_repo.call_args_list
+        ]
         for c in trigger_calls:
             assert project_level_alias not in c, (
                 f"trigger_refresh_for_repo was called with project-level alias "
@@ -174,12 +185,12 @@ class TestSyncProjectTriggersPerUserRefresh:
         alice_alias = "langfuse_MyProject_alice_example.com-global"
         bob_alias = "langfuse_MyProject_bob_example.com-global"
 
-        assert alice_alias in trigger_aliases, (
-            f"Expected '{alice_alias}' in trigger calls, got: {trigger_aliases}"
-        )
-        assert bob_alias in trigger_aliases, (
-            f"Expected '{bob_alias}' in trigger calls, got: {trigger_aliases}"
-        )
+        assert (
+            alice_alias in trigger_aliases
+        ), f"Expected '{alice_alias}' in trigger calls, got: {trigger_aliases}"
+        assert (
+            bob_alias in trigger_aliases
+        ), f"Expected '{bob_alias}' in trigger calls, got: {trigger_aliases}"
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
     def test_no_refresh_when_no_traces_written(
@@ -238,9 +249,9 @@ class TestSyncProjectTriggersPerUserRefresh:
             for i in range(len(mock_scheduler.trigger_refresh_for_repo.call_args_list))
         ]
         expected_alias = "langfuse_TestProject_no_user-global"
-        assert expected_alias in trigger_aliases, (
-            f"Expected '{expected_alias}' in trigger calls, got: {trigger_aliases}"
-        )
+        assert (
+            expected_alias in trigger_aliases
+        ), f"Expected '{expected_alias}' in trigger calls, got: {trigger_aliases}"
 
 
 class TestSyncProjectAcquiresPerUserWriteLock:

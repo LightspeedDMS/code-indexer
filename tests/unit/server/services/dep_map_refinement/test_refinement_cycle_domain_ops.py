@@ -91,7 +91,9 @@ class TestOrphanedDomainCreation:
         )
 
         written = (live_dep_map / "auth-domain.md").read_text()
-        assert written.startswith("---"), "Created file must start with YAML frontmatter"
+        assert written.startswith(
+            "---"
+        ), "Created file must start with YAML frontmatter"
         assert "domain: auth-domain" in written
 
     def test_created_file_has_last_refined(self, tmp_path: Path):
@@ -157,9 +159,9 @@ class TestLastRefinedTimestampSet:
         )
 
         written = (live_dep_map / "auth-domain.md").read_text()
-        assert "last_refined:" in written, (
-            "Updated file must have last_refined timestamp in frontmatter"
-        )
+        assert (
+            "last_refined:" in written
+        ), "Updated file must have last_refined timestamp in frontmatter"
 
     def test_last_refined_is_recent_timestamp(self, tmp_path: Path):
         """
@@ -194,9 +196,9 @@ class TestLastRefinedTimestampSet:
                 value = line.split(":", 1)[1].strip()
                 assert value, "last_refined must have a non-empty timestamp value"
                 # Must look like an ISO timestamp (starts with year)
-                assert value[:4].isdigit(), (
-                    f"last_refined must be an ISO timestamp, got: {value!r}"
-                )
+                assert value[
+                    :4
+                ].isdigit(), f"last_refined must be an ISO timestamp, got: {value!r}"
                 break
         else:
             pytest.fail("last_refined key not found in frontmatter")
@@ -216,7 +218,9 @@ class TestLastAnalyzedPreserved:
 
         (dep_map / "auth-domain.md").write_text(FULL_DOMAIN_CONTENT)
 
-        different_result = FULL_DOMAIN_BODY + "\n\nExtra content to make it different.\n"
+        different_result = (
+            FULL_DOMAIN_BODY + "\n\nExtra content to make it different.\n"
+        )
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
@@ -251,6 +255,7 @@ class TestRefinementDisabledSkips:
         """
         dep_map = make_dependency_map_dir(tmp_path)
         import json
+
         (dep_map / "_domains.json").write_text(json.dumps(SAMPLE_DOMAINS_JSON))
 
         mock_analyzer = Mock()
@@ -286,6 +291,7 @@ class TestIndexMdRegenerationAfterBatch:
         Then _generate_index_md is called on the analyzer.
         """
         import json
+
         dep_map = make_dependency_map_dir(tmp_path)
         (dep_map / "_domains.json").write_text(json.dumps(SAMPLE_DOMAINS_JSON[:1]))
         (dep_map / "auth-domain.md").write_text(FULL_DOMAIN_CONTENT)
@@ -313,6 +319,7 @@ class TestIndexMdRegenerationAfterBatch:
         Then _generate_index_md is NOT called.
         """
         import json
+
         dep_map = make_dependency_map_dir(tmp_path)
         (dep_map / "_domains.json").write_text(json.dumps(SAMPLE_DOMAINS_JSON[:1]))
         (dep_map / "auth-domain.md").write_text(FULL_DOMAIN_CONTENT)

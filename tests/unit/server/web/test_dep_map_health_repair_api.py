@@ -78,7 +78,9 @@ def admin_session_cookie(client):
 class TestHealthEndpoint:
     """GET /admin/dependency-map/health returns structured health JSON."""
 
-    def test_health_returns_structured_json(self, client, admin_session_cookie, tmp_path):
+    def test_health_returns_structured_json(
+        self, client, admin_session_cookie, tmp_path
+    ):
         """Health endpoint returns JSON with status, anomalies, and repairable_count."""
         from tests.unit.server.services.test_dep_map_health_detector import (
             make_healthy_output_dir,
@@ -100,7 +102,9 @@ class TestHealthEndpoint:
         data = response.json()
         assert "status" in data, f"Missing 'status' in response: {data}"
         assert "anomalies" in data, f"Missing 'anomalies' in response: {data}"
-        assert "repairable_count" in data, f"Missing 'repairable_count' in response: {data}"
+        assert (
+            "repairable_count" in data
+        ), f"Missing 'repairable_count' in response: {data}"
 
     def test_health_requires_admin_auth(self, client):
         """GET /admin/dependency-map/health returns auth rejection without session."""
@@ -108,9 +112,12 @@ class TestHealthEndpoint:
             "/admin/dependency-map/health",
             follow_redirects=False,
         )
-        assert response.status_code in [302, 303, 401, 403], (
-            f"Expected auth rejection, got {response.status_code}"
-        )
+        assert response.status_code in [
+            302,
+            303,
+            401,
+            403,
+        ], f"Expected auth rejection, got {response.status_code}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +128,9 @@ class TestHealthEndpoint:
 class TestRepairEndpoint:
     """POST /admin/dependency-map/repair triggers background repair."""
 
-    def test_repair_returns_202_with_service_available(self, client, admin_session_cookie, tmp_path):
+    def test_repair_returns_202_with_service_available(
+        self, client, admin_session_cookie, tmp_path
+    ):
         """Repair endpoint returns 202 Accepted when service is available."""
         from tests.unit.server.services.test_dep_map_health_detector import (
             make_healthy_output_dir,
@@ -132,12 +141,15 @@ class TestRepairEndpoint:
         mock_service = MagicMock()
         mock_service.is_available.return_value = True
 
-        with patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-            return_value=mock_service,
-        ), patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-            return_value=tmp_path,
+        with (
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
+                return_value=mock_service,
+            ),
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                return_value=tmp_path,
+            ),
         ):
             response = client.post(
                 "/admin/dependency-map/repair",
@@ -155,11 +167,16 @@ class TestRepairEndpoint:
             "/admin/dependency-map/repair",
             follow_redirects=False,
         )
-        assert response.status_code in [302, 303, 401, 403], (
-            f"Expected auth rejection, got {response.status_code}"
-        )
+        assert response.status_code in [
+            302,
+            303,
+            401,
+            403,
+        ], f"Expected auth rejection, got {response.status_code}"
 
-    def test_repair_rejects_when_analysis_running(self, client, admin_session_cookie, tmp_path):
+    def test_repair_rejects_when_analysis_running(
+        self, client, admin_session_cookie, tmp_path
+    ):
         """Repair endpoint returns 409 when analysis is already in progress."""
         from tests.unit.server.services.test_dep_map_health_detector import (
             make_healthy_output_dir,
@@ -171,12 +188,15 @@ class TestRepairEndpoint:
         mock_service = MagicMock()
         mock_service.is_available.return_value = False
 
-        with patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
-            return_value=mock_service,
-        ), patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-            return_value=tmp_path,
+        with (
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_service_from_state",
+                return_value=mock_service,
+            ),
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                return_value=tmp_path,
+            ),
         ):
             response = client.post(
                 "/admin/dependency-map/repair",
@@ -214,17 +234,29 @@ class TestJobStatusPartialAnomalyDetails:
 
         # Create a dep map dir with an incomplete domain (missing required sections)
         # This produces an "incomplete_domain" anomaly
-        make_domains_json(tmp_path, [{"name": "auth-domain", "description": "Auth", "participating_repos": ["repo-a"]}])
+        make_domains_json(
+            tmp_path,
+            [
+                {
+                    "name": "auth-domain",
+                    "description": "Auth",
+                    "participating_repos": ["repo-a"],
+                }
+            ],
+        )
         incomplete_content = "x" * 1200  # big enough to pass size check but no sections
         make_domain_file(tmp_path, "auth-domain", content=incomplete_content)
         make_index_md(tmp_path)
 
-        with patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-            return_value=tmp_path,
-        ), patch(
-            "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
-            return_value=None,
+        with (
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
+                return_value=None,
+            ),
         ):
             response = client.get(
                 "/admin/partials/depmap-job-status",
@@ -248,12 +280,15 @@ class TestJobStatusPartialAnomalyDetails:
 
         make_healthy_output_dir(tmp_path)
 
-        with patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-            return_value=tmp_path,
-        ), patch(
-            "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
-            return_value=None,
+        with (
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
+                return_value=None,
+            ),
         ):
             response = client.get(
                 "/admin/partials/depmap-job-status",
@@ -276,13 +311,16 @@ class TestJobStatusPartialAnomalyDetails:
 
         make_healthy_output_dir(tmp_path)
 
-        with patch(
-            "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-            return_value=tmp_path,
-        ), patch(
-            # Inject a known repo that is not covered by any domain
-            "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
-            return_value={"repo-alpha", "repo-beta", "uncovered-service"},
+        with (
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                return_value=tmp_path,
+            ),
+            patch(
+                # Inject a known repo that is not covered by any domain
+                "code_indexer.server.web.dependency_map_routes._get_known_repo_names",
+                return_value={"repo-alpha", "repo-beta", "uncovered-service"},
+            ),
         ):
             response = client.get(
                 "/admin/partials/depmap-job-status",
@@ -291,9 +329,9 @@ class TestJobStatusPartialAnomalyDetails:
 
         assert response.status_code == 200
         # uncovered_repo anomaly should produce "Uncovered repos: uncovered-service"
-        assert "Uncovered repos" in response.text, (
-            f"Expected 'Uncovered repos' in HTML. Got: {response.text[500:1200]}"
-        )
-        assert "uncovered-service" in response.text, (
-            f"Expected repo name 'uncovered-service' in HTML. Got: {response.text[500:1200]}"
-        )
+        assert (
+            "Uncovered repos" in response.text
+        ), f"Expected 'Uncovered repos' in HTML. Got: {response.text[500:1200]}"
+        assert (
+            "uncovered-service" in response.text
+        ), f"Expected repo name 'uncovered-service' in HTML. Got: {response.text[500:1200]}"

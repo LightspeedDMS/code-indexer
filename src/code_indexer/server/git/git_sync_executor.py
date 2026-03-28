@@ -528,7 +528,7 @@ class GitSyncExecutor:
 
         # SSH authentication
         if self.auth_config["ssh"].get("key_path"):
-            env["GIT_SSH_COMMAND"] = f'ssh -i {self.auth_config["ssh"]["key_path"]}'
+            env["GIT_SSH_COMMAND"] = f"ssh -i {self.auth_config['ssh']['key_path']}"
             if self.auth_config["ssh"].get("passphrase"):
                 # Note: In production, use a proper SSH agent or credential manager
                 logger.warning(

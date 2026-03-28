@@ -40,10 +40,7 @@ class GitCredentialHelper:
         script_path = self.tmp_dir / script_name
         # Escape single quotes for safe shell embedding: ' -> '\''
         escaped = token.replace("'", "'\\''")
-        script_path.write_text(
-            f"#!/bin/sh\n"
-            f"printf '%s\\n' '{escaped}'\n"
-        )
+        script_path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{escaped}'\n")
         script_path.chmod(stat.S_IRWXU)  # 0700 - owner only
         return script_path
 

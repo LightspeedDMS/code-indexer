@@ -26,7 +26,7 @@ Usage in create_app() to attach to app:
     # ... or populate all at once after init
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from fastapi import Request
 
 
@@ -44,55 +44,55 @@ class AppState:
     """
 
     # Core repository managers (set in create_app body, before routes)
-    golden_repo_manager: Optional[Any]          # GoldenRepoManager
-    background_job_manager: Optional[Any]       # BackgroundJobManager
-    activated_repo_manager: Optional[Any]       # ActivatedRepoManager
-    repository_listing_manager: Optional[Any]   # RepositoryListingManager
-    semantic_query_manager: Optional[Any]       # SemanticQueryManager
-    workspace_cleanup_service: Optional[Any]    # WorkspaceCleanupService
+    golden_repo_manager: Optional[Any]  # GoldenRepoManager
+    background_job_manager: Optional[Any]  # BackgroundJobManager
+    activated_repo_manager: Optional[Any]  # ActivatedRepoManager
+    repository_listing_manager: Optional[Any]  # RepositoryListingManager
+    semantic_query_manager: Optional[Any]  # SemanticQueryManager
+    workspace_cleanup_service: Optional[Any]  # WorkspaceCleanupService
 
     # Auth / group management (set in lifespan)
-    group_manager: Optional[Any]               # GroupManager
-    audit_service: Optional[Any]               # AuditService
-    access_filtering_service: Optional[Any]    # AccessFilteringService
+    group_manager: Optional[Any]  # GroupManager
+    audit_service: Optional[Any]  # AuditService
+    access_filtering_service: Optional[Any]  # AccessFilteringService
 
     # Global lifecycle / query tracking (set in lifespan)
-    global_lifecycle_manager: Optional[Any]    # GlobalLifecycleManager
-    query_tracker: Optional[Any]               # QueryTracker
-    golden_repos_dir: Optional[str]            # str path to golden repos directory
+    global_lifecycle_manager: Optional[Any]  # GlobalLifecycleManager
+    query_tracker: Optional[Any]  # QueryTracker
+    golden_repos_dir: Optional[str]  # str path to golden repos directory
 
     # Payload cache (set in lifespan)
-    payload_cache: Optional[Any]               # PayloadCache
+    payload_cache: Optional[Any]  # PayloadCache
 
     # LLM credential lifecycle (set in lifespan)
-    llm_lifecycle_service: Optional[Any]       # LLMLeaseLifecycleService
+    llm_lifecycle_service: Optional[Any]  # LLMLeaseLifecycleService
 
     # Background schedulers / debouncers (set in lifespan)
-    scheduled_catchup_service: Optional[Any]    # ScheduledCatchupService
-    cidx_meta_debouncer: Optional[Any]          # CidxMetaRefreshDebouncer
+    scheduled_catchup_service: Optional[Any]  # ScheduledCatchupService
+    cidx_meta_debouncer: Optional[Any]  # CidxMetaRefreshDebouncer
     description_refresh_scheduler: Optional[Any]  # DescriptionRefreshScheduler
-    data_retention_scheduler: Optional[Any]     # DataRetentionScheduler
+    data_retention_scheduler: Optional[Any]  # DataRetentionScheduler
 
     # Dependency map service (set in lifespan)
-    dependency_map_service: Optional[Any]       # DependencyMapService
+    dependency_map_service: Optional[Any]  # DependencyMapService
 
     # Self-monitoring (set in lifespan)
-    self_monitoring_service: Optional[Any]       # SelfMonitoringService
-    self_monitoring_repo_root: Optional[str]     # str path to repo root
-    self_monitoring_github_repo: Optional[str]   # str GitHub repo name
+    self_monitoring_service: Optional[Any]  # SelfMonitoringService
+    self_monitoring_repo_root: Optional[str]  # str path to repo root
+    self_monitoring_github_repo: Optional[str]  # str GitHub repo name
 
     # Telemetry (set in lifespan)
-    telemetry_manager: Optional[Any]             # TelemetryManager
-    machine_metrics_exporter: Optional[Any]      # MachineMetricsExporter
+    telemetry_manager: Optional[Any]  # TelemetryManager
+    machine_metrics_exporter: Optional[Any]  # MachineMetricsExporter
 
     # Langfuse trace sync (set in lifespan)
-    langfuse_sync_service: Optional[Any]         # LangfuseTraceSyncService
+    langfuse_sync_service: Optional[Any]  # LangfuseTraceSyncService
 
     # SSH migration result (set in lifespan)
-    ssh_migration_result: Optional[Any]          # SSHMigrationResult or None
+    ssh_migration_result: Optional[Any]  # SSHMigrationResult or None
 
     # Logging database path (set in lifespan)
-    log_db_path: Optional[str]                   # str path to SQLite log DB
+    log_db_path: Optional[str]  # str path to SQLite log DB
 
     def __init__(self) -> None:
         """Initialize all attributes to None."""
@@ -144,4 +144,4 @@ def get_app_state(request: Request) -> AppState:
 
     The AppState must be attached to app.state.app_state during create_app().
     """
-    return request.app.state.app_state
+    return cast(AppState, request.app.state.app_state)

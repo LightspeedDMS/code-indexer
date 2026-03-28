@@ -17,7 +17,7 @@ import logging
 import psutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable
+from typing import Any, Callable, Dict, List, Optional, cast
 
 from .models.repos import ComponentRepoInfo, CompositeRepositoryDetails
 from .models.activated_repository import ActivatedRepository
@@ -308,11 +308,8 @@ def _find_activated_repository(
 
     activated_repos = activated_repo_manager.list_activated_repositories(username)
     for repo in activated_repos:
-        if (
-            repo["user_alias"] == repo_id
-            or repo["golden_repo_alias"] == repo_id
-        ):
-            return repo["user_alias"]
+        if repo["user_alias"] == repo_id or repo["golden_repo_alias"] == repo_id:
+            return cast(Optional[str], repo["user_alias"])
 
     return None
 
@@ -348,7 +345,9 @@ def _execute_repository_sync(
         progress_callback(10)  # Starting sync
 
     try:
-        user_alias = _find_activated_repository(repo_id, username, activated_repo_manager)
+        user_alias = _find_activated_repository(
+            repo_id, username, activated_repo_manager
+        )
 
         if user_alias is None:
             raise ActivatedRepoError(
@@ -398,6 +397,7 @@ def _execute_repository_sync(
     except Exception as e:
         from .repositories.activated_repo_manager import ActivatedRepoError
         from .repositories.golden_repo_manager import GitOperationError
+
         # Re-raise known exceptions
         if isinstance(e, (ActivatedRepoError, GitOperationError)):
             raise

@@ -40,9 +40,15 @@ class MultiSearchRequest(BaseModel):
     )
     language: Optional[str] = Field(None, description="Filter by programming language")
     path_filter: Optional[str] = Field(None, description="Filter by file path pattern")
-    exclude_language: Optional[str] = Field(None, description="Exclude files of specified language")
-    exclude_path: Optional[str] = Field(None, description="Exclude files matching path pattern")
-    accuracy: Optional[str] = Field(None, description="Search accuracy profile ('fast', 'balanced', 'high')")
+    exclude_language: Optional[str] = Field(
+        None, description="Exclude files of specified language"
+    )
+    exclude_path: Optional[str] = Field(
+        None, description="Exclude files matching path pattern"
+    )
+    accuracy: Optional[str] = Field(
+        None, description="Search accuracy profile ('fast', 'balanced', 'high')"
+    )
 
     @field_validator("repositories")
     @classmethod

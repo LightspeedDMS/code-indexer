@@ -1,4 +1,5 @@
 """Shared test helpers for wiki unit tests."""
+
 import json
 from pathlib import Path
 

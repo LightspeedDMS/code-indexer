@@ -13,7 +13,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from code_indexer.server.services.config_service import ConfigService, reset_config_service
+from code_indexer.server.services.config_service import (
+    ConfigService,
+    reset_config_service,
+)
 from code_indexer.server.services.file_service import FileListingService
 
 

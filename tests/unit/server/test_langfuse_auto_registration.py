@@ -73,9 +73,15 @@ class TestRegisterLangfuseGoldenRepos:
             # Verify: register_local_repo called for both folders
             assert mock_golden_repo_manager.register_local_repo.call_count == 2
             call_aliases = sorted(
-                [c.kwargs["alias"] for c in mock_golden_repo_manager.register_local_repo.call_args_list]
+                [
+                    c.kwargs["alias"]
+                    for c in mock_golden_repo_manager.register_local_repo.call_args_list
+                ]
             )
-            assert call_aliases == ["langfuse_project1_user1", "langfuse_project2_user2"]
+            assert call_aliases == [
+                "langfuse_project1_user1",
+                "langfuse_project2_user2",
+            ]
             for call in mock_golden_repo_manager.register_local_repo.call_args_list:
                 assert call.kwargs["fire_lifecycle_hooks"] is False
 
@@ -95,9 +101,7 @@ class TestRegisterLangfuseGoldenRepos:
         # Execute
         from code_indexer.server.app import register_langfuse_golden_repos
 
-        register_langfuse_golden_repos(
-            mock_golden_repo_manager, str(golden_repos_dir)
-        )
+        register_langfuse_golden_repos(mock_golden_repo_manager, str(golden_repos_dir))
 
         # Verify: No new repos added
         assert len(mock_golden_repo_manager.golden_repos) == 0
@@ -119,16 +123,12 @@ class TestRegisterLangfuseGoldenRepos:
         # Execute
         from code_indexer.server.app import register_langfuse_golden_repos
 
-        register_langfuse_golden_repos(
-            mock_golden_repo_manager, str(golden_repos_dir)
-        )
+        register_langfuse_golden_repos(mock_golden_repo_manager, str(golden_repos_dir))
 
         # Verify: No repos registered
         assert len(mock_golden_repo_manager.golden_repos) == 0
 
-    def test_handles_empty_directory(
-        self, golden_repos_dir, mock_golden_repo_manager
-    ):
+    def test_handles_empty_directory(self, golden_repos_dir, mock_golden_repo_manager):
         """
         Test that function handles empty golden-repos/ directory gracefully.
         """
@@ -137,9 +137,7 @@ class TestRegisterLangfuseGoldenRepos:
         # Execute
         from code_indexer.server.app import register_langfuse_golden_repos
 
-        register_langfuse_golden_repos(
-            mock_golden_repo_manager, str(golden_repos_dir)
-        )
+        register_langfuse_golden_repos(mock_golden_repo_manager, str(golden_repos_dir))
 
         # Verify: No errors, no registrations
         assert len(mock_golden_repo_manager.golden_repos) == 0
@@ -254,7 +252,10 @@ class TestRegisterLangfuseGoldenRepos:
             # Verify: All folders registered
             assert mock_golden_repo_manager.register_local_repo.call_count == 3
             call_aliases = sorted(
-                [c.kwargs["alias"] for c in mock_golden_repo_manager.register_local_repo.call_args_list]
+                [
+                    c.kwargs["alias"]
+                    for c in mock_golden_repo_manager.register_local_repo.call_args_list
+                ]
             )
             assert call_aliases == [
                 "langfuse_project1_alice",
@@ -262,9 +263,7 @@ class TestRegisterLangfuseGoldenRepos:
                 "langfuse_project3_charlie",
             ]
 
-    def test_sorted_folder_processing(
-        self, golden_repos_dir, mock_golden_repo_manager
-    ):
+    def test_sorted_folder_processing(self, golden_repos_dir, mock_golden_repo_manager):
         """
         Test that folders are processed in sorted order (predictable behavior).
         """
@@ -291,9 +290,7 @@ class TestRegisterLangfuseGoldenRepos:
         # Execute
         from code_indexer.server.app import register_langfuse_golden_repos
 
-        register_langfuse_golden_repos(
-            mock_golden_repo_manager, str(golden_repos_dir)
-        )
+        register_langfuse_golden_repos(mock_golden_repo_manager, str(golden_repos_dir))
 
         # Verify: Processed in sorted order
         assert registration_order == [
@@ -383,9 +380,7 @@ class TestRegisterLangfuseGoldenRepos:
         # Execute - should not raise exception
         from code_indexer.server.app import register_langfuse_golden_repos
 
-        register_langfuse_golden_repos(
-            mock_golden_repo_manager, str(golden_repos_dir)
-        )
+        register_langfuse_golden_repos(mock_golden_repo_manager, str(golden_repos_dir))
 
         # Verify: register_local_repo was called
         mock_golden_repo_manager.register_local_repo.assert_called_once_with(
@@ -615,9 +610,12 @@ class TestCidxIndexInitialization:
         langfuse.mkdir()
 
         # Mock subprocess.run to capture cidx commands
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class, patch("subprocess.run") as mock_subprocess_run:
+        with (
+            patch(
+                "code_indexer.global_repos.global_activation.GlobalActivator"
+            ) as mock_activator_class,
+            patch("subprocess.run") as mock_subprocess_run,
+        ):
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
             # subprocess.run returns CompletedProcess with no error
@@ -664,9 +662,12 @@ class TestCidxIndexInitialization:
         (langfuse / ".code-indexer").mkdir()
 
         # Mock subprocess.run
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class, patch("subprocess.run") as mock_subprocess_run:
+        with (
+            patch(
+                "code_indexer.global_repos.global_activation.GlobalActivator"
+            ) as mock_activator_class,
+            patch("subprocess.run") as mock_subprocess_run,
+        ):
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
             mock_subprocess_run.return_value = Mock(returncode=0, stderr="", stdout="")
@@ -710,9 +711,12 @@ class TestCidxIndexInitialization:
         # Mock subprocess.run to fail on cidx init
         import subprocess
 
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class, patch("subprocess.run") as mock_subprocess_run:
+        with (
+            patch(
+                "code_indexer.global_repos.global_activation.GlobalActivator"
+            ) as mock_activator_class,
+            patch("subprocess.run") as mock_subprocess_run,
+        ):
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
 
@@ -753,9 +757,12 @@ class TestCidxIndexInitialization:
         # Mock subprocess.run to fail on cidx index
         import subprocess
 
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class, patch("subprocess.run") as mock_subprocess_run:
+        with (
+            patch(
+                "code_indexer.global_repos.global_activation.GlobalActivator"
+            ) as mock_activator_class,
+            patch("subprocess.run") as mock_subprocess_run,
+        ):
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
 
@@ -815,7 +822,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "init"]
             ]
-            assert len(cidx_init_calls) == 1, "cidx init should be called when .code-indexer missing"
+            assert (
+                len(cidx_init_calls) == 1
+            ), "cidx init should be called when .code-indexer missing"
             assert cidx_init_calls[0][1]["cwd"] == str(langfuse)
 
             # Verify: cidx index was called
@@ -824,7 +833,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "index", "--fts"]
             ]
-            assert len(cidx_index_calls) == 1, "cidx index should be called when index missing"
+            assert (
+                len(cidx_index_calls) == 1
+            ), "cidx index should be called when index missing"
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
 
     def test_re_indexes_when_registration_exists_but_index_dir_empty(
@@ -861,7 +872,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "init"]
             ]
-            assert len(cidx_init_calls) == 0, "cidx init should not be called when .code-indexer exists"
+            assert (
+                len(cidx_init_calls) == 0
+            ), "cidx init should not be called when .code-indexer exists"
 
             # Verify: cidx index WAS called (empty index directory)
             cidx_index_calls = [
@@ -869,7 +882,9 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "index", "--fts"]
             ]
-            assert len(cidx_index_calls) == 1, "cidx index should be called when index directory is empty"
+            assert (
+                len(cidx_index_calls) == 1
+            ), "cidx index should be called when index directory is empty"
             assert cidx_index_calls[0][1]["cwd"] == str(langfuse)
 
     def test_skips_indexing_when_registration_exists_and_index_populated(
@@ -909,14 +924,18 @@ class TestCidxIndexInitialization:
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "init"]
             ]
-            assert len(cidx_init_calls) == 0, "cidx init should not be called when index exists"
+            assert (
+                len(cidx_init_calls) == 0
+            ), "cidx init should not be called when index exists"
 
             cidx_index_calls = [
                 call
                 for call in mock_subprocess_run.call_args_list
                 if call[0][0] == ["cidx", "index", "--fts"]
             ]
-            assert len(cidx_index_calls) == 0, "cidx index should not be called when index is populated"
+            assert (
+                len(cidx_index_calls) == 0
+            ), "cidx index should not be called when index is populated"
 
 
 class TestWatchModeIntegration:
@@ -947,13 +966,15 @@ class TestWatchModeIntegration:
         mock_watch_manager.start_watch.return_value = {"status": "success"}
 
         # Execute: Simulate _on_langfuse_sync_complete callback
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class, patch(
-            "subprocess.run"
-        ) as mock_subprocess_run, patch(
-            "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
-            mock_watch_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.global_activation.GlobalActivator"
+            ) as mock_activator_class,
+            patch("subprocess.run") as mock_subprocess_run,
+            patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+                mock_watch_manager,
+            ),
         ):
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator
@@ -1007,13 +1028,15 @@ class TestWatchModeIntegration:
         mock_watch_manager.reset_timeout.return_value = {"status": "success"}
 
         # Execute: Simulate callback
-        with patch(
-            "code_indexer.global_repos.global_activation.GlobalActivator"
-        ) as mock_activator_class, patch(
-            "subprocess.run"
-        ) as mock_subprocess_run, patch(
-            "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
-            mock_watch_manager,
+        with (
+            patch(
+                "code_indexer.global_repos.global_activation.GlobalActivator"
+            ) as mock_activator_class,
+            patch("subprocess.run") as mock_subprocess_run,
+            patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+                mock_watch_manager,
+            ),
         ):
             mock_activator = Mock()
             mock_activator_class.return_value = mock_activator

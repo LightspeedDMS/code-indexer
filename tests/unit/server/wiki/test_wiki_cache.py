@@ -1,4 +1,5 @@
 """Tests for WikiCache SQLite render cache (Story #283)."""
+
 import os
 import sqlite3
 import tempfile
@@ -36,14 +37,24 @@ class TestEnsureTables:
     def test_ensure_tables_creates_wiki_cache_table(self, cache_db):
         cache, db_path = cache_db
         conn = sqlite3.connect(db_path)
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
         conn.close()
         assert "wiki_cache" in tables
 
     def test_ensure_tables_creates_wiki_sidebar_cache_table(self, cache_db):
         cache, db_path = cache_db
         conn = sqlite3.connect(db_path)
-        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
         conn.close()
         assert "wiki_sidebar_cache" in tables
 
@@ -52,13 +63,24 @@ class TestEnsureTables:
         conn = sqlite3.connect(db_path)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(wiki_cache)").fetchall()}
         conn.close()
-        expected = {"repo_alias", "article_path", "rendered_html", "title", "file_mtime", "file_size", "rendered_at"}
+        expected = {
+            "repo_alias",
+            "article_path",
+            "rendered_html",
+            "title",
+            "file_mtime",
+            "file_size",
+            "rendered_at",
+        }
         assert expected.issubset(cols)
 
     def test_wiki_sidebar_cache_table_has_correct_columns(self, cache_db):
         cache, db_path = cache_db
         conn = sqlite3.connect(db_path)
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(wiki_sidebar_cache)").fetchall()}
+        cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(wiki_sidebar_cache)").fetchall()
+        }
         conn.close()
         expected = {"repo_alias", "sidebar_json", "max_mtime", "built_at"}
         assert expected.issubset(cols)
@@ -130,7 +152,9 @@ class TestPutGetArticle:
         assert result is not None
         assert result["html"] == "<p>V2</p>"
 
-    def test_put_article_with_datetime_metadata_does_not_raise(self, cache_db, repo_dir):
+    def test_put_article_with_datetime_metadata_does_not_raise(
+        self, cache_db, repo_dir
+    ):
         """Story #289: put_article must not raise TypeError when metadata contains datetime/date objects.
 
         The python-frontmatter library parses YAML date fields as Python datetime/date objects.
@@ -146,8 +170,14 @@ class TestPutGetArticle:
             "visibility": "internal",
         }
         # Must not raise TypeError: Object of type datetime is not JSON serializable
-        cache.put_article("repo1", "dated-article", "<h1>Dated Article</h1>", "Dated Article", f,
-                          metadata=metadata_with_dates)
+        cache.put_article(
+            "repo1",
+            "dated-article",
+            "<h1>Dated Article</h1>",
+            "Dated Article",
+            f,
+            metadata=metadata_with_dates,
+        )
         result = cache.get_article("repo1", "dated-article", f)
         assert result is not None
         cached_meta = result.get("metadata") or {}
@@ -213,7 +243,10 @@ class TestPutGetSidebar:
         hidden.mkdir()
         hidden_file = hidden / "notes.md"
         hidden_file.write_text("# hidden")
-        os.utime(hidden_file, (hidden_file.stat().st_atime, hidden_file.stat().st_mtime + 100.0))
+        os.utime(
+            hidden_file,
+            (hidden_file.stat().st_atime, hidden_file.stat().st_mtime + 100.0),
+        )
         # Cache should still be valid because hidden dir is ignored
         result = cache.get_sidebar("repo1", repo_dir)
         assert result is not None

@@ -8,6 +8,7 @@ Covers:
   - Web UI toggle endpoint
   - Asset and search routes for user wikis
 """
+
 import json
 import os
 import tempfile
@@ -24,12 +25,17 @@ from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
 from code_indexer.server.wiki.wiki_cache import WikiCache
-from code_indexer.server.wiki.routes import wiki_router, get_current_user_hybrid, get_wiki_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_current_user_hybrid,
+    get_wiki_user_hybrid,
+)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_user(username: str):
     user = MagicMock()
@@ -70,6 +76,7 @@ def _make_user_wiki_app(
 ):
     """Build a minimal FastAPI test app with wiki_router for user wiki tests."""
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     viewer = current_user or _make_user(viewer_username or username)
@@ -99,7 +106,9 @@ def _make_user_wiki_app(
     # Activated repo manager mock
     activated_mgr = MagicMock()
     activated_mgr.get_wiki_enabled.return_value = wiki_enabled
-    activated_mgr.get_activated_repo_path.return_value = repo_path or "/nonexistent/path"
+    activated_mgr.get_activated_repo_path.return_value = (
+        repo_path or "/nonexistent/path"
+    )
     app.state.activated_repo_manager = activated_mgr
 
     return app
@@ -288,7 +297,9 @@ class TestUserWikiContent:
         """Article content should come from the user's activated repo, not golden repo."""
         repo_path = str(tmp_path / "repo")
         Path(repo_path).mkdir()
-        (Path(repo_path) / "article.md").write_text("# Article\nUser-specific content here")
+        (Path(repo_path) / "article.md").write_text(
+            "# Article\nUser-specific content here"
+        )
 
         app = _make_user_wiki_app(
             username="alice",
@@ -422,10 +433,11 @@ class TestUserWikiWebToggle:
     def test_wiki_toggle_endpoint_exists_in_web_routes(self):
         """The toggle route must be registered in web_router."""
         from code_indexer.server.web.routes import web_router
+
         paths = [r.path for r in web_router.routes]
-        assert any("activated-repos" in p and "wiki-toggle" in p for p in paths), (
-            "Expected an activated-repos wiki-toggle route in web_router paths"
-        )
+        assert any(
+            "activated-repos" in p and "wiki-toggle" in p for p in paths
+        ), "Expected an activated-repos wiki-toggle route in web_router paths"
 
     def test_repos_list_template_has_wiki_checkbox(self):
         """repos_list.html template must contain a user-wiki-toggle checkbox."""
@@ -434,9 +446,9 @@ class TestUserWikiWebToggle:
             / "../../../../src/code_indexer/server/web/templates/partials/repos_list.html"
         )
         content = template_path.read_text()
-        assert "user-wiki-toggle" in content or "wiki-toggle" in content, (
-            "Expected wiki toggle checkbox in repos_list.html template"
-        )
+        assert (
+            "user-wiki-toggle" in content or "wiki-toggle" in content
+        ), "Expected wiki toggle checkbox in repos_list.html template"
 
 
 # ===========================================================================
@@ -452,9 +464,7 @@ class TestUserWikiAssetRoute:
         repo_path = str(tmp_path / "repo")
         Path(repo_path).mkdir()
         # Write a minimal PNG header (8 bytes)
-        (Path(repo_path) / "image.png").write_bytes(
-            b"\x89PNG\r\n\x1a\n"
-        )
+        (Path(repo_path) / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
         app = _make_user_wiki_app(
             username="alice",

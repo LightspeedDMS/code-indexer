@@ -360,4 +360,3 @@ class TestGoldenRepoAsyncOperations:
             manager_with_existing_repo.background_job_manager.submit_job.call_args[1]
         )
         assert call_kwargs["submitter_username"] == "admin"
-

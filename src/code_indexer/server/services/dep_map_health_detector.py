@@ -23,7 +23,7 @@ Status escalation:
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, cast
 
 from code_indexer.server.services.dep_map_file_utils import (
     get_domain_md_files as _get_domain_md_files_util,
@@ -278,9 +278,7 @@ class DepMapHealthDetector:
         anomalies = []
         for md_file in md_files:
             if md_file.stem not in domain_names:
-                anomalies.append(
-                    Anomaly(type="orphan_domain_file", file=md_file.name)
-                )
+                anomalies.append(Anomaly(type="orphan_domain_file", file=md_file.name))
         return anomalies
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -312,9 +310,7 @@ class DepMapHealthDetector:
     # Check 4: _index.md presence and staleness
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _check_index_md(
-        self, output_dir: Path, md_files: List[Path]
-    ) -> List[Anomaly]:
+    def _check_index_md(self, output_dir: Path, md_files: List[Path]) -> List[Anomaly]:
         """Check for missing or stale _index.md."""
         index_file = output_dir / "_index.md"
         if not index_file.exists():
@@ -506,15 +502,15 @@ class DepMapHealthDetector:
 
     def _get_domain_md_files(self, output_dir: Path) -> List[Path]:
         """Return list of .md files in output_dir that are NOT underscore-prefixed."""
-        return _get_domain_md_files_util(output_dir)
+        return cast(List[Path], _get_domain_md_files_util(output_dir))
 
     def _load_domains_json(self, output_dir: Path) -> List[Dict[str, Any]]:
         """Load _domains.json, returning empty list if missing or invalid."""
-        return _load_domains_json_util(output_dir)
+        return cast(List[Dict[str, Any]], _load_domains_json_util(output_dir))
 
     def _has_yaml_frontmatter(self, content: str) -> bool:
         """Check if content starts with a YAML frontmatter block (--- ... ---)."""
-        return _has_yaml_frontmatter_util(content)
+        return cast(bool, _has_yaml_frontmatter_util(content))
 
     def _has_required_sections(self, content: str) -> bool:
         """
@@ -529,8 +525,8 @@ class DepMapHealthDetector:
 
     def _parse_yaml_frontmatter(self, content: str) -> Optional[Dict[str, Any]]:
         """Parse YAML frontmatter block from markdown content."""
-        return _parse_yaml_frontmatter_util(content)
+        return cast(Optional[Dict[str, Any]], _parse_yaml_frontmatter_util(content))
 
     def _parse_simple_yaml(self, lines: List[str]) -> Dict[str, Any]:
         """Parse a simplified YAML structure from frontmatter lines."""
-        return _parse_simple_yaml_util(lines)
+        return cast(Dict[str, Any], _parse_simple_yaml_util(lines))

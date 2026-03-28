@@ -2316,9 +2316,7 @@ class TestGoldenRepoMetadataSqliteBackend:
                 created_at="2025-01-15T11:00:00Z",
             )
 
-    def test_ensure_table_exists_migrates_missing_columns(
-        self, tmp_path: Path
-    ) -> None:
+    def test_ensure_table_exists_migrates_missing_columns(self, tmp_path: Path) -> None:
         """
         Given an existing database with a golden_repos_metadata table
             that is missing category_id, category_auto_assigned, and wiki_enabled

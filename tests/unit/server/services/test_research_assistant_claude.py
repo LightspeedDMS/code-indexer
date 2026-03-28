@@ -20,6 +20,7 @@ class TestResearchAssistantClaude:
     def temp_db(self):
         """Create temporary database for testing."""
         import os
+
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
         yield db_path
@@ -68,8 +69,11 @@ class TestResearchAssistantClaude:
 
         assert status is not None, "Poll must return status"
         assert "status" in status, "Status must include 'status' field"
-        assert status["status"] in ["running", "complete", "error"], \
-            "Status must be valid state"
+        assert status["status"] in [
+            "running",
+            "complete",
+            "error",
+        ], "Status must be valid state"
 
     def test_poll_job_complete_includes_response(self, research_service):
         """Test AC4: Complete job includes response content."""
@@ -125,31 +129,35 @@ class TestResearchAssistantClaude:
                     research_service._jobs[job_id]["response"] = "Test response"
             research_service.add_message(sess_id, "assistant", "Test response")
 
-        with patch.object(research_service, "_run_claude_background", side_effect=mock_run_claude):
+        with patch.object(
+            research_service, "_run_claude_background", side_effect=mock_run_claude
+        ):
             # Execute first prompt
             _job_id = research_service.execute_prompt(session_id, "Test question")
 
             import time
+
             time.sleep(0.1)
 
         # Verify what was SENT TO CLAUDE includes guardrails
         assert captured_prompt is not None
-        assert "SECURITY CONSTRAINTS" in captured_prompt, \
-            "Prompt sent to Claude must include security constraints header"
-        assert "ABSOLUTE PROHIBITIONS" in captured_prompt, \
-            "Must include prohibitions section"
-        assert "ALLOWED" in captured_prompt, \
-            "Must include allowed operations section"
-        assert "Test question" in captured_prompt, \
-            "Must include user's question"
+        assert (
+            "SECURITY CONSTRAINTS" in captured_prompt
+        ), "Prompt sent to Claude must include security constraints header"
+        assert (
+            "ABSOLUTE PROHIBITIONS" in captured_prompt
+        ), "Must include prohibitions section"
+        assert "ALLOWED" in captured_prompt, "Must include allowed operations section"
+        assert "Test question" in captured_prompt, "Must include user's question"
 
         # Verify what was STORED IN DATABASE does NOT include guardrails
         messages = research_service.get_messages(session_id)
         assert len(messages) >= 1, "Must have at least one message"
         first_message = messages[0]
         assert first_message["role"] == "user", "First message must be user"
-        assert first_message["content"] == "Test question", \
-            "Stored message must be ONLY user's original input (no guardrails)"
+        assert (
+            first_message["content"] == "Test question"
+        ), "Stored message must be ONLY user's original input (no guardrails)"
 
     def test_security_guardrails_content(self, research_service):
         """Test AC5: Security guardrails sent to Claude include specific constraints."""
@@ -170,27 +178,33 @@ class TestResearchAssistantClaude:
                     research_service._jobs[job_id]["response"] = "Test response"
             research_service.add_message(sess_id, "assistant", "Test response")
 
-        with patch.object(research_service, "_run_claude_background", side_effect=mock_run_claude):
+        with patch.object(
+            research_service, "_run_claude_background", side_effect=mock_run_claude
+        ):
             # Execute first prompt
             _job_id = research_service.execute_prompt(session_id, "Test question")
 
             import time
+
             time.sleep(0.1)
 
         # Check what was SENT TO CLAUDE for specific prohibitions
         assert captured_prompt is not None
-        assert "NO system destruction" in captured_prompt or \
-               "rm -rf" in captured_prompt, \
-            "Must prohibit system destruction"
-        assert "NO credential exposure" in captured_prompt, \
-            "Must prohibit credential exposure"
-        assert "NO data exfiltration" in captured_prompt, \
-            "Must prohibit data exfiltration"
+        assert (
+            "NO system destruction" in captured_prompt or "rm -rf" in captured_prompt
+        ), "Must prohibit system destruction"
+        assert (
+            "NO credential exposure" in captured_prompt
+        ), "Must prohibit credential exposure"
+        assert (
+            "NO data exfiltration" in captured_prompt
+        ), "Must prohibit data exfiltration"
 
         # Check for allowed operations
-        assert "Read CIDX logs" in captured_prompt or \
-               "cidx CLI commands" in captured_prompt, \
-            "Must specify allowed operations"
+        assert (
+            "Read CIDX logs" in captured_prompt
+            or "cidx CLI commands" in captured_prompt
+        ), "Must specify allowed operations"
 
     def test_subsequent_prompts_no_duplicate_guardrails(self, research_service):
         """Test AC5: Subsequent prompts don't duplicate guardrails (sent to Claude, not stored in DB)."""
@@ -210,11 +224,14 @@ class TestResearchAssistantClaude:
                     research_service._jobs[job_id]["response"] = "Test response"
             research_service.add_message(sess_id, "assistant", "Test response")
 
-        with patch.object(research_service, "_run_claude_background", side_effect=mock_run_claude):
+        with patch.object(
+            research_service, "_run_claude_background", side_effect=mock_run_claude
+        ):
             # Execute first prompt
             _job_id1 = research_service.execute_prompt(session_id, "First question")
 
             import time
+
             time.sleep(0.1)
 
             # Execute second prompt (now there are existing messages)
@@ -228,8 +245,9 @@ class TestResearchAssistantClaude:
         assert "First question" in captured_prompts[0]
 
         # Second prompt sent to Claude should NOT include guardrails
-        assert "SECURITY CONSTRAINTS" not in captured_prompts[1], \
-            "Subsequent prompts sent to Claude must not duplicate guardrails"
+        assert (
+            "SECURITY CONSTRAINTS" not in captured_prompts[1]
+        ), "Subsequent prompts sent to Claude must not duplicate guardrails"
         assert "Second question" in captured_prompts[1]
 
         # Verify what was STORED IN DATABASE (should be clean user messages only)
@@ -240,14 +258,16 @@ class TestResearchAssistantClaude:
         # First user message stored WITHOUT guardrails (clean)
         first_user = messages[0]
         assert first_user["role"] == "user"
-        assert first_user["content"] == "First question", \
-            "Stored messages must be ONLY user's original input (no guardrails)"
+        assert (
+            first_user["content"] == "First question"
+        ), "Stored messages must be ONLY user's original input (no guardrails)"
 
         # Second user message stored WITHOUT guardrails (clean)
         second_user = messages[2]
         assert second_user["role"] == "user"
-        assert second_user["content"] == "Second question", \
-            "Stored messages must be ONLY user's original input (no guardrails)"
+        assert (
+            second_user["content"] == "Second question"
+        ), "Stored messages must be ONLY user's original input (no guardrails)"
 
     def test_security_guardrails_stored_as_constant(self, research_service):
         """Test AC5: Security guardrails are defined as service constant."""
@@ -257,8 +277,11 @@ class TestResearchAssistantClaude:
             SECURITY_GUARDRAILS,
         )
 
-        assert SECURITY_GUARDRAILS is not None, "SECURITY_GUARDRAILS constant must exist"
+        assert (
+            SECURITY_GUARDRAILS is not None
+        ), "SECURITY_GUARDRAILS constant must exist"
         assert isinstance(SECURITY_GUARDRAILS, str), "Must be string constant"
         assert len(SECURITY_GUARDRAILS) > 100, "Must contain substantial content"
-        assert "MANDATORY SECURITY CONSTRAINTS" in SECURITY_GUARDRAILS, \
-            "Must include expected header"
+        assert (
+            "MANDATORY SECURITY CONSTRAINTS" in SECURITY_GUARDRAILS
+        ), "Must include expected header"

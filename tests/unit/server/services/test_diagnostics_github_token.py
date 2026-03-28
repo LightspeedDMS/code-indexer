@@ -133,7 +133,8 @@ class TestCheckGitHubToken:
             ) as mock_client_class:
                 mock_client = mock_client_class.return_value.__aenter__.return_value
                 mock_response_obj = Response(
-                    status_code=401, request=Request("GET", "https://api.github.com/user")
+                    status_code=401,
+                    request=Request("GET", "https://api.github.com/user"),
                 )
                 mock_client.get = AsyncMock(
                     side_effect=HTTPStatusError(
@@ -171,7 +172,9 @@ class TestCheckGitHubToken:
                 result = await service.check_github_token()
 
         assert result.status == DiagnosticStatus.ERROR
-        assert "timeout" in result.message.lower() or "timed out" in result.message.lower()
+        assert (
+            "timeout" in result.message.lower() or "timed out" in result.message.lower()
+        )
 
 
 class TestAPITimeoutConstant:

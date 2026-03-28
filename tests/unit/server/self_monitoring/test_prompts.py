@@ -82,9 +82,9 @@ class TestGetDefaultPrompt:
 
         assert repeating_pos != -1, "Repeating Warning Detection section not found"
         assert ignore_pos != -1, "DO NOT CREATE ISSUES FOR section not found"
-        assert repeating_pos < ignore_pos, (
-            "Repeating Warning Detection section must appear BEFORE the ignore list"
-        )
+        assert (
+            repeating_pos < ignore_pos
+        ), "Repeating Warning Detection section must appear BEFORE the ignore list"
 
     def test_prompt_contains_escalation_threshold(self):
         """AC1: Prompt must state the 5+ occurrence escalation threshold."""
@@ -180,9 +180,9 @@ class TestGetDefaultPrompt:
         repeating_section_pos = prompt.find("Repeating Warning Detection")
         ignore_list_pos = prompt.find("DO NOT CREATE ISSUES FOR")
 
-        assert repeating_section_pos < ignore_list_pos, (
-            "Frequency detection section must come before the ignore list"
-        )
+        assert (
+            repeating_section_pos < ignore_list_pos
+        ), "Frequency detection section must come before the ignore list"
 
     # --- AC4: Stuck-State Warning Examples ---
 
@@ -193,7 +193,9 @@ class TestGetDefaultPrompt:
         prompt = get_default_prompt()
 
         # Must mention git packfile corruption as an example of stuck-state warning
-        assert "pack" in prompt.lower() and ("delta" in prompt.lower() or "packfile" in prompt.lower())
+        assert "pack" in prompt.lower() and (
+            "delta" in prompt.lower() or "packfile" in prompt.lower()
+        )
 
     def test_prompt_contains_daemon_socket_example(self):
         """AC4: Prompt must include dead daemon socket as a stuck-state example."""
@@ -218,7 +220,11 @@ class TestGetDefaultPrompt:
         prompt = get_default_prompt()
 
         # Must have examples of patterns that indicate unrecoverable states
-        assert "self-heal" in prompt.lower() or "not self-heal" in prompt.lower() or "will not self" in prompt.lower()
+        assert (
+            "self-heal" in prompt.lower()
+            or "not self-heal" in prompt.lower()
+            or "will not self" in prompt.lower()
+        )
 
     # --- AC5: Prompt Version Tracking ---
 
@@ -239,9 +245,9 @@ class TestGetDefaultPrompt:
 
         version_pos = prompt.find("Prompt version:")
         assert version_pos != -1, "Prompt version comment not found"
-        assert version_pos < 300, (
-            f"Version comment must be within first 300 chars, found at position {version_pos}"
-        )
+        assert (
+            version_pos < 300
+        ), f"Version comment must be within first 300 chars, found at position {version_pos}"
 
     def test_prompt_version_is_2(self):
         """AC5: Prompt version must be 2 after this update."""

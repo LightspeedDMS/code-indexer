@@ -466,7 +466,7 @@ class RepositoryStatsService:
         # Check repository size
         if storage_info.repository_size_bytes > 100 * 1024 * 1024:  # >100MB
             issues.append(
-                f"Large repository size: {storage_info.repository_size_bytes / (1024*1024):.1f}MB"
+                f"Large repository size: {storage_info.repository_size_bytes / (1024 * 1024):.1f}MB"
             )
 
         # Calculate health score (1.0 = perfect, 0.0 = terrible)

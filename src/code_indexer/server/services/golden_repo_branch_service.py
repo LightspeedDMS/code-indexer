@@ -201,7 +201,7 @@ class GoldenRepoBranchService:
                         # Determine if remote branch, strip origin/ prefix
                         is_remote = raw_name.startswith("origin/")
                         branch_name = (
-                            raw_name[len("origin/"):] if is_remote else raw_name
+                            raw_name[len("origin/") :] if is_remote else raw_name
                         )
 
                         # Deduplicate: local branches take precedence over remote ones

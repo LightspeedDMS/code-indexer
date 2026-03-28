@@ -66,7 +66,7 @@ class TestDiagnosticsPersistence:
         try:
             cursor = conn.execute(
                 "SELECT category, results_json, run_at FROM diagnostic_results WHERE category = ?",
-                (DiagnosticCategory.CLI_TOOLS.value,)
+                (DiagnosticCategory.CLI_TOOLS.value,),
             )
             row = cursor.fetchone()
 
@@ -118,7 +118,7 @@ class TestDiagnosticsPersistence:
         try:
             cursor = conn.execute(
                 "SELECT results_json FROM diagnostic_results WHERE category = ?",
-                (DiagnosticCategory.CLI_TOOLS.value,)
+                (DiagnosticCategory.CLI_TOOLS.value,),
             )
             rows = cursor.fetchall()
 
@@ -149,7 +149,11 @@ class TestDiagnosticsPersistence:
             results_json = json.dumps([r.to_dict() for r in results])
             conn.execute(
                 "INSERT OR REPLACE INTO diagnostic_results (category, results_json, run_at) VALUES (?, ?, ?)",
-                (DiagnosticCategory.CLI_TOOLS.value, results_json, datetime.now().isoformat())
+                (
+                    DiagnosticCategory.CLI_TOOLS.value,
+                    results_json,
+                    datetime.now().isoformat(),
+                ),
             )
             conn.commit()
         finally:
@@ -185,7 +189,11 @@ class TestDiagnosticsPersistence:
             results_json = json.dumps([r.to_dict() for r in results])
             conn.execute(
                 "INSERT OR REPLACE INTO diagnostic_results (category, results_json, run_at) VALUES (?, ?, ?)",
-                (DiagnosticCategory.EXTERNAL_APIS.value, results_json, datetime.now().isoformat())
+                (
+                    DiagnosticCategory.EXTERNAL_APIS.value,
+                    results_json,
+                    datetime.now().isoformat(),
+                ),
             )
             conn.commit()
         finally:
@@ -220,7 +228,7 @@ class TestDiagnosticsPersistence:
         try:
             cursor = conn.execute(
                 "SELECT category, results_json FROM diagnostic_results WHERE category = ?",
-                (DiagnosticCategory.CLI_TOOLS.value,)
+                (DiagnosticCategory.CLI_TOOLS.value,),
             )
             row = cursor.fetchone()
 
@@ -277,9 +285,9 @@ class TestDiagnosticsPersistence:
                     "bool": True,
                     "null": None,
                     "list": [1, 2, 3],
-                    "nested": {"key": "value"}
+                    "nested": {"key": "value"},
                 },
-                timestamp=timestamp
+                timestamp=timestamp,
             )
         ]
 
@@ -291,7 +299,7 @@ class TestDiagnosticsPersistence:
         try:
             cursor = conn.execute(
                 "SELECT results_json FROM diagnostic_results WHERE category = ?",
-                (DiagnosticCategory.INFRASTRUCTURE.value,)
+                (DiagnosticCategory.INFRASTRUCTURE.value,),
             )
             row = cursor.fetchone()
 
@@ -332,4 +340,4 @@ class TestDiagnosticsPersistence:
         for category, results in status.items():
             assert len(results) > 0
             # Note: Actual implementation may have mixed statuses, just verify structure exists
-            assert all(hasattr(r, 'status') for r in results)
+            assert all(hasattr(r, "status") for r in results)

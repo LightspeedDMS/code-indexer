@@ -131,12 +131,15 @@ class TestHandleEnterWriteMode:
         """Invoke handler with patched app state."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
-            return_value=refresh_scheduler,
-        ), patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(golden_repos_dir),
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
+                return_value=refresh_scheduler,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(golden_repos_dir),
+            ),
         ):
             return handlers.handle_enter_write_mode(params, user)
 
@@ -147,7 +150,9 @@ class TestHandleEnterWriteMode:
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is True
@@ -175,14 +180,14 @@ class TestHandleEnterWriteMode:
             "cidx-meta", owner_name="mcp_write_mode"
         )
 
-    def test_noop_for_activated_repo(
-        self, mock_refresh_scheduler, golden_repos_dir
-    ):
+    def test_noop_for_activated_repo(self, mock_refresh_scheduler, golden_repos_dir):
         """AC2: enter_write_mode is silent no-op for activated (non-exception) repos."""
         user = _make_user()
         params = {"repo_alias": "some-normal-repo-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is True
@@ -194,19 +199,25 @@ class TestHandleEnterWriteMode:
         # No marker file must be created
         write_mode_dir = golden_repos_dir / ".write_mode"
         if write_mode_dir.exists():
-            assert list(write_mode_dir.iterdir()) == [], "No marker files must be created for no-op"
+            assert (
+                list(write_mode_dir.iterdir()) == []
+            ), "No marker files must be created for no-op"
 
     def test_returns_error_when_lock_already_held(
         self, mock_refresh_scheduler, golden_repos_dir, cidx_meta_source
     ):
         """AC9: Returns error when lock is already held by another owner."""
         # Pre-acquire the lock as a different owner
-        mock_refresh_scheduler.write_lock_manager.acquire("cidx-meta", owner_name="other_service")
+        mock_refresh_scheduler.write_lock_manager.acquire(
+            "cidx-meta", owner_name="other_service"
+        )
 
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is False
@@ -223,7 +234,9 @@ class TestHandleEnterWriteMode:
         user = _make_user()
         params = {}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is False
@@ -242,12 +255,15 @@ class TestHandleExitWriteMode:
         """Invoke handler with patched app state."""
         from code_indexer.server.mcp import handlers
 
-        with patch(
-            "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
-            return_value=refresh_scheduler,
-        ), patch(
-            "code_indexer.server.mcp.handlers._get_golden_repos_dir",
-            return_value=str(golden_repos_dir),
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
+                return_value=refresh_scheduler,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._get_golden_repos_dir",
+                return_value=str(golden_repos_dir),
+            ),
         ):
             return handlers.handle_exit_write_mode(params, user)
 
@@ -273,24 +289,32 @@ class TestHandleExitWriteMode:
         """AC5: exit_write_mode calls _execute_refresh synchronously."""
         self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
         # Pre-acquire lock
-        mock_refresh_scheduler.write_lock_manager.acquire("cidx-meta", owner_name="mcp_write_mode")
+        mock_refresh_scheduler.write_lock_manager.acquire(
+            "cidx-meta", owner_name="mcp_write_mode"
+        )
 
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is True
         # _execute_refresh must have been called directly (synchronously)
-        mock_refresh_scheduler._execute_refresh.assert_called_once_with("cidx-meta-global")
+        mock_refresh_scheduler._execute_refresh.assert_called_once_with(
+            "cidx-meta-global"
+        )
 
     def test_removes_marker_file_after_refresh(
         self, mock_refresh_scheduler, golden_repos_dir, cidx_meta_source
     ):
         """AC5: Marker file is deleted after refresh completes."""
         marker = self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
-        mock_refresh_scheduler.write_lock_manager.acquire("cidx-meta", owner_name="mcp_write_mode")
+        mock_refresh_scheduler.write_lock_manager.acquire(
+            "cidx-meta", owner_name="mcp_write_mode"
+        )
 
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
@@ -304,7 +328,9 @@ class TestHandleExitWriteMode:
     ):
         """AC5: Write lock is released after exit."""
         self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
-        mock_refresh_scheduler.write_lock_manager.acquire("cidx-meta", owner_name="mcp_write_mode")
+        mock_refresh_scheduler.write_lock_manager.acquire(
+            "cidx-meta", owner_name="mcp_write_mode"
+        )
 
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
@@ -315,14 +341,14 @@ class TestHandleExitWriteMode:
             "cidx-meta", owner_name="mcp_write_mode"
         )
 
-    def test_noop_for_activated_repo(
-        self, mock_refresh_scheduler, golden_repos_dir
-    ):
+    def test_noop_for_activated_repo(self, mock_refresh_scheduler, golden_repos_dir):
         """AC6: exit_write_mode is silent no-op for activated (non-exception) repos."""
         user = _make_user()
         params = {"repo_alias": "some-normal-repo-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is True
@@ -339,12 +365,16 @@ class TestHandleExitWriteMode:
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         # Should return success but with a warning
         assert data["success"] is True
-        assert "warning" in data or "not in write mode" in data.get("message", "").lower()
+        assert (
+            "warning" in data or "not in write mode" in data.get("message", "").lower()
+        )
 
         # No refresh should be triggered when no marker
         mock_refresh_scheduler._execute_refresh.assert_not_called()
@@ -359,7 +389,9 @@ class TestHandleExitWriteMode:
         the lock first so the refresh is not silently skipped.
         """
         self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
-        mock_refresh_scheduler.write_lock_manager.acquire("cidx-meta", owner_name="mcp_write_mode")
+        mock_refresh_scheduler.write_lock_manager.acquire(
+            "cidx-meta", owner_name="mcp_write_mode"
+        )
 
         lock_held_during_refresh: list[bool] = []
 
@@ -373,7 +405,9 @@ class TestHandleExitWriteMode:
 
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         assert data["success"] is True
@@ -388,15 +422,21 @@ class TestHandleExitWriteMode:
     ):
         """Lock is released and marker is removed even when _execute_refresh raises."""
         marker = self._create_marker(golden_repos_dir, "cidx-meta", cidx_meta_source)
-        mock_refresh_scheduler.write_lock_manager.acquire("cidx-meta", owner_name="mcp_write_mode")
+        mock_refresh_scheduler.write_lock_manager.acquire(
+            "cidx-meta", owner_name="mcp_write_mode"
+        )
 
         # Make refresh raise
-        mock_refresh_scheduler._execute_refresh.side_effect = RuntimeError("refresh exploded")
+        mock_refresh_scheduler._execute_refresh.side_effect = RuntimeError(
+            "refresh exploded"
+        )
 
         user = _make_user()
         params = {"repo_alias": "cidx-meta-global"}
 
-        result = self._call_handler(params, user, mock_refresh_scheduler, golden_repos_dir)
+        result = self._call_handler(
+            params, user, mock_refresh_scheduler, golden_repos_dir
+        )
         data = _extract_response_data(result)
 
         # Response must signal failure
@@ -407,9 +447,9 @@ class TestHandleExitWriteMode:
         assert not marker.exists(), "Marker must be cleaned up even when refresh fails"
 
         # Lock must be released despite the refresh failure
-        assert not mock_refresh_scheduler.write_lock_manager.is_locked("cidx-meta"), (
-            "Write lock must be released even when refresh fails"
-        )
+        assert not mock_refresh_scheduler.write_lock_manager.is_locked(
+            "cidx-meta"
+        ), "Write lock must be released even when refresh fails"
 
 
 # ===========================================================================
@@ -420,15 +460,23 @@ class TestHandleExitWriteMode:
 class TestAliasManagerReadAliasWithWriteMode:
     """Tests for AliasManager.read_alias write-mode redirection (C3)."""
 
-    def test_returns_versioned_path_when_no_marker(self, alias_manager, golden_repos_dir):
+    def test_returns_versioned_path_when_no_marker(
+        self, alias_manager, golden_repos_dir
+    ):
         """AC4: Returns normal versioned path when not in write mode."""
-        alias_manager.create_alias("cidx-meta-global", "/versioned/path/cidx-meta/v_123")
+        alias_manager.create_alias(
+            "cidx-meta-global", "/versioned/path/cidx-meta/v_123"
+        )
         result = alias_manager.read_alias("cidx-meta-global")
         assert result == "/versioned/path/cidx-meta/v_123"
 
-    def test_returns_source_path_when_marker_present(self, alias_manager, golden_repos_dir):
+    def test_returns_source_path_when_marker_present(
+        self, alias_manager, golden_repos_dir
+    ):
         """AC3: Returns source_path from marker when write-mode marker exists."""
-        alias_manager.create_alias("cidx-meta-global", "/versioned/path/cidx-meta/v_123")
+        alias_manager.create_alias(
+            "cidx-meta-global", "/versioned/path/cidx-meta/v_123"
+        )
 
         # Create marker file
         write_mode_dir = golden_repos_dir / ".write_mode"
@@ -452,7 +500,9 @@ class TestAliasManagerReadAliasWithWriteMode:
         self, alias_manager, golden_repos_dir
     ):
         """AC3 fallback: Falls back to versioned path on corrupt marker (JSONDecodeError)."""
-        alias_manager.create_alias("cidx-meta-global", "/versioned/path/cidx-meta/v_123")
+        alias_manager.create_alias(
+            "cidx-meta-global", "/versioned/path/cidx-meta/v_123"
+        )
 
         # Create corrupt marker file
         write_mode_dir = golden_repos_dir / ".write_mode"
@@ -461,13 +511,17 @@ class TestAliasManagerReadAliasWithWriteMode:
         marker_file.write_text("{ this is not valid json !!!")
 
         result = alias_manager.read_alias("cidx-meta-global")
-        assert result == "/versioned/path/cidx-meta/v_123", "Should fall back on corrupt marker"
+        assert (
+            result == "/versioned/path/cidx-meta/v_123"
+        ), "Should fall back on corrupt marker"
 
     def test_falls_back_when_marker_missing_source_path(
         self, alias_manager, golden_repos_dir
     ):
         """AC3 fallback: Falls back to versioned path when marker has no source_path."""
-        alias_manager.create_alias("cidx-meta-global", "/versioned/path/cidx-meta/v_123")
+        alias_manager.create_alias(
+            "cidx-meta-global", "/versioned/path/cidx-meta/v_123"
+        )
 
         # Create marker without source_path
         write_mode_dir = golden_repos_dir / ".write_mode"
@@ -478,11 +532,17 @@ class TestAliasManagerReadAliasWithWriteMode:
         )
 
         result = alias_manager.read_alias("cidx-meta-global")
-        assert result == "/versioned/path/cidx-meta/v_123", "Should fall back when source_path missing"
+        assert (
+            result == "/versioned/path/cidx-meta/v_123"
+        ), "Should fall back when source_path missing"
 
-    def test_no_marker_dir_does_not_break_read_alias(self, alias_manager, golden_repos_dir):
+    def test_no_marker_dir_does_not_break_read_alias(
+        self, alias_manager, golden_repos_dir
+    ):
         """C3: read_alias works even when .write_mode directory doesn't exist."""
-        alias_manager.create_alias("cidx-meta-global", "/versioned/path/cidx-meta/v_123")
+        alias_manager.create_alias(
+            "cidx-meta-global", "/versioned/path/cidx-meta/v_123"
+        )
         # Do NOT create the write_mode dir
         result = alias_manager.read_alias("cidx-meta-global")
         assert result == "/versioned/path/cidx-meta/v_123"
@@ -536,7 +596,9 @@ class TestFileCRUDServiceWriteModeEnforcement:
                     username="testuser",
                 )
 
-        assert "write mode" in str(exc_info.value).lower() or "enter_write_mode" in str(exc_info.value)
+        assert "write mode" in str(exc_info.value).lower() or "enter_write_mode" in str(
+            exc_info.value
+        )
 
     def test_create_file_succeeds_with_valid_write_mode_marker(
         self, file_crud_service_with_exception, golden_repos_dir, cidx_meta_source
@@ -656,7 +718,9 @@ class TestFileCRUDServiceWriteModeEnforcement:
                 return_value=str(golden_repos_dir / "some-other-repo"),
             ):
                 # Create target dir
-                (golden_repos_dir / "some-other-repo").mkdir(parents=True, exist_ok=True)
+                (golden_repos_dir / "some-other-repo").mkdir(
+                    parents=True, exist_ok=True
+                )
                 # This should not raise PermissionError about write mode
                 # (it may raise FileExistsError or succeed depending on state)
                 try:
@@ -668,8 +732,8 @@ class TestFileCRUDServiceWriteModeEnforcement:
                     )
                 except PermissionError as e:
                     # Ensure it's NOT the write-mode PermissionError
-                    assert "write mode" not in str(e).lower(), (
-                        f"Non-write-exception repo should not be gated by write mode, got: {e}"
-                    )
+                    assert (
+                        "write mode" not in str(e).lower()
+                    ), f"Non-write-exception repo should not be gated by write mode, got: {e}"
                 except Exception:
                     pass  # Other errors are acceptable

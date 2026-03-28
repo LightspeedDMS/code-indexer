@@ -105,7 +105,9 @@ class TestCleanupOrphanedJobsOnStartup:
         row = _get_job_status(db_path, "job-failed-1")
         assert row["status"] == "failed"
 
-    def test_returns_correct_count_multiple_orphans(self, backend, db_path: str) -> None:
+    def test_returns_correct_count_multiple_orphans(
+        self, backend, db_path: str
+    ) -> None:
         """Count returned must equal the number of jobs actually cleaned up."""
         _insert_sync_job(db_path, "job-r1", "running")
         _insert_sync_job(db_path, "job-r2", "running")
@@ -138,7 +140,10 @@ class TestCleanupOrphanedJobsOnStartup:
 
         row = _get_job_status(db_path, "job-orphan")
         assert row["error_message"] is not None
-        assert "restart" in row["error_message"].lower() or "interrupted" in row["error_message"].lower()
+        assert (
+            "restart" in row["error_message"].lower()
+            or "interrupted" in row["error_message"].lower()
+        )
 
     def test_completed_at_set_for_orphans(self, backend, db_path: str) -> None:
         """Orphans must have completed_at set when marked failed."""

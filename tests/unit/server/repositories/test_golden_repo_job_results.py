@@ -192,7 +192,7 @@ def test_refresh_golden_repo_result_contains_alias(temp_dirs):
     assert (
         "alias" in result
     ), "Result missing 'alias' field - dashboard will show 'Unknown'"
-    assert result["alias"] == alias_name, (
-        f"Expected alias '{alias_name}', got '{result['alias']}'"
-    )
+    assert (
+        result["alias"] == alias_name
+    ), f"Expected alias '{alias_name}', got '{result['alias']}'"
     assert result["success"] is True, f"Expected success=True, got: {result}"

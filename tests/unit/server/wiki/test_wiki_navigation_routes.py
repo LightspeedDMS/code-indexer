@@ -1,4 +1,5 @@
 """Route integration tests for wiki navigation (Story #282)."""
+
 import os
 import tempfile
 from pathlib import Path
@@ -7,7 +8,11 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_wiki_user_hybrid,
+    get_current_user_hybrid,
+)
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -19,6 +24,7 @@ def _make_user(username):
 
 def _make_app(authenticated_user, actual_repo_path, user_accessible_repos=None):
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()
@@ -42,7 +48,9 @@ def _make_app(authenticated_user, actual_repo_path, user_accessible_repos=None):
 
     app.state.access_filtering_service = MagicMock()
     app.state.access_filtering_service.is_admin_user.return_value = True
-    app.state.access_filtering_service.get_accessible_repos.return_value = user_accessible_repos or set()
+    app.state.access_filtering_service.get_accessible_repos.return_value = (
+        user_accessible_repos or set()
+    )
     return app
 
 

@@ -35,7 +35,14 @@ from datetime import datetime, timezone
 @pytest.fixture
 def jinja_env():
     """Create Jinja2 environment with template path."""
-    template_dir = Path(__file__).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "web" / "templates"
+    template_dir = (
+        Path(__file__).parent.parent.parent.parent.parent
+        / "src"
+        / "code_indexer"
+        / "server"
+        / "web"
+        / "templates"
+    )
     env = Environment(loader=FileSystemLoader(str(template_dir)))
 
     # Register the relative_time filter
@@ -43,7 +50,7 @@ def jinja_env():
         """Mock filter that just returns a formatted string."""
         return "2 minutes ago"
 
-    env.filters['relative_time'] = relative_time_filter
+    env.filters["relative_time"] = relative_time_filter
     return env
 
 
@@ -71,7 +78,9 @@ def sample_sessions():
 class TestResearchSessionsHTMXReinitialization:
     """Test HTMX reinitialization after dynamic HTML insertion (Bug #152)."""
 
-    def test_rename_session_function_calls_htmx_process(self, jinja_env, sample_sessions):
+    def test_rename_session_function_calls_htmx_process(
+        self, jinja_env, sample_sessions
+    ):
         """
         AC1: renameSession function contains htmx.process() call.
 
@@ -79,14 +88,17 @@ class TestResearchSessionsHTMXReinitialization:
         to reinitialize HTMX attributes on dynamically inserted HTML.
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Verify renameSession function exists
-        assert 'function renameSession(' in html, "renameSession function must exist"
+        assert "function renameSession(" in html, "renameSession function must exist"
 
         # Verify htmx.process() is called
-        assert 'htmx.process(' in html, \
-            "renameSession must call htmx.process() to reinitialize HTMX on dynamic HTML"
+        assert (
+            "htmx.process(" in html
+        ), "renameSession must call htmx.process() to reinitialize HTMX on dynamic HTML"
 
     def test_htmx_process_called_after_innerhtml(self, jinja_env, sample_sessions):
         """
@@ -96,26 +108,31 @@ class TestResearchSessionsHTMXReinitialization:
         ensuring HTMX processes the newly inserted content.
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Extract the renameSession function body
-        script_start = html.index('<script>')
-        script_end = html.index('</script>', script_start)
+        script_start = html.index("<script>")
+        script_end = html.index("</script>", script_start)
         script_content = html[script_start:script_end]
 
         # Verify innerHTML assignment exists
-        assert 'innerHTML = html' in script_content, \
-            "renameSession must use innerHTML to update content"
+        assert (
+            "innerHTML = html" in script_content
+        ), "renameSession must use innerHTML to update content"
 
         # Verify htmx.process() exists
-        assert 'htmx.process(' in script_content, \
-            "renameSession must call htmx.process()"
+        assert (
+            "htmx.process(" in script_content
+        ), "renameSession must call htmx.process()"
 
         # Verify order: innerHTML comes BEFORE htmx.process()
-        innerhtml_idx = script_content.index('innerHTML = html')
-        htmx_process_idx = script_content.index('htmx.process(')
-        assert innerhtml_idx < htmx_process_idx, \
-            "htmx.process() must be called AFTER innerHTML assignment"
+        innerhtml_idx = script_content.index("innerHTML = html")
+        htmx_process_idx = script_content.index("htmx.process(")
+        assert (
+            innerhtml_idx < htmx_process_idx
+        ), "htmx.process() must be called AFTER innerHTML assignment"
 
     def test_htmx_process_targets_correct_element(self, jinja_env, sample_sessions):
         """
@@ -125,16 +142,20 @@ class TestResearchSessionsHTMXReinitialization:
         contains the dynamically updated HTML.
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Extract script content
-        script_start = html.index('<script>')
-        script_end = html.index('</script>', script_start)
+        script_start = html.index("<script>")
+        script_end = html.index("</script>", script_start)
         script_content = html[script_start:script_end]
 
         # Verify htmx.process() is called with getElementById('sessions-sidebar')
-        assert "htmx.process(document.getElementById('sessions-sidebar'))" in script_content, \
-            "htmx.process() must target document.getElementById('sessions-sidebar')"
+        assert (
+            "htmx.process(document.getElementById('sessions-sidebar'))"
+            in script_content
+        ), "htmx.process() must target document.getElementById('sessions-sidebar')"
 
     def test_complete_fix_pattern(self, jinja_env, sample_sessions):
         """
@@ -149,26 +170,29 @@ class TestResearchSessionsHTMXReinitialization:
         6. });
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Extract script content
-        script_start = html.index('<script>')
-        script_end = html.index('</script>', script_start)
+        script_start = html.index("<script>")
+        script_end = html.index("</script>", script_start)
         script_content = html[script_start:script_end]
 
         # Verify the complete fix pattern
         required_components = [
             "fetch('/admin/research/sessions/' + sessionId",  # Fetch call
-            "method: 'PUT'",                                   # PUT method
-            ".then(response => response.text())",             # Parse response
-            ".then(html => {",                                 # HTML handler
+            "method: 'PUT'",  # PUT method
+            ".then(response => response.text())",  # Parse response
+            ".then(html => {",  # HTML handler
             "document.getElementById('sessions-sidebar').innerHTML = html;",  # Update HTML
-            "htmx.process(document.getElementById('sessions-sidebar'));",     # Reinitialize HTMX
+            "htmx.process(document.getElementById('sessions-sidebar'));",  # Reinitialize HTMX
         ]
 
         for component in required_components:
-            assert component in script_content, \
-                f"Missing required component in renameSession fix: {component}"
+            assert (
+                component in script_content
+            ), f"Missing required component in renameSession fix: {component}"
 
     def test_no_regression_in_existing_functionality(self, jinja_env, sample_sessions):
         """
@@ -181,24 +205,27 @@ class TestResearchSessionsHTMXReinitialization:
         - innerHTML update
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Extract script content
-        script_start = html.index('<script>')
-        script_end = html.index('</script>', script_start)
+        script_start = html.index("<script>")
+        script_end = html.index("</script>", script_start)
         script_content = html[script_start:script_end]
 
         # Verify all original functionality is preserved
-        assert 'var newName = prompt(' in script_content, \
-            "Must still prompt user for new name"
-        assert 'var formData = new FormData()' in script_content, \
-            "Must still create FormData"
-        assert "formData.append('new_name', newName)" in script_content, \
-            "Must still append new_name to FormData"
-        assert "method: 'PUT'" in script_content, \
-            "Must still use PUT method"
-        assert 'fetch(' in script_content, \
-            "Must still use fetch API"
+        assert (
+            "var newName = prompt(" in script_content
+        ), "Must still prompt user for new name"
+        assert (
+            "var formData = new FormData()" in script_content
+        ), "Must still create FormData"
+        assert (
+            "formData.append('new_name', newName)" in script_content
+        ), "Must still append new_name to FormData"
+        assert "method: 'PUT'" in script_content, "Must still use PUT method"
+        assert "fetch(" in script_content, "Must still use fetch API"
 
     def test_htmx_process_only_in_rename_success_path(self, jinja_env, sample_sessions):
         """
@@ -212,16 +239,18 @@ class TestResearchSessionsHTMXReinitialization:
         This test verifies the logical structure is preserved.
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Extract script content
-        script_start = html.index('<script>')
-        script_end = html.index('</script>', script_start)
+        script_start = html.index("<script>")
+        script_end = html.index("</script>", script_start)
         script_content = html[script_start:script_end]
 
         # Verify htmx.process() is inside the success callback
         # Should be inside .then(html => { ... })
-        then_html_start = script_content.index('.then(html => {')
+        then_html_start = script_content.index(".then(html => {")
         then_html_section = script_content[then_html_start:]
 
         # Find the closing brace of the .then callback
@@ -229,20 +258,22 @@ class TestResearchSessionsHTMXReinitialization:
         brace_count = 0
         then_html_end = 0
         for i, char in enumerate(then_html_section):
-            if char == '{':
+            if char == "{":
                 brace_count += 1
-            elif char == '}':
+            elif char == "}":
                 brace_count -= 1
                 if brace_count == 0:
                     then_html_end = i
                     break
 
-        then_html_callback = then_html_section[:then_html_end + 1]
+        then_html_callback = then_html_section[: then_html_end + 1]
 
         # Verify htmx.process() is inside this callback
-        assert 'htmx.process(' in then_html_callback, \
-            "htmx.process() must be inside the .then(html => {...}) success callback"
+        assert (
+            "htmx.process(" in then_html_callback
+        ), "htmx.process() must be inside the .then(html => {...}) success callback"
 
         # Verify innerHTML is also in the same callback
-        assert 'innerHTML = html' in then_html_callback, \
-            "innerHTML update must be in the same callback as htmx.process()"
+        assert (
+            "innerHTML = html" in then_html_callback
+        ), "innerHTML update must be in the same callback as htmx.process()"

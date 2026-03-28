@@ -52,8 +52,11 @@ class PasswordChangeAuditLogger:
         self._audit_service = audit_service
 
         if audit_service is not None:
-            # SQLite path: no file handler needed
-            self.audit_logger = None
+            # SQLite path: no file handler needed; use a disabled logger as a no-op placeholder
+            _null_logger = logging.getLogger(f"password_audit_null_{id(self)}")
+            _null_logger.addHandler(logging.NullHandler())
+            _null_logger.propagate = False
+            self.audit_logger = _null_logger
             self.log_file_path = None
             return
 
@@ -96,11 +99,13 @@ class PasswordChangeAuditLogger:
         Closes and removes the file handler to avoid resource leaks.
         """
         self._audit_service = audit_service
-        if self.audit_logger is not None:
-            for handler in self.audit_logger.handlers[:]:
-                handler.close()
-                self.audit_logger.removeHandler(handler)
-            self.audit_logger = None
+        for handler in self.audit_logger.handlers[:]:
+            handler.close()
+            self.audit_logger.removeHandler(handler)
+        _null_logger = logging.getLogger(f"password_audit_null_{id(self)}")
+        _null_logger.addHandler(logging.NullHandler())
+        _null_logger.propagate = False
+        self.audit_logger = _null_logger
         self.log_file_path = None
 
     # ------------------------------------------------------------------
@@ -166,7 +171,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("password_change_success", username, username, log_entry)
+            self._log_to_service(
+                "password_change_success", username, username, log_entry
+            )
             return
 
         self.audit_logger.info(
@@ -203,7 +210,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("password_change_failure", username, username, log_entry)
+            self._log_to_service(
+                "password_change_failure", username, username, log_entry
+            )
             return
 
         self.audit_logger.warning(
@@ -237,7 +246,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("password_change_rate_limit", username, username, log_entry)
+            self._log_to_service(
+                "password_change_rate_limit", username, username, log_entry
+            )
             return
 
         self.audit_logger.warning(
@@ -265,7 +276,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("password_change_concurrent_conflict", username, username, log_entry)
+            self._log_to_service(
+                "password_change_concurrent_conflict", username, username, log_entry
+            )
             return
 
         self.audit_logger.warning(
@@ -414,7 +427,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("authentication_failure", username, username, log_entry)
+            self._log_to_service(
+                "authentication_failure", username, username, log_entry
+            )
             return
 
         self.audit_logger.warning(
@@ -516,7 +531,9 @@ class PasswordChangeAuditLogger:
             "additional_context": additional_context or {},
         }
         if self._audit_service is not None:
-            self._log_to_service("oauth_client_registration", client_id, client_id, log_entry)
+            self._log_to_service(
+                "oauth_client_registration", client_id, client_id, log_entry
+            )
             return
 
         self.audit_logger.info(
@@ -592,7 +609,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("oauth_token_revocation", username, username, log_entry)
+            self._log_to_service(
+                "oauth_token_revocation", username, username, log_entry
+            )
             return
 
         self.audit_logger.info(
@@ -703,7 +722,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("pr_creation_disabled", "system", repo_alias, log_entry)
+            self._log_to_service(
+                "pr_creation_disabled", "system", repo_alias, log_entry
+            )
             return
 
         self.audit_logger.info(
@@ -776,7 +797,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("impersonation_set", actor_username, target_username, log_entry)
+            self._log_to_service(
+                "impersonation_set", actor_username, target_username, log_entry
+            )
             return
 
         self.audit_logger.info(
@@ -818,7 +841,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("impersonation_cleared", actor_username, previous_target, log_entry)
+            self._log_to_service(
+                "impersonation_cleared", actor_username, previous_target, log_entry
+            )
             return
 
         self.audit_logger.info(
@@ -865,7 +890,9 @@ class PasswordChangeAuditLogger:
         }
 
         if self._audit_service is not None:
-            self._log_to_service("impersonation_denied", actor_username, target_username, log_entry)
+            self._log_to_service(
+                "impersonation_denied", actor_username, target_username, log_entry
+            )
             return
 
         self.audit_logger.warning(
@@ -894,8 +921,10 @@ class PasswordChangeAuditLogger:
             List of PR creation log entries (dicts)
         """
         if self._audit_service is not None:
-            return self._audit_service.get_pr_logs(
-                repo_alias=repo_alias, limit=limit, offset=offset
+            return list(
+                self._audit_service.get_pr_logs(
+                    repo_alias=repo_alias, limit=limit, offset=offset
+                )
             )
 
         logs = self._parse_logs_by_prefix("PR_CREATION")
@@ -928,8 +957,10 @@ class PasswordChangeAuditLogger:
             List of git cleanup log entries (dicts)
         """
         if self._audit_service is not None:
-            return self._audit_service.get_cleanup_logs(
-                repo_path=repo_path, limit=limit, offset=offset
+            return list(
+                self._audit_service.get_cleanup_logs(
+                    repo_path=repo_path, limit=limit, offset=offset
+                )
             )
 
         logs = self._parse_logs_by_prefix("GIT_CLEANUP")

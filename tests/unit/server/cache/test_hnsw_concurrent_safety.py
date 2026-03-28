@@ -95,7 +95,9 @@ class TestHNSWCacheThreadSafety:
         # and each find the cached entry (incrementing hit_count).
         assert stats.miss_count >= 1, "Should have at least 1 miss (loader thread)"
         assert stats.miss_count <= 10, "miss_count cannot exceed number of threads"
-        assert stats.hit_count == 9, "Should have 9 hits (waiters that looped back to cache)"
+        assert (
+            stats.hit_count == 9
+        ), "Should have 9 hits (waiters that looped back to cache)"
 
     def test_concurrent_different_repos(self, tmp_path: Path) -> None:
         """

@@ -178,8 +178,7 @@ class TestGlobalRepos404Bug:
                 assert result is not None
             except SemanticQueryError as e:
                 pytest.fail(
-                    f"Query should work for global repo alias after fix. "
-                    f"Got error: {e}"
+                    f"Query should work for global repo alias after fix. Got error: {e}"
                 )
 
     def test_global_repo_structure_has_correct_user_alias_field(

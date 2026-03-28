@@ -83,7 +83,7 @@ def populated_docs_dir(temp_docs_dir):
 
     # Add _category.yaml to git (no tools - should be excluded from overview)
     (temp_docs_dir / "git" / "_category.yaml").write_text(
-        "name: git\n" "description: Git operations and history exploration\n"
+        "name: git\ndescription: Git operations and history exploration\n"
     )
 
     # Add guides category without _category.yaml (test fallback behavior)
@@ -348,7 +348,7 @@ class TestGetCategoryOverview:
 
         # Add _category.yaml to scip
         (temp_docs_dir / "scip" / "_category.yaml").write_text(
-            "name: scip\n" "description: Code intelligence\n"
+            "name: scip\ndescription: Code intelligence\n"
         )
 
         # Add only 1 tool

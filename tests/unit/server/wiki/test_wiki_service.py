@@ -46,10 +46,16 @@ class TestWikiServiceFrontMatter:
         # and patching builtins.__import__ to raise ModuleNotFoundError for 'frontmatter'
         saved = sys.modules.pop("frontmatter", None)
         try:
-            with patch("builtins.__import__", side_effect=_import_raise_for_frontmatter):
+            with patch(
+                "builtins.__import__", side_effect=_import_raise_for_frontmatter
+            ):
                 metadata, body = svc._strip_front_matter(content)
-            assert metadata == {}, "Expected empty metadata when frontmatter module is missing"
-            assert body == content, "Expected original content returned when frontmatter module is missing"
+            assert (
+                metadata == {}
+            ), "Expected empty metadata when frontmatter module is missing"
+            assert (
+                body == content
+            ), "Expected original content returned when frontmatter module is missing"
         finally:
             if saved is not None:
                 sys.modules["frontmatter"] = saved
@@ -59,7 +65,9 @@ class TestWikiServiceFrontMatter:
         content = "# Plain content without front matter"
         saved = sys.modules.pop("frontmatter", None)
         try:
-            with patch("builtins.__import__", side_effect=_import_raise_for_frontmatter):
+            with patch(
+                "builtins.__import__", side_effect=_import_raise_for_frontmatter
+            ):
                 # Must not raise any exception
                 metadata, body = svc._strip_front_matter(content)
             assert metadata == {}
@@ -82,7 +90,10 @@ class TestWikiServiceFrontMatter:
         content = "---\ntitle: Test\n---\nContent"
         saved = sys.modules.pop("frontmatter", None)
         try:
-            with patch("builtins.__import__", side_effect=_import_raise_importerror_for_frontmatter):
+            with patch(
+                "builtins.__import__",
+                side_effect=_import_raise_importerror_for_frontmatter,
+            ):
                 metadata, body = svc._strip_front_matter(content)
             assert metadata == {}
             assert body == content
@@ -105,7 +116,9 @@ def _import_raise_importerror_for_frontmatter(name, *args, **kwargs):
     return _real_import(name, *args, **kwargs)
 
 
-_real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+_real_import = (
+    __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+)
 
 
 class TestWikiServiceHeaderBlock:

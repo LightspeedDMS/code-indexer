@@ -36,7 +36,14 @@ from datetime import datetime, timezone
 @pytest.fixture
 def jinja_env():
     """Create Jinja2 environment with template path."""
-    template_dir = Path(__file__).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "web" / "templates"
+    template_dir = (
+        Path(__file__).parent.parent.parent.parent.parent
+        / "src"
+        / "code_indexer"
+        / "server"
+        / "web"
+        / "templates"
+    )
     env = Environment(loader=FileSystemLoader(str(template_dir)))
 
     # Register the relative_time filter
@@ -44,7 +51,7 @@ def jinja_env():
         """Mock filter that just returns a formatted string."""
         return "2 minutes ago"
 
-    env.filters['relative_time'] = relative_time_filter
+    env.filters["relative_time"] = relative_time_filter
     return env
 
 
@@ -79,17 +86,23 @@ class TestResearchSessionLoadAutoScroll:
         Verifies that clicking a session sets the flag to force scroll on next HTMX swap.
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Verify hx-on::before-request exists (already tested in other tests, but verify again)
-        assert 'hx-on::before-request=' in html, \
-            "Session items must have hx-on::before-request handler"
+        assert (
+            "hx-on::before-request=" in html
+        ), "Session items must have hx-on::before-request handler"
 
         # Verify it sets the forceScrollOnNextSwap flag
-        assert "window.forceScrollOnNextSwap = true" in html, \
-            "hx-on::before-request must set window.forceScrollOnNextSwap = true"
+        assert (
+            "window.forceScrollOnNextSwap = true" in html
+        ), "hx-on::before-request must set window.forceScrollOnNextSwap = true"
 
-    def test_force_scroll_flag_after_active_class_code(self, jinja_env, sample_sessions):
+    def test_force_scroll_flag_after_active_class_code(
+        self, jinja_env, sample_sessions
+    ):
         """
         AC2: The flag is set AFTER existing active class manipulation code.
 
@@ -100,7 +113,9 @@ class TestResearchSessionLoadAutoScroll:
         4. Set window.forceScrollOnNextSwap = true
         """
         template = jinja_env.get_template("partials/research_sessions_list.html")
-        html = template.render(sessions=sample_sessions, active_session_id="session-1-id")
+        html = template.render(
+            sessions=sample_sessions, active_session_id="session-1-id"
+        )
 
         # Extract the handler content
         handler_start = html.find('hx-on::before-request="')
@@ -130,12 +145,11 @@ class TestResearchSessionLoadAutoScroll:
         assert force_scroll_pos != -1, "Must set forceScrollOnNextSwap flag"
 
         # Verify order: remove < add < update < forceScroll
-        assert remove_pos < add_pos, \
-            "Must remove active BEFORE adding active"
-        assert add_pos < update_pos, \
-            "Must add active BEFORE updating hidden field"
-        assert update_pos < force_scroll_pos, \
-            "Must set forceScrollOnNextSwap AFTER all other operations"
+        assert remove_pos < add_pos, "Must remove active BEFORE adding active"
+        assert add_pos < update_pos, "Must add active BEFORE updating hidden field"
+        assert (
+            update_pos < force_scroll_pos
+        ), "Must set forceScrollOnNextSwap AFTER all other operations"
 
     def test_main_page_after_swap_checks_force_scroll_flag(self, jinja_env):
         """
@@ -148,19 +162,20 @@ class TestResearchSessionLoadAutoScroll:
         html = template.render(sessions=[], messages=[], active_session_id=None)
 
         # Find the htmx:afterSwap event listener
-        assert "htmx:afterSwap" in html, \
-            "Must have htmx:afterSwap event listener"
+        assert "htmx:afterSwap" in html, "Must have htmx:afterSwap event listener"
 
         # Extract the afterSwap handler section
         after_swap_start = html.find("htmx:afterSwap")
         assert after_swap_start != -1, "Must find htmx:afterSwap listener"
 
         # Get a reasonable chunk of the handler (next 1000 chars)
-        after_swap_section = html[after_swap_start:after_swap_start + 1000]
+        after_swap_section = html[after_swap_start : after_swap_start + 1000]
 
         # Verify it checks window.forceScrollOnNextSwap
-        assert "window.forceScrollOnNextSwap" in after_swap_section or "forceScrollOnNextSwap" in after_swap_section, \
-            "afterSwap handler must check window.forceScrollOnNextSwap flag"
+        assert (
+            "window.forceScrollOnNextSwap" in after_swap_section
+            or "forceScrollOnNextSwap" in after_swap_section
+        ), "afterSwap handler must check window.forceScrollOnNextSwap flag"
 
     def test_after_swap_resets_force_scroll_flag(self, jinja_env):
         """
@@ -177,11 +192,13 @@ class TestResearchSessionLoadAutoScroll:
         assert after_swap_start != -1, "Must find htmx:afterSwap listener"
 
         # Get handler section
-        after_swap_section = html[after_swap_start:after_swap_start + 1500]
+        after_swap_section = html[after_swap_start : after_swap_start + 1500]
 
         # Verify it resets the flag
-        assert "window.forceScrollOnNextSwap = false" in after_swap_section or "forceScrollOnNextSwap = false" in after_swap_section, \
-            "afterSwap handler must reset window.forceScrollOnNextSwap = false after use"
+        assert (
+            "window.forceScrollOnNextSwap = false" in after_swap_section
+            or "forceScrollOnNextSwap = false" in after_swap_section
+        ), "afterSwap handler must reset window.forceScrollOnNextSwap = false after use"
 
     def test_after_swap_scrolls_if_force_flag_or_auto_enabled(self, jinja_env):
         """
@@ -199,7 +216,7 @@ class TestResearchSessionLoadAutoScroll:
         assert after_swap_start != -1, "Must find htmx:afterSwap listener"
 
         # Get handler section (larger to capture full logic)
-        after_swap_section = html[after_swap_start:after_swap_start + 1500]
+        after_swap_section = html[after_swap_start : after_swap_start + 1500]
 
         # Verify conditional check - should be OR logic
         # Looking for patterns like:
@@ -210,15 +227,18 @@ class TestResearchSessionLoadAutoScroll:
         has_force_scroll = "forceScrollOnNextSwap" in after_swap_section
         has_auto_scroll = "autoScrollEnabled" in after_swap_section
 
-        assert has_force_scroll, \
-            "afterSwap handler must reference forceScrollOnNextSwap in condition"
-        assert has_auto_scroll, \
-            "afterSwap handler must reference autoScrollEnabled in condition"
+        assert (
+            has_force_scroll
+        ), "afterSwap handler must reference forceScrollOnNextSwap in condition"
+        assert (
+            has_auto_scroll
+        ), "afterSwap handler must reference autoScrollEnabled in condition"
 
         # Verify OR logic exists between them
         # Look for the pattern with OR operator
-        assert "||" in after_swap_section or " or " in after_swap_section.lower(), \
-            "afterSwap handler must use OR logic to check both flags"
+        assert (
+            "||" in after_swap_section or " or " in after_swap_section.lower()
+        ), "afterSwap handler must use OR logic to check both flags"
 
         # More specific check: verify the conditional pattern
         # Should have: (forceScrollOnNextSwap || autoScrollEnabled) or similar
@@ -226,8 +246,9 @@ class TestResearchSessionLoadAutoScroll:
         auto_idx = after_swap_section.find("autoScrollEnabled")
 
         # Both should be in the same conditional region
-        assert abs(force_idx - auto_idx) < 200, \
-            "forceScrollOnNextSwap and autoScrollEnabled should be in same conditional"
+        assert (
+            abs(force_idx - auto_idx) < 200
+        ), "forceScrollOnNextSwap and autoScrollEnabled should be in same conditional"
 
     def test_multiple_sessions_all_set_force_scroll_flag(self, jinja_env):
         """
@@ -254,8 +275,9 @@ class TestResearchSessionLoadAutoScroll:
         # Should be one per session
         flag_set_count = html.count("window.forceScrollOnNextSwap = true")
 
-        assert flag_set_count == len(many_sessions), \
-            f"Expected {len(many_sessions)} forceScrollOnNextSwap flags, found {flag_set_count}"
+        assert (
+            flag_set_count == len(many_sessions)
+        ), f"Expected {len(many_sessions)} forceScrollOnNextSwap flags, found {flag_set_count}"
 
     def test_scroll_to_bottom_called_in_after_swap(self, jinja_env):
         """
@@ -272,8 +294,9 @@ class TestResearchSessionLoadAutoScroll:
         assert after_swap_start != -1, "Must find htmx:afterSwap listener"
 
         # Get handler section
-        after_swap_section = html[after_swap_start:after_swap_start + 1500]
+        after_swap_section = html[after_swap_start : after_swap_start + 1500]
 
         # Verify scrollToBottom() is called
-        assert "scrollToBottom()" in after_swap_section, \
-            "afterSwap handler must call scrollToBottom() function"
+        assert (
+            "scrollToBottom()" in after_swap_section
+        ), "afterSwap handler must call scrollToBottom() function"

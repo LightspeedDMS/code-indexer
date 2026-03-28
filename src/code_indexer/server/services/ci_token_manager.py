@@ -237,7 +237,7 @@ class CITokenManager:
         elif platform == "gitlab":
             if not GITLAB_TOKEN_PATTERN.match(token):
                 raise TokenValidationError(
-                    "Invalid GitLab token format. Expected format: " "glpat-<20+ chars>"
+                    "Invalid GitLab token format. Expected format: glpat-<20+ chars>"
                 )
         else:
             raise TokenValidationError(f"Unknown platform: {platform}")

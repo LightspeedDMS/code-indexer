@@ -111,6 +111,7 @@ class TestRunOnceIntegration:
 
             # Import after patching to test initialization
             import os
+
             branch = os.environ.get("CIDX_AUTO_UPDATE_BRANCH", "master")
 
             # Verify the branch is read correctly

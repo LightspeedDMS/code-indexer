@@ -85,13 +85,15 @@ class TestGitMergeHandlerWriteMode:
 
     def test_handler_enforces_write_mode(self, mock_user, mock_git_service):
         """Without write mode active, git_merge is rejected."""
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = False
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"
@@ -105,11 +107,12 @@ class TestGitMergeHandlerWriteMode:
             data = _extract_response_data(mcp_response)
 
             assert data["success"] is False
-            assert "write mode" in data["error"].lower() or "write_mode" in data["error"].lower()
+            assert (
+                "write mode" in data["error"].lower()
+                or "write_mode" in data["error"].lower()
+            )
 
-    def test_handler_succeeds_with_write_mode_active(
-        self, mock_user, mock_git_service
-    ):
+    def test_handler_succeeds_with_write_mode_active(self, mock_user, mock_git_service):
         """With write mode active, git_merge proceeds."""
         mock_git_service.merge_branch.return_value = {
             "success": True,
@@ -117,13 +120,15 @@ class TestGitMergeHandlerWriteMode:
             "conflicts": [],
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"
@@ -162,7 +167,10 @@ class TestGitMergeHandlerAccessControl:
             data = _extract_response_data(mcp_response)
 
             assert data["success"] is False
-            assert "not found" in data["error"].lower() or "denied" in data["error"].lower()
+            assert (
+                "not found" in data["error"].lower()
+                or "denied" in data["error"].lower()
+            )
 
 
 class TestGitMergeHandlerCleanMerge:
@@ -176,13 +184,15 @@ class TestGitMergeHandlerCleanMerge:
             "conflicts": [],
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"
@@ -199,9 +209,7 @@ class TestGitMergeHandlerCleanMerge:
             assert data["conflicts"] == []
             assert "merge_summary" in data
 
-    def test_handler_passes_correct_args_to_service(
-        self, mock_user, mock_git_service
-    ):
+    def test_handler_passes_correct_args_to_service(self, mock_user, mock_git_service):
         """Handler passes repo path and source_branch to service correctly."""
         from pathlib import Path
 
@@ -211,13 +219,15 @@ class TestGitMergeHandlerCleanMerge:
             "conflicts": [],
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"
@@ -254,13 +264,15 @@ class TestGitMergeHandlerConflictMerge:
             ],
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"
@@ -296,13 +308,15 @@ class TestGitMergeHandlerConflictMerge:
             ],
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"
@@ -334,13 +348,15 @@ class TestGitMergeHandlerErrors:
         )
         mock_git_service.merge_branch.side_effect = error
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._is_write_mode_active"
-        ) as mock_write_mode, patch(
-            "code_indexer.server.mcp.handlers.app_module"
-        ) as mock_app:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._is_write_mode_active"
+            ) as mock_write_mode,
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
             mock_app.app.state.golden_repos_dir = "/tmp/golden-repos"

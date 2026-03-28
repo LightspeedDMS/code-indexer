@@ -32,7 +32,7 @@ class TestGitLabCIGetJobLogsAsyncBug:
         """Mock the TokenAuthenticator.resolve_token to return a test token."""
         with patch(
             "code_indexer.server.services.git_state_manager.TokenAuthenticator.resolve_token",
-            return_value="test_gitlab_token_123"
+            return_value="test_gitlab_token_123",
         ):
             yield
 
@@ -63,7 +63,9 @@ class TestGitLabCIGetJobLogsAsyncBug:
         }
 
         # Mock GitLabCIClient with async get_job_logs method
-        with patch("code_indexer.server.clients.gitlab_ci_client.GitLabCIClient") as MockClient:
+        with patch(
+            "code_indexer.server.clients.gitlab_ci_client.GitLabCIClient"
+        ) as MockClient:
             mock_client_instance = MagicMock()
             # CRITICAL: get_job_logs must be an AsyncMock since it's async in real client
             mock_client_instance.get_job_logs = AsyncMock(return_value=test_logs)
@@ -77,8 +79,9 @@ class TestGitLabCIGetJobLogsAsyncBug:
 
             # Assert
             # 1. Verify response is a dict (not a coroutine)
-            assert isinstance(response, dict), \
-                f"Expected dict response, got {type(response)}"
+            assert isinstance(
+                response, dict
+            ), f"Expected dict response, got {type(response)}"
 
             # 2. Verify response is JSON serializable (would fail if coroutine)
             try:
@@ -100,8 +103,7 @@ class TestGitLabCIGetJobLogsAsyncBug:
 
             # 5. Verify client.get_job_logs was called with correct args
             mock_client_instance.get_job_logs.assert_awaited_once_with(
-                project_id=test_project_id,
-                job_id=test_job_id
+                project_id=test_project_id, job_id=test_job_id
             )
 
     @pytest.mark.asyncio
@@ -117,7 +119,9 @@ class TestGitLabCIGetJobLogsAsyncBug:
         # Arrange
         args = {"project_id": "test/project", "job_id": 123}
 
-        with patch("code_indexer.server.clients.gitlab_ci_client.GitLabCIClient") as MockClient:
+        with patch(
+            "code_indexer.server.clients.gitlab_ci_client.GitLabCIClient"
+        ) as MockClient:
             mock_client_instance = MagicMock()
             mock_client_instance.get_job_logs = AsyncMock(return_value="test logs")
             mock_client_instance.last_rate_limit = None
@@ -149,7 +153,9 @@ class TestGitLabCIGetJobLogsAsyncBug:
         # Arrange
         args = {"project_id": "test/project", "job_id": 123}
 
-        with patch("code_indexer.server.clients.gitlab_ci_client.GitLabCIClient") as MockClient:
+        with patch(
+            "code_indexer.server.clients.gitlab_ci_client.GitLabCIClient"
+        ) as MockClient:
             mock_client_instance = MagicMock()
             mock_client_instance.get_job_logs = AsyncMock(return_value="test logs")
             mock_client_instance.last_rate_limit = None

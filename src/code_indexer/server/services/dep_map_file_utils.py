@@ -75,7 +75,7 @@ def parse_simple_yaml(lines: List[str]) -> Dict[str, Any]:
 
             colon_idx = line.index(":")
             key = line[:colon_idx].strip()
-            value_part = line[colon_idx + 1:].strip()
+            value_part = line[colon_idx + 1 :].strip()
 
             current_key = key
             if value_part:
@@ -120,8 +120,4 @@ def get_domain_md_files(output_dir: Path) -> List[Path]:
 
     Excludes _index.md, _domains.json, _activity.md, and any other _*.md files.
     """
-    return [
-        f
-        for f in output_dir.glob("*.md")
-        if not f.name.startswith("_")
-    ]
+    return [f for f in output_dir.glob("*.md") if not f.name.startswith("_")]

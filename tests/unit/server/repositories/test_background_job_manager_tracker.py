@@ -200,6 +200,7 @@ class TestBGMSubmitJobTrackerRegistration:
             ),
         )
         try:
+
             def quick_task():
                 return {"status": "ok"}
 
@@ -271,6 +272,7 @@ class TestBGMExecuteJobRunningStatus:
         When submit_job() starts executing
         Then after a short pause, tracker shows the job as running
         """
+
         def slow_task():
             time.sleep(0.5)
             return {"done": True}
@@ -287,12 +289,10 @@ class TestBGMExecuteJobRunningStatus:
         with tracker._lock:
             job = tracker._active_jobs.get(job_id)
 
-        assert job is not None, (
-            f"Job {job_id!r} should be in tracker._active_jobs while running"
-        )
-        assert job.status == "running", (
-            f"Expected status='running', got {job.status!r}"
-        )
+        assert (
+            job is not None
+        ), f"Job {job_id!r} should be in tracker._active_jobs while running"
+        assert job.status == "running", f"Expected status='running', got {job.status!r}"
 
     def test_execute_job_continues_when_tracker_update_status_raises(
         self, db_path, tracker
@@ -363,6 +363,7 @@ class TestBGMExecuteJobCompletionCallbacks:
         Then the tracker reflects the job as completed (removed from _active_jobs,
              present in SQLite with status="completed")
         """
+
         def succeeding_task():
             return {"result": "all_good"}
 
@@ -379,9 +380,7 @@ class TestBGMExecuteJobCompletionCallbacks:
         with tracker._lock:
             in_memory = job_id in tracker._active_jobs
 
-        assert not in_memory, (
-            "Completed job must be removed from tracker._active_jobs"
-        )
+        assert not in_memory, "Completed job must be removed from tracker._active_jobs"
 
         db_job = tracker.get_job(job_id)
         assert db_job is not None
@@ -459,9 +458,7 @@ class TestBGMExecuteJobCompletionCallbacks:
         finally:
             manager.shutdown()
 
-    def test_failed_job_calls_tracker_fail_job_with_error_message(
-        self, bgm, tracker
-    ):
+    def test_failed_job_calls_tracker_fail_job_with_error_message(self, bgm, tracker):
         """
         A job that raises an exception causes tracker.fail_job() to be called
         with the exception's error message.
@@ -470,6 +467,7 @@ class TestBGMExecuteJobCompletionCallbacks:
         When the task executes and raises
         Then tracker records the job as failed with error="boom"
         """
+
         def failing_task():
             raise ValueError("boom")
 
@@ -486,20 +484,16 @@ class TestBGMExecuteJobCompletionCallbacks:
         with tracker._lock:
             in_memory = job_id in tracker._active_jobs
 
-        assert not in_memory, (
-            "Failed job must be removed from tracker._active_jobs"
-        )
+        assert not in_memory, "Failed job must be removed from tracker._active_jobs"
 
         db_job = tracker.get_job(job_id)
         assert db_job is not None
         assert db_job.status == "failed"
-        assert "boom" in (db_job.error or ""), (
-            f"Expected error to contain 'boom', got {db_job.error!r}"
-        )
+        assert "boom" in (
+            db_job.error or ""
+        ), f"Expected error to contain 'boom', got {db_job.error!r}"
 
-    def test_execute_job_continues_when_tracker_fail_job_raises(
-        self, db_path, tracker
-    ):
+    def test_execute_job_continues_when_tracker_fail_job_raises(self, db_path, tracker):
         """
         BGM does not raise if tracker.fail_job() throws an exception.
 
@@ -561,6 +555,7 @@ class TestBGMTrackerLifecycleIntegration:
         When the full lifecycle completes
         Then tracker.get_job() returns a job with status="completed"
         """
+
         def quick_task():
             return {"lifecycle": "success"}
 
@@ -576,13 +571,11 @@ class TestBGMTrackerLifecycleIntegration:
 
         job = tracker.get_job(job_id)
         assert job is not None, f"Job {job_id!r} not found in tracker after completion"
-        assert job.status == "completed", (
-            f"Expected status='completed', got {job.status!r}"
-        )
+        assert (
+            job.status == "completed"
+        ), f"Expected status='completed', got {job.status!r}"
 
-    def test_full_lifecycle_failure_tracker_reflects_failed_state(
-        self, bgm, tracker
-    ):
+    def test_full_lifecycle_failure_tracker_reflects_failed_state(self, bgm, tracker):
         """
         Full lifecycle with failure: submit -> running -> failed — tracker shows failed.
 
@@ -590,6 +583,7 @@ class TestBGMTrackerLifecycleIntegration:
         When the full lifecycle completes (with failure)
         Then tracker.get_job() returns a job with status="failed" and non-empty error
         """
+
         def failing_task():
             raise RuntimeError("lifecycle failure")
 
@@ -605,12 +599,10 @@ class TestBGMTrackerLifecycleIntegration:
 
         job = tracker.get_job(job_id)
         assert job is not None, f"Job {job_id!r} not found in tracker after failure"
-        assert job.status == "failed", (
-            f"Expected status='failed', got {job.status!r}"
-        )
-        assert job.error is not None and len(job.error) > 0, (
-            "Failed job must have a non-empty error message in tracker"
-        )
+        assert job.status == "failed", f"Expected status='failed', got {job.status!r}"
+        assert (
+            job.error is not None and len(job.error) > 0
+        ), "Failed job must have a non-empty error message in tracker"
 
 
 # ---------------------------------------------------------------------------

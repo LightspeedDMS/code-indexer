@@ -127,9 +127,7 @@ class TestCheckHnswHealthHandler:
             assert "error" in response_data
             assert "not found" in response_data["error"].lower()
 
-    def test_force_refresh_parameter_works(
-        self, mock_regular_user, mock_health_result
-    ):
+    def test_force_refresh_parameter_works(self, mock_regular_user, mock_health_result):
         """Test that force_refresh parameter is passed to HNSWHealthService."""
         from code_indexer.server.mcp.handlers import check_hnsw_health
 

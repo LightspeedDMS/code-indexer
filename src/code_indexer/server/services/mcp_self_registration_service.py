@@ -34,7 +34,9 @@ class MCPSelfRegistrationService:
         self._config_manager = config_manager
         self._mcp_credential_manager = mcp_credential_manager
         self._registration_checked = False
-        self._registration_lock = threading.Lock()  # Story #203 Finding 5: Thread safety
+        self._registration_lock = (
+            threading.Lock()
+        )  # Story #203 Finding 5: Thread safety
 
     def ensure_registered(self) -> bool:
         """
@@ -63,7 +65,9 @@ class MCPSelfRegistrationService:
 
             # Check CLI availability
             if not self.claude_cli_available():
-                logger.warning("Claude CLI not available - skipping MCP self-registration")
+                logger.warning(
+                    "Claude CLI not available - skipping MCP self-registration"
+                )
                 # Story #203 Finding 4: Do NOT set flag on failure - allow retry if CLI becomes available
                 return False
 

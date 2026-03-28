@@ -2,6 +2,7 @@
 
 RED phase: all tests written before implementation exists.
 """
+
 import os
 import sqlite3
 import tempfile
@@ -15,7 +16,11 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.wiki.wiki_cache import WikiCache
 from code_indexer.server.wiki.wiki_service import WikiService
-from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_wiki_user_hybrid,
+    get_current_user_hybrid,
+)
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -51,10 +56,16 @@ def _make_user(username):
     return user
 
 
-def _make_app(actual_repo_path, db_path, authenticated_user=None,
-              user_accessible_repos=None, wiki_enabled=True):
+def _make_app(
+    actual_repo_path,
+    db_path,
+    authenticated_user=None,
+    user_accessible_repos=None,
+    wiki_enabled=True,
+):
     """Build a FastAPI test app with wiki router and minimal app state."""
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()
@@ -106,9 +117,7 @@ class TestEnsureTablesCreatesViewTable:
         conn = sqlite3.connect(db_path)
         cols = {
             r[1]
-            for r in conn.execute(
-                "PRAGMA table_info(wiki_article_views)"
-            ).fetchall()
+            for r in conn.execute("PRAGMA table_info(wiki_article_views)").fetchall()
         }
         conn.close()
         expected = {
@@ -258,7 +267,10 @@ class TestGetAllViewCounts:
         cache.increment_view("repo1", "page-a")
         cache.increment_view("repo1", "page-b")
 
-        results = {r["article_path"]: r["real_views"] for r in cache.get_all_view_counts("repo1")}
+        results = {
+            r["article_path"]: r["real_views"]
+            for r in cache.get_all_view_counts("repo1")
+        }
         assert results["page-a"] == 2
         assert results["page-b"] == 1
 
@@ -309,7 +321,9 @@ class TestDeleteViewsForRepo:
 
 
 class TestPopulateViewsFromFrontMatter:
-    def test_populate_creates_rows_from_front_matter_views_field(self, cache_db, repo_dir):
+    def test_populate_creates_rows_from_front_matter_views_field(
+        self, cache_db, repo_dir
+    ):
         """populate_views_from_front_matter must insert rows for articles with 'views' in front matter."""
         cache, _ = cache_db
         md_content = "---\ntitle: Intro\nviews: 42\n---\n# Intro\nContent here."

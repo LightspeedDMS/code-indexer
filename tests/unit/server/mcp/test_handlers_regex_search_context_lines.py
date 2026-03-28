@@ -80,12 +80,10 @@ class TestRegexSearchContextLinesStringType:
         # Should not be a TypeError failure
         if not parsed.get("success"):
             error_msg = parsed.get("error", "")
-            assert "typeerror" not in error_msg.lower(), (
-                f"Got TypeError: {error_msg}"
-            )
-            assert "'>' not supported" not in error_msg.lower(), (
-                f"Got comparison TypeError: {error_msg}"
-            )
+            assert "typeerror" not in error_msg.lower(), f"Got TypeError: {error_msg}"
+            assert (
+                "'>' not supported" not in error_msg.lower()
+            ), f"Got comparison TypeError: {error_msg}"
 
     @pytest.mark.asyncio
     async def test_context_lines_string_zero_does_not_raise(
@@ -196,7 +194,7 @@ class TestRegexSearchContextLinesStringType:
             mock_service.search.assert_called_once()
             call_kwargs = mock_service.search.call_args.kwargs
             context_lines_passed = call_kwargs.get("context_lines")
-            assert isinstance(context_lines_passed, int), (
-                f"Expected int but got {type(context_lines_passed)}: {context_lines_passed}"
-            )
+            assert isinstance(
+                context_lines_passed, int
+            ), f"Expected int but got {type(context_lines_passed)}: {context_lines_passed}"
             assert context_lines_passed == 7

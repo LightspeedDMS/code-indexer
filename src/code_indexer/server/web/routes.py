@@ -6619,7 +6619,7 @@ async def update_claude_delegation_config(
     result = delegation_manager.validate_connectivity(
         url,
         username,
-        credential,
+        str(credential),
         cred_type,  # type: ignore[arg-type]
         skip_ssl_verify=skip_ssl,
     )

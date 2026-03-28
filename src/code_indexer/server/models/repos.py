@@ -6,7 +6,13 @@ Extracted from app.py as part of Story #409 (app.py modularization).
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from .api_models import TemporalIndexOptions
 from .jobs import SyncProgress, SyncJobOptions

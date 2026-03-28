@@ -80,17 +80,17 @@ class TestSyncJobWrapperParamsKwarg:
             job = job_manager.jobs.get(job_id)
 
         # Job should still be in memory (failed jobs remain until retrieved)
-        assert job is not None, (
-            "Job should be in memory after failure (BackgroundJobManager keeps failed jobs)"
-        )
+        assert (
+            job is not None
+        ), "Job should be in memory after failure (BackgroundJobManager keeps failed jobs)"
         assert job.status.value == "failed", (
             f"Expected job status 'failed' due to TypeError from unexpected 'params' kwarg, "
             f"but got '{job.status.value}'"
         )
         assert job.error is not None, "Failed job should have an error message"
-        assert "params" in job.error.lower() or "unexpected keyword" in job.error.lower(), (
-            f"Expected TypeError about 'params' kwarg in error message, got: {job.error}"
-        )
+        assert (
+            "params" in job.error.lower() or "unexpected keyword" in job.error.lower()
+        ), f"Expected TypeError about 'params' kwarg in error message, got: {job.error}"
 
     def test_submit_job_without_params_kwarg_succeeds(self, job_manager):
         """Fix verification: removing params= from submit_job() call allows wrapper to succeed."""
@@ -169,9 +169,7 @@ class TestInlineReposSyncJobSubmitCall:
         Without the params={"repo_id": cleaned_repo_id} line.
         """
         # Read the inline_repos.py source
-        source_path = pathlib.Path(
-            "src/code_indexer/server/routers/inline_repos.py"
-        )
+        source_path = pathlib.Path("src/code_indexer/server/routers/inline_repos.py")
         source = source_path.read_text()
         lines = source.splitlines()
 

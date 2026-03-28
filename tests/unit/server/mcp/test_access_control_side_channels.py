@@ -597,10 +597,9 @@ class TestAC5CompositeRepoValidation:
             "manage_composite_repository must deny creation when golden_repo_aliases "
             "contains an unauthorized repo ('secret-repo')"
         )
-        assert "Access denied" in data.get("error", ""), (
-            "Error message must indicate access denial. "
-            f"Got: {data.get('error', '')}"
-        )
+        assert "Access denied" in data.get(
+            "error", ""
+        ), f"Error message must indicate access denial. Got: {data.get('error', '')}"
 
     def test_composite_create_allows_all_authorized_components(self):
         """Creating composite repo with all authorized components must succeed."""

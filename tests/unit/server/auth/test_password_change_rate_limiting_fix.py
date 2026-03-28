@@ -70,9 +70,7 @@ class TestPasswordChangeRateLimitingFix:
                             mock_user_mgr.get_user.return_value = test_user
 
                             # Mock password verification to always fail
-                            mock_user_mgr.password_manager.verify_password.return_value = (
-                                False
-                            )
+                            mock_user_mgr.password_manager.verify_password.return_value = False
 
                             # Configure rate limiter behavior
                             # First check should pass (no rate limit yet)
@@ -162,9 +160,7 @@ class TestPasswordChangeRateLimitingFix:
                             mock_user_mgr.get_user.return_value = test_user
 
                             # Mock password verification to always fail
-                            mock_user_mgr.password_manager.verify_password.return_value = (
-                                False
-                            )
+                            mock_user_mgr.password_manager.verify_password.return_value = False
 
                             # No rate limit initially
                             mock_rate_limiter.check_rate_limit.return_value = None

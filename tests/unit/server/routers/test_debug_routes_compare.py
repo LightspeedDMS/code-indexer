@@ -31,14 +31,20 @@ class TestCompareSnapshot:
 
     def test_wrong_timestamp_returns_none(self):
         """AC5: Returns None when stored timestamp does not match."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         get_snapshot()
         assert compare_snapshot("2099-01-01T00:00:00Z") is None
 
     def test_matching_timestamp_returns_result(self):
         """AC4: Matching timestamp returns a compare result dict."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -46,7 +52,10 @@ class TestCompareSnapshot:
 
     def test_result_contains_baseline_timestamp(self):
         """AC4: baseline_timestamp echoes the requested timestamp."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -54,7 +63,10 @@ class TestCompareSnapshot:
 
     def test_result_contains_current_timestamp(self):
         """AC4: current_timestamp is present and parseable ISO 8601."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -63,7 +75,10 @@ class TestCompareSnapshot:
 
     def test_result_contains_delta_objects_as_int(self):
         """AC4: delta_objects is an integer (may be 0, positive, or negative)."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -72,7 +87,10 @@ class TestCompareSnapshot:
 
     def test_result_contains_delta_size_bytes_as_int(self):
         """AC4: delta_size_bytes is an integer."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -81,7 +99,10 @@ class TestCompareSnapshot:
 
     def test_result_contains_by_count_diff_as_dict(self):
         """AC4: by_count_diff is a dict of type count changes."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -90,7 +111,10 @@ class TestCompareSnapshot:
 
     def test_result_contains_by_size_diff_as_dict(self):
         """AC4: by_size_diff is a dict of type size changes."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -100,7 +124,10 @@ class TestCompareSnapshot:
     def test_compare_updates_last_snapshot(self):
         """After compare, _last_snapshot is the current (not baseline) snapshot."""
         import code_indexer.server.routers.debug_routes as mod
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         snap = get_snapshot()
         result = compare_snapshot(snap["timestamp"])
@@ -130,7 +157,10 @@ class TestMemoryCompareEndpoint:
 
     def test_compare_full_workflow_all_fields_present(self):
         """AC4: Full workflow produces a complete diff with all required fields."""
-        from code_indexer.server.routers.debug_routes import get_snapshot, compare_snapshot
+        from code_indexer.server.routers.debug_routes import (
+            get_snapshot,
+            compare_snapshot,
+        )
 
         baseline = get_snapshot()
         diff = compare_snapshot(baseline["timestamp"])

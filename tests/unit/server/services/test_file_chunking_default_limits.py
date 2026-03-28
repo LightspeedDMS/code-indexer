@@ -61,7 +61,7 @@ class TestDefaultMaxLinesLimit:
         """File with <500 lines returns all lines when no limit specified."""
         service, repo_path = high_token_service
         test_file = repo_path / "small.py"
-        lines = [f"# Line {i+1}\n" for i in range(100)]
+        lines = [f"# Line {i + 1}\n" for i in range(100)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(
@@ -84,7 +84,7 @@ class TestDefaultMaxLinesLimit:
         """File with >500 lines returns first 500 when no limit specified."""
         service, repo_path = high_token_service
         test_file = repo_path / "medium.py"
-        lines = [f"# Line {i+1}\n" for i in range(1000)]
+        lines = [f"# Line {i + 1}\n" for i in range(1000)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(
@@ -109,7 +109,7 @@ class TestDefaultMaxLinesLimit:
         """File with exactly 500 lines returns all when no limit specified."""
         service, repo_path = high_token_service
         test_file = repo_path / "exact500.py"
-        lines = [f"# Line {i+1}\n" for i in range(500)]
+        lines = [f"# Line {i + 1}\n" for i in range(500)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(
@@ -131,7 +131,7 @@ class TestDefaultMaxLinesLimit:
         """Offset=501, no limit returns lines 501-1000 (next 500)."""
         service, repo_path = high_token_service
         test_file = repo_path / "large.py"
-        lines = [f"# Line {i+1}\n" for i in range(1000)]
+        lines = [f"# Line {i + 1}\n" for i in range(1000)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(
@@ -159,7 +159,7 @@ class TestMaxAllowedLimit:
         """Client limit < 5000 is respected."""
         service, repo_path = high_token_service
         test_file = repo_path / "large.py"
-        lines = [f"# Line {i+1}\n" for i in range(10000)]
+        lines = [f"# Line {i + 1}\n" for i in range(10000)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(
@@ -181,7 +181,7 @@ class TestMaxAllowedLimit:
         """Client limit = 5000 is respected (max allowed)."""
         service, repo_path = high_token_service
         test_file = repo_path / "large.py"
-        lines = [f"# Line {i+1}\n" for i in range(10000)]
+        lines = [f"# Line {i + 1}\n" for i in range(10000)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(
@@ -203,7 +203,7 @@ class TestMaxAllowedLimit:
         """Client limit > 5000 is capped to max_allowed_limit (5000)."""
         service, repo_path = high_token_service
         test_file = repo_path / "large.py"
-        lines = [f"# Line {i+1}\n" for i in range(10000)]
+        lines = [f"# Line {i + 1}\n" for i in range(10000)]
         test_file.write_text("".join(lines))
 
         result = service.get_file_content_by_path(

@@ -84,12 +84,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -132,12 +128,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -179,12 +171,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -224,12 +212,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -265,12 +249,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                50000
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 50000
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -309,12 +289,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                50000
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 50000
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {
@@ -354,12 +330,8 @@ class TestGetFileContentPaginationInfo:
             "code_indexer.server.mcp.handlers.get_config_service"
         ) as mock_config_service:
             mock_config = MagicMock()
-            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = (
-                100
-            )
-            mock_config.get_config.return_value.content_limits_config.chars_per_token = (
-                4
-            )
+            mock_config.get_config.return_value.content_limits_config.file_content_max_tokens = 100
+            mock_config.get_config.return_value.content_limits_config.chars_per_token = 4
             mock_config_service.return_value = mock_config
 
             params = {

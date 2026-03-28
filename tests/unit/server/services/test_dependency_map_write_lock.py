@@ -8,6 +8,7 @@ Verifies that:
 
 Story #227: write-lock coordination with RefreshScheduler.
 """
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -52,7 +53,9 @@ class TestFullAnalysisWriteLock:
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
         # Make _setup_analysis return early (disabled) to avoid complex mock setup
-        config_manager.get_claude_integration_config.return_value = _make_disabled_config()
+        config_manager.get_claude_integration_config.return_value = (
+            _make_disabled_config()
+        )
 
         service.run_full_analysis()
 
@@ -71,7 +74,9 @@ class TestFullAnalysisWriteLock:
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
         # Make _setup_analysis return early (disabled) to avoid complex mock setup
-        config_manager.get_claude_integration_config.return_value = _make_disabled_config()
+        config_manager.get_claude_integration_config.return_value = (
+            _make_disabled_config()
+        )
 
         service.run_full_analysis()
 
@@ -88,7 +93,9 @@ class TestFullAnalysisWriteLock:
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
         # Make _setup_analysis raise to simulate an analysis failure
-        config_manager.get_claude_integration_config.side_effect = RuntimeError("config error")
+        config_manager.get_claude_integration_config.side_effect = RuntimeError(
+            "config error"
+        )
 
         with pytest.raises(RuntimeError, match="config error"):
             service.run_full_analysis()
@@ -106,7 +113,9 @@ class TestFullAnalysisWriteLock:
 
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
-        config_manager.get_claude_integration_config.side_effect = RuntimeError("config error")
+        config_manager.get_claude_integration_config.side_effect = RuntimeError(
+            "config error"
+        )
 
         with pytest.raises(RuntimeError, match="config error"):
             service.run_full_analysis()
@@ -117,7 +126,9 @@ class TestFullAnalysisWriteLock:
     def test_no_acquire_or_release_when_refresh_scheduler_is_none(self):
         """When no refresh_scheduler, neither acquire nor release is attempted."""
         service, config_manager, _, _ = _make_service(refresh_scheduler=None)
-        config_manager.get_claude_integration_config.return_value = _make_disabled_config()
+        config_manager.get_claude_integration_config.return_value = (
+            _make_disabled_config()
+        )
 
         # Should not raise and should not call any scheduler method
         service.run_full_analysis()
@@ -141,7 +152,9 @@ class TestDeltaAnalysisWriteLock:
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
         # dependency_map_enabled=False causes early return inside try block
-        config_manager.get_claude_integration_config.return_value = self._make_delta_config()
+        config_manager.get_claude_integration_config.return_value = (
+            self._make_delta_config()
+        )
 
         service.run_delta_analysis()
 
@@ -160,7 +173,9 @@ class TestDeltaAnalysisWriteLock:
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
         # dependency_map_enabled=False causes early return inside try block
-        config_manager.get_claude_integration_config.return_value = self._make_delta_config()
+        config_manager.get_claude_integration_config.return_value = (
+            self._make_delta_config()
+        )
 
         service.run_delta_analysis()
 
@@ -176,7 +191,9 @@ class TestDeltaAnalysisWriteLock:
 
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
-        config_manager.get_claude_integration_config.side_effect = RuntimeError("config error")
+        config_manager.get_claude_integration_config.side_effect = RuntimeError(
+            "config error"
+        )
 
         with pytest.raises(RuntimeError, match="config error"):
             service.run_delta_analysis()
@@ -193,7 +210,9 @@ class TestDeltaAnalysisWriteLock:
 
         service, config_manager, tracking_backend, _ = _make_service(refresh_scheduler)
 
-        config_manager.get_claude_integration_config.side_effect = RuntimeError("config error")
+        config_manager.get_claude_integration_config.side_effect = RuntimeError(
+            "config error"
+        )
 
         with pytest.raises(RuntimeError, match="config error"):
             service.run_delta_analysis()

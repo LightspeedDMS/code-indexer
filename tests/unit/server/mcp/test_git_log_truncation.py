@@ -95,10 +95,10 @@ def _mock_git_log_result(num_commits=5, body_lines=10):
                 short_hash=f"abc{i:04d}",
                 author_name=f"Author {i}",
                 author_email=f"author{i}@example.com",
-                author_date=f"2024-01-{i+1:02d}T10:00:00+00:00",
+                author_date=f"2024-01-{i + 1:02d}T10:00:00+00:00",
                 committer_name=f"Committer {i}",
                 committer_email=f"committer{i}@example.com",
-                committer_date=f"2024-01-{i+1:02d}T11:00:00+00:00",
+                committer_date=f"2024-01-{i + 1:02d}T11:00:00+00:00",
                 subject=f"Commit {i}: This is a test commit message with some content",
                 body=body_content,
             )

@@ -137,6 +137,7 @@ class TestForceResyncRoute:
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
+
             original_state = app_module.app.state
             app_module.app.state = MagicMock()
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
@@ -190,6 +191,7 @@ class TestForceResyncRoute:
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
+
             original_state = app_module.app.state
             app_module.app.state = MagicMock()
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
@@ -246,6 +248,7 @@ class TestForceResyncRoute:
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
+
             original_state = app_module.app.state
             app_module.app.state = MagicMock()
             app_module.app.state.global_lifecycle_manager = mock_lifecycle
@@ -338,6 +341,7 @@ class TestForceResyncRoute:
             ) as mock_page,
         ):
             import code_indexer.server.app as app_module
+
             original_state = app_module.app.state
             app_module.app.state = MagicMock()
             app_module.app.state.global_lifecycle_manager = mock_lifecycle

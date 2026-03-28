@@ -608,7 +608,9 @@ class DependencyMapService:
                             domain_file.unlink()
                     else:
                         errors.append(f"Domain '{domain_name}': {e}")
-                        logger.warning(f"Pass 2 failed for domain '{domain_name}' after {MAX_DOMAIN_RETRIES} attempts: {e}")
+                        logger.warning(
+                            f"Pass 2 failed for domain '{domain_name}' after {MAX_DOMAIN_RETRIES} attempts: {e}"
+                        )
                         break
 
             # Record final status in journal
@@ -1655,7 +1657,9 @@ class DependencyMapService:
                         read_file=read_domain_file,
                     )
                     # Check if file was actually updated (mtime changed)
-                    new_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
+                    new_mtime = (
+                        domain_file.stat().st_mtime if domain_file.exists() else 0
+                    )
                     if new_mtime > original_mtime:
                         try:
                             self._activity_journal.log(
@@ -1895,7 +1899,9 @@ class DependencyMapService:
             )
             return True
         except Exception as e:
-            logger.warning(f"Failed to write _domains.json after stale repo cleanup: {e}")
+            logger.warning(
+                f"Failed to write _domains.json after stale repo cleanup: {e}"
+            )
             return False
 
     def _finalize_delta_tracking(self, config, all_repos: List[Dict[str, Any]]) -> None:
@@ -2350,7 +2356,9 @@ class DependencyMapService:
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.update_status(
-                        _tracked_job_id, progress=10, progress_info="Starting refinement cycle"
+                        _tracked_job_id,
+                        progress=10,
+                        progress_info="Starting refinement cycle",
                     )
                 except Exception as e:
                     logger.debug(f"Non-fatal: Failed to update progress (start): {e}")
@@ -2360,10 +2368,14 @@ class DependencyMapService:
             if _tracked_job_id is not None and self._job_tracker is not None:
                 try:
                     self._job_tracker.update_status(
-                        _tracked_job_id, progress=90, progress_info="Finalizing refinement"
+                        _tracked_job_id,
+                        progress=90,
+                        progress_info="Finalizing refinement",
                     )
                 except Exception as e:
-                    logger.debug(f"Non-fatal: Failed to update progress (finalizing): {e}")
+                    logger.debug(
+                        f"Non-fatal: Failed to update progress (finalizing): {e}"
+                    )
 
             _refinement_succeeded = True
             return {"status": "completed"}
@@ -2409,9 +2421,13 @@ class DependencyMapService:
         if not config or not config.refinement_enabled:
             logger.debug("Refinement disabled, skipping refinement cycle")
             try:
-                journal_dir = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
+                journal_dir = Path(
+                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
+                )
                 self._activity_journal.init(journal_dir)
-                self._activity_journal.log("Refinement: disabled in config, skipping cycle")
+                self._activity_journal.log(
+                    "Refinement: disabled in config, skipping cycle"
+                )
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error (disabled path): {e}")
             return None
@@ -2420,9 +2436,13 @@ class DependencyMapService:
         if not self._lock.acquire(blocking=False):
             logger.info("Refinement cycle skipped - analysis already in progress")
             try:
-                journal_dir = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
+                journal_dir = Path(
+                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
+                )
                 self._activity_journal.init(journal_dir)
-                self._activity_journal.log("Refinement: skipped - analysis already in progress")
+                self._activity_journal.log(
+                    "Refinement: skipped - analysis already in progress"
+                )
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error (lock-skip path): {e}")
             return None
@@ -2438,7 +2458,9 @@ class DependencyMapService:
         try:
             # Initialize activity journal for this refinement cycle run
             try:
-                journal_dir = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
+                journal_dir = Path(
+                    os.path.expanduser("~/.tmp/depmap-refinement-journal/")
+                )
                 self._activity_journal.init(journal_dir)
                 self._activity_journal.log("Starting refinement cycle")
             except Exception as e:
@@ -2462,7 +2484,9 @@ class DependencyMapService:
             except Exception as e:
                 logger.warning("Refinement: Failed to read _domains.json: %s", e)
                 try:
-                    self._activity_journal.log(f"Refinement: failed to read _domains.json: {e}")
+                    self._activity_journal.log(
+                        f"Refinement: failed to read _domains.json: {e}"
+                    )
                 except Exception as journal_err:
                     logger.debug(f"Non-fatal journal log error: {journal_err}")
                 return None
@@ -2470,7 +2494,9 @@ class DependencyMapService:
             if not raw_list:
                 logger.info("Refinement: domain list is empty, skipping cycle")
                 try:
-                    self._activity_journal.log("Refinement: domain list empty, skipping")
+                    self._activity_journal.log(
+                        "Refinement: domain list empty, skipping"
+                    )
                 except Exception as e:
                     logger.debug(f"Non-fatal journal log error: {e}")
                 return None
@@ -2597,9 +2623,7 @@ class DependencyMapService:
             r"^---\n(.*?)\n---\n(.*)$", existing_content, re.DOTALL
         )
         if not frontmatter_match:
-            return (
-                f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{new_body}"
-            )
+            return f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{new_body}"
 
         lines = frontmatter_match.group(1).split("\n")
         updated, found_refined = [], False
@@ -2646,7 +2670,8 @@ class DependencyMapService:
             participating_repos=participating_repos,
         )
         result_body = self._analyzer.invoke_refinement(
-            prompt, config.dependency_map_pass_timeout_seconds,
+            prompt,
+            config.dependency_map_pass_timeout_seconds,
             config.dependency_map_delta_max_turns,
         )
 
@@ -2658,8 +2683,10 @@ class DependencyMapService:
             logger.warning(
                 "Refinement truncation guard fired for domain '%s': "
                 "result %d chars < %.0f%% of body %d chars, skipping write",
-                domain_name, len(result_body),
-                REFINEMENT_TRUNCATION_MIN_RATIO * 100, body_len,
+                domain_name,
+                len(result_body),
+                REFINEMENT_TRUNCATION_MIN_RATIO * 100,
+                body_len,
             )
             return False
 

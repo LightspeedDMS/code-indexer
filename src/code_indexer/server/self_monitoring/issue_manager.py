@@ -83,7 +83,7 @@ class IssueManager:
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET)
 
             for info in addr_info:
-                ip = info[4][0]  # Address is in info[4][0]
+                ip = str(info[4][0])  # Address is in info[4][0]
                 # Skip loopback addresses
                 if not ip.startswith("127."):
                     ipv4_addresses.add(ip)
@@ -327,9 +327,7 @@ class IssueManager:
         sorted_files = sorted(source_files) if source_files else []
 
         # Concatenate components
-        fingerprint_input = (
-            f"{classification}|" f"{','.join(sorted_files)}|" f"{error_type}"
-        )
+        fingerprint_input = f"{classification}|{','.join(sorted_files)}|{error_type}"
 
         # Compute SHA256 hash
         return hashlib.sha256(fingerprint_input.encode()).hexdigest()

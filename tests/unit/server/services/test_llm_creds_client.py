@@ -23,6 +23,7 @@ from code_indexer.server.services.llm_creds_client import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_transport(handler):
     """Wrap a handler function into an httpx.MockTransport."""
     return httpx.MockTransport(handler)
@@ -39,6 +40,7 @@ def _empty_response(status_code: int) -> httpx.Response:
 # ---------------------------------------------------------------------------
 # health()
 # ---------------------------------------------------------------------------
+
 
 class TestHealth:
     def test_health_returns_true_on_200(self):
@@ -106,6 +108,7 @@ class TestHealth:
 # checkout()
 # ---------------------------------------------------------------------------
 
+
 class TestCheckout:
     def _full_checkout_response(self):
         return {
@@ -134,10 +137,12 @@ class TestCheckout:
 
     def test_checkout_parses_response_without_optional_tokens(self):
         def handler(request):
-            return _json_response({
-                "lease_id": "lease-minimal",
-                "credential_id": "cred-minimal",
-            })
+            return _json_response(
+                {
+                    "lease_id": "lease-minimal",
+                    "credential_id": "cred-minimal",
+                }
+            )
 
         client = LlmCredsClient(
             provider_url="http://fake-provider",
@@ -280,7 +285,9 @@ class TestCheckout:
 
     def test_checkout_raises_on_non_json_response(self):
         def handler(request):
-            return httpx.Response(200, content=b"not valid json", headers={"content-type": "text/plain"})
+            return httpx.Response(
+                200, content=b"not valid json", headers={"content-type": "text/plain"}
+            )
 
         client = LlmCredsClient(
             provider_url="http://fake-provider",
@@ -311,6 +318,7 @@ class TestCheckout:
 # ---------------------------------------------------------------------------
 # checkin()
 # ---------------------------------------------------------------------------
+
 
 class TestCheckin:
     def test_checkin_sends_lease_id(self):
@@ -447,6 +455,7 @@ class TestCheckin:
 # ---------------------------------------------------------------------------
 # Exception hierarchy
 # ---------------------------------------------------------------------------
+
 
 class TestExceptionHierarchy:
     def test_auth_error_is_provider_error(self):

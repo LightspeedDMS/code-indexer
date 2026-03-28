@@ -137,9 +137,9 @@ class SyncJobManager:
 
         # Queue management state
         self._job_queue: List[str] = []  # Job IDs in queue order
-        self._repository_locks: Dict[str, str] = (
-            {}
-        )  # repo_url -> job_id mapping for active syncs
+        self._repository_locks: Dict[
+            str, str
+        ] = {}  # repo_url -> job_id mapping for active syncs
         self._last_resource_check = 0.0
         self._cached_resource_metrics: Optional[Dict[str, Any]] = None
         self.backup_dir: Optional[Path] = None

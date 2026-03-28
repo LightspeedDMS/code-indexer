@@ -88,8 +88,7 @@ class CacheInvalidationService:
         # --- Strategy 1: mtime / content change ---
         if not alias_file.exists():
             logger.debug(
-                f"Cache invalidation (missing file): alias={alias} "
-                f"file={alias_file}"
+                f"Cache invalidation (missing file): alias={alias} file={alias_file}"
             )
             return True
 

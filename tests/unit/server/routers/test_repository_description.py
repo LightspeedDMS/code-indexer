@@ -236,7 +236,11 @@ def test_description_endpoint_file_not_found(
         data = response.json()
         assert "detail" in data
         # Error message should be informative
-        assert "new-repo" in data["detail"] or "cidx-meta" in data["detail"] or "not found" in data["detail"].lower()
+        assert (
+            "new-repo" in data["detail"]
+            or "cidx-meta" in data["detail"]
+            or "not found" in data["detail"].lower()
+        )
     finally:
         if hasattr(app.state, "golden_repos_dir"):
             del app.state.golden_repos_dir
@@ -252,9 +256,7 @@ def test_description_endpoint_no_golden_repos_dir_returns_404(authenticated_clie
 
     try:
         # Act
-        response = authenticated_client.get(
-            "/api/repositories/some-repo/description"
-        )
+        response = authenticated_client.get("/api/repositories/some-repo/description")
 
         # Assert: must return 404, not 500 or redirect
         assert response.status_code == 404

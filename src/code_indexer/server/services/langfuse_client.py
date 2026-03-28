@@ -48,12 +48,12 @@ class LangfuseClient:
             config: LangfuseConfig object containing credentials and settings
         """
         self._config = config
-        self._langfuse = None  # Lazy initialization
+        self._langfuse: Optional[Any] = None  # Lazy initialization
         self._lock = threading.Lock()  # Thread-safe initialization
 
     def is_enabled(self) -> bool:
         """Check if Langfuse tracing is enabled."""
-        return self._config.enabled
+        return bool(self._config.enabled)
 
     def eager_initialize(self) -> None:
         """
@@ -146,6 +146,7 @@ class LangfuseClient:
             return None
 
         try:
+            assert self._langfuse is not None
             # Create root span with context (creates trace implicitly)
             # Use end_on_exit=False so we control lifecycle manually via end_trace()
             span_cm = self._langfuse.start_as_current_span(
@@ -159,7 +160,7 @@ class LangfuseClient:
             span = span_cm.__enter__()
 
             # Update trace with session_id, user_id, and tags
-            update_kwargs = {
+            update_kwargs: Dict[str, Any] = {
                 "session_id": session_id,
                 "user_id": user_id,
             }
@@ -171,7 +172,9 @@ class LangfuseClient:
             # Exit context but keep span active - it will be ended in end_trace()
             span_cm.__exit__(None, None, None)
 
-            logger.debug(f"Created trace: {name} (session={session_id}, trace_id={span.trace_id})")
+            logger.debug(
+                f"Created trace: {name} (session={session_id}, trace_id={span.trace_id})"
+            )
 
             # Return object with span stored for later ending
             # TraceStateManager accesses trace.id and we store span for end_trace()
@@ -219,8 +222,9 @@ class LangfuseClient:
             span_cm = span  # The span object IS the context manager
             span_cm.__enter__()
             try:
+                assert self._langfuse is not None
                 # Now update_current_trace will work because span is active
-                update_kwargs = {}
+                update_kwargs: Dict[str, Any] = {}
                 if output is not None:
                     update_kwargs["output"] = output
                 if metadata is not None:
@@ -261,7 +265,7 @@ class LangfuseClient:
 
         try:
             # End the span - this marks it as complete so flush() will send it
-            if hasattr(trace_obj, 'span') and trace_obj.span is not None:
+            if hasattr(trace_obj, "span") and trace_obj.span is not None:
                 trace_obj.span.end()
                 logger.debug(f"Ended trace span: {trace_obj.trace_id}")
                 return True
@@ -270,7 +274,9 @@ class LangfuseClient:
                 return False
 
         except Exception as e:
-            logger.error(f"Failed to end trace {getattr(trace_obj, 'trace_id', 'unknown')}: {e}")
+            logger.error(
+                f"Failed to end trace {getattr(trace_obj, 'trace_id', 'unknown')}: {e}"
+            )
             return False
 
     def create_span(
@@ -305,8 +311,9 @@ class LangfuseClient:
             from langfuse.types import TraceContext
 
             # Create TraceContext to attach span to existing trace
-            trace_context = TraceContext(trace_id=trace_id)
+            trace_context = TraceContext(trace_id=trace_id)  # type: ignore[typeddict-item]
 
+            assert self._langfuse is not None
             # Create span attached to the trace
             span = self._langfuse.start_span(
                 trace_context=trace_context,
@@ -343,6 +350,7 @@ class LangfuseClient:
             return None
 
         try:
+            assert self._langfuse is not None
             # create_score() is the correct method name in Langfuse 3.7.0
             score = self._langfuse.create_score(
                 trace_id=trace_id, name=name, value=value, comment=comment

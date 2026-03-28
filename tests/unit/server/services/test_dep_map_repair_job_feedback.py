@@ -36,18 +36,25 @@ from tests.unit.server.services.test_dep_map_health_detector import (
 
 
 def _get_health_detector():
-    from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+    from code_indexer.server.services.dep_map_health_detector import (
+        DepMapHealthDetector,
+    )
+
     return DepMapHealthDetector()
 
 
 def _get_index_regenerator():
     from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
+
     return IndexRegenerator()
 
 
 def _make_executor(domain_analyzer=None, journal_callback=None, progress_callback=None):
     """Build DepMapRepairExecutor with real detector/regenerator."""
-    from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+    from code_indexer.server.services.dep_map_repair_executor import (
+        DepMapRepairExecutor,
+    )
+
     return DepMapRepairExecutor(
         health_detector=_get_health_detector(),
         index_regenerator=_get_index_regenerator(),
@@ -67,12 +74,14 @@ def _make_mock_job_tracker():
     registered_jobs = []
 
     def _register(job_id, op_type, username=None, repo_alias=None):
-        registered_jobs.append({
-            "job_id": job_id,
-            "operation_type": op_type,
-            "username": username,
-            "repo_alias": repo_alias,
-        })
+        registered_jobs.append(
+            {
+                "job_id": job_id,
+                "operation_type": op_type,
+                "username": username,
+                "repo_alias": repo_alias,
+            }
+        )
 
     tracker.register_job.side_effect = _register
     tracker._registered_jobs = registered_jobs
@@ -117,7 +126,9 @@ class TestAC1TrackingBackendStatus:
         Then tracking_backend.update_tracking(status='running') is called
         before the executor runs.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -134,9 +145,12 @@ class TestAC1TrackingBackendStatus:
 
         # Verify "running" was set
         update_calls = [str(c) for c in tracking_backend.update_tracking.call_args_list]
-        running_calls = [c for c in tracking_backend.update_tracking.call_args_list
-                         if c.kwargs.get("status") == "running" or
-                         (c.args and c.args[0] == "running")]
+        running_calls = [
+            c
+            for c in tracking_backend.update_tracking.call_args_list
+            if c.kwargs.get("status") == "running"
+            or (c.args and c.args[0] == "running")
+        ]
         assert len(running_calls) > 0, (
             "Expected tracking_backend.update_tracking(status='running') to be called "
             f"before repair starts. Actual calls: {update_calls}"
@@ -147,7 +161,9 @@ class TestAC1TrackingBackendStatus:
         Given repair completes successfully
         Then tracking_backend.update_tracking(status='completed') is called.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -162,9 +178,12 @@ class TestAC1TrackingBackendStatus:
             activity_journal=journal,
         )
 
-        completed_calls = [c for c in tracking_backend.update_tracking.call_args_list
-                           if c.kwargs.get("status") == "completed" or
-                           (c.args and c.args[0] == "completed")]
+        completed_calls = [
+            c
+            for c in tracking_backend.update_tracking.call_args_list
+            if c.kwargs.get("status") == "completed"
+            or (c.args and c.args[0] == "completed")
+        ]
         assert len(completed_calls) > 0, (
             "Expected tracking_backend.update_tracking(status='completed') on success. "
             f"Actual calls: {tracking_backend.update_tracking.call_args_list}"
@@ -175,7 +194,9 @@ class TestAC1TrackingBackendStatus:
         Given repair throws an unexpected exception
         Then tracking_backend.update_tracking(status='failed') is called in finally block.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -198,8 +219,13 @@ class TestAC1TrackingBackendStatus:
             auth_file.unlink()
 
         # Use an exploding domain_analyzer to force failure path
-        with patch("code_indexer.server.web.dependency_map_routes._build_repair_executor") as mock_build:
-            from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+        with patch(
+            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+        ) as mock_build:
+            from code_indexer.server.services.dep_map_repair_executor import (
+                DepMapRepairExecutor,
+            )
+
             executor = Mock(spec=DepMapRepairExecutor)
             executor.execute.side_effect = RuntimeError("Simulated executor failure")
             mock_build.return_value = executor
@@ -212,9 +238,11 @@ class TestAC1TrackingBackendStatus:
                 activity_journal=journal,
             )
 
-        failed_calls = [c for c in tracking_backend.update_tracking.call_args_list
-                        if c.kwargs.get("status") == "failed" or
-                        (c.args and c.args[0] == "failed")]
+        failed_calls = [
+            c
+            for c in tracking_backend.update_tracking.call_args_list
+            if c.kwargs.get("status") == "failed" or (c.args and c.args[0] == "failed")
+        ]
         assert len(failed_calls) > 0, (
             "Expected tracking_backend.update_tracking(status='failed') on exception. "
             f"Actual calls: {tracking_backend.update_tracking.call_args_list}"
@@ -235,7 +263,9 @@ class TestAC2ActivityJournalInitialization:
         When _run_repair_with_feedback executes
         Then activity_journal.init() is called with a valid writable path.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -256,13 +286,13 @@ class TestAC2ActivityJournalInitialization:
 
         journal.init.assert_called_once()
         init_path = journal.init.call_args[0][0]
-        assert isinstance(init_path, Path), (
-            f"Expected journal.init() called with a Path, got {type(init_path)}"
-        )
+        assert isinstance(
+            init_path, Path
+        ), f"Expected journal.init() called with a Path, got {type(init_path)}"
         # The parent directory must exist or be creatable
-        assert init_path.exists() or init_path.parent.exists(), (
-            f"Journal path {init_path} or its parent does not exist"
-        )
+        assert (
+            init_path.exists() or init_path.parent.exists()
+        ), f"Journal path {init_path} or its parent does not exist"
 
     def test_journal_init_uses_repair_specific_directory(self, tmp_path):
         """
@@ -270,7 +300,9 @@ class TestAC2ActivityJournalInitialization:
         Then journal is initialized in a repair-specific temp directory
         (not the staging dir, not the delta journal dir).
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -303,7 +335,9 @@ class TestAC2ActivityJournalInitialization:
         Given journal.init() raises an exception
         Then repair continues (does not raise) and tracking backend is still updated.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -347,7 +381,9 @@ class TestAC3JobTrackerAndProgressMilestones:
         Given repair is triggered
         Then job_tracker.register_job() is called with operation_type='dependency_map_repair'.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -376,7 +412,9 @@ class TestAC3JobTrackerAndProgressMilestones:
         When _get_progress_from_service() is called
         Then it returns the progress and progress_info for that job.
         """
-        from code_indexer.server.web.dependency_map_routes import _get_progress_from_service
+        from code_indexer.server.web.dependency_map_routes import (
+            _get_progress_from_service,
+        )
 
         # Build a mock dep_map_service with a job tracker holding a repair job
         dep_map_service = Mock()
@@ -392,12 +430,10 @@ class TestAC3JobTrackerAndProgressMilestones:
 
         progress, progress_info = _get_progress_from_service(dep_map_service)
 
-        assert progress == 65, (
-            f"Expected progress=65 for repair job, got {progress}"
-        )
-        assert "Phase 2" in progress_info or "orphan" in progress_info.lower(), (
-            f"Expected progress_info to contain phase info, got '{progress_info}'"
-        )
+        assert progress == 65, f"Expected progress=65 for repair job, got {progress}"
+        assert (
+            "Phase 2" in progress_info or "orphan" in progress_info.lower()
+        ), f"Expected progress_info to contain phase info, got '{progress_info}'"
 
     def test_progress_milestones_reported_during_executor_phases(self, tmp_path):
         """
@@ -424,7 +460,10 @@ class TestAC3JobTrackerAndProgressMilestones:
         output_dir = tmp_path
         executor = _make_executor(progress_callback=_capture_progress)
 
-        from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+        from code_indexer.server.services.dep_map_health_detector import (
+            DepMapHealthDetector,
+        )
+
         detector = DepMapHealthDetector()
         health_report = detector.detect(output_dir)
 
@@ -451,7 +490,10 @@ class TestAC3JobTrackerAndProgressMilestones:
         output_dir = tmp_path
         executor = _make_executor(progress_callback=_capture_progress)
 
-        from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+        from code_indexer.server.services.dep_map_health_detector import (
+            DepMapHealthDetector,
+        )
+
         detector = DepMapHealthDetector()
         health_report = detector.detect(output_dir)
 
@@ -459,16 +501,18 @@ class TestAC3JobTrackerAndProgressMilestones:
 
         if len(progress_calls) >= 2:
             for i in range(1, len(progress_calls)):
-                assert progress_calls[i] >= progress_calls[i - 1], (
-                    f"Progress must be non-decreasing. Got {progress_calls}"
-                )
+                assert (
+                    progress_calls[i] >= progress_calls[i - 1]
+                ), f"Progress must be non-decreasing. Got {progress_calls}"
 
     def test_repair_job_completed_in_job_tracker_on_success(self, tmp_path):
         """
         Given repair completes successfully
         Then job_tracker.complete_job() is called with the registered job_id.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -491,7 +535,9 @@ class TestAC3JobTrackerAndProgressMilestones:
         Given repair executor raises an exception
         Then job_tracker.fail_job() is called (not complete_job).
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -499,8 +545,13 @@ class TestAC3JobTrackerAndProgressMilestones:
         job_tracker = _make_mock_job_tracker()
         journal = _make_mock_activity_journal(tmp_path)
 
-        with patch("code_indexer.server.web.dependency_map_routes._build_repair_executor") as mock_build:
-            from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+        with patch(
+            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+        ) as mock_build:
+            from code_indexer.server.services.dep_map_repair_executor import (
+                DepMapRepairExecutor,
+            )
+
             executor = Mock(spec=DepMapRepairExecutor)
             executor.execute.side_effect = RuntimeError("Simulated failure")
             mock_build.return_value = executor
@@ -533,7 +584,9 @@ class TestAC4JournalPathPropagation:
         This is the prerequisite for Claude reporting to the journal
         (the prompt appendix is only included when journal_path is not None).
         """
-        from code_indexer.server.services.activity_journal_service import ActivityJournalService
+        from code_indexer.server.services.activity_journal_service import (
+            ActivityJournalService,
+        )
 
         journal = ActivityJournalService()
         journal_dir = tmp_path / "repair-journal"
@@ -544,12 +597,12 @@ class TestAC4JournalPathPropagation:
 
         # After init, journal_path must be non-None
         journal.init(journal_dir)
-        assert journal.journal_path is not None, (
-            "ActivityJournalService.journal_path must be non-None after init()"
-        )
-        assert (journal.journal_path).exists(), (
-            f"Journal file {journal.journal_path} must exist after init()"
-        )
+        assert (
+            journal.journal_path is not None
+        ), "ActivityJournalService.journal_path must be non-None after init()"
+        assert (
+            journal.journal_path
+        ).exists(), f"Journal file {journal.journal_path} must exist after init()"
 
     def test_build_domain_analyzer_captures_journal_path(self, tmp_path):
         """
@@ -595,16 +648,16 @@ class TestAC4JournalPathPropagation:
         domain_list = [domain]
         domain_analyzer(tmp_path, domain, domain_list, [])
 
-        assert len(captured_journal_paths) == 1, (
-            "Expected run_pass_2_per_domain to be called once"
-        )
+        assert (
+            len(captured_journal_paths) == 1
+        ), "Expected run_pass_2_per_domain to be called once"
         assert captured_journal_paths[0] is not None, (
             "Expected journal_path to be non-None when passed to run_pass_2_per_domain. "
             "This is required for Claude to report to the journal (AC4)."
         )
-        assert captured_journal_paths[0] == journal_file, (
-            f"Expected journal_path={journal_file}, got {captured_journal_paths[0]}"
-        )
+        assert (
+            captured_journal_paths[0] == journal_file
+        ), f"Expected journal_path={journal_file}, got {captured_journal_paths[0]}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -622,7 +675,9 @@ class TestAC5CompletionStateCleanup:
         Then tracking_backend.update_tracking is called with a terminal status
         (never left stuck in 'running' state).
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -630,7 +685,9 @@ class TestAC5CompletionStateCleanup:
         job_tracker = _make_mock_job_tracker()
         journal = _make_mock_activity_journal(tmp_path)
 
-        with patch("code_indexer.server.web.dependency_map_routes._build_repair_executor") as mock_build:
+        with patch(
+            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+        ) as mock_build:
             executor = Mock()
             executor.execute.side_effect = RuntimeError("Catastrophic failure")
             mock_build.return_value = executor
@@ -658,7 +715,9 @@ class TestAC5CompletionStateCleanup:
         Given repair completes
         Then activity_journal.finalize() is called to clean up the journal.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -680,7 +739,9 @@ class TestAC5CompletionStateCleanup:
         Given repair executor raises an exception
         Then activity_journal.clear() is still called (in finally block).
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -688,7 +749,9 @@ class TestAC5CompletionStateCleanup:
         job_tracker = _make_mock_job_tracker()
         journal = _make_mock_activity_journal(tmp_path)
 
-        with patch("code_indexer.server.web.dependency_map_routes._build_repair_executor") as mock_build:
+        with patch(
+            "code_indexer.server.web.dependency_map_routes._build_repair_executor"
+        ) as mock_build:
             executor = Mock()
             executor.execute.side_effect = RuntimeError("Catastrophic failure")
             mock_build.return_value = executor
@@ -717,9 +780,12 @@ class TestRepairExecutorProgressCallback:
         When progress_callback is passed
         Then it is accepted without error.
         """
-        from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+        from code_indexer.server.services.dep_map_repair_executor import (
+            DepMapRepairExecutor,
+        )
 
         progress_calls = []
+
         def cb(p, info=""):
             progress_calls.append(p)
 
@@ -736,9 +802,12 @@ class TestRepairExecutorProgressCallback:
         When execute() is called on a healthy output dir (phases 1-4 skipped)
         Then progress_callback is called at least for Phase 5 and completion.
         """
-        from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+        from code_indexer.server.services.dep_map_repair_executor import (
+            DepMapRepairExecutor,
+        )
 
         progress_calls = []
+
         def cb(progress: int, progress_info: str = "") -> None:
             progress_calls.append((progress, progress_info))
 
@@ -750,7 +819,10 @@ class TestRepairExecutorProgressCallback:
             progress_callback=cb,
         )
 
-        from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+        from code_indexer.server.services.dep_map_health_detector import (
+            DepMapHealthDetector,
+        )
+
         report = DepMapHealthDetector().detect(output_dir)
         executor.execute(output_dir, report)
 
@@ -760,9 +832,9 @@ class TestRepairExecutorProgressCallback:
         )
         # Final call must be 100%
         final_progress = progress_calls[-1][0]
-        assert final_progress == 100, (
-            f"Final progress must be 100%. Got {final_progress}"
-        )
+        assert (
+            final_progress == 100
+        ), f"Final progress must be 100%. Got {final_progress}"
 
     def test_executor_progress_callback_none_is_safe(self, tmp_path):
         """
@@ -770,7 +842,9 @@ class TestRepairExecutorProgressCallback:
         When execute() runs
         Then no exception is raised.
         """
-        from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+        from code_indexer.server.services.dep_map_repair_executor import (
+            DepMapRepairExecutor,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -780,7 +854,10 @@ class TestRepairExecutorProgressCallback:
             progress_callback=None,
         )
 
-        from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+        from code_indexer.server.services.dep_map_health_detector import (
+            DepMapHealthDetector,
+        )
+
         report = DepMapHealthDetector().detect(output_dir)
 
         # Must not raise
@@ -813,7 +890,9 @@ class TestNoneComponentsGracefulDegradation:
         This tests the explicit None guards (Finding 2): without them, calling
         activity_journal.init() on None raises AttributeError.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -835,7 +914,9 @@ class TestNoneComponentsGracefulDegradation:
         Verifies the function does not short-circuit or fail early due to
         missing components.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -848,7 +929,9 @@ class TestNoneComponentsGracefulDegradation:
             "code_indexer.server.web.dependency_map_routes._build_repair_executor"
         ) as mock_build:
             from unittest.mock import Mock as _Mock
-            from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+            from code_indexer.server.services.dep_map_repair_executor import (
+                DepMapRepairExecutor,
+            )
 
             real_result = _Mock()
             real_result.status = "nothing_to_repair"
@@ -882,7 +965,9 @@ class TestNoneComponentsGracefulDegradation:
         tracking_backend.update_tracking(status='failed') on None raises
         AttributeError, leaving the system state ambiguous.
         """
-        from code_indexer.server.web.dependency_map_routes import _run_repair_with_feedback
+        from code_indexer.server.web.dependency_map_routes import (
+            _run_repair_with_feedback,
+        )
 
         make_healthy_output_dir(tmp_path)
         output_dir = tmp_path
@@ -891,8 +976,11 @@ class TestNoneComponentsGracefulDegradation:
             "code_indexer.server.web.dependency_map_routes._build_repair_executor"
         ) as mock_build:
             from unittest.mock import Mock as _Mock
+
             executor = _Mock()
-            executor.execute.side_effect = RuntimeError("Forced failure for None-guard test")
+            executor.execute.side_effect = RuntimeError(
+                "Forced failure for None-guard test"
+            )
             mock_build.return_value = executor
 
             # Must not raise - finally block must guard all None components

@@ -71,13 +71,20 @@ class TestGitPushHandler:
             "pushed_commits": 3,
         }
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
-        ) as mock_get_pat:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+            ) as mock_get_pat,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
-            mock_get_pat.return_value = (mock_credential, "https://github.com/owner/repo.git", None)
+            mock_get_pat.return_value = (
+                mock_credential,
+                "https://github.com/owner/repo.git",
+                None,
+            )
 
             params = {
                 "repository_alias": "test-repo",
@@ -108,13 +115,20 @@ class TestGitPushHandler:
         )
         mock_git_service.git_push_with_pat.side_effect = error
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
-        ) as mock_get_pat:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+            ) as mock_get_pat,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
-            mock_get_pat.return_value = (mock_credential, "https://github.com/owner/repo.git", None)
+            mock_get_pat.return_value = (
+                mock_credential,
+                "https://github.com/owner/repo.git",
+                None,
+            )
 
             params = {
                 "repository_alias": "test-repo",
@@ -146,13 +160,20 @@ class TestGitPushHandler:
         )
         mock_git_service.git_push_with_pat.side_effect = error
 
-        with patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
-        ) as mock_get_pat:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+            ) as mock_get_pat,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
-            mock_get_pat.return_value = (mock_credential, "https://github.com/owner/repo.git", None)
+            mock_get_pat.return_value = (
+                mock_credential,
+                "https://github.com/owner/repo.git",
+                None,
+            )
 
             params = {
                 "repository_alias": "test-repo",

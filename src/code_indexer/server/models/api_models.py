@@ -95,12 +95,8 @@ class SystemHealthInfo(BaseModel):
     index_memory_mb: float = Field(
         default=0.0, description="Total index memory footprint in MB (HNSW heap + FTS)"
     )
-    swap_used_mb: float = Field(
-        default=0.0, description="Swap space used in MB"
-    )
-    swap_total_mb: float = Field(
-        default=0.0, description="Total swap space in MB"
-    )
+    swap_used_mb: float = Field(default=0.0, description="Swap space used in MB")
+    swap_total_mb: float = Field(default=0.0, description="Total swap space in MB")
     volumes: List["VolumeInfo"] = Field(
         default_factory=list, description="List of mounted non-removable volumes"
     )

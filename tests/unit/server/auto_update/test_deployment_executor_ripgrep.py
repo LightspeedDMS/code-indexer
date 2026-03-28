@@ -89,10 +89,13 @@ class TestEnsureRipgrepDelegation:
         expected_home = Path("/home/code-indexer")
 
         # Use flattened context managers for better readability
-        with patch(
-            "code_indexer.server.auto_update.deployment_executor.RipgrepInstaller"
-        ) as mock_ripgrep_class, patch.object(
-            executor, "_get_service_user_home", return_value=expected_home
+        with (
+            patch(
+                "code_indexer.server.auto_update.deployment_executor.RipgrepInstaller"
+            ) as mock_ripgrep_class,
+            patch.object(
+                executor, "_get_service_user_home", return_value=expected_home
+            ),
         ):
             # Setup mocks
             mock_ripgrep_instance = Mock()
@@ -126,12 +129,18 @@ class TestExecuteMethodIntegration:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
-        with patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"):
+        with patch.object(
+            executor, "_calculate_auto_update_hash", return_value="same_hash"
+        ):
             with patch.object(executor, "git_pull", return_value=True):
                 with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(executor, "build_custom_hnswlib", return_value=True):
+                    with patch.object(
+                        executor, "build_custom_hnswlib", return_value=True
+                    ):
                         with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(executor, "ensure_ripgrep") as mock_ensure_rg:
+                            with patch.object(
+                                executor, "ensure_ripgrep"
+                            ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = True
 
                                 result = executor.execute()
@@ -148,12 +157,18 @@ class TestExecuteMethodIntegration:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
-        with patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"):
+        with patch.object(
+            executor, "_calculate_auto_update_hash", return_value="same_hash"
+        ):
             with patch.object(executor, "git_pull", return_value=True):
                 with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(executor, "build_custom_hnswlib", return_value=True):
+                    with patch.object(
+                        executor, "build_custom_hnswlib", return_value=True
+                    ):
                         with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(executor, "ensure_ripgrep") as mock_ensure_rg:
+                            with patch.object(
+                                executor, "ensure_ripgrep"
+                            ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = False  # ripgrep fails
 
                                 result = executor.execute()
@@ -174,12 +189,18 @@ class TestExecuteMethodIntegration:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
-        with patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"):
+        with patch.object(
+            executor, "_calculate_auto_update_hash", return_value="same_hash"
+        ):
             with patch.object(executor, "git_pull", return_value=True):
                 with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(executor, "build_custom_hnswlib", return_value=True):
+                    with patch.object(
+                        executor, "build_custom_hnswlib", return_value=True
+                    ):
                         with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(executor, "ensure_ripgrep") as mock_ensure_rg:
+                            with patch.object(
+                                executor, "ensure_ripgrep"
+                            ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = True
 
                                 result = executor.execute()
@@ -201,12 +222,18 @@ class TestExecuteMethodIntegration:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
 
-        with patch.object(executor, "_calculate_auto_update_hash", return_value="same_hash"):
+        with patch.object(
+            executor, "_calculate_auto_update_hash", return_value="same_hash"
+        ):
             with patch.object(executor, "git_pull", return_value=True):
                 with patch.object(executor, "git_submodule_update", return_value=True):
-                    with patch.object(executor, "build_custom_hnswlib", return_value=True):
+                    with patch.object(
+                        executor, "build_custom_hnswlib", return_value=True
+                    ):
                         with patch.object(executor, "pip_install", return_value=True):
-                            with patch.object(executor, "ensure_ripgrep") as mock_ensure_rg:
+                            with patch.object(
+                                executor, "ensure_ripgrep"
+                            ) as mock_ensure_rg:
                                 mock_ensure_rg.return_value = False
 
                                 result = executor.execute()

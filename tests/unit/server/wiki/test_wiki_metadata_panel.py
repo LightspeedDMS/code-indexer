@@ -22,7 +22,11 @@ from fastapi.testclient import TestClient
 
 from code_indexer.server.wiki.wiki_cache import WikiCache
 from code_indexer.server.wiki.wiki_service import WikiService
-from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_wiki_user_hybrid,
+    get_current_user_hybrid,
+)
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 

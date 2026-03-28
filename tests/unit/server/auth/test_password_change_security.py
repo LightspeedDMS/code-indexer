@@ -438,9 +438,7 @@ class TestPasswordChangeConcurrencyProtection:
                                 mock_user_mgr.get_user.return_value = test_user
 
                                 # Mock password verification and change
-                                mock_user_mgr.password_manager.verify_password.return_value = (
-                                    True
-                                )
+                                mock_user_mgr.password_manager.verify_password.return_value = True
                                 mock_user_mgr.change_password.return_value = True
 
                                 # Mock rate limiter - no limits for this test
@@ -564,9 +562,7 @@ class TestPasswordChangeAuditLogging:
                             mock_user_mgr.get_user.return_value = test_user
 
                             # Mock password operations
-                            mock_user_mgr.password_manager.verify_password.return_value = (
-                                True
-                            )
+                            mock_user_mgr.password_manager.verify_password.return_value = True
                             mock_user_mgr.change_password.return_value = True
 
                             # Mock rate limiter - no limits for this test
@@ -631,9 +627,7 @@ class TestPasswordChangeAuditLogging:
                             mock_user_mgr.get_user.return_value = test_user
 
                             # Mock password verification to fail
-                            mock_user_mgr.password_manager.verify_password.return_value = (
-                                False
-                            )
+                            mock_user_mgr.password_manager.verify_password.return_value = False
 
                             # Mock rate limiter - no limits for this test
                             mock_rate_limiter.check_rate_limit.return_value = None
@@ -736,9 +730,7 @@ class TestPasswordChangeSessionInvalidation:
                                 mock_user_mgr.get_user.return_value = test_user
 
                                 # Mock password operations
-                                mock_user_mgr.password_manager.verify_password.return_value = (
-                                    True
-                                )
+                                mock_user_mgr.password_manager.verify_password.return_value = True
                                 mock_user_mgr.change_password.return_value = True
 
                                 # Mock rate limiter - no limits for this test
@@ -803,9 +795,7 @@ class TestPasswordChangeSessionInvalidation:
                                 mock_user_mgr.get_user.return_value = test_user
 
                                 # Mock password operations
-                                mock_user_mgr.password_manager.verify_password.return_value = (
-                                    True
-                                )
+                                mock_user_mgr.password_manager.verify_password.return_value = True
                                 mock_user_mgr.change_password.return_value = True
 
                                 # Mock rate limiter - no limits for this test

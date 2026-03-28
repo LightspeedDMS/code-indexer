@@ -96,7 +96,9 @@ class TestSearchQueryFilter:
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {
-            "results": [{"file_path": "Customer/getting-started.md", "similarity_score": 0.9}]
+            "results": [
+                {"file_path": "Customer/getting-started.md", "similarity_score": 0.9}
+            ]
         }
 
         with (
@@ -312,7 +314,9 @@ class TestSearchQueryFilter:
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {
-            "results": [{"file_path": "Customer/getting-started.md", "similarity_score": 0.9}]
+            "results": [
+                {"file_path": "Customer/getting-started.md", "similarity_score": 0.9}
+            ]
         }
 
         with (
@@ -352,7 +356,9 @@ class TestSearchQueryFilter:
 
         mock_sqm = Mock()
         mock_sqm.query_user_repositories.return_value = {
-            "results": [{"file_path": "Customer/getting-started.md", "similarity_score": 0.9}]
+            "results": [
+                {"file_path": "Customer/getting-started.md", "similarity_score": 0.9}
+            ]
         }
 
         with (

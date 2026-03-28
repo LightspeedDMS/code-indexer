@@ -388,7 +388,7 @@ class RefreshTokenManager:
                                     else None
                                 )
                                 result_holder["error"] = (
-                                    f'Refresh token revoked due to {revocation_reason or "unknown reason"}'
+                                    f"Refresh token revoked due to {revocation_reason or 'unknown reason'}"
                                 )
                                 result_holder["revocation_reason"] = revocation_reason
                             else:
@@ -485,7 +485,7 @@ class RefreshTokenManager:
                     if not family_record or family_record[0]:
                         result_holder["valid"] = False
                         result_holder["error"] = (
-                            f'Refresh token revoked due to {family_record[1] if family_record else "unknown reason"}'
+                            f"Refresh token revoked due to {family_record[1] if family_record else 'unknown reason'}"
                         )
                         result_holder["revocation_reason"] = (
                             family_record[1] if family_record else None

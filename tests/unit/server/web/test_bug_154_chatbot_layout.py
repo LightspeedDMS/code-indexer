@@ -38,9 +38,9 @@ def template_content():
 @pytest.fixture
 def style_content(template_content):
     """Extract <style> block content."""
-    soup = BeautifulSoup(template_content, 'html.parser')
-    styles = soup.find_all('style')
-    return '\n'.join([s.string for s in styles if s.string])
+    soup = BeautifulSoup(template_content, "html.parser")
+    styles = soup.find_all("style")
+    return "\n".join([s.string for s in styles if s.string])
 
 
 class TestChatbotLayoutStructure:
@@ -48,33 +48,35 @@ class TestChatbotLayoutStructure:
 
     def test_research_layout_exists(self, template_content):
         """Test: research-layout container must exist."""
-        soup = BeautifulSoup(template_content, 'html.parser')
-        layout = soup.find(class_='research-layout')
+        soup = BeautifulSoup(template_content, "html.parser")
+        layout = soup.find(class_="research-layout")
         assert layout is not None, "Must have research-layout container"
 
     def test_research_sidebar_exists(self, template_content):
         """Test: research-sidebar must exist for sessions."""
-        soup = BeautifulSoup(template_content, 'html.parser')
-        sidebar = soup.find(class_='research-sidebar')
+        soup = BeautifulSoup(template_content, "html.parser")
+        sidebar = soup.find(class_="research-sidebar")
         assert sidebar is not None, "Must have research-sidebar for sessions list"
 
     def test_research_chat_area_exists(self, template_content):
         """Test: research-chat-area must exist for chat."""
-        soup = BeautifulSoup(template_content, 'html.parser')
-        chat_area = soup.find(class_='research-chat-area')
+        soup = BeautifulSoup(template_content, "html.parser")
+        chat_area = soup.find(class_="research-chat-area")
         assert chat_area is not None, "Must have research-chat-area for chat interface"
 
     def test_chat_messages_exists(self, template_content):
         """Test: chat-messages container must exist."""
-        soup = BeautifulSoup(template_content, 'html.parser')
-        messages = soup.find(id='chat-messages')
+        soup = BeautifulSoup(template_content, "html.parser")
+        messages = soup.find(id="chat-messages")
         assert messages is not None, "Must have chat-messages container"
 
     def test_chat_input_container_exists(self, template_content):
         """Test: chat-input-container form must exist."""
-        soup = BeautifulSoup(template_content, 'html.parser')
-        input_container = soup.find(class_='chat-input-container')
-        assert input_container is not None, "Must have chat-input-container for input box"
+        soup = BeautifulSoup(template_content, "html.parser")
+        input_container = soup.find(class_="chat-input-container")
+        assert (
+            input_container is not None
+        ), "Must have chat-input-container for input box"
 
 
 class TestLayoutConstraints:
@@ -83,11 +85,11 @@ class TestLayoutConstraints:
     def test_research_layout_uses_fixed_or_max_height(self, style_content):
         """Test: research-layout must have fixed/max-height to prevent page scroll."""
         # Look for .research-layout CSS rule
-        assert '.research-layout' in style_content, "Must have .research-layout CSS"
+        assert ".research-layout" in style_content, "Must have .research-layout CSS"
 
         # Extract the research-layout rule
         # Match from .research-layout { to the closing }
-        pattern = r'\.research-layout\s*{[^}]*}'
+        pattern = r"\.research-layout\s*{[^}]*}"
         match = re.search(pattern, style_content, re.DOTALL)
         assert match is not None, "Must find .research-layout CSS rule"
 
@@ -95,9 +97,7 @@ class TestLayoutConstraints:
 
         # Must have height constraint (height, max-height, or calc with vh units)
         has_height_constraint = (
-            'height:' in rule or
-            'max-height:' in rule or
-            'vh' in rule
+            "height:" in rule or "max-height:" in rule or "vh" in rule
         )
 
         assert has_height_constraint, (
@@ -107,20 +107,17 @@ class TestLayoutConstraints:
 
     def test_research_sidebar_has_overflow_y(self, style_content):
         """Test: research-sidebar must have overflow-y for independent scrolling."""
-        assert '.research-sidebar' in style_content, "Must have .research-sidebar CSS"
+        assert ".research-sidebar" in style_content, "Must have .research-sidebar CSS"
 
         # Extract the sidebar rule
-        pattern = r'\.research-sidebar\s*{[^}]*}'
+        pattern = r"\.research-sidebar\s*{[^}]*}"
         match = re.search(pattern, style_content, re.DOTALL)
         assert match is not None, "Must find .research-sidebar CSS rule"
 
         rule = match.group(0)
 
         # Must have overflow (overflow-y: auto or overflow: auto/hidden/scroll)
-        has_overflow = (
-            'overflow-y' in rule or
-            'overflow:' in rule
-        )
+        has_overflow = "overflow-y" in rule or "overflow:" in rule
 
         assert has_overflow, (
             ".research-sidebar must have overflow-y: auto for independent scrolling "
@@ -129,70 +126,67 @@ class TestLayoutConstraints:
 
     def test_chat_messages_has_constrained_height(self, style_content):
         """Test: chat-messages must have max-height to constrain scrolling."""
-        assert '.chat-messages' in style_content, "Must have .chat-messages CSS"
+        assert ".chat-messages" in style_content, "Must have .chat-messages CSS"
 
         # Extract the chat-messages rule
-        pattern = r'\.chat-messages\s*{[^}]*}'
+        pattern = r"\.chat-messages\s*{[^}]*}"
         match = re.search(pattern, style_content, re.DOTALL)
         assert match is not None, "Must find .chat-messages CSS rule"
 
         rule = match.group(0)
 
         # Must have max-height or height constraint
-        has_height_constraint = (
-            'max-height:' in rule or
-            'height:' in rule
-        )
+        has_height_constraint = "max-height:" in rule or "height:" in rule
 
-        assert has_height_constraint, (
-            ".chat-messages must have max-height to constrain height and enable internal scrolling"
-        )
+        assert has_height_constraint, ".chat-messages must have max-height to constrain height and enable internal scrolling"
 
     def test_chat_messages_has_overflow_y_auto(self, style_content):
         """Test: chat-messages must have overflow-y: auto for scrolling."""
-        assert '.chat-messages' in style_content, "Must have .chat-messages CSS"
+        assert ".chat-messages" in style_content, "Must have .chat-messages CSS"
 
         # Extract the chat-messages rule
-        pattern = r'\.chat-messages\s*{[^}]*}'
+        pattern = r"\.chat-messages\s*{[^}]*}"
         match = re.search(pattern, style_content, re.DOTALL)
         assert match is not None, "Must find .chat-messages CSS rule"
 
         rule = match.group(0)
 
         # Must have overflow-y: auto
-        assert 'overflow-y' in rule, ".chat-messages must have overflow-y for scrolling"
-        assert 'auto' in rule, ".chat-messages overflow-y should be auto"
+        assert "overflow-y" in rule, ".chat-messages must have overflow-y for scrolling"
+        assert "auto" in rule, ".chat-messages overflow-y should be auto"
 
     def test_chat_area_uses_flexbox_for_pinned_input(self, style_content):
         """Test: research-chat-area must use flexbox to support pinned input."""
-        assert '.research-chat-area' in style_content, "Must have .research-chat-area CSS"
+        assert (
+            ".research-chat-area" in style_content
+        ), "Must have .research-chat-area CSS"
 
         # Extract the chat-area rule
-        pattern = r'\.research-chat-area\s*{[^}]*}'
+        pattern = r"\.research-chat-area\s*{[^}]*}"
         match = re.search(pattern, style_content, re.DOTALL)
         assert match is not None, "Must find .research-chat-area CSS rule"
 
         rule = match.group(0)
 
         # Should use flexbox
-        assert 'display:' in rule or 'flex' in rule, (
-            ".research-chat-area should use flexbox for layout control"
-        )
+        assert (
+            "display:" in rule or "flex" in rule
+        ), ".research-chat-area should use flexbox for layout control"
 
     def test_chat_container_uses_flexbox_column(self, style_content):
         """Test: chat-container must use flex-direction column for vertical layout."""
-        assert '.chat-container' in style_content, "Must have .chat-container CSS"
+        assert ".chat-container" in style_content, "Must have .chat-container CSS"
 
         # Extract the chat-container rule
-        pattern = r'\.chat-container\s*{[^}]*}'
+        pattern = r"\.chat-container\s*{[^}]*}"
         match = re.search(pattern, style_content, re.DOTALL)
         assert match is not None, "Must find .chat-container CSS rule"
 
         rule = match.group(0)
 
         # Should use flexbox with column direction
-        has_flex = 'display:' in rule or 'flex' in rule
-        has_column = 'flex-direction:' in rule or 'column' in rule
+        has_flex = "display:" in rule or "flex" in rule
+        has_column = "flex-direction:" in rule or "column" in rule
 
         assert has_flex or has_column, (
             ".chat-container should use flexbox with flex-direction: column "
@@ -205,10 +199,10 @@ class TestInputPinning:
 
     def test_input_container_not_in_scrollable_area(self, template_content):
         """Test: chat-input-container must be outside chat-messages to stay pinned."""
-        soup = BeautifulSoup(template_content, 'html.parser')
+        soup = BeautifulSoup(template_content, "html.parser")
 
-        chat_messages = soup.find(id='chat-messages')
-        input_container = soup.find(class_='chat-input-container')
+        chat_messages = soup.find(id="chat-messages")
+        input_container = soup.find(class_="chat-input-container")
 
         assert chat_messages is not None, "Must have chat-messages"
         assert input_container is not None, "Must have chat-input-container"
@@ -224,32 +218,34 @@ class TestInputPinning:
 
     def test_input_container_is_sibling_of_messages(self, template_content):
         """Test: chat-input-container must be a sibling of chat-messages."""
-        soup = BeautifulSoup(template_content, 'html.parser')
+        soup = BeautifulSoup(template_content, "html.parser")
 
-        chat_container = soup.find(class_='chat-container')
+        chat_container = soup.find(class_="chat-container")
         assert chat_container is not None, "Must have chat-container"
 
         # Get direct children of chat-container
         # Filter out NavigableString (whitespace) by checking for 'get' method
         children = [
-            child for child in chat_container.children
-            if hasattr(child, 'get') and (child.get('class') or child.get('id'))
+            child
+            for child in chat_container.children
+            if hasattr(child, "get") and (child.get("class") or child.get("id"))
         ]
 
         # Should have both chat-messages and chat-input-container as children
         has_messages = any(
-            child.get('id') == 'chat-messages' or
-            'chat-messages' in (child.get('class') or [])
+            child.get("id") == "chat-messages"
+            or "chat-messages" in (child.get("class") or [])
             for child in children
         )
 
         has_input = any(
-            'chat-input-container' in (child.get('class') or [])
-            for child in children
+            "chat-input-container" in (child.get("class") or []) for child in children
         )
 
         assert has_messages, "chat-container must contain chat-messages"
-        assert has_input, "chat-container must contain chat-input-container as sibling to messages"
+        assert (
+            has_input
+        ), "chat-container must contain chat-input-container as sibling to messages"
 
 
 class TestResponsiveDesign:
@@ -257,13 +253,15 @@ class TestResponsiveDesign:
 
     def test_responsive_media_query_exists(self, style_content):
         """Test: Must have @media query for mobile responsiveness."""
-        assert '@media' in style_content, "Must have @media query for responsive design"
+        assert "@media" in style_content, "Must have @media query for responsive design"
 
     def test_responsive_maintains_grid_layout(self, style_content):
         """Test: Responsive design must handle grid layout changes."""
         # Look for media query that changes grid-template-columns
         # Should have max-width media query
-        pattern = r'@media\s*\([^)]*max-width[^)]*\)\s*{[^}]*grid-template-columns[^}]*}'
+        pattern = (
+            r"@media\s*\([^)]*max-width[^)]*\)\s*{[^}]*grid-template-columns[^}]*}"
+        )
         match = re.search(pattern, style_content, re.DOTALL)
 
         assert match is not None, (

@@ -184,10 +184,7 @@ class TestPayloadCacheInitializationGate:
             PayloadCacheConfig,
         )
 
-        config = PayloadCacheConfig(
-            cache_ttl_seconds=1,
-            cleanup_interval_seconds=0.5
-        )
+        config = PayloadCacheConfig(cache_ttl_seconds=1, cleanup_interval_seconds=0.5)
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Initialize first, then start cleanup (normal order)
@@ -205,6 +202,7 @@ class TestPayloadCacheInitializationGate:
 
         # Verify cleanup actually ran (expired entry should be gone)
         from code_indexer.server.cache.payload_cache import CacheNotFoundError
+
         with pytest.raises(CacheNotFoundError):
             cache.retrieve(handle, page=0)
 
@@ -246,7 +244,7 @@ class TestPayloadCacheInitializationGate:
         cache = PayloadCache(db_path=temp_db_path, config=config)
 
         # Event should exist but not be set yet
-        assert hasattr(cache, '_initialized')
+        assert hasattr(cache, "_initialized")
         assert not cache._initialized.is_set()
 
         # Initialize

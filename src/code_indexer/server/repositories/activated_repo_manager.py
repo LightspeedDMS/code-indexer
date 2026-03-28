@@ -967,7 +967,8 @@ class ActivatedRepoManager:
             # Story #636: Check and migrate legacy remotes before fetch
             if (
                 golden_repo_alias
-                and self.golden_repo_manager.get_golden_repo(golden_repo_alias) is not None
+                and self.golden_repo_manager.get_golden_repo(golden_repo_alias)
+                is not None
             ):
                 # Use canonical path resolution to handle versioned repos (Bug #3, #4 fix)
                 golden_repo_path = self.golden_repo_manager.get_actual_repo_path(

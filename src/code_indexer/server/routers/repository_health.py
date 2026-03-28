@@ -22,9 +22,7 @@ class CollectionHealthResult(BaseModel):
     """Health result for a single collection/index."""
 
     collection_name: str = Field(description="Collection name (e.g., voyage-code-3)")
-    index_type: str = Field(
-        description="Index type: semantic, temporal, or multimodal"
-    )
+    index_type: str = Field(description="Index type: semantic, temporal, or multimodal")
     valid: bool = Field(description="Overall health status")
     file_exists: bool
     readable: bool
@@ -95,7 +93,7 @@ def _strip_yaml_frontmatter(content: str) -> str:
     # Find the closing ---
     for i, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
-            body = "".join(lines[i + 1:])
+            body = "".join(lines[i + 1 :])
             # Strip a single leading newline separating frontmatter from body
             if body.startswith("\n"):
                 body = body[1:]
@@ -278,6 +276,7 @@ async def get_repository_health(
             clone_path = Path(actual_path)
         else:
             # Activated repo path
+            assert repo_path is not None
             clone_path = Path(repo_path)
         index_base_path = clone_path / ".code-indexer" / "index"
 
@@ -468,6 +467,7 @@ async def get_repository_indexes(
             clone_path = Path(actual_path)
         else:
             # Activated repo path
+            assert repo_path is not None
             clone_path = Path(repo_path)
 
         # Check for each index type

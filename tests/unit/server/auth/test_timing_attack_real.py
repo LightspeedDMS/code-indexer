@@ -108,7 +108,7 @@ class TestRealTimingAttackPrevention:
 
                         # Should fail with 401 (invalid old password)
                         assert response.status_code == 401
-                        print(f"Invalid password attempt {i+1}: {elapsed:.4f}s")
+                        print(f"Invalid password attempt {i + 1}: {elapsed:.4f}s")
 
                     # Test with correct passwords (should use timing attack prevention)
                     for i in range(3):
@@ -126,7 +126,7 @@ class TestRealTimingAttackPrevention:
 
                         # Should succeed with 200
                         assert response.status_code == 200
-                        print(f"Valid password attempt {i+1}: {elapsed:.4f}s")
+                        print(f"Valid password attempt {i + 1}: {elapsed:.4f}s")
 
         # SECURITY REQUIREMENT: Response time variation should be minimal
         min_time = min(response_times)
@@ -167,7 +167,7 @@ class TestRealTimingAttackPrevention:
             elapsed = time.time() - start_time
             response_times.append(elapsed)
             assert result is False
-            print(f"Wrong password {i+1}: {elapsed:.4f}s")
+            print(f"Wrong password {i + 1}: {elapsed:.4f}s")
 
         # Test with correct passwords (full bcrypt verification)
         for i in range(5):
@@ -178,7 +178,7 @@ class TestRealTimingAttackPrevention:
             elapsed = time.time() - start_time
             response_times.append(elapsed)
             assert result is True
-            print(f"Correct password {i+1}: {elapsed:.4f}s")
+            print(f"Correct password {i + 1}: {elapsed:.4f}s")
 
         # SECURITY REQUIREMENT: Response time variation should be minimal
         min_time = min(response_times)

@@ -16,8 +16,14 @@ The overlap window + content hash strategy makes partial snapshots self-healing.
 import pytest
 from unittest.mock import Mock, patch
 
-from code_indexer.server.services.langfuse_trace_sync_service import LangfuseTraceSyncService
-from code_indexer.server.utils.config_manager import LangfuseConfig, LangfusePullProject, ServerConfig
+from code_indexer.server.services.langfuse_trace_sync_service import (
+    LangfuseTraceSyncService,
+)
+from code_indexer.server.utils.config_manager import (
+    LangfuseConfig,
+    LangfusePullProject,
+    ServerConfig,
+)
 
 
 @pytest.fixture
@@ -52,7 +58,9 @@ class TestWriteLockAliasAfterDiscovery:
     """
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
-    def test_no_project_level_acquire_when_no_traces(self, mock_client_class, tmp_service, tmp_path):
+    def test_no_project_level_acquire_when_no_traces(
+        self, mock_client_class, tmp_service, tmp_path
+    ):
         """When no traces exist, acquire_write_lock must not be called at all.
 
         Previously the code acquired 'langfuse_MyProject' which does not exist
@@ -75,7 +83,9 @@ class TestWriteLockAliasAfterDiscovery:
         mock_scheduler.acquire_write_lock.assert_not_called()
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
-    def test_no_project_level_release_when_no_traces(self, mock_client_class, tmp_service, tmp_path):
+    def test_no_project_level_release_when_no_traces(
+        self, mock_client_class, tmp_service, tmp_path
+    ):
         """When no traces exist, release_write_lock must not be called at all."""
         service, mock_scheduler = tmp_service
 
@@ -93,7 +103,9 @@ class TestWriteLockAliasAfterDiscovery:
         mock_scheduler.release_write_lock.assert_not_called()
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
-    def test_acquire_alias_does_not_use_generic_langfuse(self, mock_client_class, tmp_service, tmp_path):
+    def test_acquire_alias_does_not_use_generic_langfuse(
+        self, mock_client_class, tmp_service, tmp_path
+    ):
         """acquire_write_lock must never be called with the generic 'langfuse' alias."""
         service, mock_scheduler = tmp_service
 
@@ -117,7 +129,9 @@ class TestWriteLockAliasAfterDiscovery:
             )
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
-    def test_no_project_level_acquire_alias_used(self, mock_client_class, tmp_service, tmp_path):
+    def test_no_project_level_acquire_alias_used(
+        self, mock_client_class, tmp_service, tmp_path
+    ):
         """acquire_write_lock must not be called with the project-level alias 'langfuse_MyProject'.
 
         This alias does not exist in RefreshScheduler - only per-user repos do.
@@ -152,7 +166,9 @@ class TestWriteLockNotAcquiredOnDiscoveryFailure:
     """Verify that if discover_project() raises, no lock release is attempted."""
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
-    def test_no_release_when_discover_raises(self, mock_client_class, tmp_service, tmp_path):
+    def test_no_release_when_discover_raises(
+        self, mock_client_class, tmp_service, tmp_path
+    ):
         """If discover_project() raises, release_write_lock must not be called."""
         service, mock_scheduler = tmp_service
 
@@ -172,7 +188,9 @@ class TestWriteLockNotAcquiredOnDiscoveryFailure:
         mock_scheduler.release_write_lock.assert_not_called()
 
     @patch("code_indexer.server.services.langfuse_trace_sync_service.LangfuseApiClient")
-    def test_no_trigger_refresh_when_discover_raises(self, mock_client_class, tmp_service, tmp_path):
+    def test_no_trigger_refresh_when_discover_raises(
+        self, mock_client_class, tmp_service, tmp_path
+    ):
         """If discover_project() raises, trigger_refresh_for_repo must not be called."""
         service, mock_scheduler = tmp_service
 

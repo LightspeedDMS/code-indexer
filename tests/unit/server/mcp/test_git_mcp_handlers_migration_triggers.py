@@ -115,17 +115,25 @@ class TestGitPushMigrationTrigger:
             }
         )
 
-        with patch(
-            "code_indexer.server.mcp.handlers.git_operations_service",
-            real_git_service_with_mocked_migration,
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
-        ) as mock_get_pat:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.git_operations_service",
+                real_git_service_with_mocked_migration,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+            ) as mock_get_pat,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_get_pat.return_value = (
-                {"token": "ghp_test", "git_user_name": "Test", "git_user_email": "test@example.com"},
+                {
+                    "token": "ghp_test",
+                    "git_user_name": "Test",
+                    "git_user_email": "test@example.com",
+                },
                 "https://github.com/owner/repo.git",
                 None,
             )
@@ -146,9 +154,7 @@ class TestGitPushMigrationTrigger:
             real_git_service_with_mocked_migration._trigger_migration_if_needed.assert_called_once()
 
             # Verify it was called with correct parameters
-            call_args = (
-                real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
-            )
+            call_args = real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
             assert call_args[0][0] == "/tmp/test-repo"  # repo_path
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
@@ -165,8 +171,8 @@ class TestGitPushMigrationTrigger:
         call_order = []
 
         # Track call order
-        real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = lambda *args, **kwargs: call_order.append(
-            "migration"
+        real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = (
+            lambda *args, **kwargs: call_order.append("migration")
         )
         real_git_service_with_mocked_migration.git_push_with_pat = MagicMock(
             side_effect=lambda *args, **kwargs: (
@@ -175,17 +181,25 @@ class TestGitPushMigrationTrigger:
             )[1]
         )
 
-        with patch(
-            "code_indexer.server.mcp.handlers.git_operations_service",
-            real_git_service_with_mocked_migration,
-        ), patch(
-            "code_indexer.server.mcp.handlers._resolve_git_repo_path"
-        ) as mock_resolve, patch(
-            "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
-        ) as mock_get_pat:
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.git_operations_service",
+                real_git_service_with_mocked_migration,
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_git_repo_path"
+            ) as mock_resolve,
+            patch(
+                "code_indexer.server.mcp.handlers._get_pat_credential_for_remote"
+            ) as mock_get_pat,
+        ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_get_pat.return_value = (
-                {"token": "ghp_test", "git_user_name": "Test", "git_user_email": "test@example.com"},
+                {
+                    "token": "ghp_test",
+                    "git_user_name": "Test",
+                    "git_user_email": "test@example.com",
+                },
                 "https://github.com/owner/repo.git",
                 None,
             )
@@ -231,9 +245,7 @@ class TestGitPullMigrationTrigger:
             real_git_service_with_mocked_migration._trigger_migration_if_needed.assert_called_once()
 
             # Verify it was called with correct parameters
-            call_args = (
-                real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
-            )
+            call_args = real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
             assert call_args[0][0] == "/tmp/test-repo"  # repo_path
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
@@ -247,8 +259,8 @@ class TestGitPullMigrationTrigger:
         call_order = []
 
         # Track call order
-        real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = lambda *args, **kwargs: call_order.append(
-            "migration"
+        real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = (
+            lambda *args, **kwargs: call_order.append("migration")
         )
         original_git_pull = real_git_service_with_mocked_migration.git_pull
         real_git_service_with_mocked_migration.git_pull = MagicMock(
@@ -302,9 +314,7 @@ class TestGitFetchMigrationTrigger:
             real_git_service_with_mocked_migration._trigger_migration_if_needed.assert_called_once()
 
             # Verify it was called with correct parameters
-            call_args = (
-                real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
-            )
+            call_args = real_git_service_with_mocked_migration._trigger_migration_if_needed.call_args
             assert call_args[0][0] == "/tmp/test-repo"  # repo_path
             assert call_args[0][1] == "testuser"  # username
             assert call_args[0][2] == "test-repo"  # repo_alias
@@ -318,8 +328,8 @@ class TestGitFetchMigrationTrigger:
         call_order = []
 
         # Track call order
-        real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = lambda *args, **kwargs: call_order.append(
-            "migration"
+        real_git_service_with_mocked_migration._trigger_migration_if_needed.side_effect = (
+            lambda *args, **kwargs: call_order.append("migration")
         )
         original_git_fetch = real_git_service_with_mocked_migration.git_fetch
         real_git_service_with_mocked_migration.git_fetch = MagicMock(

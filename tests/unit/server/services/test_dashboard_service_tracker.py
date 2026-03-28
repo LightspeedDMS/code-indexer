@@ -234,16 +234,12 @@ class TestDashboardJobCountsWithTracker:
         When _get_job_counts is called
         Then it reads running/pending from the background job manager
         """
-        mock_mgr = _make_mock_job_manager(
-            completed=3, failed=0, running=1, pending=2
-        )
+        mock_mgr = _make_mock_job_manager(completed=3, failed=0, running=1, pending=2)
 
         with patch.object(
             dashboard_service, "_get_background_job_manager", return_value=mock_mgr
         ):
-            with patch.object(
-                dashboard_service, "_get_job_tracker", return_value=None
-            ):
+            with patch.object(dashboard_service, "_get_job_tracker", return_value=None):
                 counts = dashboard_service._get_job_counts("admin", "24h")
 
         assert counts.running == 1
@@ -346,9 +342,7 @@ class TestDashboardRecentJobsWithTracker:
         with patch.object(
             dashboard_service, "_get_background_job_manager", return_value=mock_mgr
         ):
-            with patch.object(
-                dashboard_service, "_get_job_tracker", return_value=None
-            ):
+            with patch.object(dashboard_service, "_get_job_tracker", return_value=None):
                 recent = dashboard_service._get_recent_jobs("admin", "30d")
 
         assert isinstance(recent, list)

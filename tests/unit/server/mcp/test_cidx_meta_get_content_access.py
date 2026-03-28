@@ -45,7 +45,11 @@ class TestGetFileContentCidxMetaAccessFiltering:
         data = extract_mcp_data(result)
         assert data["success"] is False
         error_lower = data.get("error", "").lower()
-        assert "access" in error_lower or "denied" in error_lower or "authorized" in error_lower
+        assert (
+            "access" in error_lower
+            or "denied" in error_lower
+            or "authorized" in error_lower
+        )
 
     def test_power_user_denied_for_repo_outside_their_group(
         self, power_user, access_filtering_service

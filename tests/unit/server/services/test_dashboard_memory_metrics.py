@@ -114,6 +114,7 @@ class TestSystemMetricsCollectorMemoryMetrics(unittest.TestCase):
         collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
         # Allow background thread to populate cache
         import time
+
         time.sleep(0.2)
         rss = collector.get_process_rss()
         self.assertIsInstance(rss, float)
@@ -123,6 +124,7 @@ class TestSystemMetricsCollectorMemoryMetrics(unittest.TestCase):
         """get_swap_usage() must return dict with 'used_mb' and 'total_mb' keys."""
         collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
         import time
+
         time.sleep(0.2)
         swap = collector.get_swap_usage()
         self.assertIsInstance(swap, dict)
@@ -137,6 +139,7 @@ class TestSystemMetricsCollectorMemoryMetrics(unittest.TestCase):
         """get_index_memory() must return a non-negative float."""
         collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
         import time
+
         time.sleep(0.2)
         index_memory_mb = collector.get_index_memory()
         self.assertIsInstance(index_memory_mb, float)
@@ -164,6 +167,7 @@ class TestSystemMetricsCollectorMemoryMetrics(unittest.TestCase):
         """After refresh, cached metrics must contain the new memory metric keys."""
         collector = SystemMetricsCollector(cache_ttl_seconds=60.0)
         import time
+
         time.sleep(0.3)
         with collector._cache_lock:
             metrics = collector._cached_metrics
@@ -189,12 +193,15 @@ class TestHealthServiceSystemInfoMemoryFields(unittest.TestCase):
         service._last_net_counters = None
         service._last_net_time = None
         service._cpu_history = []
-        service._cpu_history_lock = __import__('threading').Lock()
+        service._cpu_history_lock = __import__("threading").Lock()
 
         result = service._get_system_info()
         self.assertIsInstance(result, SystemHealthInfo)
-        self.assertGreater(result.process_rss_mb, 0.0,
-                           "process_rss_mb must be > 0 for a running process")
+        self.assertGreater(
+            result.process_rss_mb,
+            0.0,
+            "process_rss_mb must be > 0 for a running process",
+        )
 
     def test_get_system_info_returns_swap_fields(self) -> None:
         """_get_system_info() must return SystemHealthInfo with swap_total_mb >= 0."""
@@ -206,7 +213,7 @@ class TestHealthServiceSystemInfoMemoryFields(unittest.TestCase):
         service._last_net_counters = None
         service._last_net_time = None
         service._cpu_history = []
-        service._cpu_history_lock = __import__('threading').Lock()
+        service._cpu_history_lock = __import__("threading").Lock()
 
         result = service._get_system_info()
         self.assertGreaterEqual(result.swap_used_mb, 0.0)
@@ -222,7 +229,7 @@ class TestHealthServiceSystemInfoMemoryFields(unittest.TestCase):
         service._last_net_counters = None
         service._last_net_time = None
         service._cpu_history = []
-        service._cpu_history_lock = __import__('threading').Lock()
+        service._cpu_history_lock = __import__("threading").Lock()
 
         result = service._get_system_info()
         self.assertGreaterEqual(result.index_memory_mb, 0.0)
@@ -242,11 +249,14 @@ class TestHealthServiceSystemInfoMemoryFields(unittest.TestCase):
         service._last_net_counters = None
         service._last_net_time = None
         service._cpu_history = []
-        service._cpu_history_lock = __import__('threading').Lock()
+        service._cpu_history_lock = __import__("threading").Lock()
 
         result = service._get_system_info()
-        self.assertEqual(result.index_memory_mb, 0.0,
-                         "index_memory_mb must be 0.0 when no indexes are cached")
+        self.assertEqual(
+            result.index_memory_mb,
+            0.0,
+            "index_memory_mb must be 0.0 when no indexes are cached",
+        )
 
 
 if __name__ == "__main__":

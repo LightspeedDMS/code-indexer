@@ -114,9 +114,9 @@ class TestAutoWatchManagerTimeout:
             manager.start_watch(repo_path, timeout=1)
 
             # Manually set last_activity to 2 seconds ago
-            manager._watch_state[repo_path][
-                "last_activity"
-            ] = datetime.now() - timedelta(seconds=2)
+            manager._watch_state[repo_path]["last_activity"] = (
+                datetime.now() - timedelta(seconds=2)
+            )
 
             # Run timeout check
             manager._check_timeouts()

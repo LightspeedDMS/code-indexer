@@ -40,9 +40,7 @@ class TestSQLiteLogHandlerCleanup:
         assert result == (1,)
         handler.close()
 
-    def test_get_connection_same_connection_within_thread(
-        self, tmp_path: Path
-    ) -> None:
+    def test_get_connection_same_connection_within_thread(self, tmp_path: Path) -> None:
         """
         _get_connection() returns the same connection object for repeated
         calls from the same thread (thread-local semantics via manager).
@@ -118,8 +116,7 @@ class TestSQLiteLogHandlerCleanup:
                     errors.append(e)
 
         threads = [
-            threading.Thread(target=emit_records, args=(i,))
-            for i in range(num_threads)
+            threading.Thread(target=emit_records, args=(i,)) for i in range(num_threads)
         ]
         for t in threads:
             t.start()
@@ -180,9 +177,7 @@ class TestSQLiteLogHandlerCleanup:
 
         handler.close()
 
-    def test_emit_still_works_after_adding_tracking(
-        self, tmp_path: Path
-    ) -> None:
+    def test_emit_still_works_after_adding_tracking(self, tmp_path: Path) -> None:
         """
         Verify emit() still works correctly after connection management
         was delegated to DatabaseConnectionManager.
@@ -227,9 +222,7 @@ class TestEmitUsesExecuteAtomic:
     execute_atomic() provides proper transaction isolation for each INSERT.
     """
 
-    def test_emit_calls_execute_atomic_not_raw_commit(
-        self, tmp_path: Path
-    ) -> None:
+    def test_emit_calls_execute_atomic_not_raw_commit(self, tmp_path: Path) -> None:
         """
         emit() must call execute_atomic() on DatabaseConnectionManager,
         not raw conn.commit().
@@ -276,9 +269,7 @@ class TestEmitUsesExecuteAtomic:
             "raw conn.commit() was used instead"
         )
 
-    def test_emit_does_not_call_conn_commit_directly(
-        self, tmp_path: Path
-    ) -> None:
+    def test_emit_does_not_call_conn_commit_directly(self, tmp_path: Path) -> None:
         """
         emit() must not call conn.commit() directly on the shared connection.
         Uses MagicMock(wraps=real_conn) to track commit() calls while

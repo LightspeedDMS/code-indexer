@@ -61,7 +61,9 @@ def _make_mock_tool_registry(tool_name: str, permission: str = "query_repos") ->
 def _make_mock_handler(return_value: dict = None) -> Mock:
     """Build a mock sync handler returning given value."""
     if return_value is None:
-        return_value = {"content": [{"type": "text", "text": json.dumps({"success": True})}]}
+        return_value = {
+            "content": [{"type": "text", "text": json.dumps({"success": True})}]
+        }
     return Mock(return_value=return_value)
 
 
@@ -94,8 +96,13 @@ class TestHandleToolsCallBlocksUnauthorized:
 
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
-            patch("code_indexer.server.mcp.session_registry.get_session_registry") as mock_reg,
-            patch("code_indexer.server.services.langfuse_service.get_langfuse_service", return_value=None),
+            patch(
+                "code_indexer.server.mcp.session_registry.get_session_registry"
+            ) as mock_reg,
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             mock_app_module.app.state = mock_app_state
             mock_reg.return_value.get_or_create_session.return_value = None
@@ -150,8 +157,13 @@ class TestHandleToolsCallBlocksUnauthorized:
 
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
-            patch("code_indexer.server.mcp.session_registry.get_session_registry") as mock_reg,
-            patch("code_indexer.server.services.langfuse_service.get_langfuse_service", return_value=None),
+            patch(
+                "code_indexer.server.mcp.session_registry.get_session_registry"
+            ) as mock_reg,
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             mock_app_module.app.state = mock_app_state
             mock_reg.return_value.get_or_create_session.return_value = None
@@ -207,13 +219,22 @@ class TestHandleToolsCallAllowsAuthorized:
         mock_app_state = Mock()
         mock_app_state.access_filtering_service = access_service
 
-        expected = {"content": [{"type": "text", "text": json.dumps({"success": True, "files": []})}]}
+        expected = {
+            "content": [
+                {"type": "text", "text": json.dumps({"success": True, "files": []})}
+            ]
+        }
         mock_handler = _make_mock_handler(expected)
 
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
-            patch("code_indexer.server.mcp.session_registry.get_session_registry") as mock_reg,
-            patch("code_indexer.server.services.langfuse_service.get_langfuse_service", return_value=None),
+            patch(
+                "code_indexer.server.mcp.session_registry.get_session_registry"
+            ) as mock_reg,
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             mock_app_module.app.state = mock_app_state
             mock_reg.return_value.get_or_create_session.return_value = None
@@ -261,13 +282,20 @@ class TestHandleToolsCallAllowsAuthorized:
         mock_app_state = Mock()
         mock_app_state.access_filtering_service = access_service
 
-        expected = {"content": [{"type": "text", "text": json.dumps({"success": True})}]}
+        expected = {
+            "content": [{"type": "text", "text": json.dumps({"success": True})}]
+        }
         mock_handler = _make_mock_handler(expected)
 
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
-            patch("code_indexer.server.mcp.session_registry.get_session_registry") as mock_reg,
-            patch("code_indexer.server.services.langfuse_service.get_langfuse_service", return_value=None),
+            patch(
+                "code_indexer.server.mcp.session_registry.get_session_registry"
+            ) as mock_reg,
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             mock_app_module.app.state = mock_app_state
             mock_reg.return_value.get_or_create_session.return_value = None
@@ -322,13 +350,20 @@ class TestHandleToolsCallAdminBypass:
         mock_app_state = Mock()
         mock_app_state.access_filtering_service = access_service
 
-        expected = {"content": [{"type": "text", "text": json.dumps({"success": True})}]}
+        expected = {
+            "content": [{"type": "text", "text": json.dumps({"success": True})}]
+        }
         mock_handler = _make_mock_handler(expected)
 
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
-            patch("code_indexer.server.mcp.session_registry.get_session_registry") as mock_reg,
-            patch("code_indexer.server.services.langfuse_service.get_langfuse_service", return_value=None),
+            patch(
+                "code_indexer.server.mcp.session_registry.get_session_registry"
+            ) as mock_reg,
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             mock_app_module.app.state = mock_app_state
             mock_reg.return_value.get_or_create_session.return_value = None
@@ -390,8 +425,13 @@ class TestHandleToolsCallGuardSkipsNoRepoParam:
 
         with (
             patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
-            patch("code_indexer.server.mcp.session_registry.get_session_registry") as mock_reg,
-            patch("code_indexer.server.services.langfuse_service.get_langfuse_service", return_value=None),
+            patch(
+                "code_indexer.server.mcp.session_registry.get_session_registry"
+            ) as mock_reg,
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             mock_app_module.app.state = mock_app_state
             mock_reg.return_value.get_or_create_session.return_value = None

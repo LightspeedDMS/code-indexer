@@ -327,9 +327,7 @@ class TestPasswordStrengthValidator:
                         keyword in suggestion.lower()
                         for suggestion in result.suggestions
                     )
-                    assert (
-                        has_keyword
-                    ), f"Suggestions should mention '{keyword}' for password '{password}'"
+                    assert has_keyword, f"Suggestions should mention '{keyword}' for password '{password}'"
 
     def test_keyboard_pattern_detection(self):
         """Test detection of keyboard patterns and sequences."""

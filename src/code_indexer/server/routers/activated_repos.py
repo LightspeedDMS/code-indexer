@@ -202,7 +202,9 @@ def _check_index_status(index_path: Path, index_type: str) -> IndexStatus:
 async def get_indexes_status(
     user_alias: str,
     current_user: User = Depends(get_current_user_hybrid),
-    owner: Optional[str] = Query(None, description="Repository owner username (admin only)"),
+    owner: Optional[str] = Query(
+        None, description="Repository owner username (admin only)"
+    ),
 ) -> IndexesStatusResponse:
     """
     Get index status for an activated repository.
@@ -496,7 +498,9 @@ async def add_index_type(
 async def get_health(
     user_alias: str,
     current_user: User = Depends(get_current_user_hybrid),
-    owner: Optional[str] = Query(None, description="Repository owner username (admin only)"),
+    owner: Optional[str] = Query(
+        None, description="Repository owner username (admin only)"
+    ),
 ) -> HealthCheckResponse:
     """
     Get health check status for an activated repository.

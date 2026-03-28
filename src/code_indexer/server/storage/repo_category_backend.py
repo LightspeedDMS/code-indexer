@@ -7,7 +7,7 @@ SQLite transactions.
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from .database_manager import DatabaseConnectionManager
 
@@ -53,11 +53,11 @@ class RepoCategorySqliteBackend:
             cursor = conn.execute(
                 """INSERT INTO repo_categories (name, pattern, priority, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?)""",
-                (name, pattern, priority, now, now)
+                (name, pattern, priority, now, now),
             )
             return cursor.lastrowid
 
-        category_id = self._conn_manager.execute_atomic(operation)
+        category_id = cast(int, self._conn_manager.execute_atomic(operation))
         logger.info(f"Created category: {name} (id={category_id}, priority={priority})")
         return category_id
 
@@ -77,14 +77,16 @@ class RepoCategorySqliteBackend:
 
         result = []
         for row in cursor.fetchall():
-            result.append({
-                "id": row[0],
-                "name": row[1],
-                "pattern": row[2],
-                "priority": row[3],
-                "created_at": row[4],
-                "updated_at": row[5],
-            })
+            result.append(
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "pattern": row[2],
+                    "priority": row[3],
+                    "created_at": row[4],
+                    "updated_at": row[5],
+                }
+            )
 
         return result
 
@@ -103,7 +105,7 @@ class RepoCategorySqliteBackend:
             """SELECT id, name, pattern, priority, created_at, updated_at
                FROM repo_categories
                WHERE id = ?""",
-            (category_id,)
+            (category_id,),
         )
         row = cursor.fetchone()
 
@@ -138,7 +140,7 @@ class RepoCategorySqliteBackend:
                 """UPDATE repo_categories
                    SET name = ?, pattern = ?, updated_at = ?
                    WHERE id = ?""",
-                (name, pattern, now, category_id)
+                (name, pattern, now, category_id),
             )
             if cursor.rowcount == 0:
                 raise ValueError(f"Category with id={category_id} not found")
@@ -157,10 +159,10 @@ class RepoCategorySqliteBackend:
         Args:
             category_id: ID of the category to delete.
         """
+
         def operation(conn):
             cursor = conn.execute(
-                "DELETE FROM repo_categories WHERE id = ?",
-                (category_id,)
+                "DELETE FROM repo_categories WHERE id = ?", (category_id,)
             )
             if cursor.rowcount == 0:
                 raise ValueError(f"Category with id={category_id} not found")
@@ -177,11 +179,12 @@ class RepoCategorySqliteBackend:
             ordered_ids: List of category IDs in desired order.
                         First ID gets priority 1, second gets priority 2, etc.
         """
+
         def operation(conn):
             for new_priority, category_id in enumerate(ordered_ids, start=1):
                 conn.execute(
                     "UPDATE repo_categories SET priority = ? WHERE id = ?",
-                    (new_priority, category_id)
+                    (new_priority, category_id),
                 )
             return None
 
@@ -194,6 +197,7 @@ class RepoCategorySqliteBackend:
 
         Used when inserting a new category at priority 1 to make room.
         """
+
         def operation(conn):
             conn.execute("UPDATE repo_categories SET priority = priority + 1")
             return None

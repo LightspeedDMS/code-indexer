@@ -73,7 +73,10 @@ def test_auto_scroll_checks_correct_target(template_content):
 def test_auto_scroll_handles_user_send(template_content):
     """Test that auto-scroll always scrolls when user sends message."""
     # Should have beforeRequest handler for send form
-    assert 'form[hx-post="/admin/research/send"]' in template_content or '/admin/research/send' in template_content
+    assert (
+        'form[hx-post="/admin/research/send"]' in template_content
+        or "/admin/research/send" in template_content
+    )
 
 
 def test_jump_to_bottom_button_exists(template_content):
@@ -86,4 +89,6 @@ def test_jump_to_bottom_button_exists(template_content):
 def test_auto_scroll_uses_settimeout_for_dom_update(template_content):
     """Test that auto-scroll uses setTimeout to wait for DOM updates."""
     # Should use setTimeout to ensure DOM is updated before scrolling
-    assert "setTimeout" in template_content or "requestAnimationFrame" in template_content
+    assert (
+        "setTimeout" in template_content or "requestAnimationFrame" in template_content
+    )

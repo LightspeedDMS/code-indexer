@@ -535,7 +535,7 @@ class TestRateLimiterOffByOneFix:
         # First 4 attempts should not trigger lockout
         for i in range(4):
             should_lock = limiter.record_failed_attempt(username)
-            assert not should_lock, f"Should not lock at attempt {i+1}"
+            assert not should_lock, f"Should not lock at attempt {i + 1}"
             assert not limiter.is_locked_out(username)
 
         # 5th attempt SHOULD trigger lockout (this was the bug)
@@ -562,7 +562,7 @@ class TestRateLimiterOffByOneFix:
         # First 9 attempts should not trigger lockout
         for i in range(9):
             should_lock = limiter.record_failed_attempt(username)
-            assert not should_lock, f"Should not lock at attempt {i+1}"
+            assert not should_lock, f"Should not lock at attempt {i + 1}"
             assert not limiter.is_locked_out(username)
 
         # 10th attempt SHOULD trigger lockout

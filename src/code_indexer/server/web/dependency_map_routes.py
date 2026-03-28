@@ -710,9 +710,7 @@ def dependency_map_health(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return JSONResponse(
-            content={"error": "Admin access required"}, status_code=401
-        )
+        return JSONResponse(content={"error": "Admin access required"}, status_code=401)
 
     output_dir = _get_dep_map_output_dir()
     if output_dir is None:
@@ -851,7 +849,9 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
             active_jobs = job_tracker.get_active_jobs()
             for job in active_jobs:
                 if job.operation_type == "dependency_map_repair":
-                    job_tracker.update_status(job.job_id, progress=progress, progress_info=info)
+                    job_tracker.update_status(
+                        job.job_id, progress=progress, progress_info=info
+                    )
                     break
         except Exception as e:
             logger.debug("progress_cb failed to update job tracker: %s", e)
@@ -931,9 +931,7 @@ def _run_repair_with_feedback(
     success = False
     try:
         # Build executor (AC4: journal_path propagated via _build_domain_analyzer)
-        executor = _build_repair_executor(
-            dep_map_service, output_dir, activity_journal
-        )
+        executor = _build_repair_executor(dep_map_service, output_dir, activity_journal)
 
         from ..services.dep_map_health_detector import DepMapHealthDetector
 
@@ -992,9 +990,7 @@ def trigger_dependency_map_repair(request: Request):
     """
     session = _require_admin_session(request)
     if not session:
-        return JSONResponse(
-            content={"error": "Admin access required"}, status_code=401
-        )
+        return JSONResponse(content={"error": "Admin access required"}, status_code=401)
 
     dep_map_service = _get_dep_map_service_from_state()
     if dep_map_service is None:

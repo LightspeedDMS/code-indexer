@@ -143,7 +143,7 @@ class TestDiagnosticsService:
         import os
 
         # Use temporary database to ensure clean state
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
             tmp_db_path = tmp_db.name
 
         try:
@@ -159,8 +159,9 @@ class TestDiagnosticsService:
             # All should be NOT_RUN initially (placeholders)
             for category, results in status.items():
                 for result in results:
-                    assert result.status == DiagnosticStatus.NOT_RUN, \
-                        f"{result.name} should be NOT_RUN initially, got {result.status}"
+                    assert (
+                        result.status == DiagnosticStatus.NOT_RUN
+                    ), f"{result.name} should be NOT_RUN initially, got {result.status}"
         finally:
             # Cleanup temp DB
             if os.path.exists(tmp_db_path):
@@ -175,20 +176,36 @@ class TestDiagnosticsService:
         status = service.get_status()
 
         # Verify expected result counts per category (Bug #145)
-        assert len(status[DiagnosticCategory.CLI_TOOLS]) == 8, "CLI Tools should have 8 results"
-        assert len(status[DiagnosticCategory.SDK_PREREQUISITES]) == 3, "SDK Prerequisites should have 3 results"
-        assert len(status[DiagnosticCategory.EXTERNAL_APIS]) == 5, "External APIs should have 5 results"
-        assert len(status[DiagnosticCategory.CREDENTIALS]) == 4, "Credentials should have 4 results"
-        assert len(status[DiagnosticCategory.INFRASTRUCTURE]) == 2, "Infrastructure should have 2 results"
+        assert (
+            len(status[DiagnosticCategory.CLI_TOOLS]) == 8
+        ), "CLI Tools should have 8 results"
+        assert (
+            len(status[DiagnosticCategory.SDK_PREREQUISITES]) == 3
+        ), "SDK Prerequisites should have 3 results"
+        assert (
+            len(status[DiagnosticCategory.EXTERNAL_APIS]) == 5
+        ), "External APIs should have 5 results"
+        assert (
+            len(status[DiagnosticCategory.CREDENTIALS]) == 4
+        ), "Credentials should have 4 results"
+        assert (
+            len(status[DiagnosticCategory.INFRASTRUCTURE]) == 2
+        ), "Infrastructure should have 2 results"
 
         # Verify results have actual diagnostic status (not NOT_RUN)
         # Note: Status depends on system state, but should be one of: WORKING, ERROR, NOT_CONFIGURED, WARNING
-        valid_statuses = {DiagnosticStatus.WORKING, DiagnosticStatus.ERROR,
-                         DiagnosticStatus.NOT_CONFIGURED, DiagnosticStatus.WARNING,
-                         DiagnosticStatus.NOT_APPLICABLE}
+        valid_statuses = {
+            DiagnosticStatus.WORKING,
+            DiagnosticStatus.ERROR,
+            DiagnosticStatus.NOT_CONFIGURED,
+            DiagnosticStatus.WARNING,
+            DiagnosticStatus.NOT_APPLICABLE,
+        }
         for category, results in status.items():
             for result in results:
-                assert result.status in valid_statuses, f"{result.name} status should not be NOT_RUN"
+                assert (
+                    result.status in valid_statuses
+                ), f"{result.name} status should not be NOT_RUN"
 
     def test_cache_stores_results(self):
         """Test results are cached after execution."""
@@ -333,7 +350,9 @@ class TestDiagnosticsService:
         async def failing_api_check():
             raise RuntimeError("Simulated API check failure")
 
-        with patch.object(service, 'run_external_api_diagnostics', side_effect=failing_api_check):
+        with patch.object(
+            service, "run_external_api_diagnostics", side_effect=failing_api_check
+        ):
             # Run all diagnostics - should not raise exception
             await service.run_all_diagnostics()
 
@@ -352,14 +371,21 @@ class TestDiagnosticsService:
 
         # Verify other categories executed successfully (should have multiple real results, not ERROR)
         cli_tools_results = status[DiagnosticCategory.CLI_TOOLS]
-        assert len(cli_tools_results) > 1, "CLI Tools should have multiple diagnostic results"
+        assert (
+            len(cli_tools_results) > 1
+        ), "CLI Tools should have multiple diagnostic results"
         # At least some should not be ERROR (depends on system state, but should have real checks)
-        assert any(r.status != DiagnosticStatus.ERROR for r in cli_tools_results), \
-            "CLI Tools should have non-ERROR results"
+        assert any(
+            r.status != DiagnosticStatus.ERROR for r in cli_tools_results
+        ), "CLI Tools should have non-ERROR results"
 
         sdk_results = status[DiagnosticCategory.SDK_PREREQUISITES]
-        assert len(sdk_results) > 1, "SDK Prerequisites should have multiple diagnostic results"
+        assert (
+            len(sdk_results) > 1
+        ), "SDK Prerequisites should have multiple diagnostic results"
 
         # Verify Infrastructure ran (should have 2 results: DB + Storage)
         infra_results = status[DiagnosticCategory.INFRASTRUCTURE]
-        assert len(infra_results) == 2, "Infrastructure should have 2 diagnostic results"
+        assert (
+            len(infra_results) == 2
+        ), "Infrastructure should have 2 diagnostic results"

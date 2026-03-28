@@ -7,7 +7,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 import hashlib
 import json
 import subprocess
@@ -104,11 +104,13 @@ class DeploymentExecutor:
 
             jwt_manager = JWTManager(secret_key=secret_key, token_expiration_minutes=10)
 
-            token: str = jwt_manager.create_token({
-                "username": "admin",
-                "role": "admin",
-                "created_at": "2025-01-01T00:00:00Z",
-            })
+            token: str = jwt_manager.create_token(
+                {
+                    "username": "admin",
+                    "role": "admin",
+                    "created_at": "2025-01-01T00:00:00Z",
+                }
+            )
 
             logger.debug(
                 "Generated JWT token for maintenance API",
@@ -2070,7 +2072,7 @@ class DeploymentExecutor:
                 return None
 
             with open(AUTO_UPDATE_STATUS_FILE, "r") as f:
-                return json.load(f)
+                return cast(Optional[dict[Any, Any]], json.load(f))
 
         except (json.JSONDecodeError, IOError) as e:
             logger.warning(

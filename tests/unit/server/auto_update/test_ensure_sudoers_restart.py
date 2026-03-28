@@ -28,7 +28,9 @@ WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
-        expected_rule = "jsbattig ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
+        expected_rule = (
+            "jsbattig ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
+        )
 
         with patch.object(Path, "exists", return_value=True):
             # Service file exists
@@ -58,7 +60,9 @@ WorkingDirectory=/home/user/code-indexer
 ExecStart=/usr/bin/python3 -m uvicorn app:app
 """
 
-        expected_rule = "jsbattig ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
+        expected_rule = (
+            "jsbattig ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cidx-server"
+        )
 
         with patch.object(Path, "exists", return_value=True):
             # Service file exists (only Path.exists call now)
@@ -87,11 +91,22 @@ ExecStart=/usr/bin/python3 -m uvicorn app:app
 
         # Verify chmod call (now at index [2])
         chmod_call = mock_run.call_args_list[2]
-        assert chmod_call[0][0] == ["sudo", "chmod", "0440", "/etc/sudoers.d/cidx-server"]
+        assert chmod_call[0][0] == [
+            "sudo",
+            "chmod",
+            "0440",
+            "/etc/sudoers.d/cidx-server",
+        ]
 
         # Verify visudo call (now at index [3])
         visudo_call = mock_run.call_args_list[3]
-        assert visudo_call[0][0] == ["sudo", "visudo", "-c", "-f", "/etc/sudoers.d/cidx-server"]
+        assert visudo_call[0][0] == [
+            "sudo",
+            "visudo",
+            "-c",
+            "-f",
+            "/etc/sudoers.d/cidx-server",
+        ]
 
     def test_ensure_sudoers_no_service_file(self):
         """Should return True when service file doesn't exist (not a fatal error)."""

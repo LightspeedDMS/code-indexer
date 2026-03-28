@@ -101,11 +101,13 @@ def mock_tracking_backend():
         "last_run": "2024-01-01T00:00:00Z",
         "next_run": "2024-01-02T00:00:00Z",
         "status": "completed",
-        "commit_hashes": json.dumps({
-            "repo1": "repo1-commit-abc123",  # Unchanged
-            "repo2": "repo2-commit-old456",  # Changed (current is abc123)
-            "repo3": "repo3-commit-abc123",  # Unchanged
-        }),
+        "commit_hashes": json.dumps(
+            {
+                "repo1": "repo1-commit-abc123",  # Unchanged
+                "repo2": "repo2-commit-old456",  # Changed (current is abc123)
+                "repo3": "repo3-commit-abc123",  # Unchanged
+            }
+        ),
         "error_message": None,
     }
     return backend
@@ -130,6 +132,7 @@ def mock_golden_repos_manager(tmp_golden_repos_root: Path):
             "clone_path": str(tmp_golden_repos_root / "repo3"),
         },
     ]
+
     # get_actual_repo_path resolves stale clone_path to actual filesystem path;
     # in test fixtures the flat paths are valid, so return them directly
     def _resolve_path(alias: str) -> str:
@@ -192,10 +195,12 @@ class TestChangeDetection:
         (new_repo_dir / "main.py").write_text("# repo4 source\n")
 
         # Update mock to include new repo
-        mock_golden_repos_manager.list_golden_repos.return_value.append({
-            "alias": "repo4",
-            "clone_path": str(new_repo_dir),
-        })
+        mock_golden_repos_manager.list_golden_repos.return_value.append(
+            {
+                "alias": "repo4",
+                "clone_path": str(new_repo_dir),
+            }
+        )
 
         changed, new, removed = dependency_map_service.detect_changes()
 
@@ -209,7 +214,8 @@ class TestChangeDetection:
         """Test that removed repos are detected (in stored but not current)."""
         # Remove repo3 from current repos (but it's in stored hashes)
         mock_golden_repos_manager.list_golden_repos.return_value = [
-            repo for repo in mock_golden_repos_manager.list_golden_repos.return_value
+            repo
+            for repo in mock_golden_repos_manager.list_golden_repos.return_value
             if repo["alias"] != "repo3"
         ]
 
@@ -224,11 +230,13 @@ class TestChangeDetection:
     ):
         """Test that detect_changes returns empty lists when nothing changed."""
         # Set stored hashes to match current commits
-        mock_tracking_backend.get_tracking.return_value["commit_hashes"] = json.dumps({
-            "repo1": "repo1-commit-abc123",
-            "repo2": "repo2-commit-abc123",
-            "repo3": "repo3-commit-abc123",
-        })
+        mock_tracking_backend.get_tracking.return_value["commit_hashes"] = json.dumps(
+            {
+                "repo1": "repo1-commit-abc123",
+                "repo2": "repo2-commit-abc123",
+                "repo3": "repo3-commit-abc123",
+            }
+        )
 
         config_manager = Mock()
         config = ClaudeIntegrationConfig(dependency_map_enabled=True)
@@ -255,7 +263,9 @@ class TestAffectedDomainIdentification:
         self, dependency_map_service, tmp_golden_repos_root
     ):
         """Test that changed repo maps to correct domains from _index.md."""
-        changed_repos = [{"alias": "repo2", "clone_path": str(tmp_golden_repos_root / "repo2")}]
+        changed_repos = [
+            {"alias": "repo2", "clone_path": str(tmp_golden_repos_root / "repo2")}
+        ]
         new_repos = []
         removed_repos = []
 
@@ -273,7 +283,9 @@ class TestAffectedDomainIdentification:
     ):
         """Test that new repo not in index triggers domain discovery."""
         changed_repos = []
-        new_repos = [{"alias": "repo4", "clone_path": str(tmp_golden_repos_root / "repo4")}]
+        new_repos = [
+            {"alias": "repo4", "clone_path": str(tmp_golden_repos_root / "repo4")}
+        ]
         removed_repos = []
 
         affected = dependency_map_service.identify_affected_domains(
@@ -283,9 +295,7 @@ class TestAffectedDomainIdentification:
         # New repo not in index should trigger __NEW_REPO_DISCOVERY__
         assert "__NEW_REPO_DISCOVERY__" in affected
 
-    def test_identify_affected_domains_for_removed_repo(
-        self, dependency_map_service
-    ):
+    def test_identify_affected_domains_for_removed_repo(self, dependency_map_service):
         """Test that removed repo maps to its domains for cleanup."""
         changed_repos = []
         new_repos = []

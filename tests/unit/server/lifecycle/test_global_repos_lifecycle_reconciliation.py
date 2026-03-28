@@ -12,7 +12,9 @@ import time
 import pytest
 from unittest.mock import patch
 
-from code_indexer.server.lifecycle.global_repos_lifecycle import GlobalReposLifecycleManager
+from code_indexer.server.lifecycle.global_repos_lifecycle import (
+    GlobalReposLifecycleManager,
+)
 
 
 @pytest.fixture
@@ -55,9 +57,9 @@ class TestGlobalReposLifecycleReconciliation:
 
             manager.stop()
 
-        assert len(reconcile_called) >= 1, (
-            "reconcile_golden_repos() must be called during startup"
-        )
+        assert (
+            len(reconcile_called) >= 1
+        ), "reconcile_golden_repos() must be called during startup"
 
     def test_reconcile_failure_does_not_block_start(self, golden_repos_dir):
         """
@@ -78,8 +80,8 @@ class TestGlobalReposLifecycleReconciliation:
             time.sleep(0.1)
 
             # Manager must be running despite reconciliation failure
-            assert manager.is_running(), (
-                "Lifecycle manager must be running even after reconciliation failure"
-            )
+            assert (
+                manager.is_running()
+            ), "Lifecycle manager must be running even after reconciliation failure"
 
             manager.stop()

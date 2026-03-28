@@ -34,7 +34,9 @@ class TestDebugRouterRegistration:
     def test_snapshot_route_accepts_get(self):
         from code_indexer.server.routers.debug_routes import debug_router
 
-        snapshot_routes = [r for r in debug_router.routes if r.path == "/debug/memory-snapshot"]
+        snapshot_routes = [
+            r for r in debug_router.routes if r.path == "/debug/memory-snapshot"
+        ]
         assert len(snapshot_routes) > 0
         methods = {m for r in snapshot_routes for m in r.methods}
         assert "GET" in methods
@@ -42,7 +44,9 @@ class TestDebugRouterRegistration:
     def test_compare_route_accepts_get(self):
         from code_indexer.server.routers.debug_routes import debug_router
 
-        compare_routes = [r for r in debug_router.routes if r.path == "/debug/memory-compare"]
+        compare_routes = [
+            r for r in debug_router.routes if r.path == "/debug/memory-compare"
+        ]
         assert len(compare_routes) > 0
         methods = {m for r in compare_routes for m in r.methods}
         assert "GET" in methods
@@ -52,9 +56,9 @@ class TestDebugRouterRegistration:
         from code_indexer.server.app import app
 
         app_paths = {route.path for route in app.routes}
-        assert "/debug/memory-snapshot" in app_paths, (
-            f"debug router not registered. App paths sample: {list(app_paths)[:30]}"
-        )
+        assert (
+            "/debug/memory-snapshot" in app_paths
+        ), f"debug router not registered. App paths sample: {list(app_paths)[:30]}"
 
 
 class TestDebugRouterHttpHandlers:

@@ -8,6 +8,7 @@ Acceptance Criteria covered:
 - AC3: Edges to/from hidden domains (filtered by accessible_repos) do NOT count
 - AC4: Nodes with zero edges have count 0
 """
+
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -30,6 +31,7 @@ def _import_service():
     from code_indexer.server.services.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
+
     return DependencyMapDomainService
 
 
@@ -57,53 +59,74 @@ class TestGraphDataDepCountFields:
         """AC1: Every node must have an incoming_dep_count field."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["repo1"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "Auth domain",
+                    "participating_repos": ["repo1"],
+                },
+            ],
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) > 0, "Expected at least one node"
-        assert "incoming_dep_count" in nodes[0], (
-            f"Node missing 'incoming_dep_count' field. Got keys: {list(nodes[0].keys())}"
-        )
+        assert (
+            "incoming_dep_count" in nodes[0]
+        ), f"Node missing 'incoming_dep_count' field. Got keys: {list(nodes[0].keys())}"
 
     def test_nodes_have_outgoing_dep_count_field(self, tmp_path):
         """AC1: Every node must have an outgoing_dep_count field."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["repo1"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "Auth domain",
+                    "participating_repos": ["repo1"],
+                },
+            ],
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) > 0, "Expected at least one node"
-        assert "outgoing_dep_count" in nodes[0], (
-            f"Node missing 'outgoing_dep_count' field. Got keys: {list(nodes[0].keys())}"
-        )
+        assert (
+            "outgoing_dep_count" in nodes[0]
+        ), f"Node missing 'outgoing_dep_count' field. Got keys: {list(nodes[0].keys())}"
 
     def test_zero_dep_node_has_count_zero(self, tmp_path):
         """AC4: Isolated node with no edges has both counts equal to zero."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "isolated", "description": "No deps", "participating_repos": ["repo1"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "isolated",
+                    "description": "No deps",
+                    "participating_repos": ["repo1"],
+                },
+            ],
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) == 1
         node = nodes[0]
-        assert node["incoming_dep_count"] == 0, (
-            f"Isolated node should have incoming_dep_count=0, got {node['incoming_dep_count']}"
-        )
-        assert node["outgoing_dep_count"] == 0, (
-            f"Isolated node should have outgoing_dep_count=0, got {node['outgoing_dep_count']}"
-        )
+        assert (
+            node["incoming_dep_count"] == 0
+        ), f"Isolated node should have incoming_dep_count=0, got {node['incoming_dep_count']}"
+        assert (
+            node["outgoing_dep_count"] == 0
+        ), f"Isolated node should have outgoing_dep_count=0, got {node['outgoing_dep_count']}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,27 +141,45 @@ class TestGraphDataDepCountAccuracy:
         """AC2: outgoing_dep_count equals the number of edges where this node is source."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-            {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-            {"name": "infra", "description": "", "participating_repos": ["infra-svc"]},
-        ])
-        _write_index_md(depmap_dir, """
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["bill-svc"],
+                },
+                {
+                    "name": "infra",
+                    "description": "",
+                    "participating_repos": ["infra-svc"],
+                },
+            ],
+        )
+        _write_index_md(
+            depmap_dir,
+            """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | auth | billing | auth-svc |
 | auth | infra | auth-svc |
-""")
+""",
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes_by_id = {n["id"]: n for n in result["nodes"]}
         # auth has 2 outgoing edges
-        assert nodes_by_id["auth"]["outgoing_dep_count"] == 2, (
-            f"Expected outgoing=2 for auth, got {nodes_by_id['auth']['outgoing_dep_count']}"
-        )
+        assert (
+            nodes_by_id["auth"]["outgoing_dep_count"] == 2
+        ), f"Expected outgoing=2 for auth, got {nodes_by_id['auth']['outgoing_dep_count']}"
         assert nodes_by_id["auth"]["incoming_dep_count"] == 0
         # billing and infra each have 1 incoming edge
         assert nodes_by_id["billing"]["incoming_dep_count"] == 1
@@ -150,45 +191,77 @@ class TestGraphDataDepCountAccuracy:
         """AC2: incoming_dep_count equals the number of edges where this node is target."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "shared", "description": "", "participating_repos": ["shared-svc"]},
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-            {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-        ])
-        _write_index_md(depmap_dir, """
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "shared",
+                    "description": "",
+                    "participating_repos": ["shared-svc"],
+                },
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["bill-svc"],
+                },
+            ],
+        )
+        _write_index_md(
+            depmap_dir,
+            """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | auth | shared | auth-svc |
 | billing | shared | bill-svc |
-""")
+""",
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes_by_id = {n["id"]: n for n in result["nodes"]}
         # shared has 2 incoming edges (from auth and billing)
-        assert nodes_by_id["shared"]["incoming_dep_count"] == 2, (
-            f"Expected incoming=2 for shared, got {nodes_by_id['shared']['incoming_dep_count']}"
-        )
+        assert (
+            nodes_by_id["shared"]["incoming_dep_count"] == 2
+        ), f"Expected incoming=2 for shared, got {nodes_by_id['shared']['incoming_dep_count']}"
         assert nodes_by_id["shared"]["outgoing_dep_count"] == 0
 
     def test_bidirectional_edges_counted_correctly(self, tmp_path):
         """AC2: Bidirectional dependency (A->B and B->A) counts both nodes correctly."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-            {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-        ])
-        _write_index_md(depmap_dir, """
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["bill-svc"],
+                },
+            ],
+        )
+        _write_index_md(
+            depmap_dir,
+            """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | auth | billing | auth-svc |
 | billing | auth | bill-svc |
-""")
+""",
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
@@ -203,13 +276,34 @@ class TestGraphDataDepCountAccuracy:
         """AC2: Sum of all incoming counts equals sum of all outgoing counts (edge conservation)."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-            {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-            {"name": "infra", "description": "", "participating_repos": ["infra-svc"]},
-            {"name": "shared", "description": "", "participating_repos": ["shared-svc"]},
-        ])
-        _write_index_md(depmap_dir, """
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["bill-svc"],
+                },
+                {
+                    "name": "infra",
+                    "description": "",
+                    "participating_repos": ["infra-svc"],
+                },
+                {
+                    "name": "shared",
+                    "description": "",
+                    "participating_repos": ["shared-svc"],
+                },
+            ],
+        )
+        _write_index_md(
+            depmap_dir,
+            """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos |
@@ -217,7 +311,8 @@ class TestGraphDataDepCountAccuracy:
 | auth | shared | auth-svc |
 | billing | shared | bill-svc |
 | auth | infra | auth-svc |
-""")
+""",
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
@@ -244,19 +339,37 @@ class TestGraphDataDepCountFiltering:
         """AC3: Edge from hidden domain to visible domain does not add to visible node's count."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-            {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-            {"name": "infra", "description": "", "participating_repos": ["infra-svc"]},
-        ])
-        _write_index_md(depmap_dir, """
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["bill-svc"],
+                },
+                {
+                    "name": "infra",
+                    "description": "",
+                    "participating_repos": ["infra-svc"],
+                },
+            ],
+        )
+        _write_index_md(
+            depmap_dir,
+            """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | auth | billing | auth-svc |
 | infra | billing | infra-svc |
-""")
+""",
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         # Non-admin can only see auth-svc and bill-svc (infra is hidden)
@@ -274,9 +387,16 @@ class TestGraphDataDepCountFiltering:
         """AC4: Multi-repo domain with no visible edges has both counts equal to zero."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "shared", "description": "", "participating_repos": ["svc-a", "svc-b", "svc-c"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "shared",
+                    "description": "",
+                    "participating_repos": ["svc-a", "svc-b", "svc-c"],
+                },
+            ],
+        )
         # No _index.md — no deps at all
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
@@ -310,35 +430,56 @@ class TestGraphDataDepCountEdgeCases:
         """AC1: Dep count fields are integers, not None or strings."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-            {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-        ])
-        _write_index_md(depmap_dir, """
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["bill-svc"],
+                },
+            ],
+        )
+        _write_index_md(
+            depmap_dir,
+            """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | auth | billing | auth-svc |
-""")
+""",
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         for node in result["nodes"]:
-            assert isinstance(node["incoming_dep_count"], int), (
-                f"incoming_dep_count must be int, got {type(node['incoming_dep_count'])}"
-            )
-            assert isinstance(node["outgoing_dep_count"], int), (
-                f"outgoing_dep_count must be int, got {type(node['outgoing_dep_count'])}"
-            )
+            assert isinstance(
+                node["incoming_dep_count"], int
+            ), f"incoming_dep_count must be int, got {type(node['incoming_dep_count'])}"
+            assert isinstance(
+                node["outgoing_dep_count"], int
+            ), f"outgoing_dep_count must be int, got {type(node['outgoing_dep_count'])}"
 
     def test_existing_fields_still_present(self, tmp_path):
         """Regression: Adding new fields must not remove existing id/name/description/repo_count."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["a", "b"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "Auth domain",
+                    "participating_repos": ["a", "b"],
+                },
+            ],
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()

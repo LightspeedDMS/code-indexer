@@ -1,4 +1,5 @@
 """Tests for wiki navigation: sidebar, link rewriting, breadcrumbs (Story #282)."""
+
 import tempfile
 from pathlib import Path
 
@@ -22,7 +23,9 @@ class TestBuildSidebarTree:
             assert len(tree) == 1
             root_group = tree[0]
             # Story #288: all articles normalized into categories; uncategorized → "Uncategorized"
-            titles = [a["title"] for a in root_group["categories"].get("Uncategorized", [])]
+            titles = [
+                a["title"] for a in root_group["categories"].get("Uncategorized", [])
+            ]
             assert "Page 1" in titles
             assert "Page 2" in titles
 
@@ -60,7 +63,9 @@ class TestBuildSidebarTree:
             (repo_dir / "mango.md").write_text("# Mango")
             tree = svc.build_sidebar_tree(repo_dir, "test-repo")
             # Story #288: uncategorized articles go to "Uncategorized" category
-            titles = [a["title"] for a in tree[0]["categories"].get("Uncategorized", [])]
+            titles = [
+                a["title"] for a in tree[0]["categories"].get("Uncategorized", [])
+            ]
             assert titles == sorted(titles, key=str.lower)
 
     def test_article_path_has_no_extension(self, svc):
@@ -116,29 +121,29 @@ class TestRewriteLinks:
     def test_relative_link_in_root_dir(self, svc):
         html = '<a href="other-page">Link</a>'
         result = svc.rewrite_links(html, "my-repo", "")
-        assert '/wiki/my-repo/other-page' in result
+        assert "/wiki/my-repo/other-page" in result
 
     def test_relative_link_in_subdir(self, svc):
         html = '<a href="sibling-page">Link</a>'
         result = svc.rewrite_links(html, "my-repo", "guides")
-        assert '/wiki/my-repo/guides/sibling-page' in result
+        assert "/wiki/my-repo/guides/sibling-page" in result
 
     def test_slash_link_rewrites_with_repo(self, svc):
         html = '<a href="guides/intro">Link</a>'
         result = svc.rewrite_links(html, "my-repo", "")
-        assert '/wiki/my-repo/guides/intro' in result
+        assert "/wiki/my-repo/guides/intro" in result
 
     def test_already_wiki_prefixed_unchanged(self, svc):
         html = '<a href="/wiki/other-repo/page">Link</a>'
         result = svc.rewrite_links(html, "my-repo", "")
-        assert '/wiki/other-repo/page' in result
-        assert result.count('/wiki/') == 1
+        assert "/wiki/other-repo/page" in result
+        assert result.count("/wiki/") == 1
 
     def test_external_link_with_existing_target_unchanged(self, svc):
         html = '<a href="https://example.com" target="_blank">Link</a>'
         result = svc.rewrite_links(html, "my-repo", "")
         # Should not double-add target
-        assert result.count('target=') == 1
+        assert result.count("target=") == 1
 
 
 class TestBuildBreadcrumbs:

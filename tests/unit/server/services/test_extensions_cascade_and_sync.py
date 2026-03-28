@@ -16,7 +16,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from code_indexer.server.services.config_service import ConfigService, reset_config_service
+from code_indexer.server.services.config_service import (
+    ConfigService,
+    reset_config_service,
+)
 
 
 def _write_cidx_config(repo_path: str, file_extensions: list, extra: dict = None):
@@ -66,7 +69,9 @@ class TestCascadeToGoldenRepos:
         """AC5: cascade must write server extensions to each repo's config.json."""
         _write_cidx_config(self.repo1_dir, ["old_ext"])
         server_exts = [".py", ".go", ".ts"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         repos = [{"alias": "repo1"}]
         mock_manager = self._make_mock_manager(repos, {"repo1": self.repo1_dir})
@@ -84,7 +89,9 @@ class TestCascadeToGoldenRepos:
         """AC5: cascade must replace, not append to, existing file_extensions."""
         _write_cidx_config(self.repo1_dir, ["old1", "old2", "old3"])
         server_exts = [".rs"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         repos = [{"alias": "repo1"}]
         mock_manager = self._make_mock_manager(repos, {"repo1": self.repo1_dir})
@@ -102,7 +109,9 @@ class TestCascadeToGoldenRepos:
         """AC5: cascade must strip leading dots since CLI format has no dots."""
         _write_cidx_config(self.repo1_dir, [])
         server_exts = [".py", ".go"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         repos = [{"alias": "repo1"}]
         mock_manager = self._make_mock_manager(repos, {"repo1": self.repo1_dir})
@@ -115,7 +124,9 @@ class TestCascadeToGoldenRepos:
 
         result = _read_cidx_config(self.repo1_dir)
         for ext in result["file_extensions"]:
-            assert not ext.startswith("."), f"Extension {ext!r} should not have leading dot"
+            assert not ext.startswith(
+                "."
+            ), f"Extension {ext!r} should not have leading dot"
 
     def test_cascade_preserves_other_config_fields(self):
         """AC5: cascade must not overwrite other fields in repo config.json."""
@@ -125,7 +136,9 @@ class TestCascadeToGoldenRepos:
             extra={"embedding_provider": "voyage-ai", "collection": "my-repo"},
         )
         server_exts = [".py", ".ts"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         repos = [{"alias": "repo1"}]
         mock_manager = self._make_mock_manager(repos, {"repo1": self.repo1_dir})
@@ -144,7 +157,9 @@ class TestCascadeToGoldenRepos:
         """AC5: cascade must continue to next repo if one fails."""
         _write_cidx_config(self.repo2_dir, ["old"])
         server_exts = [".py"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         repos = [{"alias": "repo1"}, {"alias": "repo2"}]
         # repo1 has an invalid path (no .code-indexer/config.json) - must not crash
@@ -167,7 +182,9 @@ class TestCascadeToGoldenRepos:
     def test_cascade_does_nothing_when_no_repos(self):
         """AC5: cascade with empty repo list must complete without error."""
         server_exts = [".py"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         mock_manager = MagicMock()
         mock_manager.list_golden_repos.return_value = []
@@ -203,7 +220,9 @@ class TestSeedNewRepoFromServerConfig:
         # cidx init creates default extensions
         _write_cidx_config(self.repo_dir, ["py", "js", "ts"])
         server_exts = [".rs", ".go"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         self.config_service.seed_repo_extensions_from_server_config(self.repo_dir)
 
@@ -214,19 +233,25 @@ class TestSeedNewRepoFromServerConfig:
         """AC6: seed must strip leading dots for CLI format."""
         _write_cidx_config(self.repo_dir, ["py"])
         server_exts = [".py", ".ts"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         self.config_service.seed_repo_extensions_from_server_config(self.repo_dir)
 
         result = _read_cidx_config(self.repo_dir)
         for ext in result["file_extensions"]:
-            assert not ext.startswith("."), f"Extension {ext!r} should not have leading dot"
+            assert not ext.startswith(
+                "."
+            ), f"Extension {ext!r} should not have leading dot"
 
     def test_seed_handles_missing_cidx_config_gracefully(self):
         """AC6: seed must not raise if .code-indexer/config.json does not exist."""
         # No .code-indexer dir created
         server_exts = [".py"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         # Must not raise
         self.config_service.seed_repo_extensions_from_server_config(self.repo_dir)
@@ -239,7 +264,9 @@ class TestSeedNewRepoFromServerConfig:
             extra={"embedding_provider": "voyage-ai", "model": "voyage-3"},
         )
         server_exts = [".rs"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         self.config_service.seed_repo_extensions_from_server_config(self.repo_dir)
 
@@ -272,7 +299,9 @@ class TestRefreshSyncCorrectsDrift:
         _write_cidx_config(self.repo_dir, ["py", "js"])
         # Server now has different extensions
         server_exts = [".py", ".ts", ".go"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
 
@@ -282,7 +311,9 @@ class TestRefreshSyncCorrectsDrift:
     def test_sync_does_not_rewrite_when_already_in_sync(self):
         """AC7: sync must not modify the file when extensions already match."""
         server_exts = [".py", ".ts"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
         # Write the same extensions to repo (already in sync)
         _write_cidx_config(self.repo_dir, ["py", "ts"])
 
@@ -292,12 +323,16 @@ class TestRefreshSyncCorrectsDrift:
         self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
 
         mtime_after = cidx_config_path.stat().st_mtime
-        assert mtime_before == mtime_after, "File was rewritten when it shouldn't have been"
+        assert (
+            mtime_before == mtime_after
+        ), "File was rewritten when it shouldn't have been"
 
     def test_sync_handles_missing_repo_config_gracefully(self):
         """AC7: sync must not raise if .code-indexer/config.json does not exist."""
         server_exts = [".py"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         # Must not raise
         self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
@@ -306,10 +341,14 @@ class TestRefreshSyncCorrectsDrift:
         """AC7: sync must write CLI format (no leading dots) to repo config."""
         _write_cidx_config(self.repo_dir, ["old_ext"])
         server_exts = [".py", ".go"]
-        self.config_service.update_setting("indexing", "indexable_extensions", server_exts)
+        self.config_service.update_setting(
+            "indexing", "indexable_extensions", server_exts
+        )
 
         self.config_service.sync_repo_extensions_if_drifted(self.repo_dir)
 
         result = _read_cidx_config(self.repo_dir)
         for ext in result["file_extensions"]:
-            assert not ext.startswith("."), f"Extension {ext!r} should not have leading dot"
+            assert not ext.startswith(
+                "."
+            ), f"Extension {ext!r} should not have leading dot"

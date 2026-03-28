@@ -206,7 +206,11 @@ class TestBug149VectorStorageScanCorrectDirectories:
         # Create metadata
         metadata = {
             "vector_size": 1024,
-            "hnsw_index": {"vector_dim": 1024, "space": "cosine", "max_elements": 100000},
+            "hnsw_index": {
+                "vector_dim": 1024,
+                "space": "cosine",
+                "max_elements": 100000,
+            },
         }
         meta_file = collection_dir / "collection_meta.json"
         meta_file.write_text(json.dumps(metadata))

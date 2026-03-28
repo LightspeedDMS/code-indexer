@@ -9,6 +9,7 @@ Acceptance Criteria covered:
 - AC4: Access-filtered repos exclude their file counts from domain totals
 - AC6: Domains with zero files have unchanged bubble sizing (total_file_count=0)
 """
+
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -31,6 +32,7 @@ def _import_service():
     from code_indexer.server.services.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
+
     return DependencyMapDomainService
 
 
@@ -58,26 +60,40 @@ class TestGraphDataTotalFileCountField:
         """AC1: Every node must have a total_file_count field."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["repo1"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "Auth domain",
+                    "participating_repos": ["repo1"],
+                },
+            ],
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result.get("nodes", [])
         assert len(nodes) > 0, "Expected at least one node"
-        assert "total_file_count" in nodes[0], (
-            f"Node missing 'total_file_count' field. Got keys: {list(nodes[0].keys())}"
-        )
+        assert (
+            "total_file_count" in nodes[0]
+        ), f"Node missing 'total_file_count' field. Got keys: {list(nodes[0].keys())}"
 
     def test_total_file_count_is_integer(self, tmp_path):
         """AC1: total_file_count must be an integer, not None or string."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["repo1"]},
-            {"name": "billing", "description": "", "participating_repos": ["repo2"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {"name": "auth", "description": "", "participating_repos": ["repo1"]},
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["repo2"],
+                },
+            ],
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
@@ -100,19 +116,25 @@ class TestGraphDataFileCountAggregation:
         """AC2: total_file_count equals sum of file_count for repos in domain."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "Infrastructure",
+                    "description": "",
+                    "participating_repos": ["repo-a", "repo-b"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
             {
-                "name": "Infrastructure",
-                "description": "",
-                "participating_repos": ["repo-a", "repo-b"],
+                "repo_sizes": {
+                    "repo-a": {"file_count": 500},
+                    "repo-b": {"file_count": 1500},
+                }
             },
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "repo-a": {"file_count": 500},
-                "repo-b": {"file_count": 1500},
-            }
-        })
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
@@ -126,39 +148,55 @@ class TestGraphDataFileCountAggregation:
         """AC2: Single-repo domain gets the repo's file_count directly."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "auth-svc": {"file_count": 300},
-            }
-        })
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "",
+                    "participating_repos": ["auth-svc"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
+            {
+                "repo_sizes": {
+                    "auth-svc": {"file_count": 300},
+                }
+            },
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result["nodes"]
-        assert nodes[0]["total_file_count"] == 300, (
-            f"Expected total_file_count=300, got {nodes[0]['total_file_count']}"
-        )
+        assert (
+            nodes[0]["total_file_count"] == 300
+        ), f"Expected total_file_count=300, got {nodes[0]['total_file_count']}"
 
     def test_repo_missing_from_journal_contributes_zero(self, tmp_path):
         """AC2: Repo in domain but not in journal contributes 0 to the total."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "mixed",
+                    "description": "",
+                    "participating_repos": ["known-repo", "unknown-repo"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
             {
-                "name": "mixed",
-                "description": "",
-                "participating_repos": ["known-repo", "unknown-repo"],
+                "repo_sizes": {
+                    "known-repo": {"file_count": 1000},
+                    # "unknown-repo" intentionally absent
+                }
             },
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "known-repo": {"file_count": 1000},
-                # "unknown-repo" intentionally absent
-            }
-        })
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
@@ -181,10 +219,17 @@ class TestGraphDataMissingJournal:
         """AC3: When no _journal.json exists, total_file_count is 0 for all nodes."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["repo1"]},
-            {"name": "billing", "description": "", "participating_repos": ["repo2"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {"name": "auth", "description": "", "participating_repos": ["repo1"]},
+                {
+                    "name": "billing",
+                    "description": "",
+                    "participating_repos": ["repo2"],
+                },
+            ],
+        )
         # No _journal.json written
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
@@ -201,9 +246,12 @@ class TestGraphDataMissingJournal:
         """AC3: Journal exists but lacks 'repo_sizes' key - total_file_count is 0."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["repo1"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {"name": "auth", "description": "", "participating_repos": ["repo1"]},
+            ],
+        )
         # Journal exists but without repo_sizes key
         _write_journal_json(depmap_dir, {"analysis_date": "2026-02-23"})
         dep_map_svc = _make_dep_map_service(str(tmp_path))
@@ -219,9 +267,12 @@ class TestGraphDataMissingJournal:
         """AC3: Corrupt (invalid JSON) journal gives total_file_count=0, no exception."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "", "participating_repos": ["repo1"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {"name": "auth", "description": "", "participating_repos": ["repo1"]},
+            ],
+        )
         # Write corrupt JSON
         depmap_dir.mkdir(parents=True, exist_ok=True)
         (depmap_dir / "_journal.json").write_text("{ this is not valid JSON }")
@@ -239,9 +290,16 @@ class TestGraphDataMissingJournal:
         """AC3: Other node fields (repo_count, dep counts) remain correct without journal."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["a", "b"]},
-        ])
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "Auth domain",
+                    "participating_repos": ["a", "b"],
+                },
+            ],
+        )
         # No _journal.json
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
@@ -268,19 +326,25 @@ class TestGraphDataAccessFilteredFileCounts:
         """AC4: Non-admin user gets only file counts from their accessible repos."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "platform",
+                    "description": "",
+                    "participating_repos": ["repo-a", "repo-b"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
             {
-                "name": "platform",
-                "description": "",
-                "participating_repos": ["repo-a", "repo-b"],
+                "repo_sizes": {
+                    "repo-a": {"file_count": 300},
+                    "repo-b": {"file_count": 5000},
+                }
             },
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "repo-a": {"file_count": 300},
-                "repo-b": {"file_count": 5000},
-            }
-        })
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         # Non-admin can only access repo-a
@@ -296,19 +360,25 @@ class TestGraphDataAccessFilteredFileCounts:
         """AC4: Admin (accessible_repos=None) gets sum of ALL repo file counts."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "platform",
+                    "description": "",
+                    "participating_repos": ["repo-a", "repo-b"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
             {
-                "name": "platform",
-                "description": "",
-                "participating_repos": ["repo-a", "repo-b"],
+                "repo_sizes": {
+                    "repo-a": {"file_count": 300},
+                    "repo-b": {"file_count": 5000},
+                }
             },
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "repo-a": {"file_count": 300},
-                "repo-b": {"file_count": 5000},
-            }
-        })
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         # Admin (None = all repos)
@@ -332,40 +402,60 @@ class TestGraphDataZeroFileCount:
         """AC6: Repo with explicit file_count=0 in journal gives total_file_count=0."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "empty-domain", "description": "", "participating_repos": ["empty-repo"]},
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "empty-repo": {"file_count": 0},
-            }
-        })
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "empty-domain",
+                    "description": "",
+                    "participating_repos": ["empty-repo"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
+            {
+                "repo_sizes": {
+                    "empty-repo": {"file_count": 0},
+                }
+            },
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()
         nodes = result["nodes"]
-        assert nodes[0]["total_file_count"] == 0, (
-            f"Expected total_file_count=0, got {nodes[0]['total_file_count']}"
-        )
+        assert (
+            nodes[0]["total_file_count"] == 0
+        ), f"Expected total_file_count=0, got {nodes[0]['total_file_count']}"
         # Verify it's a non-negative integer (not NaN, not negative)
         count = nodes[0]["total_file_count"]
-        assert isinstance(count, int) and count >= 0, (
-            f"total_file_count must be non-negative integer, got {count!r}"
-        )
+        assert (
+            isinstance(count, int) and count >= 0
+        ), f"total_file_count must be non-negative integer, got {count!r}"
 
     def test_existing_fields_still_present_with_journal(self, tmp_path):
         """Regression: Adding total_file_count must not remove existing node fields."""
         Service = _import_service()
         depmap_dir = tmp_path / "cidx-meta" / "dependency-map"
-        _write_domains_json(depmap_dir, [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["a", "b"]},
-        ])
-        _write_journal_json(depmap_dir, {
-            "repo_sizes": {
-                "a": {"file_count": 100},
-                "b": {"file_count": 200},
-            }
-        })
+        _write_domains_json(
+            depmap_dir,
+            [
+                {
+                    "name": "auth",
+                    "description": "Auth domain",
+                    "participating_repos": ["a", "b"],
+                },
+            ],
+        )
+        _write_journal_json(
+            depmap_dir,
+            {
+                "repo_sizes": {
+                    "a": {"file_count": 100},
+                    "b": {"file_count": 200},
+                }
+            },
+        )
         dep_map_svc = _make_dep_map_service(str(tmp_path))
         service = Service(dep_map_svc, _make_config_manager())
         result = service.get_graph_data()

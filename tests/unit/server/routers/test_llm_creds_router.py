@@ -134,7 +134,9 @@ class TestTestConnection:
 class TestLeaseStatus:
     """GET /api/llm-creds/lease-status"""
 
-    def test_lease_status_inactive_when_no_lifecycle_service(self, app_with_router, client):
+    def test_lease_status_inactive_when_no_lifecycle_service(
+        self, app_with_router, client
+    ):
         """Returns inactive status when no lifecycle service in app.state."""
         # Ensure app.state has no lifecycle service
         if hasattr(app_with_router.state, "llm_lifecycle_service"):
@@ -265,12 +267,16 @@ class TestSaveConfig:
         assert data["mode"] == "subscription"
         # Config fields should have been set
         assert mock_config.claude_integration_config.claude_auth_mode == "subscription"
-        assert mock_config.claude_integration_config.llm_creds_provider_url == "http://provider:3000"
+        assert (
+            mock_config.claude_integration_config.llm_creds_provider_url
+            == "http://provider:3000"
+        )
 
     def test_save_config_subscription_missing_url_returns_error(self, client):
         """Subscription mode with missing provider URL returns 422 or error response."""
         mock_config = MagicMock()
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+
         mock_config.claude_integration_config = ClaudeIntegrationConfig()
 
         with patch(
@@ -299,6 +305,7 @@ class TestSaveConfig:
         """Subscription mode with missing API key returns error."""
         mock_config = MagicMock()
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+
         mock_config.claude_integration_config = ClaudeIntegrationConfig()
 
         with patch(
@@ -321,19 +328,26 @@ class TestSaveConfig:
         else:
             assert response.status_code == 422
 
-    def test_save_config_switching_to_subscription_starts_lifecycle(self, app_with_router, client):
+    def test_save_config_switching_to_subscription_starts_lifecycle(
+        self, app_with_router, client
+    ):
         """Switching from api_key to subscription triggers lifecycle start."""
         mock_config = self._base_config()
         mock_config.claude_integration_config.claude_auth_mode = "api_key"
 
         mock_lifecycle = MagicMock()
-        mock_lifecycle.get_status.return_value = MagicMock(status=MagicMock(value="active"))
+        mock_lifecycle.get_status.return_value = MagicMock(
+            status=MagicMock(value="active")
+        )
 
-        with patch(
-            "code_indexer.server.routers.llm_creds.get_config_service"
-        ) as mock_cs, patch(
-            "code_indexer.server.routers.llm_creds._build_lifecycle_service"
-        ) as mock_build:
+        with (
+            patch(
+                "code_indexer.server.routers.llm_creds.get_config_service"
+            ) as mock_cs,
+            patch(
+                "code_indexer.server.routers.llm_creds._build_lifecycle_service"
+            ) as mock_build,
+        ):
             svc = mock_cs.return_value
             svc.load_config.return_value = mock_config
             svc.config_manager = MagicMock()
@@ -353,13 +367,17 @@ class TestSaveConfig:
         assert data["success"] is True
         mock_lifecycle.start.assert_called_once()
 
-    def test_save_config_switching_from_subscription_stops_lifecycle(self, app_with_router, client):
+    def test_save_config_switching_from_subscription_stops_lifecycle(
+        self, app_with_router, client
+    ):
         """Switching from subscription to api_key triggers lifecycle stop."""
         mock_config = self._base_config()
         mock_config.claude_integration_config.claude_auth_mode = "subscription"
 
         mock_lifecycle = MagicMock()
-        mock_lifecycle.get_status.return_value = MagicMock(status=MagicMock(value="inactive"))
+        mock_lifecycle.get_status.return_value = MagicMock(
+            status=MagicMock(value="inactive")
+        )
         app_with_router.state.llm_lifecycle_service = mock_lifecycle
 
         with patch(
@@ -443,11 +461,12 @@ class TestAnthropicKey409Guard:
             claude_auth_mode="api_key",
         )
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_config_service"
-        ) as mock_cs, patch(
-            "code_indexer.server.routers.api_keys.get_api_key_sync_service"
-        ) as mock_sync:
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_sync_service"
+            ) as mock_sync,
+        ):
             mock_cs.return_value.load_config.return_value = mock_config
             mock_cs.return_value.config_manager = MagicMock()
 
@@ -457,10 +476,14 @@ class TestAnthropicKey409Guard:
             mock_sync.return_value.sync_anthropic_key.return_value = sync_result
 
             # Patch catchup to avoid side effects
-            with patch("code_indexer.server.routers.api_keys.trigger_catchup_on_api_key_save"):
+            with patch(
+                "code_indexer.server.routers.api_keys.trigger_catchup_on_api_key_save"
+            ):
                 response = full_app_client.post(
                     "/api/api-keys/anthropic",
-                    json={"api_key": "sk-ant-api03-validkeyformatXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"},
+                    json={
+                        "api_key": "sk-ant-api03-validkeyformatXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+                    },
                 )
 
         # Should NOT be 409

@@ -63,6 +63,7 @@ class TestFrontmatterRequiredFields:
         loader.load_all_docs()
         assert loader._cache["public_tool"].required_permission == ""
 
+
 class TestFrontmatterFormatErrors:
     """Tests for frontmatter format error handling."""
 

@@ -50,12 +50,10 @@ class TestLangfuseClientEagerInitialize:
     def test_eager_initialize_method_exists(self):
         """LangfuseClient must have an eager_initialize() method."""
         client = LangfuseClient(make_enabled_config())
-        assert hasattr(client, "eager_initialize"), (
-            "LangfuseClient must have an eager_initialize() method"
-        )
-        assert callable(client.eager_initialize), (
-            "eager_initialize must be callable"
-        )
+        assert hasattr(
+            client, "eager_initialize"
+        ), "LangfuseClient must have an eager_initialize() method"
+        assert callable(client.eager_initialize), "eager_initialize must be callable"
 
     def test_eager_initialize_calls_ensure_initialized(self):
         """eager_initialize() must call _ensure_initialized() to pre-warm SDK."""
@@ -71,9 +69,9 @@ class TestLangfuseClientEagerInitialize:
 
         client.eager_initialize()
 
-        assert len(ensure_init_called) >= 1, (
-            "eager_initialize() must call _ensure_initialized() to pre-warm the SDK"
-        )
+        assert (
+            len(ensure_init_called) >= 1
+        ), "eager_initialize() must call _ensure_initialized() to pre-warm the SDK"
 
     def test_eager_initialize_when_disabled_is_noop(self):
         """When Langfuse is disabled, eager_initialize() must be a no-op."""
@@ -107,9 +105,7 @@ class TestLangfuseClientEagerInitialize:
         try:
             client.eager_initialize()
         except Exception as e:
-            assert False, (
-                f"eager_initialize() must not raise exceptions. Got: {e}"
-            )
+            assert False, f"eager_initialize() must not raise exceptions. Got: {e}"
 
     def test_after_eager_initialize_langfuse_instance_is_set(self):
         """After successful eager_initialize(), _langfuse must be set."""
@@ -138,12 +134,10 @@ class TestLangfuseServiceEagerInitialize:
         """LangfuseService must have an eager_initialize() method."""
         mock_config_manager = MagicMock()
         service = LangfuseService(mock_config_manager)
-        assert hasattr(service, "eager_initialize"), (
-            "LangfuseService must have an eager_initialize() method"
-        )
-        assert callable(service.eager_initialize), (
-            "eager_initialize must be callable"
-        )
+        assert hasattr(
+            service, "eager_initialize"
+        ), "LangfuseService must have an eager_initialize() method"
+        assert callable(service.eager_initialize), "eager_initialize must be callable"
 
     def test_eager_initialize_calls_client_eager_initialize(self):
         """LangfuseService.eager_initialize() must call client.eager_initialize()."""
@@ -157,14 +151,16 @@ class TestLangfuseServiceEagerInitialize:
 
         client_eager_init_called = []
         mock_client = MagicMock()
-        mock_client.eager_initialize.side_effect = lambda: client_eager_init_called.append(True)
+        mock_client.eager_initialize.side_effect = (
+            lambda: client_eager_init_called.append(True)
+        )
         service._client = mock_client
 
         service.eager_initialize()
 
-        assert len(client_eager_init_called) >= 1, (
-            "LangfuseService.eager_initialize() must call client.eager_initialize()"
-        )
+        assert (
+            len(client_eager_init_called) >= 1
+        ), "LangfuseService.eager_initialize() must call client.eager_initialize()"
 
     def test_eager_initialize_failure_does_not_raise(self):
         """LangfuseService.eager_initialize() must not raise on failure."""
@@ -177,9 +173,7 @@ class TestLangfuseServiceEagerInitialize:
         try:
             service.eager_initialize()
         except Exception as e:
-            assert False, (
-                f"LangfuseService.eager_initialize() must not raise. Got: {e}"
-            )
+            assert False, f"LangfuseService.eager_initialize() must not raise. Got: {e}"
 
     def test_eager_initialize_when_not_enabled_is_safe(self):
         """eager_initialize() when Langfuse is not enabled must complete without error."""
@@ -194,9 +188,7 @@ class TestLangfuseServiceEagerInitialize:
         try:
             service.eager_initialize()
         except Exception as e:
-            assert False, (
-                f"eager_initialize() with no config must not raise. Got: {e}"
-            )
+            assert False, f"eager_initialize() with no config must not raise. Got: {e}"
 
 
 class TestLangfuseClientPropertyAfterEagerInit:

@@ -221,9 +221,7 @@ class TestMigrateFlat:
         )
 
         log_file = tmp_path / "password_audit.log"
-        log_file.write_text(
-            "This line has no JSON at all\n" "Another plain text line\n"
-        )
+        log_file.write_text("This line has no JSON at all\nAnother plain text line\n")
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)

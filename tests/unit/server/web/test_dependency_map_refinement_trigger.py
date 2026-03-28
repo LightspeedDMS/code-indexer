@@ -83,9 +83,9 @@ class TestRunTrackedRefinementRegistersJob:
         mock_job_tracker.register_job.assert_called_once()
         call_args = mock_job_tracker.register_job.call_args
         assert call_args[0][0] == "test-job-001", "job_id should be passed through"
-        assert call_args[0][1] == "dependency_map_refinement", (
-            "operation_type must be 'dependency_map_refinement'"
-        )
+        assert (
+            call_args[0][1] == "dependency_map_refinement"
+        ), "operation_type must be 'dependency_map_refinement'"
 
     def test_generates_job_id_when_none_provided(self):
         """When no job_id provided, a dep-map-refinement-XXXX id is generated."""
@@ -95,9 +95,9 @@ class TestRunTrackedRefinementRegistersJob:
 
         mock_job_tracker.register_job.assert_called_once()
         registered_job_id = mock_job_tracker.register_job.call_args[0][0]
-        assert registered_job_id.startswith("dep-map-refinement-"), (
-            f"Auto-generated job_id should start with 'dep-map-refinement-', got: {registered_job_id}"
-        )
+        assert registered_job_id.startswith(
+            "dep-map-refinement-"
+        ), f"Auto-generated job_id should start with 'dep-map-refinement-', got: {registered_job_id}"
 
     def test_sets_status_running_after_registration(self):
         """update_status should be called with status='running' after registration."""
@@ -107,21 +107,31 @@ class TestRunTrackedRefinementRegistersJob:
 
         # Find any call that sets status=running
         running_calls = [
-            c for c in mock_job_tracker.update_status.call_args_list
-            if c[1].get("status") == "running" or (len(c[0]) > 1 and c[0][1] == "running")
+            c
+            for c in mock_job_tracker.update_status.call_args_list
+            if c[1].get("status") == "running"
+            or (len(c[0]) > 1 and c[0][1] == "running")
         ]
-        assert len(running_calls) > 0, "update_status should be called with status='running'"
+        assert (
+            len(running_calls) > 0
+        ), "update_status should be called with status='running'"
 
     def test_checks_operation_conflict_before_registering(self):
         """check_operation_conflict must be called before register_job."""
         service, mock_job_tracker = _make_service_with_mocks()
         call_order = []
-        mock_job_tracker.check_operation_conflict.side_effect = lambda *a, **kw: call_order.append("check")
-        mock_job_tracker.register_job.side_effect = lambda *a, **kw: call_order.append("register")
+        mock_job_tracker.check_operation_conflict.side_effect = (
+            lambda *a, **kw: call_order.append("check")
+        )
+        mock_job_tracker.register_job.side_effect = lambda *a, **kw: call_order.append(
+            "register"
+        )
 
         service.run_tracked_refinement("test-job-003")
 
-        assert call_order[0] == "check", "check_operation_conflict must be called before register_job"
+        assert (
+            call_order[0] == "check"
+        ), "check_operation_conflict must be called before register_job"
         assert "register" in call_order
 
 
@@ -204,7 +214,9 @@ class TestRunTrackedRefinementFailsJobOnException:
 
         mock_job_tracker.fail_job.assert_called_once()
         call_args = mock_job_tracker.fail_job.call_args
-        assert call_args[0][0] == "test-job-009", "fail_job must receive the correct job_id"
+        assert (
+            call_args[0][0] == "test-job-009"
+        ), "fail_job must receive the correct job_id"
 
     def test_complete_job_not_called_on_exception(self):
         """complete_job must NOT be called when run_refinement_cycle raises."""
@@ -234,6 +246,7 @@ class TestRunTrackedRefinementFailsJobOnException:
 def app():
     """Create FastAPI app with minimal startup."""
     from code_indexer.server.app import app as _app
+
     return _app
 
 
@@ -280,7 +293,9 @@ class TestTriggerRefinementRoute:
 
         mock_service = MagicMock()
         mock_service.is_available.return_value = True
-        mock_service.run_tracked_refinement = MagicMock(return_value={"status": "completed"})
+        mock_service.run_tracked_refinement = MagicMock(
+            return_value={"status": "completed"}
+        )
 
         original_service = getattr(app.state, "dependency_map_service", None)
         app.state.dependency_map_service = mock_service
@@ -289,9 +304,9 @@ class TestTriggerRefinementRoute:
                 "/admin/dependency-map/trigger-refinement",
                 cookies=admin_session_cookie,
             )
-            assert response.status_code == 202, (
-                f"Expected 202, got {response.status_code}: {response.text}"
-            )
+            assert (
+                response.status_code == 202
+            ), f"Expected 202, got {response.status_code}: {response.text}"
             body = response.json()
             assert body.get("success") is True
             assert "job_id" in body
@@ -342,7 +357,9 @@ class TestTriggerRefinementRoute:
 
         mock_service = MagicMock()
         mock_service.is_available.return_value = True
-        mock_service.run_tracked_refinement = MagicMock(return_value={"status": "completed"})
+        mock_service.run_tracked_refinement = MagicMock(
+            return_value={"status": "completed"}
+        )
 
         original_service = getattr(app.state, "dependency_map_service", None)
         app.state.dependency_map_service = mock_service
@@ -353,9 +370,9 @@ class TestTriggerRefinementRoute:
             )
             assert response.status_code == 202
             body = response.json()
-            assert body["job_id"].startswith("dep-map-refinement-"), (
-                f"job_id should start with 'dep-map-refinement-', got: {body['job_id']}"
-            )
+            assert body["job_id"].startswith(
+                "dep-map-refinement-"
+            ), f"job_id should start with 'dep-map-refinement-', got: {body['job_id']}"
         finally:
             app.state.dependency_map_service = original_service
 
@@ -384,12 +401,12 @@ class TestRefinementButtonInTemplate:
         )
         assert template_path.exists(), f"Template file not found: {template_path}"
         content = template_path.read_text()
-        assert "trigger-refinement" in content, (
-            "Template must contain 'trigger-refinement' (button HTMX post target)"
-        )
-        assert "Refinement Pass" in content, (
-            "Template must contain 'Refinement Pass' button text"
-        )
+        assert (
+            "trigger-refinement" in content
+        ), "Template must contain 'trigger-refinement' (button HTMX post target)"
+        assert (
+            "Refinement Pass" in content
+        ), "Template must contain 'Refinement Pass' button text"
 
     def test_refinement_button_uses_correct_endpoint(self):
         """Button must post to /admin/dependency-map/trigger-refinement."""
@@ -406,6 +423,6 @@ class TestRefinementButtonInTemplate:
             / "depmap_job_status.html"
         )
         content = template_path.read_text()
-        assert "/admin/dependency-map/trigger-refinement" in content, (
-            "Button must use /admin/dependency-map/trigger-refinement as HTMX post target"
-        )
+        assert (
+            "/admin/dependency-map/trigger-refinement" in content
+        ), "Button must use /admin/dependency-map/trigger-refinement as HTMX post target"

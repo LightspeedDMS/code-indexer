@@ -25,6 +25,7 @@ def get_claude_cli_manager():
     ``scheduled_catchup_service.get_claude_cli_manager``.
     """
     from .claude_cli_manager import get_claude_cli_manager as _get
+
     return _get()
 
 
@@ -187,7 +188,9 @@ class ScheduledCatchupService:
             try:
                 tracked_job_id = f"scheduled-catchup-{uuid.uuid4().hex[:8]}"
                 self._job_tracker.register_job(
-                    tracked_job_id, "scheduled_catchup", username="system",
+                    tracked_job_id,
+                    "scheduled_catchup",
+                    username="system",
                     repo_alias="server",
                 )
                 self._job_tracker.update_status(tracked_job_id, status="running")

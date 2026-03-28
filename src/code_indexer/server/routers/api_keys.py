@@ -39,6 +39,7 @@ def get_job_tracker():
     """
     try:
         from ..app import job_tracker  # type: ignore[attr-defined]
+
         return job_tracker
     except Exception:
         return None
@@ -51,6 +52,7 @@ def get_claude_cli_manager():
     Wraps the service-level function for module-level patching in tests.
     """
     from ..services.claude_cli_manager import get_claude_cli_manager as _get
+
     return _get()
 
 
@@ -104,7 +106,9 @@ def trigger_catchup_on_api_key_save(api_key: Optional[str]) -> bool:
             try:
                 tracked_job_id = f"immediate-catchup-{uuid.uuid4().hex[:8]}"
                 tracker.register_job(
-                    tracked_job_id, "immediate_catchup", username="system",
+                    tracked_job_id,
+                    "immediate_catchup",
+                    username="system",
                     repo_alias="server",
                 )
                 tracker.update_status(tracked_job_id, status="running")
@@ -309,6 +313,7 @@ def save_anthropic_key(
     """
     # 409 guard: block manual key save when subscription mode is active
     _cfg = get_config_service().load_config()
+    assert _cfg.claude_integration_config is not None
     if _cfg.claude_integration_config.claude_auth_mode == "subscription":
         raise HTTPException(
             status_code=409,
@@ -333,6 +338,7 @@ def save_anthropic_key(
     # Persist to server config
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
     config.claude_integration_config.anthropic_api_key = request.api_key
     config_service.config_manager.save_config(config)
 
@@ -378,6 +384,7 @@ def save_voyageai_key(
     # Persist to server config
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
     config.claude_integration_config.voyageai_api_key = request.api_key
     config_service.config_manager.save_config(config)
 
@@ -456,6 +463,7 @@ async def test_configured_anthropic_key(
     """
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
 
     api_key = config.claude_integration_config.anthropic_api_key
     if not api_key:
@@ -489,6 +497,7 @@ async def test_configured_voyageai_key(
     """
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
 
     api_key = config.claude_integration_config.voyageai_api_key
     if not api_key:
@@ -522,6 +531,7 @@ def get_api_keys_status(
     """
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
 
     return ApiKeysStatusResponse(
         anthropic_configured=bool(config.claude_integration_config.anthropic_api_key),
@@ -545,6 +555,7 @@ def clear_anthropic_key(
     """Clear the Anthropic API key from config and matching synced locations."""
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
     key_to_clear = config.claude_integration_config.anthropic_api_key
 
     if not key_to_clear:
@@ -586,6 +597,7 @@ def clear_voyageai_key(
     """Clear the VoyageAI API key from config and matching synced locations."""
     config_service = get_config_service()
     config = config_service.load_config()
+    assert config.claude_integration_config is not None
     key_to_clear = config.claude_integration_config.voyageai_api_key
 
     if not key_to_clear:

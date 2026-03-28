@@ -47,27 +47,35 @@ class TestBasicSpanIntegration:
         mock_handler_result = {"content": [{"type": "text", "text": "Result"}]}
 
         # Setup: Mock span_logger to execute handler and return result
-        async def mock_intercept(session_id, tool_name, arguments, handler, username=None):
+        async def mock_intercept(
+            session_id, tool_name, arguments, handler, username=None
+        ):
             # Execute the handler wrapper that was passed
             return await handler()
 
-        mock_langfuse_service.span_logger.intercept_tool_call.side_effect = mock_intercept
+        mock_langfuse_service.span_logger.intercept_tool_call.side_effect = (
+            mock_intercept
+        )
 
         # Setup: Patch the tool registry and handler
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "list_repositories": {
-                    "name": "list_repositories",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"list_repositories": AsyncMock(return_value=mock_handler_result)},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=mock_langfuse_service,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "list_repositories": {
+                        "name": "list_repositories",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"list_repositories": AsyncMock(return_value=mock_handler_result)},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=mock_langfuse_service,
+            ),
         ):
             # Execute
             params = {"name": "list_repositories", "arguments": {}}
@@ -84,30 +92,39 @@ class TestBasicSpanIntegration:
         self, admin_user, mock_langfuse_service
     ):
         """Should pass session_id, tool_name, arguments, and username to intercept_tool_call."""
+
         # Setup: Mock span_logger
-        async def mock_intercept(session_id, tool_name, arguments, handler, username=None):
+        async def mock_intercept(
+            session_id, tool_name, arguments, handler, username=None
+        ):
             return await handler()
 
-        mock_langfuse_service.span_logger.intercept_tool_call.side_effect = mock_intercept
+        mock_langfuse_service.span_logger.intercept_tool_call.side_effect = (
+            mock_intercept
+        )
 
         # Setup: Patch registry
         mock_handler = AsyncMock(
             return_value={"content": [{"type": "text", "text": "Success"}]}
         )
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "search_code": {
-                    "name": "search_code",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"search_code": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=mock_langfuse_service,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "search_code": {
+                        "name": "search_code",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"search_code": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=mock_langfuse_service,
+            ),
         ):
             # Execute with specific arguments
             params = {
@@ -138,20 +155,24 @@ class TestErrorHandling:
             return_value={"content": [{"type": "text", "text": "Success"}]}
         )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "list_repositories": {
-                    "name": "list_repositories",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"list_repositories": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=None,  # Service unavailable
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "list_repositories": {
+                        "name": "list_repositories",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"list_repositories": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,  # Service unavailable
+            ),
         ):
             # Execute
             params = {"name": "list_repositories", "arguments": {}}
@@ -169,20 +190,24 @@ class TestErrorHandling:
             return_value={"content": [{"type": "text", "text": "Success"}]}
         )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "list_repositories": {
-                    "name": "list_repositories",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"list_repositories": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=None,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "list_repositories": {
+                        "name": "list_repositories",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"list_repositories": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=None,
+            ),
         ):
             # Execute with session_id=None
             params = {"name": "list_repositories", "arguments": {}}
@@ -201,26 +226,34 @@ class TestErrorHandling:
         )
 
         # Setup: Mock span_logger to execute handler and return result
-        async def mock_intercept(session_id, tool_name, arguments, handler, username=None):
+        async def mock_intercept(
+            session_id, tool_name, arguments, handler, username=None
+        ):
             # Execute the handler wrapper that was passed
             return await handler()
 
-        mock_langfuse_service.span_logger.intercept_tool_call.side_effect = mock_intercept
+        mock_langfuse_service.span_logger.intercept_tool_call.side_effect = (
+            mock_intercept
+        )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "list_repositories": {
-                    "name": "list_repositories",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"list_repositories": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=mock_langfuse_service,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "list_repositories": {
+                        "name": "list_repositories",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"list_repositories": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=mock_langfuse_service,
+            ),
         ):
             # Execute
             params = {"name": "list_repositories", "arguments": {}}
@@ -238,20 +271,24 @@ class TestErrorHandling:
             return_value={"content": [{"type": "text", "text": "Success"}]}
         )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "list_repositories": {
-                    "name": "list_repositories",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"list_repositories": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            side_effect=Exception("Service initialization failed"),
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "list_repositories": {
+                        "name": "list_repositories",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"list_repositories": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                side_effect=Exception("Service initialization failed"),
+            ),
         ):
             # Execute - should not fail
             params = {"name": "list_repositories", "arguments": {}}
@@ -274,20 +311,24 @@ class TestErrorHandling:
             return_value={"content": [{"type": "text", "text": "Success"}]}
         )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "list_repositories": {
-                    "name": "list_repositories",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"list_repositories": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=mock_langfuse_service,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "list_repositories": {
+                        "name": "list_repositories",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"list_repositories": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=mock_langfuse_service,
+            ),
         ):
             # Execute
             params = {"name": "list_repositories", "arguments": {}}
@@ -311,20 +352,24 @@ class TestExcludedTools:
             return_value={"content": [{"type": "text", "text": "Trace started"}]}
         )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "start_trace": {
-                    "name": "start_trace",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"start_trace": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=mock_langfuse_service,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "start_trace": {
+                        "name": "start_trace",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"start_trace": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=mock_langfuse_service,
+            ),
         ):
             # Execute
             params = {"name": "start_trace", "arguments": {"topic": "Test"}}
@@ -345,20 +390,24 @@ class TestExcludedTools:
             return_value={"content": [{"type": "text", "text": "Trace ended"}]}
         )
 
-        with patch(
-            "code_indexer.server.mcp.tools.TOOL_REGISTRY",
-            {
-                "end_trace": {
-                    "name": "end_trace",
-                    "required_permission": "query_repos",
-                }
-            },
-        ), patch(
-            "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
-            {"end_trace": mock_handler},
-        ), patch(
-            "code_indexer.server.services.langfuse_service.get_langfuse_service",
-            return_value=mock_langfuse_service,
+        with (
+            patch(
+                "code_indexer.server.mcp.tools.TOOL_REGISTRY",
+                {
+                    "end_trace": {
+                        "name": "end_trace",
+                        "required_permission": "query_repos",
+                    }
+                },
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers.HANDLER_REGISTRY",
+                {"end_trace": mock_handler},
+            ),
+            patch(
+                "code_indexer.server.services.langfuse_service.get_langfuse_service",
+                return_value=mock_langfuse_service,
+            ),
         ):
             # Execute
             params = {"name": "end_trace", "arguments": {}}

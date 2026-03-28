@@ -106,6 +106,7 @@ class TestIndexingConfigRoundTrip:
 
         # Serialize and deserialize via JSON
         from dataclasses import asdict
+
         data = asdict(config)
         json_str = json.dumps(data)
         restored_data = json.loads(json_str)
@@ -119,6 +120,7 @@ class TestIndexingConfigRoundTrip:
         config.indexable_extensions = []
 
         from dataclasses import asdict
+
         data = asdict(config)
         json_str = json.dumps(data)
         restored_data = json.loads(json_str)

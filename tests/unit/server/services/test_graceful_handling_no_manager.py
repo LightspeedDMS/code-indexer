@@ -46,9 +46,7 @@ class TestGracefulHandlingWhenManagerNotInitialized:
 
         # Should not raise, should return False
         with caplog.at_level(logging.WARNING):
-            result = trigger_catchup_on_api_key_save(
-                "placeholder-not-a-key"
-            )
+            result = trigger_catchup_on_api_key_save("placeholder-not-a-key")
 
         assert result is False
         assert any(

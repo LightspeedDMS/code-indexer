@@ -116,7 +116,7 @@ class TestRateLimiting500ErrorFix:
             )
             # Should get 401 for invalid token, NOT 500
             assert response.status_code == 401, (
-                f"Attempt {i+1}: Expected 401 Unauthorized for invalid token, "
+                f"Attempt {i + 1}: Expected 401 Unauthorized for invalid token, "
                 f"got {response.status_code} with response: {response.text}"
             )
 
@@ -179,7 +179,7 @@ class TestRateLimiting500ErrorFix:
 
             # Each attempt should return 401, not 500
             assert response.status_code == 401, (
-                f"Attempt {i+1} with invalid token should return 401, "
+                f"Attempt {i + 1} with invalid token should return 401, "
                 f"got {response.status_code}. This suggests username extraction "
                 f"is failing and causing 500 error. Response: {response.text}"
             )

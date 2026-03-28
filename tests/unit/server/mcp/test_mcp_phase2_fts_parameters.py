@@ -177,9 +177,7 @@ class TestEditDistanceParameter:
                 search_code(params, mock_user)
 
                 # Verify edit_distance parameter was passed
-                call_kwargs = (
-                    mock_app.semantic_query_manager.query_user_repositories.call_args.kwargs
-                )
+                call_kwargs = mock_app.semantic_query_manager.query_user_repositories.call_args.kwargs
                 assert call_kwargs["edit_distance"] == distance
 
     def test_edit_distance_defaults_to_zero(self, mock_user):
@@ -238,9 +236,7 @@ class TestSnippetLinesParameter:
                 search_code(params, mock_user)
 
                 # Verify snippet_lines parameter was passed
-                call_kwargs = (
-                    mock_app.semantic_query_manager.query_user_repositories.call_args.kwargs
-                )
+                call_kwargs = mock_app.semantic_query_manager.query_user_repositories.call_args.kwargs
                 assert call_kwargs["snippet_lines"] == lines
 
     def test_snippet_lines_defaults_to_five(self, mock_user):

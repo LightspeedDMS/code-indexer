@@ -451,9 +451,7 @@ class TestAuthentication:
         app.dependency_overrides.clear()
         client = TestClient(app)
 
-        response = client.post(
-            "/admin/diagnostics/generate-missing-descriptions"
-        )
+        response = client.post("/admin/diagnostics/generate-missing-descriptions")
         assert response.status_code == 401
 
     def test_no_app_state_returns_500(self, authenticated_admin_client):

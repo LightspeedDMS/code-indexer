@@ -57,7 +57,9 @@ def _make_manager_for_add_index():
     golden_repo.enable_temporal = False
 
     manager.golden_repos = {"test-repo": golden_repo}
-    manager.get_actual_repo_path = Mock(return_value="/fake/data/golden-repos/test-repo")
+    manager.get_actual_repo_path = Mock(
+        return_value="/fake/data/golden-repos/test-repo"
+    )
 
     # background_job_manager: capture submitted func so we can call it directly
     manager.background_job_manager = Mock()

@@ -103,9 +103,9 @@ class TestSecurityHardeningCommandFlags:
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1, "subprocess.run must have been called"
 
-        assert "--disallowedTools" in calls[0], (
-            "Command must include --disallowedTools flag. " f"Got cmd: {calls[0]}"
-        )
+        assert (
+            "--disallowedTools" in calls[0]
+        ), f"Command must include --disallowedTools flag. Got cmd: {calls[0]}"
 
     def test_disallowed_tools_blocks_all_required_tools(self, research_service):
         """

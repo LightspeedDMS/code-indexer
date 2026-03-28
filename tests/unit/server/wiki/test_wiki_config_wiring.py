@@ -216,7 +216,7 @@ class TestWikiRoutesHonourWikiConfig:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)
             (repo_dir / "home.md").write_text(
-                "Article Number: KA-00002\n" "---\n" "# Home\n" "Welcome."
+                "Article Number: KA-00002\n---\n# Home\nWelcome."
             )
             app = _make_wiki_app(tmpdir, wiki_config=wiki_config)
             client = TestClient(app)

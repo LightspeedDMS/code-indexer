@@ -66,9 +66,7 @@ class ClaudeCliManager:
         """
         self._api_key = api_key
         self._max_workers = max_workers
-        self._work_queue: (
-            "queue.Queue[Optional[Tuple[Path, Callable[[bool, str], None]]]]"
-        ) = queue.Queue()
+        self._work_queue: "queue.Queue[Optional[Tuple[Path, Callable[[bool, str], None]]]]" = queue.Queue()
         self._worker_threads: List[threading.Thread] = []
         self._shutdown_event = threading.Event()
         self._cli_available: Optional[bool] = None
@@ -78,7 +76,9 @@ class ClaudeCliManager:
         self._cli_was_unavailable: bool = True
         self._cli_state_lock = threading.Lock()  # Lock for CLI state management
         self._mcp_registration_service = mcp_registration_service
-        self._mcp_registration_attempted = False  # Flag to ensure registration only attempted once per manager
+        self._mcp_registration_attempted = (
+            False  # Flag to ensure registration only attempted once per manager
+        )
         self._job_tracker = job_tracker  # Unified job tracking (Story #313)
 
         # Start worker threads
@@ -787,7 +787,11 @@ def initialize_claude_cli_manager(
             return _global_cli_manager
 
         # Create the singleton instance
-        manager = ClaudeCliManager(api_key=api_key, max_workers=max_workers, mcp_registration_service=mcp_registration_service)
+        manager = ClaudeCliManager(
+            api_key=api_key,
+            max_workers=max_workers,
+            mcp_registration_service=mcp_registration_service,
+        )
         manager.set_meta_dir(meta_dir)
         _global_cli_manager = manager
 

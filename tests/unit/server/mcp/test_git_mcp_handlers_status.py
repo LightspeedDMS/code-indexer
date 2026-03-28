@@ -510,7 +510,7 @@ class TestGitCommitHandlerCredentialLookup:
             Path("/tmp/test-repo"),
             "Feature work",
             "alice@gitlab.com",  # author_email from credential
-            "Alice Smith",       # author_name from credential
+            "Alice Smith",  # author_name from credential
             committer_email="alice@gitlab.com",
             committer_name="Alice Smith",
         )
@@ -546,7 +546,7 @@ class TestGitCommitHandlerCredentialLookup:
             Path("/tmp/test-repo"),
             "Test commit",
             "testuser@example.com",  # user.email fallback
-            "testuser",              # username fallback
+            "testuser",  # username fallback
             committer_email=None,
             committer_name=None,
         )
@@ -624,8 +624,8 @@ class TestGitCommitHandlerCredentialLookup:
         mock_git_service.git_commit.assert_called_once_with(
             Path("/tmp/test-repo"),
             "Test commit",
-            "bob@gitlab.com",   # author_email from credential
-            "testuser",         # name fallback: no args.author_name, use user.username
+            "bob@gitlab.com",  # author_email from credential
+            "testuser",  # name fallback: no args.author_name, use user.username
             committer_email="bob@gitlab.com",
             committer_name=None,  # No name in credential -> None
         )
@@ -637,7 +637,7 @@ class TestGitCommitHandlerCredentialLookup:
         from code_indexer.server.mcp import handlers
 
         credential = {
-            "git_user_email": "",   # Empty -> treat as absent
+            "git_user_email": "",  # Empty -> treat as absent
             "git_user_name": "Alice",
             "token": "glpat-secret",
         }
@@ -667,7 +667,7 @@ class TestGitCommitHandlerCredentialLookup:
             Path("/tmp/test-repo"),
             "Test commit",
             "testuser@example.com",  # user.email fallback (credential email was empty)
-            "testuser",              # username fallback
+            "testuser",  # username fallback
             committer_email=None,
             committer_name=None,
         )

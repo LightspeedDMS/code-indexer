@@ -49,6 +49,7 @@ def _make_user(username: str = "testuser") -> User:
 
 def _extract_response_data(mcp_response: dict) -> dict:
     import json as _json
+
     content = mcp_response["content"][0]
     return cast(dict, _json.loads(content["text"]))
 
@@ -59,11 +60,13 @@ def _create_write_mode_marker(golden_repos_dir: Path, alias: str) -> Path:
     write_mode_dir.mkdir(parents=True, exist_ok=True)
     marker = write_mode_dir / f"{alias}.json"
     marker.write_text(
-        json.dumps({
-            "alias": alias,
-            "source_path": str(golden_repos_dir / alias),
-            "entered_at": datetime.now(timezone.utc).isoformat(),
-        })
+        json.dumps(
+            {
+                "alias": alias,
+                "source_path": str(golden_repos_dir / alias),
+                "entered_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     )
     return marker
 
@@ -147,17 +150,21 @@ class TestHandleEditFileWriteModeSuppression:
 
         # auto_watch_manager is imported locally inside handle_edit_file, so we patch
         # the singleton at the source module level.
-        with patch(
-            "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
-            mock_auto_watch_manager,
-        ), patch(
-            "code_indexer.server.services.file_crud_service.file_crud_service",
-            mock_file_crud_service,
-        ), patch.object(
-            app_module.app.state,
-            "golden_repos_dir",
-            str(golden_repos_dir),
-            create=True,
+        with (
+            patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+                mock_auto_watch_manager,
+            ),
+            patch(
+                "code_indexer.server.services.file_crud_service.file_crud_service",
+                mock_file_crud_service,
+            ),
+            patch.object(
+                app_module.app.state,
+                "golden_repos_dir",
+                str(golden_repos_dir),
+                create=True,
+            ),
         ):
             return handlers.handle_edit_file(params, user)
 
@@ -178,7 +185,11 @@ class TestHandleEditFileWriteModeSuppression:
         }
 
         self._call_handler(
-            params, user, golden_repos_dir, mock_auto_watch_manager, mock_file_crud_service
+            params,
+            user,
+            golden_repos_dir,
+            mock_auto_watch_manager,
+            mock_file_crud_service,
         )
 
         # start_watch must NOT be called when write mode is active
@@ -199,7 +210,11 @@ class TestHandleEditFileWriteModeSuppression:
         }
 
         self._call_handler(
-            params, user, golden_repos_dir, mock_auto_watch_manager, mock_file_crud_service
+            params,
+            user,
+            golden_repos_dir,
+            mock_auto_watch_manager,
+            mock_file_crud_service,
         )
 
         # start_watch MUST be called when write mode is NOT active
@@ -220,17 +235,21 @@ class TestHandleCreateFileWriteModeSuppression:
         from code_indexer.server.mcp import handlers
         from code_indexer.server import app as app_module
 
-        with patch(
-            "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
-            mock_auto_watch_manager,
-        ), patch(
-            "code_indexer.server.services.file_crud_service.file_crud_service",
-            mock_file_crud_service,
-        ), patch.object(
-            app_module.app.state,
-            "golden_repos_dir",
-            str(golden_repos_dir),
-            create=True,
+        with (
+            patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+                mock_auto_watch_manager,
+            ),
+            patch(
+                "code_indexer.server.services.file_crud_service.file_crud_service",
+                mock_file_crud_service,
+            ),
+            patch.object(
+                app_module.app.state,
+                "golden_repos_dir",
+                str(golden_repos_dir),
+                create=True,
+            ),
         ):
             return handlers.handle_create_file(params, user)
 
@@ -248,7 +267,11 @@ class TestHandleCreateFileWriteModeSuppression:
         }
 
         self._call_handler(
-            params, user, golden_repos_dir, mock_auto_watch_manager, mock_file_crud_service
+            params,
+            user,
+            golden_repos_dir,
+            mock_auto_watch_manager,
+            mock_file_crud_service,
         )
 
         mock_auto_watch_manager.start_watch.assert_not_called()
@@ -265,7 +288,11 @@ class TestHandleCreateFileWriteModeSuppression:
         }
 
         self._call_handler(
-            params, user, golden_repos_dir, mock_auto_watch_manager, mock_file_crud_service
+            params,
+            user,
+            golden_repos_dir,
+            mock_auto_watch_manager,
+            mock_file_crud_service,
         )
 
         mock_auto_watch_manager.start_watch.assert_called_once()
@@ -285,17 +312,21 @@ class TestHandleDeleteFileWriteModeSuppression:
         from code_indexer.server.mcp import handlers
         from code_indexer.server import app as app_module
 
-        with patch(
-            "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
-            mock_auto_watch_manager,
-        ), patch(
-            "code_indexer.server.services.file_crud_service.file_crud_service",
-            mock_file_crud_service,
-        ), patch.object(
-            app_module.app.state,
-            "golden_repos_dir",
-            str(golden_repos_dir),
-            create=True,
+        with (
+            patch(
+                "code_indexer.server.services.auto_watch_manager.auto_watch_manager",
+                mock_auto_watch_manager,
+            ),
+            patch(
+                "code_indexer.server.services.file_crud_service.file_crud_service",
+                mock_file_crud_service,
+            ),
+            patch.object(
+                app_module.app.state,
+                "golden_repos_dir",
+                str(golden_repos_dir),
+                create=True,
+            ),
         ):
             return handlers.handle_delete_file(params, user)
 
@@ -312,7 +343,11 @@ class TestHandleDeleteFileWriteModeSuppression:
         }
 
         self._call_handler(
-            params, user, golden_repos_dir, mock_auto_watch_manager, mock_file_crud_service
+            params,
+            user,
+            golden_repos_dir,
+            mock_auto_watch_manager,
+            mock_file_crud_service,
         )
 
         mock_auto_watch_manager.start_watch.assert_not_called()
@@ -328,7 +363,11 @@ class TestHandleDeleteFileWriteModeSuppression:
         }
 
         self._call_handler(
-            params, user, golden_repos_dir, mock_auto_watch_manager, mock_file_crud_service
+            params,
+            user,
+            golden_repos_dir,
+            mock_auto_watch_manager,
+            mock_file_crud_service,
         )
 
         mock_auto_watch_manager.start_watch.assert_called_once()
@@ -384,15 +423,15 @@ class TestWriteModeRunRefreshStopsWatch:
             )
 
         # stop_watch must have been called before execute_refresh
-        assert len(call_order) >= 2, (
-            f"Expected at least 2 calls (stop_watch + execute_refresh). Got: {call_order}"
-        )
-        assert call_order[0][0] == "stop_watch", (
-            f"stop_watch must be called FIRST. Call order: {call_order}"
-        )
-        assert call_order[1][0] == "execute_refresh", (
-            f"execute_refresh must be called SECOND. Call order: {call_order}"
-        )
+        assert (
+            len(call_order) >= 2
+        ), f"Expected at least 2 calls (stop_watch + execute_refresh). Got: {call_order}"
+        assert (
+            call_order[0][0] == "stop_watch"
+        ), f"stop_watch must be called FIRST. Call order: {call_order}"
+        assert (
+            call_order[1][0] == "execute_refresh"
+        ), f"execute_refresh must be called SECOND. Call order: {call_order}"
 
     def test_stop_watch_called_even_when_execute_refresh_raises(
         self, golden_repos_dir, mock_refresh_scheduler, mock_auto_watch_manager
@@ -405,7 +444,9 @@ class TestWriteModeRunRefreshStopsWatch:
         mock_refresh_scheduler.write_lock_manager.acquire(
             "cidx-meta", owner_name="mcp_write_mode"
         )
-        mock_refresh_scheduler._execute_refresh.side_effect = RuntimeError("refresh failed")
+        mock_refresh_scheduler._execute_refresh.side_effect = RuntimeError(
+            "refresh failed"
+        )
 
         from code_indexer.server.mcp import handlers
 

@@ -154,7 +154,9 @@ class FileCRUDService:
 
         # Build alias name without -global suffix for marker filename
         alias_without_global = (
-            repo_alias[: -len("-global")] if repo_alias.endswith("-global") else repo_alias
+            repo_alias[: -len("-global")]
+            if repo_alias.endswith("-global")
+            else repo_alias
         )
         marker_file = golden_repos_dir / ".write_mode" / f"{alias_without_global}.json"
 

@@ -18,7 +18,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from code_indexer.server.config.llm_lease_state import LlmLeaseState, LlmLeaseStateManager
+from code_indexer.server.config.llm_lease_state import (
+    LlmLeaseState,
+    LlmLeaseStateManager,
+)
 from code_indexer.server.services.claude_credentials_file_manager import (
     ClaudeCredentialsFileManager,
 )
@@ -33,9 +36,9 @@ logger = logging.getLogger(__name__)
 
 
 class LeaseLifecycleStatus(str, Enum):
-    INACTIVE = "inactive"          # Subscription mode disabled or not started
-    ACTIVE = "active"              # Credential checked out and files written
-    DEGRADED = "degraded"          # Provider unreachable, no credential available
+    INACTIVE = "inactive"  # Subscription mode disabled or not started
+    ACTIVE = "active"  # Credential checked out and files written
+    DEGRADED = "degraded"  # Provider unreachable, no credential available
     SHUTTING_DOWN = "shutting_down"  # Shutdown in progress
 
 
@@ -108,7 +111,9 @@ class LlmLeaseLifecycleService:
                     self._do_plain_checkin(residual.lease_id, residual.credential_id)
                     self._clear_claude_api_key()
                 else:
-                    self._do_checkin_with_writeback(residual.lease_id, residual.credential_id)
+                    self._do_checkin_with_writeback(
+                        residual.lease_id, residual.credential_id
+                    )
                 self._state_mgr.clear_state()
 
             # Step 2: Remove ANTHROPIC_API_KEY from env to prevent interference
@@ -116,7 +121,9 @@ class LlmLeaseLifecycleService:
 
             # Step 3: Fresh checkout
             try:
-                response = self._client.checkout(vendor="anthropic", consumer_id=consumer_id)
+                response = self._client.checkout(
+                    vendor="anthropic", consumer_id=consumer_id
+                )
 
                 # Step 4: Store credentials based on type returned by provider
                 if response.api_key:
@@ -149,9 +156,7 @@ class LlmLeaseLifecycleService:
 
             except Exception as exc:
                 # Non-blocking: server continues in degraded state
-                logger.error(
-                    "Failed to checkout credential from LLM provider: %s", exc
-                )
+                logger.error("Failed to checkout credential from LLM provider: %s", exc)
                 self._credential_type = None
                 self._status = LeaseStatusInfo(
                     status=LeaseLifecycleStatus.DEGRADED,
@@ -228,9 +233,7 @@ class LlmLeaseLifecycleService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _do_plain_checkin(
-        self, lease_id: str, credential_id: Optional[str]
-    ) -> None:
+    def _do_plain_checkin(self, lease_id: str, credential_id: Optional[str]) -> None:
         """
         Checkin without token writeback — used for api_key credential type.
 
@@ -268,9 +271,7 @@ class LlmLeaseLifecycleService:
                 access_token=access_token,
                 refresh_token=refresh_token,
             )
-            logger.info(
-                "Checkin with writeback successful: lease_id=%s", lease_id
-            )
+            logger.info("Checkin with writeback successful: lease_id=%s", lease_id)
         except Exception as exc:
             logger.warning(
                 "Checkin failed for lease_id=%s (non-fatal): %s", lease_id, exc

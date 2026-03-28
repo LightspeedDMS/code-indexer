@@ -1337,7 +1337,7 @@ class DescriptionRefreshTrackingBackend:
         def operation(conn):
             conn.execute(
                 f"""INSERT INTO description_refresh_tracking
-                   ({', '.join(all_columns)}) VALUES ({', '.join(placeholders)})
+                   ({", ".join(all_columns)}) VALUES ({", ".join(placeholders)})
                    ON CONFLICT(repo_alias) DO UPDATE SET {update_clause}""",
                 values,
             )

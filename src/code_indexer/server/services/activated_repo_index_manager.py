@@ -424,7 +424,8 @@ class ActivatedRepoIndexManager:
                 next_progress = 10 + int(((idx + 1) / total_types) * 80)
 
             update_progress(
-                base_progress, f"Processing {index_type} index ({idx+1}/{total_types})"
+                base_progress,
+                f"Processing {index_type} index ({idx + 1}/{total_types})",
             )
 
             try:

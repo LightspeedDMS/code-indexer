@@ -151,9 +151,7 @@ class TestMigrateLegacyCidxMeta:
         # Verify: No migration attempted
         mock_manager.add_golden_repo.assert_not_called()
 
-    def test_migration_scenario1_persists_with_sqlite_backend(
-        self, golden_repos_dir
-    ):
+    def test_migration_scenario1_persists_with_sqlite_backend(self, golden_repos_dir):
         """
         Test that Scenario 1 (cidx-meta directory exists but not in registry)
         persists via register_local_repo() which handles SQLite persistence internally.
@@ -181,9 +179,7 @@ class TestMigrateLegacyCidxMeta:
             fire_lifecycle_hooks=False,
         )
 
-    def test_migration_scenario2_persists_repo_url_with_sqlite(
-        self, golden_repos_dir
-    ):
+    def test_migration_scenario2_persists_repo_url_with_sqlite(self, golden_repos_dir):
         """
         Test that Scenario 2 (repo_url=None in metadata) persists to SQLite when _use_sqlite=True.
 
@@ -479,5 +475,3 @@ class TestBootstrapCidxMeta:
 
                     # Should not raise — idempotent
                     bootstrap_cidx_meta(mock_manager, str(golden_repos_dir))
-
-

@@ -82,9 +82,7 @@ class TestSCIPToolSchemasRepositoryAlias:
             types = [opt.get("type") for opt in one_of]
             # Check if null is in types or if default is None
             has_null = "null" in types or repo_alias_schema.get("default") is None
-            assert (
-                has_null
-            ), f"Tool {tool_name}: repository_alias should accept null or have null default"
+            assert has_null, f"Tool {tool_name}: repository_alias should accept null or have null default"
 
     @pytest.mark.parametrize("tool_name", SCIP_TOOLS)
     def test_repository_alias_has_null_default(self, tool_name: str):

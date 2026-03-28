@@ -67,11 +67,13 @@ class TestWikiConfigDataclass:
     def test_wiki_config_can_be_imported(self):
         """WikiConfig must be importable from config_manager."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         assert WikiConfig is not None
 
     def test_wiki_config_defaults_all_true(self):
         """AC13: Default WikiConfig has all 4 toggles True."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         cfg = WikiConfig()
         assert cfg.enable_header_block_parsing is True
         assert cfg.enable_article_number is True
@@ -81,6 +83,7 @@ class TestWikiConfigDataclass:
     def test_wiki_config_can_set_all_false(self):
         """WikiConfig can be instantiated with all False."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         cfg = WikiConfig(
             enable_header_block_parsing=False,
             enable_article_number=False,
@@ -115,12 +118,14 @@ class TestWikiConfigDataclass:
     def test_server_config_has_wiki_config_field(self):
         """ServerConfig must have a wiki_config field."""
         from code_indexer.server.utils.config_manager import ServerConfig
+
         fields = {f.name for f in ServerConfig.__dataclass_fields__.values()}
         assert "wiki_config" in fields
 
     def test_server_config_initializes_wiki_config_on_post_init(self):
         """AC13: ServerConfig.__post_init__ creates WikiConfig with all-True defaults."""
         from code_indexer.server.utils.config_manager import ServerConfig, WikiConfig
+
         cfg = ServerConfig(server_dir="/tmp/test_wiki_config")
         assert cfg.wiki_config is not None
         assert isinstance(cfg.wiki_config, WikiConfig)
@@ -135,6 +140,7 @@ class TestWikiConfigDataclass:
             ServerConfigManager,
             WikiConfig,
         )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             raw_config = {
@@ -159,6 +165,7 @@ class TestWikiConfigDataclass:
             ServerConfigManager,
             WikiConfig,
         )
+
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             raw_config = {"server_dir": tmpdir}
@@ -183,6 +190,7 @@ class TestHeaderBlockParsingToggle:
     def test_ac1_header_block_stripped_when_toggle_on(self, svc):
         """AC1: enable_header_block_parsing=True -> _strip_header_block runs normally."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_header_block_parsing=True)
         with tempfile.TemporaryDirectory() as tmpdir:
             f = Path(tmpdir) / "article.md"
@@ -202,6 +210,7 @@ class TestHeaderBlockParsingToggle:
     def test_ac2_header_block_preserved_when_toggle_off(self, svc):
         """AC2: enable_header_block_parsing=False -> header fields NOT stripped, render as-is."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_header_block_parsing=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             f = Path(tmpdir) / "article.md"
@@ -228,6 +237,7 @@ class TestArticleNumberToggle:
     def test_ac3_article_number_included_when_toggle_on(self, svc):
         """AC3: enable_article_number=True -> article_number appears in metadata panel."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_article_number=True)
         cache = _make_cache()
         metadata = {"article_number": "KA-00001", "created": "2024-01-01"}
@@ -241,6 +251,7 @@ class TestArticleNumberToggle:
     def test_ac4_article_number_excluded_when_toggle_off(self, svc):
         """AC4: enable_article_number=False -> article_number not in metadata panel."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_article_number=False)
         cache = _make_cache()
         metadata = {"article_number": "KA-00001", "created": "2024-01-01"}
@@ -253,6 +264,7 @@ class TestArticleNumberToggle:
     def test_ac4_original_article_also_excluded_when_toggle_off(self, svc):
         """AC4: original_article (normalized to article_number) also excluded when toggle OFF."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_article_number=False)
         cache = _make_cache()
         metadata = {"original_article": "KA-00002"}
@@ -265,9 +277,14 @@ class TestArticleNumberToggle:
     def test_ac3_article_number_is_first_item_when_toggle_on(self, svc):
         """AC3: article_number is the first item in the metadata panel list."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_article_number=True)
         cache = _make_cache()
-        metadata = {"article_number": "KA-00001", "created": "2024-01-01", "author": "Alice"}
+        metadata = {
+            "article_number": "KA-00001",
+            "created": "2024-01-01",
+            "author": "Alice",
+        }
         result = svc.prepare_metadata_context(
             metadata, "repo", "path", cache, wiki_config=wiki_config
         )
@@ -285,6 +302,7 @@ class TestPublicationStatusToggle:
     def test_ac5_publication_status_included_when_toggle_on(self, svc):
         """AC5: enable_publication_status=True -> publication_status in panel."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_publication_status=True)
         cache = _make_cache()
         metadata = {"publication_status": "Published"}
@@ -298,6 +316,7 @@ class TestPublicationStatusToggle:
     def test_ac6_publication_status_excluded_when_toggle_off(self, svc):
         """AC6: enable_publication_status=False -> publication_status NOT in panel."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_publication_status=False)
         cache = _make_cache()
         metadata = {"publication_status": "Published"}
@@ -319,6 +338,7 @@ class TestViewsSeedingToggle:
     def test_ac7_populate_views_runs_when_toggle_on(self, svc):
         """AC7: enable_views_seeding=True -> populate_views_from_front_matter seeds views."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_views_seeding=True)
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
@@ -328,11 +348,14 @@ class TestViewsSeedingToggle:
             svc.populate_views_from_front_matter(
                 "test-repo", repo_path, cache, wiki_config=wiki_config
             )
-            cache.insert_initial_views.assert_called_once_with("test-repo", "article", 42)
+            cache.insert_initial_views.assert_called_once_with(
+                "test-repo", "article", 42
+            )
 
     def test_ac8_populate_views_is_noop_when_toggle_off(self, svc):
         """AC8: enable_views_seeding=False -> populate_views_from_front_matter returns immediately."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_views_seeding=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
@@ -344,9 +367,12 @@ class TestViewsSeedingToggle:
             )
             cache.insert_initial_views.assert_not_called()
 
-    def test_ac8_views_key_excluded_from_metadata_panel_when_views_seeding_off(self, svc):
+    def test_ac8_views_key_excluded_from_metadata_panel_when_views_seeding_off(
+        self, svc
+    ):
         """AC8/AC10: enable_views_seeding=False -> 'views' front-matter key excluded from panel."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_views_seeding=False)
         cache = _make_cache()
         metadata = {"views": 500, "author": "Alice"}
@@ -359,6 +385,7 @@ class TestViewsSeedingToggle:
     def test_ac7_views_key_included_in_metadata_panel_when_views_seeding_on(self, svc):
         """AC7: enable_views_seeding=True -> 'views' front-matter key included as 'Salesforce Views'."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         wiki_config = WikiConfig(enable_views_seeding=True)
         cache = _make_cache()
         metadata = {"views": 500}
@@ -381,6 +408,7 @@ class TestGoldenRegression:
     def test_prepare_metadata_context_default_config_equals_none(self, svc):
         """AC9: prepare_metadata_context with default WikiConfig == with wiki_config=None."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         cache = _make_cache(view_count=5)
         metadata = _make_kb_metadata()
 
@@ -395,14 +423,11 @@ class TestGoldenRegression:
     def test_render_article_default_config_equals_none(self, svc):
         """AC9: render_article with default WikiConfig == with wiki_config=None."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         with tempfile.TemporaryDirectory() as tmpdir:
             f = Path(tmpdir) / "article.md"
             f.write_text(
-                "Article Number: KA-00001\n"
-                "Title: My Article\n"
-                "---\n"
-                "# Body\n"
-                "Content."
+                "Article Number: KA-00001\nTitle: My Article\n---\n# Body\nContent."
             )
             result_none = svc.render_article(f, "test-repo", wiki_config=None)
             result_default = svc.render_article(
@@ -413,14 +438,19 @@ class TestGoldenRegression:
     def test_populate_views_default_config_equals_none(self, svc):
         """AC9: populate_views_from_front_matter with default WikiConfig == with wiki_config=None."""
         from code_indexer.server.utils.config_manager import WikiConfig
+
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
-            (repo_path / "article.md").write_text("---\nviews: 10\n---\n# Art\nContent.")
+            (repo_path / "article.md").write_text(
+                "---\nviews: 10\n---\n# Art\nContent."
+            )
 
             cache_none = _make_cache()
             cache_default = _make_cache()
 
-            svc.populate_views_from_front_matter("r", repo_path, cache_none, wiki_config=None)
+            svc.populate_views_from_front_matter(
+                "r", repo_path, cache_none, wiki_config=None
+            )
             svc.populate_views_from_front_matter(
                 "r", repo_path, cache_default, wiki_config=WikiConfig()
             )
@@ -441,6 +471,7 @@ class TestCleanGenericWiki:
 
     def _all_off(self):
         from code_indexer.server.utils.config_manager import WikiConfig
+
         return WikiConfig(
             enable_header_block_parsing=False,
             enable_article_number=False,
@@ -513,9 +544,13 @@ class TestCleanGenericWiki:
         wiki_config = self._all_off()
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir)
-            (repo_path / "article.md").write_text("---\nviews: 100\n---\n# Art\nContent.")
+            (repo_path / "article.md").write_text(
+                "---\nviews: 100\n---\n# Art\nContent."
+            )
             cache = _make_cache()
-            svc.populate_views_from_front_matter("r", repo_path, cache, wiki_config=wiki_config)
+            svc.populate_views_from_front_matter(
+                "r", repo_path, cache, wiki_config=wiki_config
+            )
             cache.insert_initial_views.assert_not_called()
 
 

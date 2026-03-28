@@ -119,8 +119,10 @@ class TestVectorStorageHNSWValidation:
             assert result.status == DiagnosticStatus.ERROR
             assert "repos_with_issues" in result.details
             assert len(result.details["repos_with_issues"]) == 1
-            assert "corrupted" in str(result.details["repos_with_issues"][0]).lower() or \
-                   "load" in str(result.details["repos_with_issues"][0]).lower()
+            assert (
+                "corrupted" in str(result.details["repos_with_issues"][0]).lower()
+                or "load" in str(result.details["repos_with_issues"][0]).lower()
+            )
 
     @pytest.mark.asyncio
     async def test_check_vector_storage_validates_multiple_index_types(self, tmp_path):
@@ -139,7 +141,9 @@ class TestVectorStorageHNSWValidation:
         # Create temporal index
         temporal_index_dir = repo_base / "code-indexer-temporal"
         temporal_index_dir.mkdir(parents=True)
-        self._create_valid_hnsw_index(temporal_index_dir, vector_count=100, vector_dim=1024)
+        self._create_valid_hnsw_index(
+            temporal_index_dir, vector_count=100, vector_dim=1024
+        )
 
         # Bug #149 Fix: Register repo in database
         db_path = tmp_path / "cidx_server.db"
@@ -161,8 +165,14 @@ class TestVectorStorageHNSWValidation:
             assert result.status == DiagnosticStatus.WORKING
             assert "index_types_found" in result.details
             index_types = result.details["index_types_found"]
-            assert "voyage-code-3" in index_types or "code semantic" in str(index_types).lower()
-            assert "code-indexer-temporal" in index_types or "temporal" in str(index_types).lower()
+            assert (
+                "voyage-code-3" in index_types
+                or "code semantic" in str(index_types).lower()
+            )
+            assert (
+                "code-indexer-temporal" in index_types
+                or "temporal" in str(index_types).lower()
+            )
 
     @pytest.mark.asyncio
     async def test_check_vector_storage_with_no_golden_repos(self, tmp_path):
@@ -197,7 +207,14 @@ class TestVectorStorageHNSWValidation:
         golden_repos_dir.mkdir(parents=True)
 
         # Create versioned directory (should be skipped - not registered)
-        versioned_dir = golden_repos_dir / ".versioned" / "repo-v1" / ".code-indexer" / "index" / "voyage-code-3"
+        versioned_dir = (
+            golden_repos_dir
+            / ".versioned"
+            / "repo-v1"
+            / ".code-indexer"
+            / "index"
+            / "voyage-code-3"
+        )
         versioned_dir.mkdir(parents=True)
         self._create_valid_hnsw_index(versioned_dir, vector_count=10)
 
@@ -350,7 +367,10 @@ class TestVectorStorageHNSWValidation:
             assert result.status in [DiagnosticStatus.WARNING, DiagnosticStatus.ERROR]
             assert "repos_with_issues" in result.details
             assert len(result.details["repos_with_issues"]) == 1
-            assert "missing-hnsw-repo" in str(result.details["repos_with_issues"][0]).lower()
+            assert (
+                "missing-hnsw-repo"
+                in str(result.details["repos_with_issues"][0]).lower()
+            )
             assert "missing hnsw" in str(result.details["repos_with_issues"][0]).lower()
 
     @pytest.mark.asyncio
@@ -432,7 +452,10 @@ class TestVectorStorageHNSWValidation:
             assert result.status in [DiagnosticStatus.WARNING, DiagnosticStatus.ERROR]
             assert "repos_with_issues" in result.details
             assert len(result.details["repos_with_issues"]) == 1
-            assert "corrupted-meta-repo" in str(result.details["repos_with_issues"][0]).lower()
+            assert (
+                "corrupted-meta-repo"
+                in str(result.details["repos_with_issues"][0]).lower()
+            )
 
     def _create_database_with_registered_repos(
         self, db_path: Path, repos: list[tuple[str, str]]

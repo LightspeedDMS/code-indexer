@@ -187,8 +187,8 @@ class TestHNSWIndexCacheGetStatsUsesRealSize(unittest.TestCase):
 
     def test_get_stats_multiple_entries_sum_real_sizes(self) -> None:
         """get_stats().total_memory_mb must be sum of all entry index_size_bytes."""
-        bytes_1 = 10 * 1024 * 1024   # 10 MB
-        bytes_2 = 20 * 1024 * 1024   # 20 MB
+        bytes_1 = 10 * 1024 * 1024  # 10 MB
+        bytes_2 = 20 * 1024 * 1024  # 20 MB
 
         mock_index_1 = MagicMock()
         mock_index_1.index_file_size.return_value = bytes_1
@@ -454,17 +454,20 @@ class TestGetTotalIndexMemoryMb(unittest.TestCase):
     def tearDown(self) -> None:
         # Reset singletons after each test
         from code_indexer.server.cache import reset_global_cache, reset_global_fts_cache
+
         reset_global_cache()
         reset_global_fts_cache()
 
     def test_get_total_index_memory_mb_is_importable(self) -> None:
         """get_total_index_memory_mb must be importable from cache module."""
         from code_indexer.server.cache import get_total_index_memory_mb
+
         self.assertTrue(callable(get_total_index_memory_mb))
 
     def test_get_total_index_memory_mb_returns_float(self) -> None:
         """get_total_index_memory_mb() must return a float."""
         from code_indexer.server.cache import get_total_index_memory_mb
+
         result = get_total_index_memory_mb()
         self.assertIsInstance(result, float)
 
@@ -473,16 +476,19 @@ class TestGetTotalIndexMemoryMb(unittest.TestCase):
     ) -> None:
         """get_total_index_memory_mb() must return 0.0 when caches are not initialized."""
         from code_indexer.server.cache import reset_global_cache, reset_global_fts_cache
+
         reset_global_cache()
         reset_global_fts_cache()
 
         from code_indexer.server.cache import get_total_index_memory_mb
+
         result = get_total_index_memory_mb()
         self.assertEqual(result, 0.0)
 
     def test_get_total_index_memory_mb_is_in_all_list(self) -> None:
         """get_total_index_memory_mb must be in __all__ of cache module."""
         import code_indexer.server.cache as cache_module
+
         self.assertIn("get_total_index_memory_mb", cache_module.__all__)
 
     def test_get_total_index_memory_mb_combines_hnsw_and_fts(self) -> None:
@@ -502,7 +508,7 @@ class TestGetTotalIndexMemoryMb(unittest.TestCase):
         fts_cache = get_global_fts_cache()
 
         hnsw_bytes = 30 * 1024 * 1024  # 30 MB
-        fts_bytes = 5 * 1024 * 1024    # 5 MB
+        fts_bytes = 5 * 1024 * 1024  # 5 MB
 
         # Load HNSW entry
         mock_hnsw = MagicMock()

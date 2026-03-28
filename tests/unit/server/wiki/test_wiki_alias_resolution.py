@@ -5,6 +5,7 @@ TDD red phase - AC1 and AC2 (core behavioral changes).
 AC1 - Wiki path resolution through AliasManager.read_alias("{alias}-global")
 AC2 - Missing alias returns 404 with no fallback to get_actual_repo_path()
 """
+
 import os
 import tempfile
 from pathlib import Path
@@ -13,7 +14,11 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_wiki_user_hybrid,
+    get_current_user_hybrid,
+)
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -21,17 +26,24 @@ from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_user(username: str):
     user = MagicMock()
     user.username = username
     return user
 
 
-def _make_app(*, authenticated_user, golden_repos_dir: str,
-              wiki_enabled: bool = True, is_admin: bool = True,
-              user_accessible_repos=None):
+def _make_app(
+    *,
+    authenticated_user,
+    golden_repos_dir: str,
+    wiki_enabled: bool = True,
+    is_admin: bool = True,
+    user_accessible_repos=None,
+):
     """Create a FastAPI test app wired to wiki_router with alias-aware state."""
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()
@@ -60,6 +72,7 @@ def _make_app(*, authenticated_user, golden_repos_dir: str,
 # AC1: Wiki path resolution through AliasManager
 # ---------------------------------------------------------------------------
 
+
 class TestAC1AliasManagerPathResolution:
     """Routes resolve repo path via AliasManager.read_alias('{alias}-global')."""
 
@@ -73,8 +86,10 @@ class TestAC1AliasManagerPathResolution:
             golden_repos_dir.mkdir()
             make_aliases_dir(str(golden_repos_dir), "my-repo", str(repo_dir))
 
-            app = _make_app(authenticated_user=_make_user("admin"),
-                            golden_repos_dir=str(golden_repos_dir))
+            app = _make_app(
+                authenticated_user=_make_user("admin"),
+                golden_repos_dir=str(golden_repos_dir),
+            )
             client = TestClient(app)
             resp = client.get("/wiki/my-repo/")
             assert resp.status_code == 200
@@ -90,8 +105,10 @@ class TestAC1AliasManagerPathResolution:
             golden_repos_dir.mkdir()
             make_aliases_dir(str(golden_repos_dir), "my-repo", str(repo_dir))
 
-            app = _make_app(authenticated_user=_make_user("admin"),
-                            golden_repos_dir=str(golden_repos_dir))
+            app = _make_app(
+                authenticated_user=_make_user("admin"),
+                golden_repos_dir=str(golden_repos_dir),
+            )
             client = TestClient(app)
             resp = client.get("/wiki/my-repo/guide")
             assert resp.status_code == 200
@@ -107,8 +124,10 @@ class TestAC1AliasManagerPathResolution:
             golden_repos_dir.mkdir()
             make_aliases_dir(str(golden_repos_dir), "my-repo", str(repo_dir))
 
-            app = _make_app(authenticated_user=_make_user("admin"),
-                            golden_repos_dir=str(golden_repos_dir))
+            app = _make_app(
+                authenticated_user=_make_user("admin"),
+                golden_repos_dir=str(golden_repos_dir),
+            )
             client = TestClient(app)
             resp = client.get("/wiki/my-repo/")
             assert resp.status_code == 200
@@ -118,6 +137,7 @@ class TestAC1AliasManagerPathResolution:
 # ---------------------------------------------------------------------------
 # AC2: Missing alias returns 404, no fallback
 # ---------------------------------------------------------------------------
+
 
 class TestAC2MissingAlias404NoFallback:
     """When alias JSON is absent, return 404 without touching get_actual_repo_path()."""
@@ -129,8 +149,10 @@ class TestAC2MissingAlias404NoFallback:
             golden_repos_dir.mkdir()
             (Path(golden_repos_dir) / "aliases").mkdir(parents=True, exist_ok=True)
 
-            app = _make_app(authenticated_user=_make_user("admin"),
-                            golden_repos_dir=str(golden_repos_dir))
+            app = _make_app(
+                authenticated_user=_make_user("admin"),
+                golden_repos_dir=str(golden_repos_dir),
+            )
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/wiki/no-such-repo/")
             assert resp.status_code == 404
@@ -142,8 +164,10 @@ class TestAC2MissingAlias404NoFallback:
             golden_repos_dir.mkdir()
             (Path(golden_repos_dir) / "aliases").mkdir(parents=True, exist_ok=True)
 
-            app = _make_app(authenticated_user=_make_user("admin"),
-                            golden_repos_dir=str(golden_repos_dir))
+            app = _make_app(
+                authenticated_user=_make_user("admin"),
+                golden_repos_dir=str(golden_repos_dir),
+            )
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/wiki/no-such-repo/some-article")
             assert resp.status_code == 404
@@ -155,8 +179,10 @@ class TestAC2MissingAlias404NoFallback:
             golden_repos_dir.mkdir()
             (Path(golden_repos_dir) / "aliases").mkdir(parents=True, exist_ok=True)
 
-            app = _make_app(authenticated_user=_make_user("admin"),
-                            golden_repos_dir=str(golden_repos_dir))
+            app = _make_app(
+                authenticated_user=_make_user("admin"),
+                golden_repos_dir=str(golden_repos_dir),
+            )
             client = TestClient(app, raise_server_exceptions=False)
             client.get("/wiki/no-such-repo/")
             manager = app.state.golden_repo_manager

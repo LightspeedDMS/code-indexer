@@ -445,7 +445,9 @@ class HNSWIndexCache:
             return
 
         # Calculate current cache size using real index sizes
-        current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
+        current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (
+            1024 * 1024
+        )
 
         # Evict LRU entries until under limit
         while current_size_mb > self.config.max_cache_size_mb and self._cache:
@@ -464,7 +466,9 @@ class HNSWIndexCache:
             )
 
             # Recalculate size
-            current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
+            current_size_mb = sum(e.index_size_bytes for e in self._cache.values()) / (
+                1024 * 1024
+            )
 
         if current_size_mb <= self.config.max_cache_size_mb and self._cache:
             logger.debug(
@@ -564,7 +568,9 @@ class HNSWIndexCache:
         """
         with self._cache_lock:
             # Calculate total memory usage using real index sizes
-            total_memory_mb = sum(e.index_size_bytes for e in self._cache.values()) / (1024 * 1024)
+            total_memory_mb = sum(e.index_size_bytes for e in self._cache.values()) / (
+                1024 * 1024
+            )
 
             # Per-repository stats
             per_repo_stats = {}

@@ -47,9 +47,7 @@ class LeaseStatusResponse(BaseModel):
 
 
 class SaveConfigRequest(BaseModel):
-    claude_auth_mode: str = Field(
-        ..., description="'api_key' or 'subscription'"
-    )
+    claude_auth_mode: str = Field(..., description="'api_key' or 'subscription'")
     llm_creds_provider_url: str = Field(default="")
     llm_creds_provider_api_key: str = Field(default="")
     llm_creds_provider_consumer_id: str = Field(default="cidx-server")
@@ -73,7 +71,9 @@ def _build_lifecycle_service(provider_url: str, api_key: str):
     from code_indexer.server.services.claude_credentials_file_manager import (
         ClaudeCredentialsFileManager,
     )
-    from code_indexer.server.services.llm_lease_lifecycle import LlmLeaseLifecycleService
+    from code_indexer.server.services.llm_lease_lifecycle import (
+        LlmLeaseLifecycleService,
+    )
 
     client = LlmCredsClient(provider_url=provider_url, api_key=api_key)
     return LlmLeaseLifecycleService(
@@ -92,6 +92,7 @@ def get_config_service():
     from code_indexer.server.services.config_service import (
         get_config_service as _get,
     )
+
     return _get()
 
 
@@ -214,9 +215,7 @@ def save_config(
             )
         except Exception as exc:
             logger.error("Failed to start LLM lease lifecycle: %s", exc)
-            return SaveConfigResponse(
-                success=False, mode=mode, error=str(exc)
-            )
+            return SaveConfigResponse(success=False, mode=mode, error=str(exc))
 
     elif mode == "api_key" and prev_mode == "subscription":
         # Switching FROM subscription — stop existing lifecycle if present
@@ -235,7 +234,9 @@ def save_config(
             try:
                 old_svc.stop()
             except Exception as exc:
-                logger.warning("Error stopping old LLM lease lifecycle during re-save: %s", exc)
+                logger.warning(
+                    "Error stopping old LLM lease lifecycle during re-save: %s", exc
+                )
         try:
             new_svc = _build_lifecycle_service(
                 provider_url=request.llm_creds_provider_url,

@@ -515,7 +515,11 @@ class SCIPQueryService:
         _ = repository_alias, username
 
         result = get_smart_context(
-            symbol, scip_dir, limit=limit, min_score=min_score, timeout_seconds=timeout_seconds
+            symbol,
+            scip_dir,
+            limit=limit,
+            min_score=min_score,
+            timeout_seconds=timeout_seconds,
         )
 
         return {

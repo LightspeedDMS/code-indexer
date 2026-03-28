@@ -13,9 +13,9 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, cast
 
-import markdown
+import markdown  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class DependencyMapDomainService:
         """Validate domain name contains no path traversal sequences."""
         if not domain_name:
             return False
-        if '/' in domain_name or '\\' in domain_name or '..' in domain_name:
+        if "/" in domain_name or "\\" in domain_name or ".." in domain_name:
             return False
         return True
 
@@ -54,7 +54,9 @@ class DependencyMapDomainService:
     # Public API
     # ─────────────────────────────────────────────────────────────────────────
 
-    def get_domain_list(self, accessible_repos: Optional[Set[str]] = None) -> Dict[str, Any]:
+    def get_domain_list(
+        self, accessible_repos: Optional[Set[str]] = None
+    ) -> Dict[str, Any]:
         """
         Return domain list for the explorer left panel.
 
@@ -87,13 +89,15 @@ class DependencyMapDomainService:
 
             last_analyzed = self._get_domain_last_analyzed(name)
 
-            domains.append({
-                "name": name,
-                "description": description,
-                "repo_count": len(visible_repos),
-                "participating_repos": visible_repos,
-                "last_analyzed": last_analyzed,
-            })
+            domains.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "repo_count": len(visible_repos),
+                    "participating_repos": visible_repos,
+                    "last_analyzed": last_analyzed,
+                }
+            )
 
         # Sort alphabetically by name
         domains.sort(key=lambda d: d["name"])
@@ -122,11 +126,15 @@ class DependencyMapDomainService:
             OR None if domain not found.
         """
         if not self._validate_domain_name(domain_name):
-            logger.warning("dependency_map_domain: invalid domain name: %s", domain_name)
+            logger.warning(
+                "dependency_map_domain: invalid domain name: %s", domain_name
+            )
             return None
 
         raw_domains = self._load_domains_json()
-        domain_data = next((d for d in raw_domains if d.get("name") == domain_name), None)
+        domain_data = next(
+            (d for d in raw_domains if d.get("name") == domain_name), None
+        )
 
         if domain_data is None:
             return None
@@ -140,17 +148,21 @@ class DependencyMapDomainService:
             visible_repos = sorted(all_repos)
 
         # Determine visible domains set for cross-dep filtering
-        visible_domain_names = self._compute_visible_domain_names(accessible_repos, raw_domains)
+        visible_domain_names = self._compute_visible_domain_names(
+            accessible_repos, raw_domains
+        )
 
         # Parse cross-domain dependencies
         all_deps = self._parse_cross_domain_deps()
 
         outgoing_deps = [
-            dep for dep in all_deps
+            dep
+            for dep in all_deps
             if dep["source"] == domain_name and dep["target"] in visible_domain_names
         ]
         incoming_deps = [
-            dep for dep in all_deps
+            dep
+            for dep in all_deps
             if dep["target"] == domain_name and dep["source"] in visible_domain_names
         ]
 
@@ -167,7 +179,9 @@ class DependencyMapDomainService:
             "full_documentation_html": full_documentation_html,
         }
 
-    def get_graph_data(self, accessible_repos: Optional[Set[str]] = None) -> Dict[str, Any]:
+    def get_graph_data(
+        self, accessible_repos: Optional[Set[str]] = None
+    ) -> Dict[str, Any]:
         """
         Return graph data (nodes + edges) for the D3.js visualization.
 
@@ -182,20 +196,27 @@ class DependencyMapDomainService:
               - edges: List[Dict] each with source, target, relationship
         """
         raw_domains = self._load_domains_json()
-        visible_domain_names = self._compute_visible_domain_names(accessible_repos, raw_domains)
+        visible_domain_names = self._compute_visible_domain_names(
+            accessible_repos, raw_domains
+        )
 
         # Build edges first: only between visible domains.
         # Edges must be built before nodes so dep counts can be pre-computed.
         all_deps = self._parse_cross_domain_deps()
         edges = []
         for dep in all_deps:
-            if dep["source"] in visible_domain_names and dep["target"] in visible_domain_names:
-                edges.append({
-                    "source": dep["source"],
-                    "target": dep["target"],
-                    "relationship": dep.get("relationship", ""),
-                    "dep_type": dep.get("dep_type", ""),
-                })
+            if (
+                dep["source"] in visible_domain_names
+                and dep["target"] in visible_domain_names
+            ):
+                edges.append(
+                    {
+                        "source": dep["source"],
+                        "target": dep["target"],
+                        "relationship": dep.get("relationship", ""),
+                        "dep_type": dep.get("dep_type", ""),
+                    }
+                )
 
         # Pre-compute dep counts from visible edges for each node
         outgoing_counts: Dict[str, int] = {}
@@ -222,15 +243,17 @@ class DependencyMapDomainService:
                 repo_sizes.get(repo_alias, {}).get("file_count", 0)
                 for repo_alias in participating_repos
             )
-            nodes.append({
-                "id": node_id,
-                "name": node_id,
-                "description": (domain.get("description") or "")[:100],
-                "repo_count": domain["repo_count"],
-                "incoming_dep_count": incoming_counts.get(node_id, 0),
-                "outgoing_dep_count": outgoing_counts.get(node_id, 0),
-                "total_file_count": total_file_count,
-            })
+            nodes.append(
+                {
+                    "id": node_id,
+                    "name": node_id,
+                    "description": (domain.get("description") or "")[:100],
+                    "repo_count": domain["repo_count"],
+                    "incoming_dep_count": incoming_counts.get(node_id, 0),
+                    "outgoing_dep_count": outgoing_counts.get(node_id, 0),
+                    "total_file_count": total_file_count,
+                }
+            )
 
         return {"nodes": nodes, "edges": edges}
 
@@ -246,7 +269,7 @@ class DependencyMapDomainService:
         .versioned/cidx-meta/v_*/ rather than the live golden-repos/cidx-meta/.
         """
         cidx_meta_read_path = self._dependency_map_service.cidx_meta_read_path
-        return cidx_meta_read_path / "dependency-map"
+        return cast(Path, cidx_meta_read_path / "dependency-map")
 
     def _load_journal_repo_sizes(self) -> Dict[str, Any]:
         """
@@ -258,7 +281,9 @@ class DependencyMapDomainService:
         try:
             journal_path = self._get_depmap_dir() / "_journal.json"
         except Exception as e:
-            logger.warning("dependency_map_domain: failed to get depmap dir for journal: %s", e)
+            logger.warning(
+                "dependency_map_domain: failed to get depmap dir for journal: %s", e
+            )
             return {}
 
         if not journal_path.exists():
@@ -266,9 +291,12 @@ class DependencyMapDomainService:
 
         try:
             journal = json.loads(journal_path.read_text())
-            return journal.get("repo_sizes", {})
+            return cast(Dict[str, Any], journal.get("repo_sizes", {}))
         except Exception as e:
-            logger.warning("dependency_map_domain: failed to read _journal.json for repo sizes: %s", e)
+            logger.warning(
+                "dependency_map_domain: failed to read _journal.json for repo sizes: %s",
+                e,
+            )
             return {}
 
     def _load_domains_json(self) -> List[Dict[str, Any]]:
@@ -365,14 +393,16 @@ class DependencyMapDomainService:
             if set(source) <= {"-", " "}:
                 continue
 
-            deps.append({
-                "source": source,
-                "target": target,
-                "via_repos": [r.strip() for r in via.split(",") if r.strip()],
-                "relationship": relationship,
-                "dep_type": dep_type,
-                "why": why,
-            })
+            deps.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "via_repos": [r.strip() for r in via.split(",") if r.strip()],
+                    "relationship": relationship,
+                    "dep_type": dep_type,
+                    "why": why,
+                }
+            )
 
         return deps
 
@@ -401,36 +431,42 @@ class DependencyMapDomainService:
         try:
             content = file_path.read_text()
         except Exception as e:
-            logger.warning("dependency_map_domain: failed to read %s.md: %s", domain_name, e)
+            logger.warning(
+                "dependency_map_domain: failed to read %s.md: %s", domain_name, e
+            )
             return None
 
         # Strip YAML frontmatter (---...---)
         if content.startswith("---"):
             end = content.find("---", 3)
             if end != -1:
-                content = content[end + 3:].strip()
+                content = content[end + 3 :].strip()
 
         try:
             html = markdown.markdown(content, extensions=["tables", "fenced_code"])
             # Sanitize: strip script/style/iframe/object tags (defense-in-depth)
             html = re.sub(
-                r'<(script|style|iframe|object|embed|form|input)[^>]*>.*?</\1>',
-                '',
+                r"<(script|style|iframe|object|embed|form|input)[^>]*>.*?</\1>",
+                "",
                 html,
                 flags=re.IGNORECASE | re.DOTALL,
             )
             html = re.sub(
-                r'<(script|style|iframe|object|embed|form|input)[^>]*/?\s*>',
-                '',
+                r"<(script|style|iframe|object|embed|form|input)[^>]*/?\s*>",
+                "",
                 html,
                 flags=re.IGNORECASE,
             )
             # Strip on* event handlers from remaining tags
-            html = re.sub(r'\s+on\w+\s*=\s*"[^"]*"', '', html, flags=re.IGNORECASE)
-            html = re.sub(r"\s+on\w+\s*=\s*'[^']*'", '', html, flags=re.IGNORECASE)
-            return html
+            html = re.sub(r'\s+on\w+\s*=\s*"[^"]*"', "", html, flags=re.IGNORECASE)
+            html = re.sub(r"\s+on\w+\s*=\s*'[^']*'", "", html, flags=re.IGNORECASE)
+            return str(html)
         except Exception as e:
-            logger.warning("dependency_map_domain: failed to render markdown for %s: %s", domain_name, e)
+            logger.warning(
+                "dependency_map_domain: failed to render markdown for %s: %s",
+                domain_name,
+                e,
+            )
             return None
 
     def _get_domain_last_analyzed(self, domain_name: str) -> Optional[str]:
@@ -458,7 +494,9 @@ class DependencyMapDomainService:
         try:
             content = file_path.read_text()
         except Exception as e:
-            logger.warning("dependency_map_domain: failed to read %s.md: %s", domain_name, e)
+            logger.warning(
+                "dependency_map_domain: failed to read %s.md: %s", domain_name, e
+            )
             return None
 
         # Extract YAML frontmatter

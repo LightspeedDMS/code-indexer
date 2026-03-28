@@ -186,8 +186,7 @@ class JobReconciliationService:
 
         for row in rows:
             logger.info(
-                "JobReconciliationService: reclaimed job %s "
-                "(dead node: %s) -> pending",
+                "JobReconciliationService: reclaimed job %s (dead node: %s) -> pending",
                 row[0],
                 row[1],
             )

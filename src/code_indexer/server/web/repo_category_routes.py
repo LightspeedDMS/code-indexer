@@ -128,7 +128,9 @@ def create_category(
     try:
         service = _get_repo_category_service()
         category_id = service.create_category(name.strip(), pattern.strip())
-        logger.info(f"Created category '{name}' (id={category_id}) by {session.username}")
+        logger.info(
+            f"Created category '{name}' (id={category_id}) by {session.username}"
+        )
 
         # Apply to existing repos if checkbox was checked
         apply_msg = ""
@@ -150,21 +152,19 @@ def create_category(
         )
     except ValueError as e:
         # Validation error (invalid regex, pattern too long)
-        return _render_categories_response(
-            request, session, error_message=str(e)
-        )
+        return _render_categories_response(request, session, error_message=str(e))
     except Exception as e:
         # Database error (duplicate name, etc.)
         logger.warning("Failed to create category '%s': %s", name, e)
         error_msg = str(e)
         if "UNIQUE constraint failed" in error_msg:
             error_msg = f"Category name '{name}' already exists"
-        return _render_categories_response(
-            request, session, error_message=error_msg
-        )
+        return _render_categories_response(request, session, error_message=error_msg)
 
 
-@repo_category_web_router.post("/repo-categories/{category_id}/update", response_class=HTMLResponse)
+@repo_category_web_router.post(
+    "/repo-categories/{category_id}/update", response_class=HTMLResponse
+)
 def update_category(
     request: Request,
     category_id: int,
@@ -203,7 +203,9 @@ def update_category(
     try:
         service = _get_repo_category_service()
         service.update_category(category_id, name.strip(), pattern.strip())
-        logger.info(f"Updated category id={category_id} to '{name}' by {session.username}")
+        logger.info(
+            f"Updated category id={category_id} to '{name}' by {session.username}"
+        )
 
         # Apply to existing repos if checkbox was checked
         apply_msg = ""
@@ -225,21 +227,21 @@ def update_category(
         )
     except ValueError as e:
         # Validation error (invalid regex, pattern too long)
-        return _render_categories_response(
-            request, session, error_message=str(e)
-        )
+        return _render_categories_response(request, session, error_message=str(e))
     except Exception as e:
         # Database error (duplicate name, etc.)
-        logger.warning("Failed to update category id=%s to '%s': %s", category_id, name, e)
+        logger.warning(
+            "Failed to update category id=%s to '%s': %s", category_id, name, e
+        )
         error_msg = str(e)
         if "UNIQUE constraint failed" in error_msg:
             error_msg = f"Category name '{name}' already exists"
-        return _render_categories_response(
-            request, session, error_message=error_msg
-        )
+        return _render_categories_response(request, session, error_message=error_msg)
 
 
-@repo_category_web_router.post("/repo-categories/{category_id}/delete", response_class=HTMLResponse)
+@repo_category_web_router.post(
+    "/repo-categories/{category_id}/delete", response_class=HTMLResponse
+)
 def delete_category(
     request: Request,
     category_id: int,
@@ -303,7 +305,9 @@ def reorder_categories(
 
     # Parse ordered IDs
     try:
-        id_list = [int(id_str.strip()) for id_str in ordered_ids.split(",") if id_str.strip()]
+        id_list = [
+            int(id_str.strip()) for id_str in ordered_ids.split(",") if id_str.strip()
+        ]
     except ValueError:
         return _render_categories_response(
             request, session, error_message="Invalid category IDs format"
@@ -332,7 +336,9 @@ def reorder_categories(
         )
 
 
-@repo_category_web_router.post("/repo-categories/re-evaluate", response_class=HTMLResponse)
+@repo_category_web_router.post(
+    "/repo-categories/re-evaluate", response_class=HTMLResponse
+)
 def re_evaluate_categories(
     request: Request,
     csrf_token: Optional[str] = Form(None),
@@ -362,13 +368,19 @@ def re_evaluate_categories(
         updated = result.get("updated", 0)
         errors = result.get("errors", [])
 
-        logger.info(f"Re-evaluated repository categories: {updated} updated by {session.username}")
+        logger.info(
+            f"Re-evaluated repository categories: {updated} updated by {session.username}"
+        )
 
         # Build success message
         if errors:
-            success_msg = f"Re-evaluated {updated} repositories with {len(errors)} errors"
+            success_msg = (
+                f"Re-evaluated {updated} repositories with {len(errors)} errors"
+            )
         else:
-            success_msg = f"Re-evaluated all repositories: {updated} assignments updated"
+            success_msg = (
+                f"Re-evaluated all repositories: {updated} assignments updated"
+            )
 
         return _render_categories_response(
             request,
@@ -437,7 +449,9 @@ def _render_categories_response(
     return response
 
 
-@repo_category_web_router.post("/golden-repos/{alias}/category", response_class=HTMLResponse)
+@repo_category_web_router.post(
+    "/golden-repos/{alias}/category", response_class=HTMLResponse
+)
 def update_repo_category_route(
     request: Request,
     alias: str,

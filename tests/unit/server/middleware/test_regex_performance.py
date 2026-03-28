@@ -108,8 +108,8 @@ class TestRegexPerformanceOptimization:
         max_acceptable_time = 0.002  # 2ms per call (well under the old 5-10ms problem)
 
         assert avg_time_per_call < max_acceptable_time, (
-            f"Sanitization too slow: {avg_time_per_call*1000:.2f}ms per call "
-            f"(limit: {max_acceptable_time*1000:.2f}ms). "
+            f"Sanitization too slow: {avg_time_per_call * 1000:.2f}ms per call "
+            f"(limit: {max_acceptable_time * 1000:.2f}ms). "
             f"Regex patterns may not be pre-compiled."
         )
 

@@ -48,9 +48,7 @@ class TestConflictDetection:
         When check_operation_conflict('dependency_map_delta') is called
         Then DuplicateJobError is raised with the conflicting job_id
         """
-        job_tracker.register_job(
-            "existing-delta-job", "dependency_map_delta", "system"
-        )
+        job_tracker.register_job("existing-delta-job", "dependency_map_delta", "system")
         job_tracker.update_status("existing-delta-job", status="running")
 
         with pytest.raises(DuplicateJobError) as exc_info:

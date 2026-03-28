@@ -205,9 +205,7 @@ class DepMapRepairExecutor:
                 (d for d in domain_list if d.get("name") == anomaly.domain), None
             )
             if domain_info is None:
-                errors.append(
-                    f"Domain '{anomaly.domain}' not found in _domains.json"
-                )
+                errors.append(f"Domain '{anomaly.domain}' not found in _domains.json")
                 continue
 
             self._log(f"Repairing domain: {anomaly.domain}")
@@ -325,9 +323,7 @@ class DepMapRepairExecutor:
         }
 
         # Scan domain .md files on disk
-        md_files = [
-            f for f in output_dir.glob("*.md") if not f.name.startswith("_")
-        ]
+        md_files = [f for f in output_dir.glob("*.md") if not f.name.startswith("_")]
 
         new_list: List[Dict[str, Any]] = []
         for md_file in sorted(md_files):

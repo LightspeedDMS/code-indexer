@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 def _make_backend(tmp_path):
     from code_indexer.server.storage.sqlite_backends import DependencyMapTrackingBackend
+
     return DependencyMapTrackingBackend(str(tmp_path / "test.db"))
 
 
@@ -37,9 +38,9 @@ class TestRecordRunMetrics:
     def test_method_exists_on_backend(self, tmp_path):
         """AC9: DependencyMapTrackingBackend has record_run_metrics method."""
         backend = _make_backend(tmp_path)
-        assert hasattr(backend, "record_run_metrics"), (
-            "DependencyMapTrackingBackend must have record_run_metrics method"
-        )
+        assert hasattr(
+            backend, "record_run_metrics"
+        ), "DependencyMapTrackingBackend must have record_run_metrics method"
 
     def test_stores_metrics_retrievable_via_get_run_history(self, tmp_path):
         """AC9: Stored metrics are retrievable via get_run_history."""
@@ -84,9 +85,9 @@ class TestGetRunHistory:
     def test_method_exists_on_backend(self, tmp_path):
         """AC9: DependencyMapTrackingBackend has get_run_history method."""
         backend = _make_backend(tmp_path)
-        assert hasattr(backend, "get_run_history"), (
-            "DependencyMapTrackingBackend must have get_run_history method"
-        )
+        assert hasattr(
+            backend, "get_run_history"
+        ), "DependencyMapTrackingBackend must have get_run_history method"
 
     def test_returns_empty_when_no_runs(self, tmp_path):
         """AC9: Returns empty list when no metrics recorded."""
@@ -97,10 +98,12 @@ class TestGetRunHistory:
         """AC9: Most recently inserted runs appear first."""
         backend = _make_backend(tmp_path)
         for i in range(3):
-            backend.record_run_metrics(_sample_metrics(
-                timestamp=f"2026-01-0{i+1}T00:00:00+00:00",
-                domain_count=i,
-            ))
+            backend.record_run_metrics(
+                _sample_metrics(
+                    timestamp=f"2026-01-0{i + 1}T00:00:00+00:00",
+                    domain_count=i,
+                )
+            )
 
         history = backend.get_run_history(limit=5)
         assert len(history) == 3
@@ -131,15 +134,19 @@ class TestDashboardRunHistory:
         from code_indexer.server.services.dependency_map_dashboard_service import (
             DependencyMapDashboardService,
         )
-        from code_indexer.server.storage.sqlite_backends import DependencyMapTrackingBackend
+        from code_indexer.server.storage.sqlite_backends import (
+            DependencyMapTrackingBackend,
+        )
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
         backend = DependencyMapTrackingBackend(str(tmp_path / "test.db"))
         for i in range(run_count):
-            backend.record_run_metrics(_sample_metrics(
-                timestamp=f"2026-01-0{i+1}T00:00:00+00:00",
-                domain_count=3 + i,
-            ))
+            backend.record_run_metrics(
+                _sample_metrics(
+                    timestamp=f"2026-01-0{i + 1}T00:00:00+00:00",
+                    domain_count=3 + i,
+                )
+            )
 
         config = ClaudeIntegrationConfig(
             dependency_map_enabled=True,

@@ -18,8 +18,7 @@ from .conftest import extract_mcp_data
 def _make_tree_result(filenames: list) -> DirectoryTreeResult:
     """Build a DirectoryTreeResult with the given flat file list under root."""
     children = [
-        TreeNode(name=name, path=name, is_directory=False)
-        for name in filenames
+        TreeNode(name=name, path=name, is_directory=False) for name in filenames
     ]
     root = TreeNode(
         name="cidx-meta",
@@ -70,9 +69,7 @@ class TestDirectoryTreeCidxMetaAccessFiltering:
                         "code_indexer.server.mcp.handlers._get_access_filtering_service",
                         return_value=access_svc,
                     ):
-                        return handle_directory_tree(
-                            {"repository_alias": alias}, user
-                        )
+                        return handle_directory_tree({"repository_alias": alias}, user)
 
     def test_regular_user_sees_no_repo_files_in_tree(
         self, regular_user, access_filtering_service

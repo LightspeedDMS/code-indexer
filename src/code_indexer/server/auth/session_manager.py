@@ -315,7 +315,11 @@ class PasswordChangeSessionManager:
                 sessions_snap, timestamps_snap = self._snapshot_state()
 
         # Write to disk outside the lock using immutable snapshots
-        if users_to_remove and sessions_snap is not None and timestamps_snap is not None:
+        if (
+            users_to_remove
+            and sessions_snap is not None
+            and timestamps_snap is not None
+        ):
             self._save_session_data(sessions_snap, timestamps_snap)
 
         return len(users_to_remove)

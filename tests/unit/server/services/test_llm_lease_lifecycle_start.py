@@ -178,7 +178,9 @@ class TestStartRemovesAnthropicApiKey:
         svc.start()
         assert "ANTHROPIC_API_KEY" not in os.environ
 
-    def test_start_succeeds_even_without_anthropic_api_key_in_env(self, tmp_path, monkeypatch):
+    def test_start_succeeds_even_without_anthropic_api_key_in_env(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         svc = _make_service(tmp_path)
         svc.start()  # Should not raise
@@ -195,7 +197,9 @@ class TestStartWithCrashRecovery:
 
     def test_old_lease_checked_in_before_fresh_checkout(self, tmp_path):
         state_mgr = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
-        state_mgr.save_state(LlmLeaseState(lease_id="old-lease", credential_id="old-cred"))
+        state_mgr.save_state(
+            LlmLeaseState(lease_id="old-lease", credential_id="old-cred")
+        )
 
         creds_path = tmp_path / "creds" / ".credentials.json"
         creds_mgr = ClaudeCredentialsFileManager(credentials_path=creds_path)
@@ -219,7 +223,9 @@ class TestStartWithCrashRecovery:
 
     def test_old_lease_checkin_includes_token_writeback(self, tmp_path):
         state_mgr = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
-        state_mgr.save_state(LlmLeaseState(lease_id="old-lease", credential_id="old-cred"))
+        state_mgr.save_state(
+            LlmLeaseState(lease_id="old-lease", credential_id="old-cred")
+        )
 
         creds_path = tmp_path / "creds" / ".credentials.json"
         creds_mgr = ClaudeCredentialsFileManager(credentials_path=creds_path)
@@ -243,7 +249,9 @@ class TestStartWithCrashRecovery:
 
     def test_fresh_checkout_performed_after_crash_recovery(self, tmp_path):
         state_mgr = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
-        state_mgr.save_state(LlmLeaseState(lease_id="old-lease", credential_id="old-cred"))
+        state_mgr.save_state(
+            LlmLeaseState(lease_id="old-lease", credential_id="old-cred")
+        )
 
         checkout_count = [0]
         new_lease_id = "new-lease-after-recovery"
@@ -265,7 +273,9 @@ class TestStartWithCrashRecovery:
 
     def test_status_is_active_after_crash_recovery(self, tmp_path):
         state_mgr = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
-        state_mgr.save_state(LlmLeaseState(lease_id="old-lease", credential_id="old-cred"))
+        state_mgr.save_state(
+            LlmLeaseState(lease_id="old-lease", credential_id="old-cred")
+        )
 
         svc = _make_service(tmp_path)
         svc.start()
@@ -458,7 +468,9 @@ class TestCrashRecoveryWithApiKey:
         assert "access_token" not in recovery_checkin
         assert "refresh_token" not in recovery_checkin
 
-    def test_crash_recovery_with_api_key_state_is_cleared_then_refreshed(self, tmp_path):
+    def test_crash_recovery_with_api_key_state_is_cleared_then_refreshed(
+        self, tmp_path
+    ):
         """After crash recovery for api_key lease, state file holds the new lease."""
         state_mgr = LlmLeaseStateManager(server_dir_path=str(tmp_path / "state"))
         state_mgr.save_state(
@@ -500,7 +512,10 @@ class TestCredentialTypeResetOnFailedStart:
 
         # Second start: provider unreachable → DEGRADED
         failing_transport = _make_transport(_failing_handler)
-        from code_indexer.server.services.llm_creds_client import LlmCredsClient as _LlmCredsClient
+        from code_indexer.server.services.llm_creds_client import (
+            LlmCredsClient as _LlmCredsClient,
+        )
+
         svc._client = _LlmCredsClient(
             provider_url="http://unreachable",
             api_key="key",

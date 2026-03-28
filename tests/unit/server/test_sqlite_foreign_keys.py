@@ -189,7 +189,7 @@ class TestSqliteForeignKeyEnforcement:
                 cursor.execute("PRAGMA foreign_keys")
                 result = cursor.fetchone()
                 assert result[0] == 1, (
-                    f"Connection {i+1}: PRAGMA foreign_keys should be ON (1), "
+                    f"Connection {i + 1}: PRAGMA foreign_keys should be ON (1), "
                     f"but got {result[0]}"
                 )
             finally:

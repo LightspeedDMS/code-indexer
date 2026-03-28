@@ -175,7 +175,9 @@ Provide concise troubleshooting steps."""
             service, "_load_prompt_template", return_value=template_content
         ):
             with patch.object(
-                service, "_execute_claude_prompt", side_effect=[feedback_old, feedback_new]
+                service,
+                "_execute_claude_prompt",
+                side_effect=[feedback_old, feedback_new],
             ) as mock_execute:
                 # First call
                 feedback1 = await service.get_actionable_feedback(error_result)
@@ -306,7 +308,9 @@ class TestExecuteClaudePrompt:
             response = await service._execute_claude_prompt(prompt_text)
 
             # Should return error message
-            assert "not found" in response.lower() or "not available" in response.lower()
+            assert (
+                "not found" in response.lower() or "not available" in response.lower()
+            )
 
     @pytest.mark.asyncio
     async def test_execute_claude_prompt_handles_nonzero_exit(self):

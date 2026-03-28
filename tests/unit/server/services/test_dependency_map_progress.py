@@ -137,7 +137,7 @@ class TestFullAnalysisProgressFormula7Domains:
         for i in range(1, len(values)):
             assert (
                 values[i] >= values[i - 1]
-            ), f"Progress decreased at step {i}: {values[i-1]} -> {values[i]}"
+            ), f"Progress decreased at step {i}: {values[i - 1]} -> {values[i]}"
 
 
 class TestFullAnalysisProgressFormula1Domain:

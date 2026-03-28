@@ -164,9 +164,11 @@ class TestServerStartupFixIntegration:
                     process = psutil.Process(pid)
                     assert (
                         process.is_running()
-                    ), f"Server process died after {(i+1)*2} seconds"
+                    ), f"Server process died after {(i + 1) * 2} seconds"
                 except psutil.NoSuchProcess:
-                    pytest.fail(f"Server process {pid} died after {(i+1)*2} seconds")
+                    pytest.fail(
+                        f"Server process {pid} died after {(i + 1) * 2} seconds"
+                    )
 
         finally:
             # Clean up
@@ -239,16 +241,16 @@ class TestServerStartupFixIntegration:
                     # Should get some response (auth errors are expected)
                     assert response.status_code in [200, 401, 403]
                 except requests.exceptions.ConnectionError:
-                    pytest.fail(f"Server connection failed on request {i+1}")
+                    pytest.fail(f"Server connection failed on request {i + 1}")
 
                 # Verify process still running
                 try:
                     process = psutil.Process(pid)
                     assert (
                         process.is_running()
-                    ), f"Server process died during request {i+1}"
+                    ), f"Server process died during request {i + 1}"
                 except psutil.NoSuchProcess:
-                    pytest.fail(f"Server process {pid} died during request {i+1}")
+                    pytest.fail(f"Server process {pid} died during request {i + 1}")
 
                 time.sleep(0.5)
 

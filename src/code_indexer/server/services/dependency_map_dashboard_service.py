@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,9 @@ class DependencyMapDashboardService:
             return [], [], []
 
         try:
-            return self._dependency_map_service.detect_changes()
+            return cast(
+                Tuple[list, list, list], self._dependency_map_service.detect_changes()
+            )
         except Exception as e:
             logger.warning(
                 "dependency_map_dashboard: detect_changes() failed, "
@@ -160,7 +162,9 @@ class DependencyMapDashboardService:
                 if status == "completed":
                     changed_repos, new_repos, _ = changes
                     has_changed_repos = len(changed_repos) > 0 or len(new_repos) > 0
-                    approaching_stale = hours_since_last_run > (stale_threshold_hours * 0.75)
+                    approaching_stale = hours_since_last_run > (
+                        stale_threshold_hours * 0.75
+                    )
 
                     if has_changed_repos or approaching_stale:
                         return ("Degraded", "YELLOW")
@@ -215,7 +219,8 @@ class DependencyMapDashboardService:
         # Apply access filtering: admin sees all (accessible_repos=None)
         if accessible_repos is not None:
             repos = [
-                r for r in all_repos
+                r
+                for r in all_repos
                 if r["status"] != "REMOVED" and r["alias"] in accessible_repos
             ]
         else:
@@ -234,9 +239,7 @@ class DependencyMapDashboardService:
 
         # Coverage calculation: (OK + CHANGED) / active repos
         active_count = len(active)
-        covered_count = sum(
-            1 for r in active if r["status"] in ("OK", "CHANGED")
-        )
+        covered_count = sum(1 for r in active if r["status"] in ("OK", "CHANGED"))
 
         if active_count == 0:
             coverage_pct = 0.0
@@ -265,9 +268,11 @@ class DependencyMapDashboardService:
         if not commit_hashes_json:
             return {}
         try:
-            return json.loads(commit_hashes_json)
+            return cast(Dict[str, str], json.loads(commit_hashes_json))
         except (json.JSONDecodeError, TypeError):
-            logger.warning("dependency_map_dashboard: failed to parse commit_hashes JSON")
+            logger.warning(
+                "dependency_map_dashboard: failed to parse commit_hashes JSON"
+            )
             return {}
 
     def _compute_repo_statuses(
@@ -317,24 +322,28 @@ class DependencyMapDashboardService:
                 status_color = "YELLOW"
                 last_analyzed = last_run
 
-            repos.append({
-                "alias": alias,
-                "status": status,
-                "status_color": status_color,
-                "domains": domain_map.get(alias, []),
-                "last_analyzed": last_analyzed,
-            })
+            repos.append(
+                {
+                    "alias": alias,
+                    "status": status,
+                    "status_color": status_color,
+                    "domains": domain_map.get(alias, []),
+                    "last_analyzed": last_analyzed,
+                }
+            )
 
         # REMOVED: in stored hashes but not in current golden repos
         for alias in stored_hashes:
             if alias not in current_aliases:
-                repos.append({
-                    "alias": alias,
-                    "status": "REMOVED",
-                    "status_color": "GRAY",
-                    "domains": domain_map.get(alias, []),
-                    "last_analyzed": last_run,
-                })
+                repos.append(
+                    {
+                        "alias": alias,
+                        "status": "REMOVED",
+                        "status_color": "GRAY",
+                        "domains": domain_map.get(alias, []),
+                        "last_analyzed": last_run,
+                    }
+                )
 
         return repos
 
@@ -347,7 +356,7 @@ class DependencyMapDashboardService:
         """
         provider = getattr(self, "_current_commits_provider", None)
         if provider is not None:
-            return provider(alias)
+            return cast(Optional[str], provider(alias))
 
         if not clone_path:
             return None
@@ -359,7 +368,7 @@ class DependencyMapDashboardService:
         try:
             with open(metadata_path) as f:
                 metadata = json.load(f)
-            return metadata.get("current_commit", "unknown")
+            return cast(Optional[str], metadata.get("current_commit", "unknown"))
         except Exception as e:
             logger.warning(
                 "dependency_map_dashboard: failed to read metadata for %s: %s", alias, e
