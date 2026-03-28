@@ -26,7 +26,9 @@ storage_mode="postgres".  No SQLite dependency.
 from __future__ import annotations
 
 import logging
+import random
 import threading
+import time
 from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -37,6 +39,9 @@ _DEFAULT_SWEEP_INTERVAL = 5
 # Default maximum time a job may stay in 'running' state before being
 # considered hung and reclaimed (30 minutes).
 _DEFAULT_MAX_EXECUTION_TIME = 1800
+
+# Bug #543: Max retries for deadlock (SQLSTATE 40P01) during reconciliation.
+_DEADLOCK_MAX_RETRIES = 3
 
 # Extra seconds added to sweep_interval when joining the thread on stop().
 _THREAD_JOIN_GRACE_SECONDS = 5
@@ -163,26 +168,45 @@ class JobReconciliationService:
         # is old enough that the node genuinely appears dead, not just
         # experiencing a brief heartbeat delay (GC pause, connection contention).
         grace_seconds = self._sweep_interval * 3  # 3x sweep interval as grace
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE background_jobs
-                    SET    status         = 'pending',
-                           executing_node = NULL,
-                           started_at     = NULL,
-                           claimed_at     = NULL
-                    WHERE  status         = 'running'
-                      AND  executing_node IS NOT NULL
-                      AND  executing_node != ALL(%s)
-                      AND  (claimed_at IS NULL
-                            OR claimed_at < NOW() - %s * INTERVAL '1 second')
-                    RETURNING job_id, executing_node
-                    """,
-                    (active_nodes, grace_seconds),
-                )
-                rows = cur.fetchall()
-            conn.commit()
+        rows = []
+        for attempt in range(_DEADLOCK_MAX_RETRIES):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE background_jobs
+                            SET    status         = 'pending',
+                                   executing_node = NULL,
+                                   started_at     = NULL,
+                                   claimed_at     = NULL
+                            WHERE  status         = 'running'
+                              AND  executing_node IS NOT NULL
+                              AND  executing_node != ALL(%s)
+                              AND  (claimed_at IS NULL
+                                    OR claimed_at < NOW() - %s * INTERVAL '1 second')
+                            RETURNING job_id, executing_node
+                            """,
+                            (active_nodes, grace_seconds),
+                        )
+                        rows = cur.fetchall()
+                    conn.commit()
+                break  # Success — exit retry loop
+            except Exception as exc:
+                # Bug #543: Catch deadlock (SQLSTATE 40P01) and retry with jitter
+                sqlstate = getattr(exc, "sqlstate", None)
+                if sqlstate == "40P01" and attempt < _DEADLOCK_MAX_RETRIES - 1:
+                    jitter = random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "JobReconciliationService: deadlock in _reclaim_dead_node_jobs "
+                        "(attempt %d/%d), retrying in %.2fs",
+                        attempt + 1,
+                        _DEADLOCK_MAX_RETRIES,
+                        jitter,
+                    )
+                    time.sleep(jitter)
+                else:
+                    raise
 
         for row in rows:
             logger.info(
@@ -199,23 +223,42 @@ class JobReconciliationService:
         Returns:
             Number of rows updated.
         """
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE background_jobs
-                    SET    status         = 'pending',
-                           executing_node = NULL,
-                           started_at     = NULL,
-                           claimed_at     = NULL
-                    WHERE  status     = 'running'
-                      AND  started_at <= NOW() - %s * INTERVAL '1 second'
-                    RETURNING job_id, executing_node, started_at
-                    """,
-                    (self._max_execution_time,),
-                )
-                rows = cur.fetchall()
-            conn.commit()
+        rows = []
+        for attempt in range(_DEADLOCK_MAX_RETRIES):
+            try:
+                with self._pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE background_jobs
+                            SET    status         = 'pending',
+                                   executing_node = NULL,
+                                   started_at     = NULL,
+                                   claimed_at     = NULL
+                            WHERE  status     = 'running'
+                              AND  started_at <= NOW() - %s * INTERVAL '1 second'
+                            RETURNING job_id, executing_node, started_at
+                            """,
+                            (self._max_execution_time,),
+                        )
+                        rows = cur.fetchall()
+                    conn.commit()
+                break  # Success — exit retry loop
+            except Exception as exc:
+                # Bug #543: Catch deadlock (SQLSTATE 40P01) and retry with jitter
+                sqlstate = getattr(exc, "sqlstate", None)
+                if sqlstate == "40P01" and attempt < _DEADLOCK_MAX_RETRIES - 1:
+                    jitter = random.uniform(0.1, 0.5)
+                    logger.warning(
+                        "JobReconciliationService: deadlock in _reclaim_timed_out_jobs "
+                        "(attempt %d/%d), retrying in %.2fs",
+                        attempt + 1,
+                        _DEADLOCK_MAX_RETRIES,
+                        jitter,
+                    )
+                    time.sleep(jitter)
+                else:
+                    raise
 
         for row in rows:
             logger.warning(
