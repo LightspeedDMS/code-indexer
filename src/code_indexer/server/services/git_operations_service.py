@@ -1320,6 +1320,41 @@ class GitOperationsService:
 
     # F4: Remote Operations
 
+    def _count_pushed_commits(
+        self, result: subprocess.CompletedProcess, repo_path: Path
+    ) -> int:
+        """Count commits from git push result by parsing stderr ref updates.
+
+        Bug #569: git push writes ref-update info (e.g., 'abc1234..def5678')
+        to stderr, not stdout. This method checks stderr and uses
+        git rev-list --count for accurate commit counting. Falls back to 1
+        with a warning when rev-list fails, since the push already succeeded
+        and at least 1 commit was pushed.
+        """
+        stderr_text = result.stderr or ""
+        match = re.search(r"([0-9a-f]{7,40})\.\.\.?([0-9a-f]{7,40})", stderr_text)
+        if match:
+            try:
+                count_result = run_git_command(
+                    [
+                        "git",
+                        "rev-list",
+                        "--count",
+                        f"{match.group(1)}..{match.group(2)}",
+                    ],
+                    cwd=repo_path,
+                    check=True,
+                )
+                return int(count_result.stdout.strip())
+            except (subprocess.CalledProcessError, ValueError) as e:
+                logger.warning(
+                    "Failed to count pushed commits via rev-list: %s. "
+                    "Falling back to 1 (push succeeded).",
+                    e,
+                )
+                return 1
+        return 0
+
     def git_push(
         self, repo_path: Path, remote: str = "origin", branch: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -1349,9 +1384,7 @@ class GitOperationsService:
                 check=True,
             )
 
-            pushed_commits = 0
-            if ".." in result.stdout:
-                pushed_commits = 1
+            pushed_commits = self._count_pushed_commits(result, repo_path)
 
             return {"success": True, "pushed_commits": pushed_commits}
 
@@ -1503,9 +1536,7 @@ class GitOperationsService:
                         f"Push succeeded but upstream tracking not set: {upstream_err}"
                     )
 
-            pushed_commits = 0
-            if ".." in result.stdout:
-                pushed_commits = 1
+            pushed_commits = self._count_pushed_commits(result, repo_path)
 
             response: Dict[str, Any] = {
                 "success": True,
