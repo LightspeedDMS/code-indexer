@@ -1071,6 +1071,25 @@ def make_lifespan(
                 app.state.self_monitoring_repo_root = None
                 app.state.self_monitoring_github_repo = None
 
+        # Startup: Initialize TOTP MFA service (Story #559)
+        try:
+            from code_indexer.server.auth.totp_service import TOTPService
+            from code_indexer.server.web.mfa_routes import set_totp_service
+
+            mfa_db = str(Path(server_data_dir) / "data" / "cidx_server.db")
+            totp_svc = TOTPService(db_path=mfa_db)
+            set_totp_service(totp_svc)
+            logger.info(
+                "TOTP MFA service initialized",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                "TOTP MFA service initialization failed (MFA unavailable): %s",
+                e,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
         # Startup: Initialize MCP Session cleanup (Story #731)
         session_registry = None
         logger.info(

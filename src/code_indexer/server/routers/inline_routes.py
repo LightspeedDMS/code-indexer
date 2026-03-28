@@ -53,6 +53,7 @@ from ..routers.maintenance_router import router as maintenance_router
 from ..routers.api_keys import router as api_keys_router
 from ..routers.diagnostics import router as diagnostics_router
 from ..routers.research_assistant import router as research_assistant_router
+from ..web.mfa_routes import mfa_router
 from ..routers.repository_health import router as repository_health_router
 from ..routers.activated_repos import router as activated_repos_router
 from ..routers.llm_creds import router as llm_creds_router
@@ -257,6 +258,7 @@ def register_inline_routes(
     app.include_router(llm_creds_router)
     app.include_router(diagnostics_router)
     app.include_router(research_assistant_router)
+    app.include_router(mfa_router)  # Story #559: MFA setup UI
     app.include_router(repository_health_router)
     app.include_router(activated_repos_router)
     app.include_router(debug_router)
