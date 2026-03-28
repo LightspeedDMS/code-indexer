@@ -339,15 +339,17 @@ class FileCRUDService:
             )
 
         # Decode current content
-        current_content_str = current_content_bytes.decode("utf-8")
+        # Bug #570: Use utf-8-sig to strip BOM if present; track for write-back
+        has_bom = current_content_bytes[:3] == b"\xef\xbb\xbf"
+        current_content_str = current_content_bytes.decode("utf-8-sig")
 
         # Perform string replacement
         new_content, changes_made = self._perform_replacement(
             current_content_str, old_string, new_string, replace_all, file_path
         )
 
-        # Atomic write
-        self._atomic_write_file(full_path, new_content)
+        # Atomic write (Bug #570: preserve BOM if original had one)
+        self._atomic_write_file(full_path, new_content, has_bom=has_bom)
 
         # Compute new hash and metadata
         new_content_bytes = new_content.encode("utf-8")
@@ -487,13 +489,16 @@ class FileCRUDService:
         """
         return hashlib.sha256(content).hexdigest()
 
-    def _atomic_write_file(self, full_path: Path, content: str) -> None:
+    def _atomic_write_file(
+        self, full_path: Path, content: str, has_bom: bool = False
+    ) -> None:
         """
         Atomically write content to file using temp file + rename pattern.
 
         Args:
             full_path: Full path to target file
             content: Content to write as string
+            has_bom: If True, write with UTF-8 BOM (Bug #570)
 
         Raises:
             CRUDOperationError: If write operation fails
@@ -506,7 +511,9 @@ class FileCRUDService:
 
             try:
                 # Write content to temp file
-                with os.fdopen(temp_fd, "w", encoding="utf-8") as temp_file:
+                # Bug #570: Use utf-8-sig to preserve BOM if original had one
+                write_encoding = "utf-8-sig" if has_bom else "utf-8"
+                with os.fdopen(temp_fd, "w", encoding=write_encoding) as temp_file:
                     temp_file.write(content)
                     temp_file.flush()
                     os.fsync(temp_file.fileno())
@@ -549,6 +556,14 @@ class FileCRUDService:
         Raises:
             ValueError: If string not found or not unique when replace_all=False
         """
+        # Bug #570: Normalize Unicode to NFC so visually identical strings
+        # with different normalization forms (NFC vs NFD, emoji variants) match.
+        import unicodedata
+
+        content = unicodedata.normalize("NFC", content)
+        old_string = unicodedata.normalize("NFC", old_string)
+        new_string = unicodedata.normalize("NFC", new_string)
+
         if replace_all:
             # Replace all occurrences
             new_content = content.replace(old_string, new_string)
