@@ -11,10 +11,9 @@ import logging
 import random
 import re
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
@@ -71,10 +70,14 @@ class DescriptionRefreshScheduler:
             return
 
         if not config.claude_integration_config.description_refresh_enabled:
-            logger.debug("Skipping description refresh: description_refresh_enabled is false")
+            logger.debug(
+                "Skipping description refresh: description_refresh_enabled is false"
+            )
             return
 
-        interval_hours = config.claude_integration_config.description_refresh_interval_hours
+        interval_hours = (
+            config.claude_integration_config.description_refresh_interval_hours
+        )
 
         # Calculate number of buckets (one per hour in interval)
         buckets = interval_hours
@@ -187,9 +190,7 @@ class DescriptionRefreshScheduler:
                     return True
 
             # Unknown metadata format - assume changes
-            logger.debug(
-                f"Unknown metadata format in {repo_path}, assuming changes"
-            )
+            logger.debug(f"Unknown metadata format in {repo_path}, assuming changes")
             return True
 
         except Exception as e:
@@ -310,9 +311,7 @@ class DescriptionRefreshScheduler:
                     error_message = result.get("error") if result else "Unknown error"
                     self._job_tracker.fail_job(job_id, error=str(error_message))
             except Exception as e:
-                logger.warning(
-                    f"Failed to update job tracker for job {job_id}: {e}"
-                )
+                logger.warning(f"Failed to update job tracker for job {job_id}: {e}")
 
     def _run_loop(self) -> None:
         """
@@ -330,9 +329,7 @@ class DescriptionRefreshScheduler:
                     or not config.claude_integration_config
                     or not config.claude_integration_config.description_refresh_enabled
                 ):
-                    logger.debug(
-                        "Description refresh disabled, sleeping"
-                    )
+                    logger.debug("Description refresh disabled, sleeping")
                     self._shutdown_event.wait(60)
                     continue
 
@@ -447,9 +444,7 @@ class DescriptionRefreshScheduler:
                 logger.debug(f"Spawned refresh task for {alias}")
 
             else:
-                logger.debug(
-                    f"ClaudeCliManager not available, skipping {alias}"
-                )
+                logger.debug(f"ClaudeCliManager not available, skipping {alias}")
 
     def _get_interval_hours(self) -> int:
         """Get refresh interval from config."""
@@ -457,9 +452,11 @@ class DescriptionRefreshScheduler:
         if not config or not config.claude_integration_config:
             return 24  # Default
 
-        return config.claude_integration_config.description_refresh_interval_hours
+        return int(config.claude_integration_config.description_refresh_interval_hours)
 
-    def _read_existing_description(self, repo_alias: str) -> Optional[Dict[str, str]]:
+    def _read_existing_description(
+        self, repo_alias: str
+    ) -> Optional[Dict[str, Optional[str]]]:
         """
         Read existing .md file from cidx-meta and extract description and last_analyzed.
 
@@ -489,7 +486,7 @@ class DescriptionRefreshScheduler:
                 return {"description": content, "last_analyzed": None}
 
             frontmatter_text = frontmatter_match.group(1)
-            body = frontmatter_match.group(2)
+            _body = frontmatter_match.group(2)
 
             # Extract last_analyzed from frontmatter
             last_analyzed = None
@@ -501,7 +498,10 @@ class DescriptionRefreshScheduler:
             return {"description": content, "last_analyzed": last_analyzed}
 
         except Exception as e:
-            logger.error(f"Failed to read existing description for {repo_alias}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to read existing description for {repo_alias}: {e}",
+                exc_info=True,
+            )
             return None
 
     def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
@@ -518,7 +518,9 @@ class DescriptionRefreshScheduler:
         # Read existing description
         desc_data = self._read_existing_description(repo_alias)
         if not desc_data or not desc_data.get("last_analyzed"):
-            logger.warning(f"Cannot generate refresh prompt for {repo_alias}: missing existing description or last_analyzed")
+            logger.warning(
+                f"Cannot generate refresh prompt for {repo_alias}: missing existing description or last_analyzed"
+            )
             return None
 
         try:
@@ -530,10 +532,13 @@ class DescriptionRefreshScheduler:
                 last_analyzed=desc_data["last_analyzed"],
                 existing_description=desc_data["description"],
             )
-            return prompt
+            return cast(Optional[str], prompt)
 
         except Exception as e:
-            logger.error(f"Failed to generate refresh prompt for {repo_alias}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to generate refresh prompt for {repo_alias}: {e}",
+                exc_info=True,
+            )
             return None
 
     def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
@@ -571,10 +576,16 @@ class DescriptionRefreshScheduler:
                 capture_output=True,
                 text=True,
                 timeout=120,
-                env={k: v for k, v in os.environ.items() if k not in (
-                    ("CLAUDECODE", "ANTHROPIC_API_KEY") if "CLAUDECODE" in os.environ
-                    else ("CLAUDECODE",)
-                )},
+                env={
+                    k: v
+                    for k, v in os.environ.items()
+                    if k
+                    not in (
+                        ("CLAUDECODE", "ANTHROPIC_API_KEY")
+                        if "CLAUDECODE" in os.environ
+                        else ("CLAUDECODE",)
+                    )
+                },
             )
 
             if result.returncode != 0:
@@ -599,9 +610,9 @@ class DescriptionRefreshScheduler:
             output = output.strip()
             # Strip chain-of-thought text before YAML frontmatter
             # Claude may emit reasoning text before the actual description
-            frontmatter_match = re.search(r'^---\s*$', output, re.MULTILINE)
+            frontmatter_match = re.search(r"^---\s*$", output, re.MULTILINE)
             if frontmatter_match and frontmatter_match.start() > 0:
-                output = output[frontmatter_match.start():]
+                output = output[frontmatter_match.start() :]
 
             # Validate output quality (detect error messages masquerading as content)
             if not self._validate_cli_output(output):
@@ -633,7 +644,9 @@ class DescriptionRefreshScheduler:
         # Empty or very short output is invalid
         if not output or len(output) < 100:
             output_len = len(output) if output else 0
-            logger.warning(f"CLI output too short ({output_len} chars), likely an error")
+            logger.warning(
+                f"CLI output too short ({output_len} chars), likely an error"
+            )
             return False
 
         # Infrastructure error patterns — always checked.
@@ -681,7 +694,9 @@ class DescriptionRefreshScheduler:
             content: New content for the .md file (YAML frontmatter + markdown)
         """
         if not self._meta_dir:
-            logger.warning(f"Meta directory not set, cannot update description for {repo_alias}")
+            logger.warning(
+                f"Meta directory not set, cannot update description for {repo_alias}"
+            )
             return
 
         md_file = self._meta_dir / f"{repo_alias}.md"
@@ -691,7 +706,10 @@ class DescriptionRefreshScheduler:
             logger.info(f"Updated description file: {md_file}")
 
         except Exception as e:
-            logger.error(f"Failed to update description file for {repo_alias}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to update description file for {repo_alias}: {e}",
+                exc_info=True,
+            )
 
     def close(self) -> None:
         """Clean up resources."""

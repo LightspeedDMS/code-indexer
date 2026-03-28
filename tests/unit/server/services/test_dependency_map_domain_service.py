@@ -16,8 +16,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 
-import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -41,6 +39,7 @@ def _import_service():
     from code_indexer.server.services.dependency_map_domain_service import (
         DependencyMapDomainService,
     )
+
     return DependencyMapDomainService
 
 
@@ -85,18 +84,21 @@ class TestGetDomainList:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "authentication",
-                    "description": "Handles user auth",
-                    "participating_repos": ["auth-service", "api-gateway"],
-                },
-                {
-                    "name": "billing",
-                    "description": "Payment processing",
-                    "participating_repos": ["billing-service"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Handles user auth",
+                        "participating_repos": ["auth-service", "api-gateway"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "Payment processing",
+                        "participating_repos": ["billing-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list()
@@ -110,13 +112,16 @@ class TestGetDomainList:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "authentication",
-                    "description": "Handles user auth",
-                    "participating_repos": ["auth-service", "api-gateway"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Handles user auth",
+                        "participating_repos": ["auth-service", "api-gateway"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list()
@@ -132,13 +137,20 @@ class TestGetDomainList:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "authentication",
-                    "description": "Handles user auth",
-                    "participating_repos": ["auth-service", "api-gateway", "user-db"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Handles user auth",
+                        "participating_repos": [
+                            "auth-service",
+                            "api-gateway",
+                            "user-db",
+                        ],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list()
@@ -150,11 +162,14 @@ class TestGetDomainList:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "zebra", "description": "", "participating_repos": []},
-                {"name": "alpha", "description": "", "participating_repos": []},
-                {"name": "middle", "description": "", "participating_repos": []},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {"name": "zebra", "description": "", "participating_repos": []},
+                    {"name": "alpha", "description": "", "participating_repos": []},
+                    {"name": "middle", "description": "", "participating_repos": []},
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list()
@@ -188,10 +203,21 @@ class TestGetDomainListAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-service"]},
-                {"name": "billing", "description": "", "participating_repos": ["billing-service"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-service"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["billing-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list(accessible_repos=None)
@@ -202,11 +228,26 @@ class TestGetDomainListAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-service"]},
-                {"name": "billing", "description": "", "participating_repos": ["billing-service"]},
-                {"name": "shared", "description": "", "participating_repos": ["auth-service", "billing-service"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-service"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["billing-service"],
+                    },
+                    {
+                        "name": "shared",
+                        "description": "",
+                        "participating_repos": ["auth-service", "billing-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             # User can only access auth-service
@@ -221,13 +262,16 @@ class TestGetDomainListAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "shared",
-                    "description": "",
-                    "participating_repos": ["auth-service", "billing-service"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "shared",
+                        "description": "",
+                        "participating_repos": ["auth-service", "billing-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list(accessible_repos={"auth-service"})
@@ -240,9 +284,16 @@ class TestGetDomainListAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-service"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_list(accessible_repos=set())
@@ -272,7 +323,9 @@ class TestParseCrossDomainDeps:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 # Dependency Map Index
 
 ## Cross-Domain Dependencies
@@ -281,7 +334,8 @@ class TestParseCrossDomainDeps:
 |---|---|---|---|
 | authentication | user-management | auth-service | imports shared types |
 | billing | authentication | billing-service, auth-service | validates tokens |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -296,13 +350,16 @@ class TestParseCrossDomainDeps:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | billing | authentication | billing-service, auth-service | validates tokens |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -314,11 +371,14 @@ class TestParseCrossDomainDeps:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | authentication | billing | auth-service | depends on |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -331,11 +391,14 @@ class TestParseCrossDomainDeps:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 # Dependency Map Index
 
 No cross-domain dependencies defined yet.
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -366,13 +429,16 @@ class TestGetDomainDetail:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "authentication",
-                    "description": "Handles user auth",
-                    "participating_repos": ["auth-service", "api-gateway"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Handles user auth",
+                        "participating_repos": ["auth-service", "api-gateway"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -390,13 +456,16 @@ class TestGetDomainDetail:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "authentication",
-                    "description": "Handles user auth",
-                    "participating_repos": ["auth-service", "api-gateway"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Handles user auth",
+                        "participating_repos": ["auth-service", "api-gateway"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -407,17 +476,31 @@ class TestGetDomainDetail:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "", "participating_repos": ["auth-service"]},
-                {"name": "user-management", "description": "", "participating_repos": ["user-svc"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "",
+                        "participating_repos": ["auth-service"],
+                    },
+                    {
+                        "name": "user-management",
+                        "description": "",
+                        "participating_repos": ["user-svc"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | authentication | user-management | auth-service | imports shared types |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -429,17 +512,31 @@ class TestGetDomainDetail:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "", "participating_repos": ["auth-service"]},
-                {"name": "billing", "description": "", "participating_repos": ["billing-service"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "",
+                        "participating_repos": ["auth-service"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["billing-service"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | billing | authentication | billing-service | validates tokens |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -451,9 +548,16 @@ class TestGetDomainDetail:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "", "participating_repos": []},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "",
+                        "participating_repos": [],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -464,9 +568,16 @@ class TestGetDomainDetail:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "", "participating_repos": []},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "",
+                        "participating_repos": [],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -495,11 +606,15 @@ class TestRenderDomainMarkdown:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "authentication", """
+            _write_domain_md(
+                depmap_dir,
+                "authentication",
+                """
 # Authentication Domain
 
 This domain handles user authentication.
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._render_domain_markdown("authentication")
@@ -511,14 +626,18 @@ This domain handles user authentication.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "authentication", """---
+            _write_domain_md(
+                depmap_dir,
+                "authentication",
+                """---
 domain: authentication
 last_analyzed: 2026-02-15T10:30:00
 ---
 # Authentication Domain
 
 This domain handles user authentication.
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._render_domain_markdown("authentication")
@@ -534,7 +653,10 @@ This domain handles user authentication.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "billing", """
+            _write_domain_md(
+                depmap_dir,
+                "billing",
+                """
 # Billing Domain
 
 Handles payment processing.
@@ -542,7 +664,8 @@ Handles payment processing.
 ## Services
 - billing-service
 - payment-gateway
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._render_domain_markdown("billing")
@@ -564,12 +687,16 @@ class TestGetDomainLastAnalyzed:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "authentication", """---
+            _write_domain_md(
+                depmap_dir,
+                "authentication",
+                """---
 domain: authentication
 last_analyzed: 2026-02-15T10:30:00
 ---
 # Authentication Domain
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._get_domain_last_analyzed("authentication")
@@ -580,11 +707,15 @@ last_analyzed: 2026-02-15T10:30:00
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "billing", """
+            _write_domain_md(
+                depmap_dir,
+                "billing",
+                """
 # Billing Domain
 
 No frontmatter here.
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._get_domain_last_analyzed("billing")
@@ -604,15 +735,26 @@ No frontmatter here.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "Auth domain", "participating_repos": []},
-            ])
-            _write_domain_md(depmap_dir, "authentication", """---
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Auth domain",
+                        "participating_repos": [],
+                    },
+                ],
+            )
+            _write_domain_md(
+                depmap_dir,
+                "authentication",
+                """---
 domain: authentication
 last_analyzed: 2026-02-15T10:30:00
 ---
 # Auth
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -632,13 +774,16 @@ class TestGetDomainDetailAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "shared",
-                    "description": "",
-                    "participating_repos": ["auth-service", "billing-service"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "shared",
+                        "description": "",
+                        "participating_repos": ["auth-service", "billing-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("shared", accessible_repos=None)
@@ -649,16 +794,21 @@ class TestGetDomainDetailAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {
-                    "name": "shared",
-                    "description": "",
-                    "participating_repos": ["auth-service", "billing-service"],
-                },
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "shared",
+                        "description": "",
+                        "participating_repos": ["auth-service", "billing-service"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
-            result = service.get_domain_detail("shared", accessible_repos={"auth-service"})
+            result = service.get_domain_detail(
+                "shared", accessible_repos={"auth-service"}
+            )
             assert result["repos"] == ["auth-service"]
 
     def test_non_admin_cross_deps_only_visible_domains(self):
@@ -666,19 +816,37 @@ class TestGetDomainDetailAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "", "participating_repos": ["auth-service"]},
-                {"name": "billing", "description": "", "participating_repos": ["billing-service"]},
-                {"name": "user-management", "description": "", "participating_repos": ["user-svc"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "",
+                        "participating_repos": ["auth-service"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["billing-service"],
+                    },
+                    {
+                        "name": "user-management",
+                        "description": "",
+                        "participating_repos": ["user-svc"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | authentication | user-management | auth-service | imports types |
 | authentication | billing | auth-service | validates |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             # User can only see authentication (auth-service) - billing and user-management hidden
@@ -694,17 +862,28 @@ class TestGetDomainDetailAccessFiltering:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "Auth", "participating_repos": []},
-            ])
-            _write_domain_md(depmap_dir, "authentication", """---
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "Auth",
+                        "participating_repos": [],
+                    },
+                ],
+            )
+            _write_domain_md(
+                depmap_dir,
+                "authentication",
+                """---
 domain: authentication
 last_analyzed: 2026-02-15T10:30:00
 ---
 # Authentication Domain
 
 Handles all user authentication flows.
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_domain_detail("authentication")
@@ -772,12 +951,16 @@ class TestMarkdownSanitization:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "evil", """# Normal heading
+            _write_domain_md(
+                depmap_dir,
+                "evil",
+                """# Normal heading
 
 <script>alert('xss')</script>
 
 Some normal text.
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._render_domain_markdown("evil")
@@ -791,10 +974,14 @@ Some normal text.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domain_md(depmap_dir, "evil2", """# Heading
+            _write_domain_md(
+                depmap_dir,
+                "evil2",
+                """# Heading
 
 <div onmouseover="alert('xss')">hover me</div>
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._render_domain_markdown("evil2")
@@ -825,10 +1012,21 @@ class TestGetGraphData:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "Authentication domain", "participating_repos": ["auth-svc"]},
-                {"name": "billing", "description": "Billing domain", "participating_repos": ["bill-svc"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "Authentication domain",
+                        "participating_repos": ["auth-svc"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "Billing domain",
+                        "participating_repos": ["bill-svc"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data()
@@ -841,9 +1039,16 @@ class TestGetGraphData:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "Auth domain", "participating_repos": ["a", "b"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "Auth domain",
+                        "participating_repos": ["a", "b"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data()
@@ -859,9 +1064,16 @@ class TestGetGraphData:
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
             long_desc = "x" * 200
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": long_desc, "participating_repos": ["a"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": long_desc,
+                        "participating_repos": ["a"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data()
@@ -872,17 +1084,31 @@ class TestGetGraphData:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-                {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-svc"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["bill-svc"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | auth | billing | auth-svc | validates payments |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data()
@@ -897,19 +1123,37 @@ class TestGetGraphData:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-                {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-                {"name": "infra", "description": "", "participating_repos": ["infra-svc"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-svc"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["bill-svc"],
+                    },
+                    {
+                        "name": "infra",
+                        "description": "",
+                        "participating_repos": ["infra-svc"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | auth | billing | auth-svc | validates |
 | auth | infra | auth-svc | uses infra |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             # Non-admin can only see auth-svc
@@ -925,17 +1169,31 @@ class TestGetGraphData:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-                {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-svc"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["bill-svc"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependencies
 
 | Source Domain | Target Domain | Via Repos | Relationship |
 |---|---|---|---|
 | auth | billing | auth-svc | validates |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data(accessible_repos=None)
@@ -947,10 +1205,21 @@ class TestGetGraphData:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "auth", "description": "", "participating_repos": ["auth-svc"]},
-                {"name": "billing", "description": "", "participating_repos": ["bill-svc"]},
-            ])
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "auth",
+                        "description": "",
+                        "participating_repos": ["auth-svc"],
+                    },
+                    {
+                        "name": "billing",
+                        "description": "",
+                        "participating_repos": ["bill-svc"],
+                    },
+                ],
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data()
@@ -973,7 +1242,9 @@ class TestParseCrossDomainDeps3Column:
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependency Graph
 
 Directed connections between domains.
@@ -982,7 +1253,8 @@ Directed connections between domains.
 |---|---|---|
 | authentication | user-management | auth-service |
 | billing | authentication | billing-service, auth-service |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -998,13 +1270,16 @@ Directed connections between domains.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependency Graph
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | billing | authentication | billing-service, auth-service |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -1016,11 +1291,14 @@ Directed connections between domains.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_index_md(depmap_dir, """
+            _write_index_md(
+                depmap_dir,
+                """
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | auth | billing | auth-svc |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service._parse_cross_domain_deps()
@@ -1032,17 +1310,31 @@ Directed connections between domains.
         Service = _import_service()
         with tempfile.TemporaryDirectory() as tmp:
             depmap_dir = Path(tmp) / "cidx-meta" / "dependency-map"
-            _write_domains_json(depmap_dir, [
-                {"name": "authentication", "description": "", "participating_repos": ["auth-svc"]},
-                {"name": "user-management", "description": "", "participating_repos": ["user-svc"]},
-            ])
-            _write_index_md(depmap_dir, """
+            _write_domains_json(
+                depmap_dir,
+                [
+                    {
+                        "name": "authentication",
+                        "description": "",
+                        "participating_repos": ["auth-svc"],
+                    },
+                    {
+                        "name": "user-management",
+                        "description": "",
+                        "participating_repos": ["user-svc"],
+                    },
+                ],
+            )
+            _write_index_md(
+                depmap_dir,
+                """
 ## Cross-Domain Dependency Graph
 
 | Source Domain | Target Domain | Via Repos |
 |---|---|---|
 | authentication | user-management | auth-svc |
-""")
+""",
+            )
             dep_map_svc = _make_dep_map_service(tmp)
             service = Service(dep_map_svc, _make_config_manager())
             result = service.get_graph_data()
@@ -1064,12 +1356,17 @@ class TestIdentifyAffectedDomainsIntegration:
     def _make_service(self, tmp: str):
         """Build a minimal DependencyMapService for testing."""
         from unittest.mock import Mock
-        from code_indexer.server.services.dependency_map_service import DependencyMapService
+        from code_indexer.server.services.dependency_map_service import (
+            DependencyMapService,
+        )
 
         gm = Mock()
         gm.golden_repos_dir = tmp
         tracking = Mock()
-        tracking.get_tracking.return_value = {"status": "completed", "commit_hashes": None}
+        tracking.get_tracking.return_value = {
+            "status": "completed",
+            "commit_hashes": None,
+        }
         config_mgr = Mock()
         analyzer = Mock()
         return DependencyMapService(gm, config_mgr, tracking, analyzer)

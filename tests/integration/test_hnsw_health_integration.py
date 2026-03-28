@@ -9,9 +9,7 @@ Tests the service with actual hnswlib Index instances to verify:
 Story #56: HNSWHealthService Core Logic
 """
 
-import os
 import tempfile
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -282,7 +280,9 @@ class TestRealIndexCacheInvalidation:
         num_elements = 500
 
         index = hnswlib.Index(space="l2", dim=dim)
-        index.init_index(max_elements=num_elements + 100, ef_construction=200, M=16)  # Allow room for additional elements
+        index.init_index(
+            max_elements=num_elements + 100, ef_construction=200, M=16
+        )  # Allow room for additional elements
         data = np.random.random((num_elements, dim)).astype("float32")
         index.add_items(data, np.arange(num_elements))
         index.save_index(str(index_path))

@@ -13,7 +13,7 @@ AC4: Admin users retain full visibility -> unchanged behavior
 
 import inspect
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -25,7 +25,7 @@ from code_indexer.server.auth.dependencies import (
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.routers.groups import get_group as get_group_endpoint
 from code_indexer.server.routers.groups import list_groups as list_groups_endpoint
-from code_indexer.server.routers.groups import get_group_manager, set_group_manager
+from code_indexer.server.routers.groups import get_group_manager
 
 
 # ---------------------------------------------------------------------------
@@ -39,9 +39,9 @@ class TestGroupEndpointDependencies:
     def test_list_groups_requires_admin_dependency(self):
         """list_groups must use get_current_admin_user, not get_current_user."""
         sig = inspect.signature(list_groups_endpoint)
-        assert "current_user" in sig.parameters, (
-            "list_groups must have a current_user parameter"
-        )
+        assert (
+            "current_user" in sig.parameters
+        ), "list_groups must have a current_user parameter"
         param = sig.parameters["current_user"]
         assert param.default.dependency is get_current_admin_user, (
             "list_groups must depend on get_current_admin_user, "
@@ -51,9 +51,9 @@ class TestGroupEndpointDependencies:
     def test_get_group_requires_admin_dependency(self):
         """get_group must use get_current_admin_user, not get_current_user."""
         sig = inspect.signature(get_group_endpoint)
-        assert "current_user" in sig.parameters, (
-            "get_group must have a current_user parameter"
-        )
+        assert (
+            "current_user" in sig.parameters
+        ), "get_group must have a current_user parameter"
         param = sig.parameters["current_user"]
         assert param.default.dependency is get_current_admin_user, (
             "get_group must depend on get_current_admin_user, "
@@ -64,17 +64,17 @@ class TestGroupEndpointDependencies:
         """list_groups must NOT use get_current_user (regular user dependency)."""
         sig = inspect.signature(list_groups_endpoint)
         param = sig.parameters["current_user"]
-        assert param.default.dependency is not get_current_user, (
-            "list_groups incorrectly uses get_current_user - security leak!"
-        )
+        assert (
+            param.default.dependency is not get_current_user
+        ), "list_groups incorrectly uses get_current_user - security leak!"
 
     def test_get_group_does_not_use_regular_user_dependency(self):
         """get_group must NOT use get_current_user (regular user dependency)."""
         sig = inspect.signature(get_group_endpoint)
         param = sig.parameters["current_user"]
-        assert param.default.dependency is not get_current_user, (
-            "get_group incorrectly uses get_current_user - security leak!"
-        )
+        assert (
+            param.default.dependency is not get_current_user
+        ), "get_group incorrectly uses get_current_user - security leak!"
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +191,9 @@ class TestListGroupsEndpoint:
         client = TestClient(app)
         try:
             response = client.get("/api/v1/groups")
-            assert response.status_code in (401, 403), (
-                f"Unauthenticated request should return 401 or 403, got {response.status_code}"
-            )
+            assert (
+                response.status_code in (401, 403)
+            ), f"Unauthenticated request should return 401 or 403, got {response.status_code}"
         finally:
             app.dependency_overrides.clear()
 
@@ -231,8 +231,8 @@ class TestGetGroupEndpoint:
         client = TestClient(app)
         try:
             response = client.get("/api/v1/groups/1")
-            assert response.status_code in (401, 403), (
-                f"Unauthenticated request should return 401 or 403, got {response.status_code}"
-            )
+            assert (
+                response.status_code in (401, 403)
+            ), f"Unauthenticated request should return 401 or 403, got {response.status_code}"
         finally:
             app.dependency_overrides.clear()

@@ -10,9 +10,6 @@ Tests cover all 5 module-level functions:
 """
 
 import json
-from pathlib import Path
-
-import pytest
 
 
 def _get_utils():
@@ -24,7 +21,14 @@ def _get_utils():
         has_yaml_frontmatter,
         get_domain_md_files,
     )
-    return load_domains_json, parse_yaml_frontmatter, parse_simple_yaml, has_yaml_frontmatter, get_domain_md_files
+
+    return (
+        load_domains_json,
+        parse_yaml_frontmatter,
+        parse_simple_yaml,
+        has_yaml_frontmatter,
+        get_domain_md_files,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,14 +161,14 @@ participating_repos:
         """Quoted string values have surrounding quotes stripped."""
         _, parse_yaml_frontmatter, _, _, _ = _get_utils()
 
-        content = '''\
+        content = """\
 ---
 last_analyzed: "2026-01-01T00:00:00Z"
 name: 'single-quoted'
 ---
 
 # Body
-'''
+"""
         result = parse_yaml_frontmatter(content)
 
         assert result is not None

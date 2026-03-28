@@ -9,12 +9,12 @@ import sys
 
 sys.modules["langfuse"] = MagicMock()
 
-from code_indexer.server.services.langfuse_service import (
+from code_indexer.server.services.langfuse_service import (  # noqa: E402
     LangfuseService,
     get_langfuse_service,
     reset_langfuse_service,
 )
-from code_indexer.server.utils.config_manager import ServerConfig, LangfuseConfig
+from code_indexer.server.utils.config_manager import ServerConfig, LangfuseConfig  # noqa: E402
 
 
 @pytest.fixture

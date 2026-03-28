@@ -9,8 +9,6 @@ Tests cover:
 TDD RED PHASE: Tests written before production code changes exist.
 """
 
-import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test fixtures - structured domain file content
@@ -79,6 +77,7 @@ No verified cross-domain dependencies.
 
 def _import_analyzer():
     from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+
     return DependencyMapAnalyzer
 
 
@@ -99,11 +98,16 @@ class TestBuildCrossDomainGraphStructuredParser:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         assert "## Cross-Domain Dependency Graph" in result
         assert "domain-a" in result
@@ -125,7 +129,9 @@ class TestBuildCrossDomainGraphStructuredParser:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         assert result == "", "Sentinel-only domains must produce no edges"
 
@@ -151,7 +157,9 @@ class TestBuildCrossDomainGraphStructuredParser:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         assert result == "", "Empty structured tables must produce no edges"
 
@@ -182,12 +190,14 @@ class TestBuildCrossDomainGraphStructuredParser:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Table row is explicitly declared — must produce edge regardless of prose
-        assert "## Cross-Domain Dependency Graph" in result, (
-            "Negation phrases in prose must NOT suppress explicitly declared table edges"
-        )
+        assert (
+            "## Cross-Domain Dependency Graph" in result
+        ), "Negation phrases in prose must NOT suppress explicitly declared table edges"
 
     def test_missing_domain_file_skipped_gracefully(self, tmp_path):
         """AC6: Domain without .md file is skipped without error."""
@@ -201,7 +211,9 @@ class TestBuildCrossDomainGraphStructuredParser:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
         assert result == "", "Missing domain files must be handled gracefully"
 
     def test_no_cross_domain_section_produces_no_edges(self, tmp_path):
@@ -219,8 +231,12 @@ class TestBuildCrossDomainGraphStructuredParser:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
-        assert result == "", "Missing Cross-Domain Connections section must produce no edges"
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
+        assert (
+            result == ""
+        ), "Missing Cross-Domain Connections section must produce no edges"
 
     def test_malformed_row_skipped_valid_row_produces_edge(self, tmp_path):
         """AC6 + AC13: Malformed row skipped, valid row still produces edge."""
@@ -247,12 +263,14 @@ class TestBuildCrossDomainGraphStructuredParser:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Valid row should produce an edge
-        assert "## Cross-Domain Dependency Graph" in result, (
-            "Valid rows must produce edges even when mixed with malformed rows"
-        )
+        assert (
+            "## Cross-Domain Dependency Graph" in result
+        ), "Valid rows must produce edges even when mixed with malformed rows"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -272,13 +290,20 @@ class TestOutputTableHasTypeAndWhy:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
-        assert "Type" in result, "_build_cross_domain_graph output must include 'Type' column"
+        assert (
+            "Type" in result
+        ), "_build_cross_domain_graph output must include 'Type' column"
 
     def test_output_table_header_has_why_column(self, tmp_path):
         """AC8: Output table header includes 'Why' column."""
@@ -289,13 +314,20 @@ class TestOutputTableHasTypeAndWhy:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
-        assert "Why" in result, "_build_cross_domain_graph output must include 'Why' column"
+        assert (
+            "Why" in result
+        ), "_build_cross_domain_graph output must include 'Why' column"
 
     def test_type_value_from_table_appears_in_output(self, tmp_path):
         """AC8: Type value declared in structured table appears in _index.md output."""
@@ -306,16 +338,21 @@ class TestOutputTableHasTypeAndWhy:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # "Service integration" from the domain-a outgoing table must appear
-        assert "Service integration" in result, (
-            "Type value from structured table must appear in _index.md output"
-        )
+        assert (
+            "Service integration" in result
+        ), "Type value from structured table must appear in _index.md output"
 
     def test_why_value_from_table_appears_in_output(self, tmp_path):
         """AC8: Why value declared in structured table appears in _index.md output."""
@@ -326,16 +363,21 @@ class TestOutputTableHasTypeAndWhy:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # "repo-a-one calls REST API" from Why column must appear in output
-        assert "repo-a-one calls REST API" in result, (
-            "Why value from structured table must appear in _index.md output"
-        )
+        assert (
+            "repo-a-one calls REST API" in result
+        ), "Why value from structured table must appear in _index.md output"
 
     def test_output_table_format_has_five_columns(self, tmp_path):
         """AC8: Output table row has 5 columns: Source Domain | Target Domain | Via Repos | Type | Why."""
@@ -346,11 +388,16 @@ class TestOutputTableHasTypeAndWhy:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Find a data row and count columns
         for line in result.splitlines():
@@ -362,9 +409,9 @@ class TestOutputTableHasTypeAndWhy:
                 and "Source Domain" not in line
             ):
                 cells = [c.strip() for c in line.split("|") if c.strip()]
-                assert len(cells) == 5, (
-                    f"Output table data row must have 5 columns, got {len(cells)}: {cells}"
-                )
+                assert (
+                    len(cells) == 5
+                ), f"Output table data row must have 5 columns, got {len(cells)}: {cells}"
                 break
 
 
@@ -395,8 +442,12 @@ class TestTableParsingEdgeCases:
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
-        assert result == "", "Sentinel text in structured sections must produce no edges"
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
+        assert (
+            result == ""
+        ), "Sentinel text in structured sections must produce no edges"
 
     def test_domain_with_only_incoming_table_produces_no_self_edge(self, tmp_path):
         """AC13: Incoming table in domain-b does not create duplicate edge if outgoing already counts."""
@@ -410,11 +461,16 @@ class TestTableParsingEdgeCases:
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
         DependencyMapAnalyzer = _import_analyzer()
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Count data rows in output table to ensure no duplicates
         data_rows = []
@@ -430,6 +486,6 @@ class TestTableParsingEdgeCases:
 
         # There should be exactly 1 edge: domain-a -> domain-b
         # Not 2 (outgoing from domain-a + incoming to domain-b)
-        assert len(data_rows) == 1, (
-            f"Expected 1 edge (domain-a -> domain-b), got {len(data_rows)}: {data_rows}"
-        )
+        assert (
+            len(data_rows) == 1
+        ), f"Expected 1 edge (domain-a -> domain-b), got {len(data_rows)}: {data_rows}"

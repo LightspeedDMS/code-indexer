@@ -18,9 +18,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch
-
-import pytest
+from unittest.mock import Mock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +70,9 @@ class TestGetCidxMetaReadPath:
         _get_cidx_meta_read_path() must return that versioned path.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
+            versioned_path = os.path.join(
+                tmp, ".versioned", "cidx-meta", "v_1700000000"
+            )
             os.makedirs(versioned_path)
 
             service = _make_service(
@@ -126,7 +126,9 @@ class TestGetCidxMetaReadPath:
         for local repos) instead of the versioned content path.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
+            versioned_path = os.path.join(
+                tmp, ".versioned", "cidx-meta", "v_1700000000"
+            )
             os.makedirs(versioned_path)
 
             service = _make_service(tmp)
@@ -146,7 +148,9 @@ class TestGetCidxMetaReadPath:
             os.makedirs(non_versioned_path)
 
             service = _make_service(tmp)
-            service._golden_repos_manager.get_actual_repo_path.return_value = non_versioned_path
+            service._golden_repos_manager.get_actual_repo_path.return_value = (
+                non_versioned_path
+            )
 
             service._get_cidx_meta_read_path()
 
@@ -163,7 +167,9 @@ class TestGetCidxMetaReadPath:
         (which always exists for local repos) but the content is in .versioned/.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
+            versioned_path = os.path.join(
+                tmp, ".versioned", "cidx-meta", "v_1700000000"
+            )
             os.makedirs(versioned_path)
 
             # get_actual_repo_path returns the live (stale) path
@@ -176,12 +182,12 @@ class TestGetCidxMetaReadPath:
             result = service._get_cidx_meta_read_path()
 
             # Must return versioned path, NOT the live path from get_actual_repo_path
-            assert result == Path(versioned_path), (
-                f"Expected versioned path {versioned_path}, got {result}"
-            )
-            assert result != Path(live_path), (
-                "Must not return the stale live path from get_actual_repo_path()"
-            )
+            assert result == Path(
+                versioned_path
+            ), f"Expected versioned path {versioned_path}, got {result}"
+            assert result != Path(
+                live_path
+            ), "Must not return the stale live path from get_actual_repo_path()"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -197,11 +203,15 @@ class TestCidxMetaReadPathProperty:
         cidx_meta_read_path property must return same value as _get_cidx_meta_read_path().
         """
         with tempfile.TemporaryDirectory() as tmp:
-            versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
+            versioned_path = os.path.join(
+                tmp, ".versioned", "cidx-meta", "v_1700000000"
+            )
             os.makedirs(versioned_path)
 
             service = _make_service(tmp)
-            service._golden_repos_manager.get_actual_repo_path.return_value = versioned_path
+            service._golden_repos_manager.get_actual_repo_path.return_value = (
+                versioned_path
+            )
 
             assert service.cidx_meta_read_path == service._get_cidx_meta_read_path()
 
@@ -220,11 +230,15 @@ class TestDomainServiceGetDepMapDir:
         _get_depmap_dir() must return versioned_path / 'dependency-map'.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            versioned_path = os.path.join(tmp, ".versioned", "cidx-meta", "v_1700000000")
+            versioned_path = os.path.join(
+                tmp, ".versioned", "cidx-meta", "v_1700000000"
+            )
             os.makedirs(versioned_path)
 
             service = _make_service(tmp)
-            service._golden_repos_manager.get_actual_repo_path.return_value = versioned_path
+            service._golden_repos_manager.get_actual_repo_path.return_value = (
+                versioned_path
+            )
 
             domain_svc = _make_domain_service(service)
             result = domain_svc._get_depmap_dir()
@@ -254,32 +268,46 @@ class TestDomainServiceGetDepMapDir:
         """
         with tempfile.TemporaryDirectory() as tmp:
             # Create versioned path with _domains.json
-            versioned_depmap = Path(tmp) / ".versioned" / "cidx-meta" / "v_1700000000" / "dependency-map"
+            versioned_depmap = (
+                Path(tmp)
+                / ".versioned"
+                / "cidx-meta"
+                / "v_1700000000"
+                / "dependency-map"
+            )
             versioned_depmap.mkdir(parents=True)
-            domains = [{"name": "backend", "repos": [], "description": "Backend services"}]
+            domains = [
+                {"name": "backend", "repos": [], "description": "Backend services"}
+            ]
             (versioned_depmap / "_domains.json").write_text(json.dumps(domains))
 
             # Create live path with different (stale) _domains.json
             live_depmap = Path(tmp) / "cidx-meta" / "dependency-map"
             live_depmap.mkdir(parents=True)
-            stale_domains = [{"name": "stale-domain", "repos": [], "description": "Stale"}]
+            stale_domains = [
+                {"name": "stale-domain", "repos": [], "description": "Stale"}
+            ]
             (live_depmap / "_domains.json").write_text(json.dumps(stale_domains))
 
-            versioned_path = str(Path(tmp) / ".versioned" / "cidx-meta" / "v_1700000000")
+            versioned_path = str(
+                Path(tmp) / ".versioned" / "cidx-meta" / "v_1700000000"
+            )
             service = _make_service(tmp)
-            service._golden_repos_manager.get_actual_repo_path.return_value = versioned_path
+            service._golden_repos_manager.get_actual_repo_path.return_value = (
+                versioned_path
+            )
 
             domain_svc = _make_domain_service(service)
             result = domain_svc.get_domain_list()
 
             # Must read from versioned path (backend), NOT from stale live path (stale-domain)
             domain_names = [d["name"] for d in result["domains"]]
-            assert "backend" in domain_names, (
-                "get_domain_list() must read from versioned cidx-meta path"
-            )
-            assert "stale-domain" not in domain_names, (
-                "get_domain_list() must NOT read from stale live path"
-            )
+            assert (
+                "backend" in domain_names
+            ), "get_domain_list() must read from versioned cidx-meta path"
+            assert (
+                "stale-domain" not in domain_names
+            ), "get_domain_list() must NOT read from stale live path"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,11 +336,14 @@ class TestGetActivatedReposReadsFromVersionedPath:
             # Create stale live path with wrong description
             live_cidx_meta = Path(tmp) / "cidx-meta"
             live_cidx_meta.mkdir(parents=True)
-            (live_cidx_meta / "my-repo.md").write_text("Stale description from live path")
+            (live_cidx_meta / "my-repo.md").write_text(
+                "Stale description from live path"
+            )
 
             versioned_path = str(versioned_cidx_meta)
 
             service = _make_service(tmp)
+
             # get_actual_repo_path called for both "cidx-meta" and "my-repo"
             def side_effect(alias):
                 if alias == "cidx-meta":
@@ -333,9 +364,9 @@ class TestGetActivatedReposReadsFromVersionedPath:
             # Description should come from versioned path
             assert len(result) == 1
             description = result[0]["description_summary"]
-            assert description == "Versioned description for my-repo", (
-                f"Expected versioned description, got: {description}"
-            )
+            assert (
+                description == "Versioned description for my-repo"
+            ), f"Expected versioned description, got: {description}"
 
 
 class TestIdentifyAffectedDomainsReadsFromVersionedPath:
@@ -349,7 +380,11 @@ class TestIdentifyAffectedDomainsReadsFromVersionedPath:
         with tempfile.TemporaryDirectory() as tmp:
             # Create versioned path with _index.md containing real domain mappings
             versioned_depmap = (
-                Path(tmp) / ".versioned" / "cidx-meta" / "v_1700000000" / "dependency-map"
+                Path(tmp)
+                / ".versioned"
+                / "cidx-meta"
+                / "v_1700000000"
+                / "dependency-map"
             )
             versioned_depmap.mkdir(parents=True)
             versioned_index = """## Repo-to-Domain Matrix
@@ -365,19 +400,25 @@ class TestIdentifyAffectedDomainsReadsFromVersionedPath:
             live_depmap.mkdir(parents=True)
             (live_depmap / "_index.md").write_text("## Repo-to-Domain Matrix\n\n")
 
-            versioned_path = str(Path(tmp) / ".versioned" / "cidx-meta" / "v_1700000000")
+            versioned_path = str(
+                Path(tmp) / ".versioned" / "cidx-meta" / "v_1700000000"
+            )
 
             service = _make_service(tmp)
-            service._golden_repos_manager.get_actual_repo_path.return_value = versioned_path
+            service._golden_repos_manager.get_actual_repo_path.return_value = (
+                versioned_path
+            )
 
             # Changed repos: my-repo changed
             changed_repos = [{"alias": "my-repo"}]
             new_repos = []
             removed_repos = []
 
-            affected = service.identify_affected_domains(changed_repos, new_repos, removed_repos)
+            affected = service.identify_affected_domains(
+                changed_repos, new_repos, removed_repos
+            )
 
             # Must find "backend" domain from versioned _index.md
-            assert "backend" in affected, (
-                f"Expected 'backend' domain from versioned _index.md, got: {affected}"
-            )
+            assert (
+                "backend" in affected
+            ), f"Expected 'backend' domain from versioned _index.md, got: {affected}"

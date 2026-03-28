@@ -5,8 +5,6 @@ Tests the SQLite CRUD backend for description refresh tracking records.
 Uses real SQLite database (anti-mock methodology).
 """
 
-import sqlite3
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 

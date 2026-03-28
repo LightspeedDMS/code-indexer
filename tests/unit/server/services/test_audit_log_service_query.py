@@ -10,8 +10,6 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 
 import sqlite3
 
-import pytest
-
 
 class TestAuditLogServiceQuery:
     """Tests for AuditLogService.query() method."""
@@ -27,10 +25,23 @@ class TestAuditLogServiceQuery:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "admin", "action_type": "user_group_change", "target_type": "user", "target_id": "u1"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "user_group_change",
+                    "target_type": "user",
+                    "target_id": "u1",
+                },
+            ],
+        )
 
         logs, total = service.query()
 
@@ -55,11 +66,29 @@ class TestAuditLogServiceQuery:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "admin", "action_type": "user_group_change", "target_type": "user", "target_id": "u1"},
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g2"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "user_group_change",
+                    "target_type": "user",
+                    "target_id": "u1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g2",
+                },
+            ],
+        )
 
         logs, total = service.query(action_type="group_create")
 
@@ -72,11 +101,29 @@ class TestAuditLogServiceQuery:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "admin", "action_type": "user_group_change", "target_type": "user", "target_id": "u1"},
-            {"admin_id": "sys", "action_type": "authentication_failure", "target_type": "auth", "target_id": "u2"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "user_group_change",
+                    "target_type": "user",
+                    "target_id": "u1",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "authentication_failure",
+                    "target_type": "auth",
+                    "target_id": "u2",
+                },
+            ],
+        )
 
         logs, total = service.query(target_type="user")
 
@@ -89,11 +136,29 @@ class TestAuditLogServiceQuery:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin1", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "admin2", "action_type": "group_create", "target_type": "group", "target_id": "g2"},
-            {"admin_id": "admin1", "action_type": "user_group_change", "target_type": "user", "target_id": "u1"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin1",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "admin2",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g2",
+                },
+                {
+                    "admin_id": "admin1",
+                    "action_type": "user_group_change",
+                    "target_type": "user",
+                    "target_id": "u1",
+                },
+            ],
+        )
 
         logs, total = service.query(admin_id="admin1")
 
@@ -168,7 +233,15 @@ class TestAuditLogServiceQuery:
 
         assert len(logs) == 1
         log = logs[0]
-        for field in ("id", "timestamp", "admin_id", "action_type", "target_type", "target_id", "details"):
+        for field in (
+            "id",
+            "timestamp",
+            "admin_id",
+            "action_type",
+            "target_type",
+            "target_id",
+            "details",
+        ):
             assert field in log
 
     def test_query_filters_by_date_from(self, tmp_path):
@@ -235,12 +308,35 @@ class TestAuditLogServiceQueryExcludeTargetType:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "sys", "action_type": "authentication_failure", "target_type": "auth", "target_id": "u1"},
-            {"admin_id": "admin", "action_type": "user_group_change", "target_type": "user", "target_id": "u2"},
-            {"admin_id": "sys", "action_type": "token_refresh_success", "target_type": "auth", "target_id": "u3"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "authentication_failure",
+                    "target_type": "auth",
+                    "target_id": "u1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "user_group_change",
+                    "target_type": "user",
+                    "target_id": "u2",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "token_refresh_success",
+                    "target_type": "auth",
+                    "target_id": "u3",
+                },
+            ],
+        )
 
         logs, total = service.query(exclude_target_type="auth")
 
@@ -253,13 +349,33 @@ class TestAuditLogServiceQueryExcludeTargetType:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "admin", "action_type": "user_group_change", "target_type": "user", "target_id": "u1"},
-            {"admin_id": "sys", "action_type": "authentication_failure", "target_type": "auth", "target_id": "u2"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "user_group_change",
+                    "target_type": "user",
+                    "target_id": "u1",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "authentication_failure",
+                    "target_type": "auth",
+                    "target_id": "u2",
+                },
+            ],
+        )
 
-        logs, total = service.query(action_type="group_create", exclude_target_type="auth")
+        logs, total = service.query(
+            action_type="group_create", exclude_target_type="auth"
+        )
 
         assert total == 1
         assert logs[0]["action_type"] == "group_create"
@@ -270,10 +386,23 @@ class TestAuditLogServiceQueryExcludeTargetType:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "sys", "action_type": "authentication_failure", "target_type": "auth", "target_id": "u1"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "authentication_failure",
+                    "target_type": "auth",
+                    "target_id": "u1",
+                },
+            ],
+        )
 
         logs, total = service.query(exclude_target_type=None)
 
@@ -285,13 +414,41 @@ class TestAuditLogServiceQueryExcludeTargetType:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        self._seed(service, [
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g1"},
-            {"admin_id": "admin", "action_type": "group_create", "target_type": "group", "target_id": "g2"},
-            {"admin_id": "sys", "action_type": "auth_event", "target_type": "auth", "target_id": "u1"},
-            {"admin_id": "sys", "action_type": "auth_event", "target_type": "auth", "target_id": "u2"},
-            {"admin_id": "sys", "action_type": "auth_event", "target_type": "auth", "target_id": "u3"},
-        ])
+        self._seed(
+            service,
+            [
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g1",
+                },
+                {
+                    "admin_id": "admin",
+                    "action_type": "group_create",
+                    "target_type": "group",
+                    "target_id": "g2",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "auth_event",
+                    "target_type": "auth",
+                    "target_id": "u1",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "auth_event",
+                    "target_type": "auth",
+                    "target_id": "u2",
+                },
+                {
+                    "admin_id": "sys",
+                    "action_type": "auth_event",
+                    "target_type": "auth",
+                    "target_id": "u3",
+                },
+            ],
+        )
 
         logs, total = service.query(exclude_target_type="auth")
 

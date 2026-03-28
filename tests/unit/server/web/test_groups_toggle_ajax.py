@@ -17,11 +17,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
-from starlette.datastructures import Headers
 
 from code_indexer.server.services.group_access_manager import (
     GroupAccessManager,
-    CidxMetaCannotBeRevokedError,
 )
 
 
@@ -74,13 +72,14 @@ class TestAjaxGrantRepoAccess:
         """AC1: AJAX request returns JSON success response without full page reload."""
         # Create a test group
         test_group = group_manager.create_group(
-            name="developers",
-            description="Developer group"
+            name="developers", description="Developer group"
         )
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             response = test_client.post(
@@ -108,7 +107,9 @@ class TestAjaxGrantRepoAccess:
             description="Developer group",
         )
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = "valid-token"
 
             # Send invalid CSRF token
@@ -139,7 +140,9 @@ class TestAjaxGrantRepoAccess:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             test_client.post(
@@ -167,7 +170,9 @@ class TestAjaxGrantRepoAccess:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             test_client.post(
@@ -189,11 +194,15 @@ class TestAjaxGrantRepoAccess:
         assert logs[0]["action_type"] == "repo_access_grant"
         assert logs[0]["target_id"] == "test-repo"
 
-    def test_ajax_grant_returns_json_error_on_exception(self, test_client, group_manager):
+    def test_ajax_grant_returns_json_error_on_exception(
+        self, test_client, group_manager
+    ):
         """AC3: AJAX grant returns JSON error response on server error."""
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             # Use nonexistent group to trigger error
@@ -230,7 +239,9 @@ class TestAjaxRevokeRepoAccess:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             response = test_client.post(
@@ -259,7 +270,9 @@ class TestAjaxRevokeRepoAccess:
         )
         group_manager.grant_repo_access("test-repo", test_group.id, "admin")
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = "valid-token"
 
             response = test_client.post(
@@ -289,7 +302,9 @@ class TestAjaxRevokeRepoAccess:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             test_client.post(
@@ -318,7 +333,9 @@ class TestAjaxRevokeRepoAccess:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             test_client.post(
@@ -342,7 +359,9 @@ class TestAjaxRevokeRepoAccess:
 class TestBackwardsCompatibility:
     """Tests for AC6: Form POST endpoints still work (backwards compatibility)."""
 
-    def test_form_post_grant_still_returns_html_redirect(self, test_client, group_manager):
+    def test_form_post_grant_still_returns_html_redirect(
+        self, test_client, group_manager
+    ):
         """AC6: Regular form POST grant returns full HTML page redirect (not JSON)."""
         test_group = group_manager.create_group(
             name="developers",
@@ -351,7 +370,9 @@ class TestBackwardsCompatibility:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             # Form POST (no X-Requested-With header)
@@ -371,9 +392,15 @@ class TestBackwardsCompatibility:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
         # Verify it's a full page response, not JSON
-        assert "success" not in response.json() if response.headers["content-type"] == "application/json" else True
+        assert (
+            "success" not in response.json()
+            if response.headers["content-type"] == "application/json"
+            else True
+        )
 
-    def test_form_post_revoke_still_returns_html_redirect(self, test_client, group_manager):
+    def test_form_post_revoke_still_returns_html_redirect(
+        self, test_client, group_manager
+    ):
         """AC6: Regular form POST revoke returns full HTML page redirect (not JSON)."""
         test_group = group_manager.create_group(
             name="developers",
@@ -383,7 +410,9 @@ class TestBackwardsCompatibility:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             response = test_client.post(
@@ -401,14 +430,18 @@ class TestBackwardsCompatibility:
         assert response.status_code == 200
         assert "text/html" in response.headers["content-type"]
 
-    def test_form_post_grant_validates_csrf_from_form_body(self, test_client, group_manager):
+    def test_form_post_grant_validates_csrf_from_form_body(
+        self, test_client, group_manager
+    ):
         """AC6: Form POST validates CSRF from form body (not header)."""
         test_group = group_manager.create_group(
             name="developers",
             description="Developer group",
         )
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = "valid-token"
 
             # Send form POST with invalid CSRF in body
@@ -440,7 +473,9 @@ class TestSpecialCases:
 
         csrf_token = "test-csrf-token"
 
-        with patch("code_indexer.server.web.routes.get_csrf_token_from_cookie") as mock_csrf:
+        with patch(
+            "code_indexer.server.web.routes.get_csrf_token_from_cookie"
+        ) as mock_csrf:
             mock_csrf.return_value = csrf_token
 
             response = test_client.post(
@@ -482,7 +517,9 @@ class TestCsrfTokenEmbedding:
         assert 'id="csrf-data"' in html_content
         assert f'data-csrf-token="{csrf_token}"' in html_content
 
-    def test_embedded_csrf_token_accessible_to_javascript(self, test_client, group_manager):
+    def test_embedded_csrf_token_accessible_to_javascript(
+        self, test_client, group_manager
+    ):
         """JavaScript can read CSRF token from data attribute (unlike httponly cookies)."""
         csrf_token = "accessible-token-67890"
 
@@ -496,9 +533,9 @@ class TestCsrfTokenEmbedding:
         html_content = response.text
 
         # Verify the data attribute exists and contains the token
-        assert 'data-csrf-token=' in html_content
+        assert "data-csrf-token=" in html_content
         assert csrf_token in html_content
 
         # Verify it's in a hidden element (display:none in style attribute)
         # Note: Jinja2 may render with or without spaces in style attribute
-        assert 'display:none' in html_content or 'display: none' in html_content
+        assert "display:none" in html_content or "display: none" in html_content

@@ -17,13 +17,13 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 # Add the perf-suite directory to path so we can import from it
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -44,24 +44,66 @@ SAMPLE_RAW_METRICS = {
             "repo_alias": "tries-global",
             "priority": "highest",
             "levels": {
-                "1":  {"p50_ms": 120.0, "p95_ms": 150.0, "p99_ms": 180.0,
-                        "throughput_rps": 8.3, "error_rate_pct": 0.0,
-                        "total_requests": 20, "total_errors": 0, "raw_timings": []},
-                "2":  {"p50_ms": 130.0, "p95_ms": 165.0, "p99_ms": 195.0,
-                        "throughput_rps": 14.0, "error_rate_pct": 0.0,
-                        "total_requests": 40, "total_errors": 0, "raw_timings": []},
-                "5":  {"p50_ms": 155.0, "p95_ms": 200.0, "p99_ms": 240.0,
-                        "throughput_rps": 30.0, "error_rate_pct": 0.0,
-                        "total_requests": 100, "total_errors": 0, "raw_timings": []},
-                "10": {"p50_ms": 200.0, "p95_ms": 260.0, "p99_ms": 310.0,
-                        "throughput_rps": 46.0, "error_rate_pct": 0.0,
-                        "total_requests": 200, "total_errors": 0, "raw_timings": []},
-                "20": {"p50_ms": 260.0, "p95_ms": 350.0, "p99_ms": 420.0,
-                        "throughput_rps": 70.0, "error_rate_pct": 2.0,
-                        "total_requests": 400, "total_errors": 8, "raw_timings": []},
-                "50": {"p50_ms": 550.0, "p95_ms": 720.0, "p99_ms": 850.0,
-                        "throughput_rps": 85.0, "error_rate_pct": 5.0,
-                        "total_requests": 1000, "total_errors": 50, "raw_timings": []},
+                "1": {
+                    "p50_ms": 120.0,
+                    "p95_ms": 150.0,
+                    "p99_ms": 180.0,
+                    "throughput_rps": 8.3,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 20,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "2": {
+                    "p50_ms": 130.0,
+                    "p95_ms": 165.0,
+                    "p99_ms": 195.0,
+                    "throughput_rps": 14.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 40,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "5": {
+                    "p50_ms": 155.0,
+                    "p95_ms": 200.0,
+                    "p99_ms": 240.0,
+                    "throughput_rps": 30.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 100,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "10": {
+                    "p50_ms": 200.0,
+                    "p95_ms": 260.0,
+                    "p99_ms": 310.0,
+                    "throughput_rps": 46.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 200,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "20": {
+                    "p50_ms": 260.0,
+                    "p95_ms": 350.0,
+                    "p99_ms": 420.0,
+                    "throughput_rps": 70.0,
+                    "error_rate_pct": 2.0,
+                    "total_requests": 400,
+                    "total_errors": 8,
+                    "raw_timings": [],
+                },
+                "50": {
+                    "p50_ms": 550.0,
+                    "p95_ms": 720.0,
+                    "p99_ms": 850.0,
+                    "throughput_rps": 85.0,
+                    "error_rate_pct": 5.0,
+                    "total_requests": 1000,
+                    "total_errors": 50,
+                    "raw_timings": [],
+                },
             },
             "inflection": {
                 "inflection_level": 20,
@@ -75,24 +117,66 @@ SAMPLE_RAW_METRICS = {
             "repo_alias": "flask-global",
             "priority": "highest",
             "levels": {
-                "1":  {"p50_ms": 90.0, "p95_ms": 110.0, "p99_ms": 130.0,
-                        "throughput_rps": 11.0, "error_rate_pct": 0.0,
-                        "total_requests": 20, "total_errors": 0, "raw_timings": []},
-                "2":  {"p50_ms": 95.0, "p95_ms": 115.0, "p99_ms": 135.0,
-                        "throughput_rps": 20.0, "error_rate_pct": 0.0,
-                        "total_requests": 40, "total_errors": 0, "raw_timings": []},
-                "5":  {"p50_ms": 105.0, "p95_ms": 130.0, "p99_ms": 160.0,
-                        "throughput_rps": 45.0, "error_rate_pct": 0.0,
-                        "total_requests": 100, "total_errors": 0, "raw_timings": []},
-                "10": {"p50_ms": 120.0, "p95_ms": 155.0, "p99_ms": 190.0,
-                        "throughput_rps": 80.0, "error_rate_pct": 0.0,
-                        "total_requests": 200, "total_errors": 0, "raw_timings": []},
-                "20": {"p50_ms": 145.0, "p95_ms": 190.0, "p99_ms": 230.0,
-                        "throughput_rps": 130.0, "error_rate_pct": 0.0,
-                        "total_requests": 400, "total_errors": 0, "raw_timings": []},
-                "50": {"p50_ms": 185.0, "p95_ms": 240.0, "p99_ms": 290.0,
-                        "throughput_rps": 260.0, "error_rate_pct": 0.0,
-                        "total_requests": 1000, "total_errors": 0, "raw_timings": []},
+                "1": {
+                    "p50_ms": 90.0,
+                    "p95_ms": 110.0,
+                    "p99_ms": 130.0,
+                    "throughput_rps": 11.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 20,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "2": {
+                    "p50_ms": 95.0,
+                    "p95_ms": 115.0,
+                    "p99_ms": 135.0,
+                    "throughput_rps": 20.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 40,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "5": {
+                    "p50_ms": 105.0,
+                    "p95_ms": 130.0,
+                    "p99_ms": 160.0,
+                    "throughput_rps": 45.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 100,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "10": {
+                    "p50_ms": 120.0,
+                    "p95_ms": 155.0,
+                    "p99_ms": 190.0,
+                    "throughput_rps": 80.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 200,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "20": {
+                    "p50_ms": 145.0,
+                    "p95_ms": 190.0,
+                    "p99_ms": 230.0,
+                    "throughput_rps": 130.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 400,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "50": {
+                    "p50_ms": 185.0,
+                    "p95_ms": 240.0,
+                    "p99_ms": 290.0,
+                    "throughput_rps": 260.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 1000,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
             },
             "inflection": {
                 "inflection_level": None,
@@ -106,12 +190,26 @@ SAMPLE_RAW_METRICS = {
             "repo_alias": "tries-global",
             "priority": "high",
             "levels": {
-                "1":  {"p50_ms": 50.0, "p95_ms": 70.0, "p99_ms": 90.0,
-                        "throughput_rps": 18.0, "error_rate_pct": 0.0,
-                        "total_requests": 20, "total_errors": 0, "raw_timings": []},
-                "50": {"p50_ms": 600.0, "p95_ms": 800.0, "p99_ms": 950.0,
-                        "throughput_rps": 80.0, "error_rate_pct": 15.0,
-                        "total_requests": 1000, "total_errors": 150, "raw_timings": []},
+                "1": {
+                    "p50_ms": 50.0,
+                    "p95_ms": 70.0,
+                    "p99_ms": 90.0,
+                    "throughput_rps": 18.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 20,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "50": {
+                    "p50_ms": 600.0,
+                    "p95_ms": 800.0,
+                    "p99_ms": 950.0,
+                    "throughput_rps": 80.0,
+                    "error_rate_pct": 15.0,
+                    "total_requests": 1000,
+                    "total_errors": 150,
+                    "raw_timings": [],
+                },
             },
             "inflection": {
                 "inflection_level": 50,
@@ -125,12 +223,26 @@ SAMPLE_RAW_METRICS = {
             "repo_alias": "flask-global",
             "priority": "medium",
             "levels": {
-                "1":  {"p50_ms": 200.0, "p95_ms": 250.0, "p99_ms": 300.0,
-                        "throughput_rps": 5.0, "error_rate_pct": 0.0,
-                        "total_requests": 20, "total_errors": 0, "raw_timings": []},
-                "50": {"p50_ms": 800.0, "p95_ms": 1000.0, "p99_ms": 1200.0,
-                        "throughput_rps": 60.0, "error_rate_pct": 20.0,
-                        "total_requests": 1000, "total_errors": 200, "raw_timings": []},
+                "1": {
+                    "p50_ms": 200.0,
+                    "p95_ms": 250.0,
+                    "p99_ms": 300.0,
+                    "throughput_rps": 5.0,
+                    "error_rate_pct": 0.0,
+                    "total_requests": 20,
+                    "total_errors": 0,
+                    "raw_timings": [],
+                },
+                "50": {
+                    "p50_ms": 800.0,
+                    "p95_ms": 1000.0,
+                    "p99_ms": 1200.0,
+                    "throughput_rps": 60.0,
+                    "error_rate_pct": 20.0,
+                    "total_requests": 1000,
+                    "total_errors": 200,
+                    "raw_timings": [],
+                },
             },
             "inflection": {
                 "inflection_level": 50,
@@ -179,7 +291,11 @@ class TestMetricsTableRendering:
 
         # 6 concurrency levels → 6 data rows (plus header + separator)
         lines = [line for line in table.splitlines() if line.strip()]
-        data_rows = [l for l in lines if "|" in l and "---" not in l and "Concurrency" not in l]
+        data_rows = [
+            row
+            for row in lines
+            if "|" in row and "---" not in row and "Concurrency" not in row
+        ]
         assert len(data_rows) == 6
 
     def test_response_times_rounded_to_one_decimal(self):
@@ -200,7 +316,11 @@ class TestMetricsTableRendering:
 
         lines = table.splitlines()
         # Find the row for level 20 — it should have ** markers
-        level_20_rows = [l for l in lines if "| 20 |" in l or "| **20**" in l or "**20**" in l]
+        level_20_rows = [
+            row
+            for row in lines
+            if "| 20 |" in row or "| **20**" in row or "**20**" in row
+        ]
         assert len(level_20_rows) >= 1
         # Verify bold markers present in the inflection row
         inflection_row = level_20_rows[0]
@@ -215,7 +335,11 @@ class TestMetricsTableRendering:
 
         # No row should be bolded (no ** in data rows)
         lines = table.splitlines()
-        data_rows = [l for l in lines if "|" in l and "---" not in l and "Concurrency" not in l]
+        data_rows = [
+            row
+            for row in lines
+            if "|" in row and "---" not in row and "Concurrency" not in row
+        ]
         bold_rows = [r for r in data_rows if "**" in r]
         assert len(bold_rows) == 0
 
@@ -227,7 +351,7 @@ class TestMetricsTableRendering:
 
         lines = table.splitlines()
         # First non-empty line is the header
-        header_lines = [l for l in lines if l.strip().startswith("|")]
+        header_lines = [line for line in lines if line.strip().startswith("|")]
         assert len(header_lines) >= 3  # header, separator, at least 1 data row
         # Second line should be the separator (contains ---)
         separator = header_lines[1]
@@ -293,9 +417,9 @@ class TestAsciiBarChartRendering:
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
         lines = chart.splitlines()
-        bar_lines = [l for l in lines if "=" in l]
+        bar_lines = [row for row in lines if "=" in row]
         # The longest bar (highest p50 = 550.0) should have bars at max width
-        bar_lengths = [l.count("=") for l in bar_lines]
+        bar_lengths = [row.count("=") for row in bar_lines]
         assert max(bar_lengths) <= 60  # max column width is 60
 
     def test_chart_stable_scenario_has_no_inflection_marker(self):
@@ -334,8 +458,12 @@ class TestCrossRepoComparisonTables:
         scenarios = SAMPLE_RAW_METRICS["scenarios"]
         table = render_cross_repo_table("search_code", scenarios)
 
-        lines = [l for l in table.splitlines() if l.strip()]
-        data_rows = [l for l in lines if "|" in l and "---" not in l and "Repository" not in l]
+        lines = [row for row in table.splitlines() if row.strip()]
+        data_rows = [
+            row
+            for row in lines
+            if "|" in row and "---" not in row and "Repository" not in row
+        ]
         # search_code appears in: semantic_search_tries (tries-global),
         #                          semantic_search_flask (flask-global),
         #                          fts_search_tries (tries-global)
@@ -350,7 +478,12 @@ class TestCrossRepoComparisonTables:
         # git_blame only tested against flask-global → no cross-repo comparison
         table = render_cross_repo_table("git_blame", scenarios)
         # Should return empty string or note since there's only 1 repo
-        assert table == "" or "only one" in table.lower() or table is None or len(table.strip()) == 0
+        assert (
+            table == ""
+            or "only one" in table.lower()
+            or table is None
+            or len(table.strip()) == 0
+        )
 
     def test_comparison_includes_inflection_level(self):
         from report_sections import render_cross_repo_table
@@ -417,7 +550,11 @@ class TestExecutiveSummary:
 
         # fts_search_tries has inflection at level 50 but only 2 levels tested
         # semantic_search_tries has inflection at level 20
-        assert "sensitive" in summary.lower() or "inflection" in summary.lower() or "degradation" in summary.lower()
+        assert (
+            "sensitive" in summary.lower()
+            or "inflection" in summary.lower()
+            or "degradation" in summary.lower()
+        )
 
     def test_summary_lists_error_prone_endpoints(self):
         from report_sections import render_executive_summary
@@ -437,7 +574,11 @@ class TestExecutiveSummary:
         scenarios = SAMPLE_RAW_METRICS["scenarios"]
         summary = render_executive_summary(metadata, scenarios)
 
-        assert "recommend" in summary.lower() or "capacity" in summary.lower() or "concurrency" in summary.lower()
+        assert (
+            "recommend" in summary.lower()
+            or "capacity" in summary.lower()
+            or "concurrency" in summary.lower()
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +632,9 @@ class TestSanitization:
         warnings = post_generation_scan(content)
 
         assert len(warnings) > 0
-        assert any("ip" in w.lower() or "address" in w.lower() or "192" in w for w in warnings)
+        assert any(
+            "ip" in w.lower() or "address" in w.lower() or "192" in w for w in warnings
+        )
 
     def test_post_scan_detects_bearer_token(self):
         from sanitizer import post_generation_scan
@@ -556,7 +699,11 @@ class TestHardwareProfileSection:
 
         section = render_hardware_section({})
 
-        assert "not captured" in section.lower() or "n/a" in section.lower() or "Hardware" in section
+        assert (
+            "not captured" in section.lower()
+            or "n/a" in section.lower()
+            or "Hardware" in section
+        )
 
     def test_hardware_capture_skips_gracefully_on_no_ssh(self):
         """When SSH is not configured, capture returns None without raising."""
@@ -718,7 +865,11 @@ class TestFullReportGeneration:
 
         content = Path(report_path).read_text(encoding="utf-8")
         hardware_pos = content.find("Hardware")
-        summary_pos = content.find("Summary") if "Summary" in content else content.find("Executive")
+        summary_pos = (
+            content.find("Summary")
+            if "Summary" in content
+            else content.find("Executive")
+        )
         reproduce_pos = content.find("Reproduce")
 
         # Hardware → Summary → Reproduce (order per AC7)

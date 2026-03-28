@@ -15,7 +15,6 @@ Tests:
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
 from code_indexer.server.services.scip_resolution_queue import SCIPResolutionQueue
@@ -57,9 +56,12 @@ class TestSCIPResolutionQueueConstructor:
         When SCIPResolutionQueue is instantiated
         Then no exception is raised and _job_tracker is None
         """
+
         async def run():
             mock_healing = _make_mock_healing()
-            queue = SCIPResolutionQueue(self_healing_service=mock_healing, job_tracker=None)
+            queue = SCIPResolutionQueue(
+                self_healing_service=mock_healing, job_tracker=None
+            )
             assert queue is not None
             assert queue._job_tracker is None
 
@@ -73,6 +75,7 @@ class TestSCIPResolutionQueueConstructor:
         When SCIPResolutionQueue is instantiated with it
         Then _job_tracker is set
         """
+
         async def run():
             mock_healing = _make_mock_healing()
             queue = SCIPResolutionQueue(
@@ -90,6 +93,7 @@ class TestSCIPResolutionQueueConstructor:
         When SCIPResolutionQueue is instantiated
         Then no TypeError is raised
         """
+
         async def run():
             mock_healing = MagicMock()
             queue = SCIPResolutionQueue(self_healing_service=mock_healing)
@@ -163,7 +167,9 @@ class TestSCIPResolutionJobRegistration:
 
         asyncio.run(run())
 
-        jobs = job_tracker.query_jobs(operation_type="scip_resolution", status="completed")
+        jobs = job_tracker.query_jobs(
+            operation_type="scip_resolution", status="completed"
+        )
         assert len(jobs) >= 1
 
     def test_scip_resolution_job_fails_when_exception_raised(self, job_tracker):

@@ -44,11 +44,13 @@ class TestReindexBackgroundRemovedFromApp:
         Path(golden_repos_dir).mkdir(parents=True)
 
         mock_golden_repo_manager = MagicMock()
-        mock_golden_repo_manager.golden_repo_exists.return_value = True  # Already registered
+        mock_golden_repo_manager.golden_repo_exists.return_value = (
+            True  # Already registered
+        )
 
         threads_started = []
 
-        original_thread_init = None
+        _original_thread_init = None
 
         import threading
 

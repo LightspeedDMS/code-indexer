@@ -17,7 +17,6 @@ Key requirements tested:
 - get_* methods still return valid metric data
 """
 
-import threading
 import time
 from unittest.mock import patch, MagicMock
 
@@ -42,26 +41,26 @@ class TestBackgroundRefreshThreadStarts:
     def test_background_thread_attribute_exists(self):
         """SystemMetricsCollector must have a background refresh thread attribute."""
         collector = SystemMetricsCollector(cache_ttl_seconds=5.0)
-        assert hasattr(collector, "_refresh_thread"), (
-            "SystemMetricsCollector must have a _refresh_thread attribute"
-        )
+        assert hasattr(
+            collector, "_refresh_thread"
+        ), "SystemMetricsCollector must have a _refresh_thread attribute"
 
     def test_background_thread_is_alive_after_construction(self):
         """Background refresh thread must be running after construction."""
         collector = SystemMetricsCollector(cache_ttl_seconds=5.0)
-        assert collector._refresh_thread is not None, (
-            "_refresh_thread must not be None after construction"
-        )
-        assert collector._refresh_thread.is_alive(), (
-            "Background refresh thread must be alive after construction"
-        )
+        assert (
+            collector._refresh_thread is not None
+        ), "_refresh_thread must not be None after construction"
+        assert (
+            collector._refresh_thread.is_alive()
+        ), "Background refresh thread must be alive after construction"
 
     def test_background_thread_is_daemon(self):
         """Background refresh thread must be a daemon thread (won't block shutdown)."""
         collector = SystemMetricsCollector(cache_ttl_seconds=5.0)
-        assert collector._refresh_thread.daemon, (
-            "Background refresh thread must be a daemon thread"
-        )
+        assert (
+            collector._refresh_thread.daemon
+        ), "Background refresh thread must be a daemon thread"
 
 
 class TestGetMethodsReturnCachedValues:
@@ -86,8 +85,15 @@ class TestGetMethodsReturnCachedValues:
         # Now verify get_all_metrics does NOT call psutil during the call itself
         psutil_calls = []
 
-        with patch("psutil.cpu_percent", side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0):
-            with patch("psutil.virtual_memory", side_effect=lambda: psutil_calls.append("mem") or MagicMock(percent=50.0, used=1000)):
+        with patch(
+            "psutil.cpu_percent",
+            side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0,
+        ):
+            with patch(
+                "psutil.virtual_memory",
+                side_effect=lambda: psutil_calls.append("mem")
+                or MagicMock(percent=50.0, used=1000),
+            ):
                 metrics = collector.get_all_metrics()
 
         assert len(psutil_calls) == 0, (
@@ -103,12 +109,15 @@ class TestGetMethodsReturnCachedValues:
         time.sleep(0.2)
 
         psutil_calls = []
-        with patch("psutil.cpu_percent", side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0):
+        with patch(
+            "psutil.cpu_percent",
+            side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0,
+        ):
             cpu = collector.get_cpu_usage()
 
-        assert len(psutil_calls) == 0, (
-            "get_cpu_usage must NOT call psutil.cpu_percent directly"
-        )
+        assert (
+            len(psutil_calls) == 0
+        ), "get_cpu_usage must NOT call psutil.cpu_percent directly"
         assert isinstance(cpu, float)
 
     def test_get_memory_usage_does_not_call_psutil_directly(self):
@@ -117,12 +126,16 @@ class TestGetMethodsReturnCachedValues:
         time.sleep(0.2)
 
         psutil_calls = []
-        with patch("psutil.virtual_memory", side_effect=lambda: psutil_calls.append("mem") or MagicMock(percent=50.0, used=1000)):
+        with patch(
+            "psutil.virtual_memory",
+            side_effect=lambda: psutil_calls.append("mem")
+            or MagicMock(percent=50.0, used=1000),
+        ):
             mem = collector.get_memory_usage()
 
-        assert len(psutil_calls) == 0, (
-            "get_memory_usage must NOT call psutil.virtual_memory directly"
-        )
+        assert (
+            len(psutil_calls) == 0
+        ), "get_memory_usage must NOT call psutil.virtual_memory directly"
         assert "percent" in mem
         assert "used_bytes" in mem
 
@@ -147,9 +160,9 @@ class TestCachePopulatedByBackgroundThread:
                 break
             time.sleep(0.05)
 
-        assert collector._cached_metrics is not None, (
-            "Background thread must populate _cached_metrics within 2 seconds"
-        )
+        assert (
+            collector._cached_metrics is not None
+        ), "Background thread must populate _cached_metrics within 2 seconds"
 
     def test_metrics_values_are_valid_numbers(self):
         """Background-populated cache must contain valid numeric metrics."""
@@ -203,9 +216,9 @@ class TestBackgroundThreadStopsOnReset:
 
         # Give thread time to stop
         collector._refresh_thread.join(timeout=2.0)
-        assert not collector._refresh_thread.is_alive(), (
-            "Background thread must stop after stop signal is sent"
-        )
+        assert (
+            not collector._refresh_thread.is_alive()
+        ), "Background thread must stop after stop signal is sent"
 
 
 class TestGetSystemMetricsCollectorSingleton:

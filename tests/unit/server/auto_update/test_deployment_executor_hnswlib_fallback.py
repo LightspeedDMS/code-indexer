@@ -45,7 +45,7 @@ class TestCloneHnswlibStandalone:
         with (
             patch("subprocess.run") as mock_run,
             patch("pathlib.Path.exists") as mock_exists,
-            patch("shutil.rmtree") as mock_rmtree,
+            patch("shutil.rmtree") as _mock_rmtree,
         ):
             # Directory doesn't exist initially
             mock_exists.return_value = False
@@ -87,7 +87,7 @@ class TestCloneHnswlibStandalone:
         with (
             patch("subprocess.run") as mock_run,
             patch("pathlib.Path.exists") as mock_exists,
-            patch("shutil.rmtree") as mock_rmtree,
+            patch("shutil.rmtree") as _mock_rmtree,
         ):
             mock_exists.return_value = False
             mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
@@ -113,7 +113,7 @@ class TestCloneHnswlibStandalone:
         with (
             patch("subprocess.run") as mock_run,
             patch("pathlib.Path.exists") as mock_exists,
-            patch("shutil.rmtree") as mock_rmtree,
+            patch("shutil.rmtree") as _mock_rmtree,
         ):
             mock_exists.return_value = False
             mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
@@ -136,7 +136,7 @@ class TestCloneHnswlibStandalone:
     ):
         """Test that rmtree failure returns False."""
         with (
-            patch("subprocess.run") as mock_run,
+            patch("subprocess.run") as _mock_run,
             patch("pathlib.Path.exists") as mock_exists,
             patch("shutil.rmtree") as mock_rmtree,
         ):
@@ -154,7 +154,7 @@ class TestCloneHnswlibStandalone:
         with (
             patch("subprocess.run") as mock_run,
             patch("pathlib.Path.exists") as mock_exists,
-            patch("shutil.rmtree") as mock_rmtree,
+            patch("shutil.rmtree") as _mock_rmtree,
         ):
             mock_exists.return_value = False
             # Safe directory succeeds, clone fails

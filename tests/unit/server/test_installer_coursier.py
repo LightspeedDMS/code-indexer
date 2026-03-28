@@ -101,7 +101,7 @@ class TestInstallCoursier:
         # Create ~/.local/bin directory
         local_bin = tmp_path / ".local" / "bin"
         local_bin.mkdir(parents=True, exist_ok=True)
-        install_path = local_bin / "cs"
+        _install_path = local_bin / "cs"
 
         # Mock successful download with proper context manager
         mock_response = MagicMock()

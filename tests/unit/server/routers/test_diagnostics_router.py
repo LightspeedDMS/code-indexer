@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import patch, AsyncMock
 from code_indexer.server.routers.diagnostics import router
 from code_indexer.server.services.diagnostics_service import (
     DiagnosticCategory,
@@ -38,7 +38,7 @@ def client(app):
 @pytest.fixture
 def mock_diagnostics_service():
     """Create mock diagnostics service."""
-    with patch('code_indexer.server.routers.diagnostics.diagnostics_service') as mock:
+    with patch("code_indexer.server.routers.diagnostics.diagnostics_service") as mock:
         yield mock
 
 
@@ -78,9 +78,12 @@ class TestDiagnosticsPageEndpoint:
         assert 'id="diagnostics-results"' in html
         # Verify the results section doesn't have hx-trigger initially
         import re
-        results_section = re.search(r'<section[^>]*id="diagnostics-results"[^>]*>', html)
+
+        results_section = re.search(
+            r'<section[^>]*id="diagnostics-results"[^>]*>', html
+        )
         assert results_section is not None
-        assert 'hx-trigger' not in results_section.group(0)
+        assert "hx-trigger" not in results_section.group(0)
 
     def test_diagnostics_page_has_navigation_bar(self, client):
         """Test diagnostics page includes navigation bar (show_nav=True)."""
@@ -97,9 +100,16 @@ class TestDiagnosticsPageEndpoint:
         html = response.text
         # Should have aria-current="page" on Diagnostics nav item
         import re
+
         # Look for Diagnostics link with aria-current marker
-        diagnostics_nav = re.search(r'<a[^>]*href="/admin/diagnostics"[^>]*aria-current="page"[^>]*>.*?Diagnostics.*?</a>', html, re.IGNORECASE | re.DOTALL)
-        assert diagnostics_nav is not None, "Diagnostics nav item should be marked as current page"
+        diagnostics_nav = re.search(
+            r'<a[^>]*href="/admin/diagnostics"[^>]*aria-current="page"[^>]*>.*?Diagnostics.*?</a>',
+            html,
+            re.IGNORECASE | re.DOTALL,
+        )
+        assert (
+            diagnostics_nav is not None
+        ), "Diagnostics nav item should be marked as current page"
 
 
 class TestRunAllDiagnosticsEndpoint:
@@ -144,7 +154,9 @@ class TestRunAllDiagnosticsEndpoint:
         # Should have polling attributes enabled
         assert "hx-get" in html and "/admin/diagnostics/status" in html
 
-    def test_run_all_returns_immediately_without_awaiting(self, client, mock_diagnostics_service):
+    def test_run_all_returns_immediately_without_awaiting(
+        self, client, mock_diagnostics_service
+    ):
         """Test run-all endpoint uses BackgroundTasks (doesn't await completion)."""
         # Mock diagnostics service
         mock_diagnostics_service.run_all_diagnostics = AsyncMock()
@@ -175,7 +187,9 @@ class TestRunCategoryEndpoint:
         assert response.status_code in [200, 202]
         mock_diagnostics_service.run_category.assert_called_once()
 
-    def test_run_category_accepts_valid_categories(self, client, mock_diagnostics_service):
+    def test_run_category_accepts_valid_categories(
+        self, client, mock_diagnostics_service
+    ):
         """Test run category accepts all valid category values."""
         mock_diagnostics_service.run_category = AsyncMock()
 
@@ -189,7 +203,10 @@ class TestRunCategoryEndpoint:
 
         for category in valid_categories:
             response = client.post(f"/admin/diagnostics/run/{category}")
-            assert response.status_code in [200, 202], f"Failed for category: {category}"
+            assert response.status_code in [
+                200,
+                202,
+            ], f"Failed for category: {category}"
 
     def test_run_category_rejects_invalid_category(self, client):
         """Test run category rejects invalid category values."""
@@ -210,7 +227,9 @@ class TestRunCategoryEndpoint:
         # Should include polling trigger to /admin/diagnostics/status
         assert "hx-get" in html and "/admin/diagnostics/status" in html
 
-    def test_run_category_returns_immediately_without_awaiting(self, client, mock_diagnostics_service):
+    def test_run_category_returns_immediately_without_awaiting(
+        self, client, mock_diagnostics_service
+    ):
         """Test run-category endpoint uses BackgroundTasks (doesn't await completion)."""
         # Mock diagnostics service
         mock_diagnostics_service.run_category = AsyncMock()
@@ -269,7 +288,10 @@ class TestStatusPollingEndpoint:
         response = client.get("/admin/diagnostics/status")
 
         # When not running, should include stop polling header
-        assert "HX-Stop-Polling" in response.headers or "hx-stop-polling" in response.headers
+        assert (
+            "HX-Stop-Polling" in response.headers
+            or "hx-stop-polling" in response.headers
+        )
 
     def test_status_endpoint_no_stop_polling_when_running(
         self, client, mock_diagnostics_service

@@ -7,12 +7,11 @@ and rejects out-of-range values, and that the section is in valid_sections.
 TDD: These tests are written BEFORE implementation to define expected behavior.
 """
 
-import pytest
-
 
 def _validate(data: dict):
     """Helper to call the route validation function for data_retention."""
     from code_indexer.server.web.routes import _validate_config_section
+
     return _validate_config_section("data_retention", data)
 
 

@@ -95,14 +95,16 @@ class TestRestartSignalDetected:
 
         deleted_before_restart = []
 
-        original_restart = service.deployment_executor.restart_server
+        _original_restart = service.deployment_executor.restart_server
 
         def check_deleted_on_restart():
             # At time of restart, file should already be deleted
             deleted_before_restart.append(not signal_file.exists())
             return True
 
-        service.deployment_executor.restart_server.side_effect = check_deleted_on_restart
+        service.deployment_executor.restart_server.side_effect = (
+            check_deleted_on_restart
+        )
 
         mock_pending = MagicMock()
         mock_pending.exists.return_value = False
@@ -122,9 +124,9 @@ class TestRestartSignalDetected:
                 ):
                     service.poll_once()
 
-        assert deleted_before_restart == [True], (
-            "Signal file must be deleted BEFORE restart_server() is called"
-        )
+        assert deleted_before_restart == [
+            True
+        ], "Signal file must be deleted BEFORE restart_server() is called"
 
     def test_signal_file_is_deleted_after_detection(self, service, tmp_path):
         """
@@ -215,14 +217,15 @@ class TestRestartSignalDetected:
                     "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
                     mock_legacy,
                 ):
-                    with patch("code_indexer.server.auto_update.service.logger") as mock_logger:
+                    with patch(
+                        "code_indexer.server.auto_update.service.logger"
+                    ) as mock_logger:
                         service.poll_once()
 
         assert mock_logger.info.called
         log_calls = [str(call) for call in mock_logger.info.call_args_list]
         assert any(
-            "signal" in msg.lower() or "restart" in msg.lower()
-            for msg in log_calls
+            "signal" in msg.lower() or "restart" in msg.lower() for msg in log_calls
         )
 
 
@@ -260,7 +263,9 @@ class TestRestartSignalDeletedOnFailure:
                 ):
                     service.poll_once()
 
-        assert not signal_file.exists(), "Signal file must be deleted even on restart failure"
+        assert (
+            not signal_file.exists()
+        ), "Signal file must be deleted even on restart failure"
 
     def test_restart_failure_is_logged(self, service, tmp_path):
         """
@@ -291,7 +296,9 @@ class TestRestartSignalDeletedOnFailure:
                     "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
                     mock_legacy,
                 ):
-                    with patch("code_indexer.server.auto_update.service.logger") as mock_logger:
+                    with patch(
+                        "code_indexer.server.auto_update.service.logger"
+                    ) as mock_logger:
                         service.poll_once()
 
         # Error should be logged
@@ -350,7 +357,9 @@ class TestStaleSignalFileCleaned:
 
         signal_file = tmp_path / "restart.signal"
         # Make it older than the threshold
-        make_signal_file(signal_file, age_seconds=RESTART_SIGNAL_STALENESS_THRESHOLD + 30)
+        make_signal_file(
+            signal_file, age_seconds=RESTART_SIGNAL_STALENESS_THRESHOLD + 30
+        )
 
         mock_pending = MagicMock()
         mock_pending.exists.return_value = False
@@ -388,7 +397,9 @@ class TestStaleSignalFileCleaned:
         )
 
         signal_file = tmp_path / "restart.signal"
-        make_signal_file(signal_file, age_seconds=RESTART_SIGNAL_STALENESS_THRESHOLD + 30)
+        make_signal_file(
+            signal_file, age_seconds=RESTART_SIGNAL_STALENESS_THRESHOLD + 30
+        )
 
         mock_pending = MagicMock()
         mock_pending.exists.return_value = False
@@ -406,7 +417,9 @@ class TestStaleSignalFileCleaned:
                     "code_indexer.server.auto_update.service.LEGACY_REDEPLOY_MARKER",
                     mock_legacy,
                 ):
-                    with patch("code_indexer.server.auto_update.service.logger") as mock_logger:
+                    with patch(
+                        "code_indexer.server.auto_update.service.logger"
+                    ) as mock_logger:
                         service.poll_once()
 
         assert mock_logger.warning.called
@@ -490,7 +503,9 @@ class TestStaleSignalFileCleaned:
 class TestSignalCheckedBeforeRedeployMarker:
     """Tests that restart signal is checked BEFORE PENDING_REDEPLOY_MARKER."""
 
-    def test_restart_signal_check_precedes_redeploy_marker_check(self, service, tmp_path):
+    def test_restart_signal_check_precedes_redeploy_marker_check(
+        self, service, tmp_path
+    ):
         """
         Restart signal check must happen BEFORE PENDING_REDEPLOY_MARKER check.
 
@@ -538,9 +553,9 @@ class TestSignalCheckedBeforeRedeployMarker:
                     service.poll_once()
 
         # Pending marker check should NOT happen because signal triggered early return
-        assert "pending_check" not in call_order, (
-            "PENDING_REDEPLOY_MARKER should not be checked when restart signal is present"
-        )
+        assert (
+            "pending_check" not in call_order
+        ), "PENDING_REDEPLOY_MARKER should not be checked when restart signal is present"
 
     def test_no_signal_falls_through_to_redeploy_marker_check(self, service, tmp_path):
         """
@@ -587,6 +602,7 @@ class TestSignalConstantsExist:
         from code_indexer.server.auto_update.deployment_executor import (
             RESTART_SIGNAL_STALENESS_THRESHOLD,
         )
+
         assert RESTART_SIGNAL_STALENESS_THRESHOLD is not None
         assert isinstance(RESTART_SIGNAL_STALENESS_THRESHOLD, int)
 
@@ -597,13 +613,17 @@ class TestSignalConstantsExist:
         from code_indexer.server.auto_update.deployment_executor import (
             RESTART_SIGNAL_STALENESS_THRESHOLD,
         )
+
         assert RESTART_SIGNAL_STALENESS_THRESHOLD == 120
 
     def test_restart_signal_path_constant_exists(self):
         """
         RESTART_SIGNAL_PATH constant must exist in deployment_executor.
         """
-        from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
+        from code_indexer.server.auto_update.deployment_executor import (
+            RESTART_SIGNAL_PATH,
+        )
+
         assert RESTART_SIGNAL_PATH == Path.home() / ".cidx-server" / "restart.signal"
 
     def test_service_imports_restart_signal_constants(self):
@@ -611,6 +631,7 @@ class TestSignalConstantsExist:
         service.py must import RESTART_SIGNAL_PATH from deployment_executor.
         """
         import code_indexer.server.auto_update.service as service_module
+
         assert hasattr(service_module, "RESTART_SIGNAL_PATH"), (
             "service.py must have RESTART_SIGNAL_PATH attribute "
             "(imported from deployment_executor)"

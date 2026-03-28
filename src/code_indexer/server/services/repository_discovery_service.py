@@ -112,7 +112,7 @@ class RepositoryDiscoveryService:
                 (
                     golden_matches,
                     activated_matches,
-                ) = repository_matcher.find_all_matching_repositories(
+                ) = self.repository_matcher.find_all_matching_repositories(
                     canonical_url=normalized_url.canonical_form,
                     user=user,
                 )

@@ -34,12 +34,8 @@ implementation behavior. All collaborators are mocked to avoid real I/O:
 
 import json
 import os
-import threading
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -159,21 +155,24 @@ class TestJournalInitIsCalled:
 
         mock_journal.init.assert_called_once()
         init_arg = mock_journal.init.call_args[0][0]
-        assert isinstance(init_arg, Path), (
-            f"init() should receive a Path, got {type(init_arg)}"
-        )
+        assert isinstance(
+            init_arg, Path
+        ), f"init() should receive a Path, got {type(init_arg)}"
 
     def test_journal_logs_disabled_when_refinement_disabled(self, tmp_path):
         """init() IS called when refinement_enabled=False to log the skip reason."""
         domains = [{"name": "domain-A"}]
-        service, mock_journal = _make_service(tmp_path, domains, refinement_enabled=False)
+        service, mock_journal = _make_service(
+            tmp_path, domains, refinement_enabled=False
+        )
 
         service.run_refinement_cycle()
 
         mock_journal.init.assert_called_once()
         # Should log a "disabled" message
         disabled_calls = [
-            c for c in mock_journal.log.call_args_list
+            c
+            for c in mock_journal.log.call_args_list
             if c.args and "disabled" in str(c.args[0]).lower()
         ]
         assert len(disabled_calls) >= 1, (
@@ -191,7 +190,8 @@ class TestJournalInitIsCalled:
 
         mock_journal.init.assert_called_once()
         skipped_calls = [
-            c for c in mock_journal.log.call_args_list
+            c
+            for c in mock_journal.log.call_args_list
             if c.args and "skipped" in str(c.args[0]).lower()
         ]
         assert len(skipped_calls) >= 1, (
@@ -216,8 +216,11 @@ class TestStartingRefinementCycleMessage:
         service.run_refinement_cycle()
 
         log_calls = [str(c) for c in mock_journal.log.call_args_list]
-        starting_calls = [c for c in mock_journal.log.call_args_list
-                          if "Starting refinement cycle" in str(c.args)]
+        starting_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if "Starting refinement cycle" in str(c.args)
+        ]
         assert len(starting_calls) >= 1, (
             "log('Starting refinement cycle') must be called. "
             f"Actual calls: {log_calls}"
@@ -240,15 +243,14 @@ class TestPerDomainLogMessages:
         service.run_refinement_cycle()
 
         all_log_messages = " ".join(
-            str(c.args[0]) for c in mock_journal.log.call_args_list
-            if c.args
+            str(c.args[0]) for c in mock_journal.log.call_args_list if c.args
         )
-        assert "payments" in all_log_messages, (
-            "Domain 'payments' must appear in journal log messages"
-        )
-        assert "auth" in all_log_messages, (
-            "Domain 'auth' must appear in journal log messages"
-        )
+        assert (
+            "payments" in all_log_messages
+        ), "Domain 'payments' must appear in journal log messages"
+        assert (
+            "auth" in all_log_messages
+        ), "Domain 'auth' must appear in journal log messages"
 
     def test_before_domain_message_logged(self, tmp_path):
         """A 'Refining domain' message should be logged before each domain."""
@@ -257,9 +259,13 @@ class TestPerDomainLogMessages:
 
         service.run_refinement_cycle()
 
-        refining_calls = [c for c in mock_journal.log.call_args_list
-                          if c.args and "Refining domain" in str(c.args[0])
-                          and "billing" in str(c.args[0])]
+        refining_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and "Refining domain" in str(c.args[0])
+            and "billing" in str(c.args[0])
+        ]
         assert len(refining_calls) >= 1, (
             "A 'Refining domain' message for 'billing' must be logged. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -273,10 +279,16 @@ class TestPerDomainLogMessages:
 
         service.run_refinement_cycle()
 
-        success_calls = [c for c in mock_journal.log.call_args_list
-                         if c.args and "orders" in str(c.args[0])
-                         and ("refined" in str(c.args[0]).lower()
-                              or "no changes" in str(c.args[0]).lower())]
+        success_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and "orders" in str(c.args[0])
+            and (
+                "refined" in str(c.args[0]).lower()
+                or "no changes" in str(c.args[0]).lower()
+            )
+        ]
         assert len(success_calls) >= 1, (
             "A completion message for 'orders' must be logged after refinement. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -290,10 +302,16 @@ class TestPerDomainLogMessages:
 
         service.run_refinement_cycle()
 
-        success_calls = [c for c in mock_journal.log.call_args_list
-                         if c.args and "inventory" in str(c.args[0])
-                         and ("refined" in str(c.args[0]).lower()
-                              or "changed" in str(c.args[0]).lower())]
+        success_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and "inventory" in str(c.args[0])
+            and (
+                "refined" in str(c.args[0]).lower()
+                or "changed" in str(c.args[0]).lower()
+            )
+        ]
         assert len(success_calls) >= 1, (
             "A changed success message for 'inventory' must be logged. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -307,10 +325,15 @@ class TestPerDomainLogMessages:
 
         service.run_refinement_cycle()
 
-        failure_calls = [c for c in mock_journal.log.call_args_list
-                         if c.args and "reporting" in str(c.args[0])
-                         and ("failed" in str(c.args[0]).lower()
-                              or "error" in str(c.args[0]).lower())]
+        failure_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and "reporting" in str(c.args[0])
+            and (
+                "failed" in str(c.args[0]).lower() or "error" in str(c.args[0]).lower()
+            )
+        ]
         assert len(failure_calls) >= 1, (
             "A failure message for 'reporting' must be logged on exception. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -323,9 +346,15 @@ class TestPerDomainLogMessages:
 
         service.run_refinement_cycle()
 
-        batch_calls = [c for c in mock_journal.log.call_args_list
-                       if c.args and ("batch" in str(c.args[0]).lower()
-                                      or "processing" in str(c.args[0]).lower())]
+        batch_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and (
+                "batch" in str(c.args[0]).lower()
+                or "processing" in str(c.args[0]).lower()
+            )
+        ]
         assert len(batch_calls) >= 1, (
             "A batch selection message must be logged. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -347,9 +376,15 @@ class TestCompletionLogMessage:
 
         service.run_refinement_cycle()
 
-        completion_calls = [c for c in mock_journal.log.call_args_list
-                            if c.args and ("complete" in str(c.args[0]).lower()
-                                           or "refinement cycle" in str(c.args[0]).lower())]
+        completion_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and (
+                "complete" in str(c.args[0]).lower()
+                or "refinement cycle" in str(c.args[0]).lower()
+            )
+        ]
         assert len(completion_calls) >= 1, (
             "A completion message must be logged at end of cycle. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -363,9 +398,15 @@ class TestCompletionLogMessage:
         service.run_refinement_cycle()
 
         # Find any log message containing digits (domain count)
-        completion_calls = [c for c in mock_journal.log.call_args_list
-                            if c.args and ("complete" in str(c.args[0]).lower()
-                                           or "processed" in str(c.args[0]).lower())]
+        completion_calls = [
+            c
+            for c in mock_journal.log.call_args_list
+            if c.args
+            and (
+                "complete" in str(c.args[0]).lower()
+                or "processed" in str(c.args[0]).lower()
+            )
+        ]
         assert len(completion_calls) >= 1, (
             "A completion message with domain count must be logged. "
             f"Actual calls: {[str(c) for c in mock_journal.log.call_args_list]}"
@@ -373,10 +414,11 @@ class TestCompletionLogMessage:
         # Check that the message contains a number
         completion_msg = str(completion_calls[0].args[0])
         import re
-        has_number = bool(re.search(r'\d', completion_msg))
-        assert has_number, (
-            f"Completion message should include a count, got: '{completion_msg}'"
-        )
+
+        has_number = bool(re.search(r"\d", completion_msg))
+        assert (
+            has_number
+        ), f"Completion message should include a count, got: '{completion_msg}'"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -409,9 +451,9 @@ class TestJournalErrorsNonFatal:
         service.run_refinement_cycle()
 
         # Both domains should still be processed
-        assert service.refine_or_create_domain.call_count == 2, (
-            "Both domains must be processed even when journal.log() raises"
-        )
+        assert (
+            service.refine_or_create_domain.call_count == 2
+        ), "Both domains must be processed even when journal.log() raises"
 
     def test_journal_log_error_mid_loop_does_not_skip_domains(self, tmp_path):
         """If journal.log() raises during loop, remaining domains still process."""
@@ -431,9 +473,9 @@ class TestJournalErrorsNonFatal:
         service.run_refinement_cycle()
 
         # All 3 domains should be processed
-        assert service.refine_or_create_domain.call_count == 3, (
-            "All 3 domains must be processed despite intermittent journal errors"
-        )
+        assert (
+            service.refine_or_create_domain.call_count == 3
+        ), "All 3 domains must be processed despite intermittent journal errors"
 
     def test_tracking_update_still_called_when_journal_fails(self, tmp_path):
         """Cursor update (tracking_backend.update_tracking) runs even if journal fails."""
@@ -463,9 +505,9 @@ class TestJournalInitDirectoryPath:
 
         mock_journal.init.assert_called_once()
         init_path = mock_journal.init.call_args[0][0]
-        assert "depmap-refinement-journal" in str(init_path), (
-            f"init() path must contain 'depmap-refinement-journal', got: {init_path}"
-        )
+        assert "depmap-refinement-journal" in str(
+            init_path
+        ), f"init() path must contain 'depmap-refinement-journal', got: {init_path}"
 
     def test_journal_init_path_is_under_home_tmp(self, tmp_path):
         """init() path must be under ~/.tmp/."""
@@ -476,9 +518,11 @@ class TestJournalInitDirectoryPath:
 
         init_path = mock_journal.init.call_args[0][0]
         expected_prefix = os.path.expanduser("~/.tmp")
-        assert str(init_path).startswith(expected_prefix), (
-            f"init() path must start with '~/.tmp' (~={expected_prefix}), got: {init_path}"
-        )
+        assert str(
+            init_path
+        ).startswith(
+            expected_prefix
+        ), f"init() path must start with '~/.tmp' (~={expected_prefix}), got: {init_path}"
 
     def test_journal_init_path_matches_exact_pattern(self, tmp_path):
         """init() path must exactly match ~/.tmp/depmap-refinement-journal/."""
@@ -489,6 +533,4 @@ class TestJournalInitDirectoryPath:
 
         init_path = mock_journal.init.call_args[0][0]
         expected = Path(os.path.expanduser("~/.tmp/depmap-refinement-journal/"))
-        assert init_path == expected, (
-            f"Expected exact path {expected}, got {init_path}"
-        )
+        assert init_path == expected, f"Expected exact path {expected}, got {init_path}"

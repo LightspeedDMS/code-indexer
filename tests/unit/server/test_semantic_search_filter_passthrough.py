@@ -12,7 +12,6 @@ TDD: written before implementation to define expected behavior.
 Production file: src/code_indexer/server/services/search_service.py
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 from src.code_indexer.server.models.api_models import (
@@ -28,92 +27,124 @@ class TestSearchRepositoryPathFilterPassthrough:
 
     def test_passes_path_filter_to_perform_search(self, tmp_path):
         """AC1: path_filter is forwarded from search_repository_path to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
 
-        with patch.object(service, "_perform_semantic_search", return_value=[]) as mock_perform:
+        with patch.object(
+            service, "_perform_semantic_search", return_value=[]
+        ) as mock_perform:
             request = SemanticSearchRequest(
                 query="test",
                 limit=10,
                 path_filter="*/src/*",
             )
-            service.search_repository_path(repo_path=str(tmp_path), search_request=request)
+            service.search_repository_path(
+                repo_path=str(tmp_path), search_request=request
+            )
 
             call_kwargs = mock_perform.call_args.kwargs
             assert call_kwargs.get("path_filter") == "*/src/*"
 
     def test_passes_language_to_perform_search(self, tmp_path):
         """AC2: language is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
 
-        with patch.object(service, "_perform_semantic_search", return_value=[]) as mock_perform:
+        with patch.object(
+            service, "_perform_semantic_search", return_value=[]
+        ) as mock_perform:
             request = SemanticSearchRequest(
                 query="test",
                 limit=10,
                 language="python",
             )
-            service.search_repository_path(repo_path=str(tmp_path), search_request=request)
+            service.search_repository_path(
+                repo_path=str(tmp_path), search_request=request
+            )
 
             call_kwargs = mock_perform.call_args.kwargs
             assert call_kwargs.get("language") == "python"
 
     def test_passes_exclude_language_to_perform_search(self, tmp_path):
         """AC2: exclude_language is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
 
-        with patch.object(service, "_perform_semantic_search", return_value=[]) as mock_perform:
+        with patch.object(
+            service, "_perform_semantic_search", return_value=[]
+        ) as mock_perform:
             request = SemanticSearchRequest(
                 query="test",
                 limit=10,
                 exclude_language="javascript",
             )
-            service.search_repository_path(repo_path=str(tmp_path), search_request=request)
+            service.search_repository_path(
+                repo_path=str(tmp_path), search_request=request
+            )
 
             call_kwargs = mock_perform.call_args.kwargs
             assert call_kwargs.get("exclude_language") == "javascript"
 
     def test_passes_exclude_path_to_perform_search(self, tmp_path):
         """AC3: exclude_path is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
 
-        with patch.object(service, "_perform_semantic_search", return_value=[]) as mock_perform:
+        with patch.object(
+            service, "_perform_semantic_search", return_value=[]
+        ) as mock_perform:
             request = SemanticSearchRequest(
                 query="test",
                 limit=10,
                 exclude_path="*/tests/*",
             )
-            service.search_repository_path(repo_path=str(tmp_path), search_request=request)
+            service.search_repository_path(
+                repo_path=str(tmp_path), search_request=request
+            )
 
             call_kwargs = mock_perform.call_args.kwargs
             assert call_kwargs.get("exclude_path") == "*/tests/*"
 
     def test_passes_accuracy_to_perform_search(self, tmp_path):
         """AC4: accuracy is forwarded to _perform_semantic_search."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
 
-        with patch.object(service, "_perform_semantic_search", return_value=[]) as mock_perform:
+        with patch.object(
+            service, "_perform_semantic_search", return_value=[]
+        ) as mock_perform:
             request = SemanticSearchRequest(
                 query="test",
                 limit=10,
                 accuracy="high",
             )
-            service.search_repository_path(repo_path=str(tmp_path), search_request=request)
+            service.search_repository_path(
+                repo_path=str(tmp_path), search_request=request
+            )
 
             call_kwargs = mock_perform.call_args.kwargs
             assert call_kwargs.get("accuracy") == "high"
 
     def test_no_filters_produces_valid_response(self, tmp_path):
         """Backward compat: no filter fields still returns valid SemanticSearchResponse."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
 
@@ -137,7 +168,9 @@ class TestPerformSemanticSearchFilterConditions:
 
     def _make_search_service_with_mocks(self, mock_vector_store, tmp_path):
         """Helper to set up SemanticSearchService with mocked backend."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
 
         service = SemanticSearchService()
         return service
@@ -149,13 +182,15 @@ class TestPerformSemanticSearchFilterConditions:
         self, mock_emb_factory, mock_backend_factory, mock_config_manager, tmp_path
     ):
         """AC1: path_filter produces filter_conditions passed to vector store search."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
-        from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
+        from src.code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
         mock_vector_store = MagicMock(spec=FilesystemVectorStore)
         mock_vector_store.search.return_value = ([], {})
         mock_vector_store.resolve_collection_name.return_value = "test_col"
@@ -195,13 +230,15 @@ class TestPerformSemanticSearchFilterConditions:
         self, mock_emb_factory, mock_backend_factory, mock_config_manager, tmp_path
     ):
         """AC2: language filter produces filter_conditions passed to vector store."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
-        from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
+        from src.code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
         mock_vector_store = MagicMock(spec=FilesystemVectorStore)
         mock_vector_store.search.return_value = ([], {})
         mock_vector_store.resolve_collection_name.return_value = "test_col"
@@ -226,7 +263,9 @@ class TestPerformSemanticSearchFilterConditions:
 
         assert filter_conditions is not None
         filter_str = str(filter_conditions)
-        assert "language" in filter_str, f"Expected 'language' in filter_conditions: {filter_conditions}"
+        assert (
+            "language" in filter_str
+        ), f"Expected 'language' in filter_conditions: {filter_conditions}"
 
     @patch("src.code_indexer.server.services.search_service.ConfigManager")
     @patch("src.code_indexer.server.services.search_service.BackendFactory")
@@ -235,13 +274,15 @@ class TestPerformSemanticSearchFilterConditions:
         self, mock_emb_factory, mock_backend_factory, mock_config_manager, tmp_path
     ):
         """Backward compat: no filters passes None or empty filter_conditions."""
-        from src.code_indexer.server.services.search_service import SemanticSearchService
-        from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+        from src.code_indexer.server.services.search_service import (
+            SemanticSearchService,
+        )
+        from src.code_indexer.storage.filesystem_vector_store import (
+            FilesystemVectorStore,
+        )
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
         mock_vector_store = MagicMock(spec=FilesystemVectorStore)
         mock_vector_store.search.return_value = ([], {})
         mock_vector_store.resolve_collection_name.return_value = "test_col"

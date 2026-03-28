@@ -5,9 +5,8 @@ Tests verify that cidx-meta-global is registered as a write exception
 during server startup.
 """
 
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 
 class TestBootstrapWriteExceptions:
@@ -21,25 +20,32 @@ class TestBootstrapWriteExceptions:
         file_crud_service._global_write_exceptions.clear()
 
         # Mock all the heavyweight dependencies
-        with patch("code_indexer.server.app.UserManager"), \
-             patch("code_indexer.server.app.JWTManager"), \
-             patch("code_indexer.server.app.JWTSecretManager"), \
-             patch("code_indexer.server.app.RefreshTokenManager"), \
-             patch("code_indexer.server.auth.oauth.oauth_manager.OAuthManager"), \
-             patch("code_indexer.server.app.GoldenRepoManager") as mock_grm_class, \
-             patch("code_indexer.server.app.BackgroundJobManager"), \
-             patch("code_indexer.server.app.ActivatedRepoManager"), \
-             patch("code_indexer.server.app.RepositoryListingManager"), \
-             patch("code_indexer.server.app.SemanticQueryManager"), \
-             patch("code_indexer.server.services.workspace_cleanup_service.WorkspaceCleanupService"), \
-             patch("code_indexer.server.services.repo_category_service.RepoCategoryService"), \
-             patch("code_indexer.server.auth.mcp_credential_manager.MCPCredentialManager"), \
-             patch("code_indexer.server.app.migrate_legacy_cidx_meta"), \
-             patch("code_indexer.server.app.bootstrap_cidx_meta"), \
-             patch("code_indexer.server.app.register_langfuse_golden_repos"), \
-             patch("code_indexer.server.app.Path") as mock_path_class, \
-             patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": "/tmp/test"}):
-
+        with (
+            patch("code_indexer.server.app.UserManager"),
+            patch("code_indexer.server.app.JWTManager"),
+            patch("code_indexer.server.app.JWTSecretManager"),
+            patch("code_indexer.server.app.RefreshTokenManager"),
+            patch("code_indexer.server.auth.oauth.oauth_manager.OAuthManager"),
+            patch("code_indexer.server.app.GoldenRepoManager") as mock_grm_class,
+            patch("code_indexer.server.app.BackgroundJobManager"),
+            patch("code_indexer.server.app.ActivatedRepoManager"),
+            patch("code_indexer.server.app.RepositoryListingManager"),
+            patch("code_indexer.server.app.SemanticQueryManager"),
+            patch(
+                "code_indexer.server.services.workspace_cleanup_service.WorkspaceCleanupService"
+            ),
+            patch(
+                "code_indexer.server.services.repo_category_service.RepoCategoryService"
+            ),
+            patch(
+                "code_indexer.server.auth.mcp_credential_manager.MCPCredentialManager"
+            ),
+            patch("code_indexer.server.app.migrate_legacy_cidx_meta"),
+            patch("code_indexer.server.app.bootstrap_cidx_meta"),
+            patch("code_indexer.server.app.register_langfuse_golden_repos"),
+            patch("code_indexer.server.app.Path") as mock_path_class,
+            patch.dict("os.environ", {"CIDX_SERVER_DATA_DIR": "/tmp/test"}),
+        ):
             # Setup Path mocks
             mock_data_dir = MagicMock()
             mock_data_dir.__truediv__ = lambda self, x: MagicMock(spec=Path)
@@ -58,13 +64,15 @@ class TestBootstrapWriteExceptions:
             # Import and call create_app
             from code_indexer.server.app import create_app
 
-            app = create_app()
+            _app = create_app()
 
             # Verify cidx-meta-global was registered
             assert file_crud_service.is_write_exception("cidx-meta-global")
 
             # Verify the path is correct (should be golden_repos_dir / "cidx-meta")
-            registered_path = file_crud_service.get_write_exception_path("cidx-meta-global")
+            registered_path = file_crud_service.get_write_exception_path(
+                "cidx-meta-global"
+            )
             assert registered_path is not None
 
     def test_bootstrap_is_idempotent(self):
@@ -82,7 +90,10 @@ class TestBootstrapWriteExceptions:
 
         # Should still be registered
         assert file_crud_service.is_write_exception("cidx-meta-global")
-        assert file_crud_service.get_write_exception_path("cidx-meta-global") == cidx_meta_path
+        assert (
+            file_crud_service.get_write_exception_path("cidx-meta-global")
+            == cidx_meta_path
+        )
 
     def test_other_golden_repos_not_registered_as_exceptions(self):
         """Test that only cidx-meta is registered as exception, not other golden repos."""

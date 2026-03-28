@@ -12,7 +12,6 @@ real filesystem, real detector, no mocking.
 import json
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.services.dep_map_health_detector import (
     REPAIRABLE_ANOMALY_TYPES,

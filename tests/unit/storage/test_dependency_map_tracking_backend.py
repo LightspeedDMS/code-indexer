@@ -6,8 +6,6 @@ Uses real SQLite database (anti-mock methodology).
 """
 
 import json
-import sqlite3
-import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -151,11 +149,13 @@ def test_update_tracking_commit_hashes_json(backend: DependencyMapTrackingBacken
     backend.get_tracking()
 
     # Update with commit hashes
-    commit_hashes = json.dumps({
-        "code-indexer": "abc123def456",
-        "web-app": "789abc012def",
-        "cidx-meta": "local",
-    })
+    commit_hashes = json.dumps(
+        {
+            "code-indexer": "abc123def456",
+            "web-app": "789abc012def",
+            "cidx-meta": "local",
+        }
+    )
 
     backend.update_tracking(
         status="completed",

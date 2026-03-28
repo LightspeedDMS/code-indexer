@@ -10,9 +10,8 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
-import pytest
 
-from code_indexer.server.services.job_tracker import JobTracker, TrackedJob
+from code_indexer.server.services.job_tracker import TrackedJob
 
 
 class TestJobTrackerRegister:
@@ -225,7 +224,9 @@ class TestJobTrackerUpdateStatus:
         Then the job's progress_info is 'Pass 2/3'
         """
         tracker.register_job("job-pinfo-001", "dep_map_analysis", "admin")
-        tracker.update_status("job-pinfo-001", status="running", progress_info="Pass 2/3")
+        tracker.update_status(
+            "job-pinfo-001", status="running", progress_info="Pass 2/3"
+        )
 
         job = tracker.get_job("job-pinfo-001")
         assert job is not None

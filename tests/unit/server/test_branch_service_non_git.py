@@ -113,7 +113,9 @@ class TestBranchServiceNonGitSupport:
                 index_status_manager=index_status_manager,
             )
         except ValueError:
-            pytest.skip("AC1 not implemented yet - BranchService rejects non-git folders")
+            pytest.skip(
+                "AC1 not implemented yet - BranchService rejects non-git folders"
+            )
 
         # Act
         branches = branch_service.list_branches()
@@ -144,7 +146,9 @@ class TestBranchServiceNonGitSupport:
                 index_status_manager=index_status_manager,
             )
         except ValueError:
-            pytest.skip("AC1 not implemented yet - BranchService rejects non-git folders")
+            pytest.skip(
+                "AC1 not implemented yet - BranchService rejects non-git folders"
+            )
 
         # Act
         branches = branch_service.list_branches(include_remote=True)
@@ -175,7 +179,9 @@ class TestBranchServiceNonGitSupport:
                 index_status_manager=index_status_manager,
             )
         except ValueError:
-            pytest.skip("AC1 not implemented yet - BranchService rejects non-git folders")
+            pytest.skip(
+                "AC1 not implemented yet - BranchService rejects non-git folders"
+            )
 
         # Act
         branch = branch_service.get_branch_by_name("any-branch-name")
@@ -206,7 +212,7 @@ class TestBranchServiceNonGitSupport:
         initial_commit = repo.index.commit("Initial commit")
 
         # Create additional branch
-        develop_branch = repo.create_head("develop")
+        _develop_branch = repo.create_head("develop")
         repo.heads.develop.checkout()
         develop_file = git_dir / "develop.py"
         develop_file.write_text("print('develop branch')")
@@ -269,4 +275,6 @@ class TestBranchServiceNonGitSupport:
                 branches = branch_service.list_branches()
                 assert branches == []
         except ValueError:
-            pytest.skip("AC1 not implemented yet - BranchService rejects non-git folders")
+            pytest.skip(
+                "AC1 not implemented yet - BranchService rejects non-git folders"
+            )

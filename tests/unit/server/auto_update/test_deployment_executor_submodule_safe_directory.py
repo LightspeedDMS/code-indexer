@@ -8,7 +8,6 @@ errors when git tries to operate on submodules owned by a different user.
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import subprocess
 
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 
@@ -119,7 +118,9 @@ class TestEnsureSubmoduleSafeDirectory:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch(
                 "code_indexer.server.auto_update.deployment_executor.subprocess.run"
             ) as mock_run:
@@ -188,9 +189,7 @@ class TestCleanupSubmoduleState:
         with patch(
             "code_indexer.server.auto_update.deployment_executor.subprocess.run"
         ) as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1, stderr="Permission denied"
-            )
+            mock_run.return_value = MagicMock(returncode=1, stderr="Permission denied")
 
             result = executor._cleanup_submodule_state("third_party/hnswlib")
 
@@ -204,7 +203,7 @@ class TestCleanupSubmoduleState:
 
         with patch(
             "code_indexer.server.auto_update.deployment_executor.subprocess.run",
-            side_effect=Exception("Subprocess error")
+            side_effect=Exception("Subprocess error"),
         ):
             result = executor._cleanup_submodule_state("third_party/hnswlib")
 
@@ -220,11 +219,15 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch(
                 "code_indexer.server.auto_update.deployment_executor.subprocess.run"
             ) as mock_run:
-                mock_run.return_value = MagicMock(returncode=0, stdout="success", stderr="")
+                mock_run.return_value = MagicMock(
+                    returncode=0, stdout="success", stderr=""
+                )
 
                 result = executor.git_submodule_update()
 
@@ -238,8 +241,12 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
-            with patch.object(executor, "_cleanup_submodule_state", return_value=True) as mock_cleanup:
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
+            with patch.object(
+                executor, "_cleanup_submodule_state", return_value=True
+            ) as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
@@ -248,9 +255,9 @@ class TestSubmoduleRetryLogic:
                     mock_run.side_effect = [
                         MagicMock(
                             returncode=1,
-                            stderr="error: could not lock config file .git/modules/third_party/hnswlib/config: Permission denied"
+                            stderr="error: could not lock config file .git/modules/third_party/hnswlib/config: Permission denied",
                         ),
-                        MagicMock(returncode=0, stdout="success", stderr="")
+                        MagicMock(returncode=0, stdout="success", stderr=""),
                     ]
 
                     result = executor.git_submodule_update()
@@ -267,17 +274,21 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
-            with patch.object(executor, "_cleanup_submodule_state", return_value=True) as mock_cleanup:
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
+            with patch.object(
+                executor, "_cleanup_submodule_state", return_value=True
+            ) as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.side_effect = [
                         MagicMock(
                             returncode=1,
-                            stderr="destination path 'third_party/hnswlib' already exists"
+                            stderr="destination path 'third_party/hnswlib' already exists",
                         ),
-                        MagicMock(returncode=0, stdout="success", stderr="")
+                        MagicMock(returncode=0, stdout="success", stderr=""),
                     ]
 
                     result = executor.git_submodule_update()
@@ -292,17 +303,21 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
-            with patch.object(executor, "_cleanup_submodule_state", return_value=True) as mock_cleanup:
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
+            with patch.object(
+                executor, "_cleanup_submodule_state", return_value=True
+            ) as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.side_effect = [
                         MagicMock(
                             returncode=1,
-                            stderr="could not get a repository handle for submodule 'third_party/hnswlib'"
+                            stderr="could not get a repository handle for submodule 'third_party/hnswlib'",
                         ),
-                        MagicMock(returncode=0, stdout="success", stderr="")
+                        MagicMock(returncode=0, stdout="success", stderr=""),
                     ]
 
                     result = executor.git_submodule_update()
@@ -317,17 +332,18 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
-            with patch.object(executor, "_cleanup_submodule_state", return_value=True) as mock_cleanup:
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
+            with patch.object(
+                executor, "_cleanup_submodule_state", return_value=True
+            ) as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.side_effect = [
-                        MagicMock(
-                            returncode=1,
-                            stderr="worktree configuration error"
-                        ),
-                        MagicMock(returncode=0, stdout="success", stderr="")
+                        MagicMock(returncode=1, stderr="worktree configuration error"),
+                        MagicMock(returncode=0, stdout="success", stderr=""),
                     ]
 
                     result = executor.git_submodule_update()
@@ -342,14 +358,15 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch.object(executor, "_cleanup_submodule_state") as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.return_value = MagicMock(
-                        returncode=1,
-                        stderr="Could not resolve host: github.com"
+                        returncode=1, stderr="Could not resolve host: github.com"
                     )
 
                     result = executor.git_submodule_update()
@@ -366,14 +383,15 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch.object(executor, "_cleanup_submodule_state") as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.return_value = MagicMock(
-                        returncode=1,
-                        stderr="Authentication failed"
+                        returncode=1, stderr="Authentication failed"
                     )
 
                     result = executor.git_submodule_update()
@@ -388,14 +406,16 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch.object(executor, "_cleanup_submodule_state") as mock_cleanup:
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.return_value = MagicMock(
                         returncode=1,
-                        stderr="fatal: unable to access 'https://github.com/repo.git/'"
+                        stderr="fatal: unable to access 'https://github.com/repo.git/'",
                     )
 
                     result = executor.git_submodule_update()
@@ -410,14 +430,16 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch.object(executor, "_cleanup_submodule_state", return_value=False):
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     mock_run.return_value = MagicMock(
                         returncode=1,
-                        stderr="error: could not lock config file: Permission denied"
+                        stderr="error: could not lock config file: Permission denied",
                     )
 
                     result = executor.git_submodule_update()
@@ -432,15 +454,20 @@ class TestSubmoduleRetryLogic:
             repo_path=Path("/home/user/code-indexer"),
         )
 
-        with patch.object(executor, "_ensure_submodule_safe_directory", return_value=True):
+        with patch.object(
+            executor, "_ensure_submodule_safe_directory", return_value=True
+        ):
             with patch.object(executor, "_cleanup_submodule_state", return_value=True):
                 with patch(
                     "code_indexer.server.auto_update.deployment_executor.subprocess.run"
                 ) as mock_run:
                     # Both attempts fail
                     mock_run.side_effect = [
-                        MagicMock(returncode=1, stderr="error: could not lock config file: Permission denied"),
-                        MagicMock(returncode=1, stderr="still failing")
+                        MagicMock(
+                            returncode=1,
+                            stderr="error: could not lock config file: Permission denied",
+                        ),
+                        MagicMock(returncode=1, stderr="still failing"),
                     ]
 
                     result = executor.git_submodule_update()

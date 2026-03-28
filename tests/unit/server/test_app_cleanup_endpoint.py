@@ -16,12 +16,9 @@ TDD: These tests are written BEFORE implementation to define expected behavior.
 import tempfile
 import shutil
 import os
-from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.config_service import ConfigService
-from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
 
 class TestCleanupEndpointConfigDefault:
@@ -63,7 +60,9 @@ class TestCleanupEndpointConfigDefault:
 
         # Explicit param should override config
         explicit_param = 48
-        max_age_hours = explicit_param if explicit_param is not None else configured_value
+        max_age_hours = (
+            explicit_param if explicit_param is not None else configured_value
+        )
         assert max_age_hours == 48
 
     def test_cleanup_uses_custom_configured_default(self):
@@ -112,18 +111,18 @@ class TestCleanupEndpointDefaultParamSignature:
                 cleanup_route = route
                 break
 
-        assert cleanup_route is not None, (
-            "Could not find /api/admin/jobs/cleanup route in app"
-        )
+        assert (
+            cleanup_route is not None
+        ), "Could not find /api/admin/jobs/cleanup route in app"
 
         # Inspect the endpoint function
         endpoint = cleanup_route.endpoint
         sig = inspect.signature(endpoint)
         params = sig.parameters
 
-        assert "max_age_hours" in params, (
-            "cleanup_old_jobs must have max_age_hours parameter"
-        )
+        assert (
+            "max_age_hours" in params
+        ), "cleanup_old_jobs must have max_age_hours parameter"
 
         max_age_param = params["max_age_hours"]
         # The default should be None (not 24) for Story #360

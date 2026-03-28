@@ -5,7 +5,6 @@ Verifies that on_repo_added creates tracking records and on_repo_removed deletes
 """
 
 import pytest
-from pathlib import Path
 from datetime import datetime, timezone
 from code_indexer.global_repos.meta_description_hook import (
     on_repo_added,
@@ -23,6 +22,7 @@ def temp_db(tmp_path):
 
     # Initialize schema (matches actual schema from database_manager.py)
     import sqlite3
+
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS description_refresh_tracking (
@@ -88,6 +88,7 @@ def test_on_repo_added_creates_tracking_record(
     # Mock the tracking backend module-level variable
     # We need to inject it into meta_description_hook
     import code_indexer.global_repos.meta_description_hook as hook_module
+
     hook_module._tracking_backend = backend
 
     # Call on_repo_added
@@ -117,6 +118,7 @@ def test_on_repo_removed_deletes_tracking_record(
 
     # Mock the tracking backend
     import code_indexer.global_repos.meta_description_hook as hook_module
+
     hook_module._tracking_backend = backend
 
     # Pre-create a tracking record
@@ -151,6 +153,7 @@ def test_on_repo_removed_no_tracking_record_no_error(
 
     # Mock the tracking backend
     import code_indexer.global_repos.meta_description_hook as hook_module
+
     hook_module._tracking_backend = backend
 
     # Call on_repo_removed for non-existent repo (should not raise)
@@ -170,6 +173,7 @@ def test_on_repo_added_skips_cidx_meta(
 
     # Mock the tracking backend
     import code_indexer.global_repos.meta_description_hook as hook_module
+
     hook_module._tracking_backend = backend
 
     # Call on_repo_added for cidx-meta
@@ -196,6 +200,7 @@ def test_on_repo_added_handles_missing_backend_gracefully(
 
     # Mock tracking backend as None
     import code_indexer.global_repos.meta_description_hook as hook_module
+
     hook_module._tracking_backend = None
 
     # Call on_repo_added (should not crash)

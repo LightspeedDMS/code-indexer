@@ -16,7 +16,6 @@ Fixture `job_tracker` is provided by conftest.py in this directory.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
 from code_indexer.global_repos.cleanup_manager import CleanupManager
@@ -114,7 +113,9 @@ class TestCleanupManagerJobRegistration:
         jobs = job_tracker.query_jobs(operation_type="index_cleanup")
         assert len(jobs) >= 1
 
-    def test_index_cleanup_job_completes_on_successful_delete(self, tmp_path, job_tracker):
+    def test_index_cleanup_job_completes_on_successful_delete(
+        self, tmp_path, job_tracker
+    ):
         """
         index_cleanup job transitions to completed when directory is deleted.
 
@@ -131,7 +132,9 @@ class TestCleanupManagerJobRegistration:
         manager.schedule_cleanup(str(old_index))
         manager._process_cleanup_queue()
 
-        jobs = job_tracker.query_jobs(operation_type="index_cleanup", status="completed")
+        jobs = job_tracker.query_jobs(
+            operation_type="index_cleanup", status="completed"
+        )
         assert len(jobs) >= 1
 
     def test_index_cleanup_job_fails_when_delete_raises(self, tmp_path, job_tracker):
@@ -151,10 +154,14 @@ class TestCleanupManagerJobRegistration:
         manager.schedule_cleanup(str(old_index))
 
         # Patch _delete_index to raise so we can test failure tracking
-        with patch.object(manager, "_delete_index", side_effect=OSError("Permission denied")):
+        with patch.object(
+            manager, "_delete_index", side_effect=OSError("Permission denied")
+        ):
             manager._process_cleanup_queue()
 
-        failed_jobs = job_tracker.query_jobs(operation_type="index_cleanup", status="failed")
+        failed_jobs = job_tracker.query_jobs(
+            operation_type="index_cleanup", status="failed"
+        )
         assert len(failed_jobs) >= 1
 
     def test_no_job_tracker_does_not_break_cleanup(self, tmp_path):
@@ -213,7 +220,9 @@ class TestCleanupManagerJobRegistration:
         jobs = job_tracker.query_jobs(operation_type="index_cleanup")
         assert len(jobs) == 0
 
-    def test_no_job_registered_when_path_has_active_queries(self, tmp_path, job_tracker):
+    def test_no_job_registered_when_path_has_active_queries(
+        self, tmp_path, job_tracker
+    ):
         """
         No index_cleanup job registered when path has active queries (ref count > 0).
 

@@ -9,7 +9,7 @@ Tests:
 5. trigger_refresh_for_repo direct execution path (no BackgroundJobManager) with force_reset
 """
 
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -148,7 +148,9 @@ class TestExecuteRefreshForceReset:
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -190,7 +192,9 @@ class TestExecuteRefreshForceReset:
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -233,7 +237,9 @@ class TestExecuteRefreshForceReset:
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -288,7 +294,7 @@ class TestExecuteRefreshForceReset:
                 return_value=mock_updater,
             ),
         ):
-            result = scheduler._execute_refresh(alias_name, force_reset=True)
+            _result = scheduler._execute_refresh(alias_name, force_reset=True)
 
         # Indexing must have proceeded despite has_changes not being called
         mock_index_source.assert_called_once()
@@ -300,7 +306,6 @@ class TestExecuteRefreshForceReset:
         """
         When force_reset=True, a log message must indicate change detection is skipped.
         """
-        import logging
 
         alias_name = "my-repo-global"
         master_path = str(golden_repos_dir / "my-repo")
@@ -326,7 +331,9 @@ class TestExecuteRefreshForceReset:
             patch.object(scheduler, "_detect_existing_indexes", return_value={}),
             patch.object(scheduler, "_reconcile_registry_with_filesystem"),
             patch.object(scheduler, "_index_source"),
-            patch.object(scheduler, "_create_snapshot", return_value=new_versioned_path),
+            patch.object(
+                scheduler, "_create_snapshot", return_value=new_versioned_path
+            ),
             patch.object(scheduler.cleanup_manager, "schedule_cleanup"),
             patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
@@ -408,7 +415,7 @@ class TestTriggerRefreshForRepoForceReset:
 
         # force_reset should NOT be True
         call_kwargs = mock_submit.call_args[1] if mock_submit.call_args[1] else {}
-        call_args = mock_submit.call_args[0]
+        _call_args = mock_submit.call_args[0]
         force_reset_value = call_kwargs.get("force_reset", False)
         assert force_reset_value is False
 
@@ -459,7 +466,7 @@ class TestSubmitRefreshJobForceReset:
         _execute_refresh(alias, force_reset=True).
         """
         alias_name = "my-repo-global"
-        master_path = str(golden_repos_dir / "my-repo")
+        _master_path = str(golden_repos_dir / "my-repo")
 
         (golden_repos_dir / "my-repo").mkdir(parents=True, exist_ok=True)
 
@@ -489,7 +496,9 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()
 
-        mock_execute.assert_called_once_with(alias_name, force_reset=True, progress_callback=None)
+        mock_execute.assert_called_once_with(
+            alias_name, force_reset=True, progress_callback=None
+        )
 
     def test_submit_job_passes_force_reset_false_in_lambda(
         self,
@@ -530,7 +539,9 @@ class TestSubmitRefreshJobForceReset:
         ) as mock_execute:
             captured_funcs[0]()
 
-        mock_execute.assert_called_once_with(alias_name, force_reset=False, progress_callback=None)
+        mock_execute.assert_called_once_with(
+            alias_name, force_reset=False, progress_callback=None
+        )
 
     def test_submit_job_default_force_reset_is_false(
         self,
@@ -565,4 +576,6 @@ class TestSubmitRefreshJobForceReset:
             captured_funcs[0]()
 
         # Default must be force_reset=False
-        mock_execute.assert_called_once_with(alias_name, force_reset=False, progress_callback=None)
+        mock_execute.assert_called_once_with(
+            alias_name, force_reset=False, progress_callback=None
+        )

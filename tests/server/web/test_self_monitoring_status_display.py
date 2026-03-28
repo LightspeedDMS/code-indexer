@@ -10,7 +10,6 @@ Tests the /admin/self-monitoring page's status section to ensure:
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-import pytest
 from fastapi.testclient import TestClient
 
 

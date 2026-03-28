@@ -13,7 +13,6 @@ import socket
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
@@ -150,7 +149,9 @@ class TestVariableSubstitution:
         test_data_dir = "/custom/data/dir"
         with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": test_data_dir}):
             service = ResearchAssistantService()
-            with patch.object(service, "_get_config_dir", return_value=str(template_dir)):
+            with patch.object(
+                service, "_get_config_dir", return_value=str(template_dir)
+            ):
                 prompt = service.load_research_prompt()
 
         assert f"Data: {test_data_dir}" in prompt
@@ -169,7 +170,9 @@ class TestVariableSubstitution:
 
         with patch.dict(os.environ, env_without_server_dir, clear=True):
             service = ResearchAssistantService()
-            with patch.object(service, "_get_config_dir", return_value=str(template_dir)):
+            with patch.object(
+                service, "_get_config_dir", return_value=str(template_dir)
+            ):
                 prompt = service.load_research_prompt()
 
         expected_default = str(Path.home() / ".cidx-server")
@@ -185,7 +188,9 @@ class TestVariableSubstitution:
         test_data_dir = "/test/data"
         with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": test_data_dir}):
             service = ResearchAssistantService()
-            with patch.object(service, "_get_config_dir", return_value=str(template_dir)):
+            with patch.object(
+                service, "_get_config_dir", return_value=str(template_dir)
+            ):
                 prompt = service.load_research_prompt()
 
         expected_db_path = f"{test_data_dir}/data/cidx_server.db"
@@ -201,7 +206,9 @@ class TestVariableSubstitution:
         test_repo_root = "/custom/repo/root"
         with patch.dict(os.environ, {"CIDX_REPO_ROOT": test_repo_root}):
             service = ResearchAssistantService()
-            with patch.object(service, "_get_config_dir", return_value=str(template_dir)):
+            with patch.object(
+                service, "_get_config_dir", return_value=str(template_dir)
+            ):
                 prompt = service.load_research_prompt()
 
         assert f"Repo: {test_repo_root}" in prompt
@@ -220,7 +227,9 @@ class TestVariableSubstitution:
 
         with patch.dict(os.environ, env_without_repo_root, clear=True):
             service = ResearchAssistantService()
-            with patch.object(service, "_get_config_dir", return_value=str(template_dir)):
+            with patch.object(
+                service, "_get_config_dir", return_value=str(template_dir)
+            ):
                 prompt = service.load_research_prompt()
 
         # Should have some path (auto-detected or empty)
@@ -237,7 +246,9 @@ class TestVariableSubstitution:
         test_data_dir = "/test/data"
         with patch.dict(os.environ, {"CIDX_SERVER_DATA_DIR": test_data_dir}):
             service = ResearchAssistantService()
-            with patch.object(service, "_get_config_dir", return_value=str(template_dir)):
+            with patch.object(
+                service, "_get_config_dir", return_value=str(template_dir)
+            ):
                 prompt = service.load_research_prompt()
 
         expected_repos_dir = f"{test_data_dir}/golden-repos"

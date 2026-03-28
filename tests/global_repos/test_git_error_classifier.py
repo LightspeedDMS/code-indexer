@@ -8,8 +8,6 @@ Tests error classification logic for git fetch failures:
 - GitFetchError exception attributes
 """
 
-import pytest
-
 from code_indexer.global_repos.git_error_classifier import (
     GitFetchError,
     classify_fetch_error,
@@ -21,7 +19,9 @@ class TestClassifyFetchError:
 
     def test_classify_corruption_could_not_read(self):
         """'Could not read' in stderr classifies as corruption."""
-        result = classify_fetch_error("error: Could not read d670460b4b4aece5915caf5c68d12f560a9fe3e4")
+        result = classify_fetch_error(
+            "error: Could not read d670460b4b4aece5915caf5c68d12f560a9fe3e4"
+        )
         assert result == "corruption"
 
     def test_classify_corruption_pack_unresolved_deltas(self):
@@ -61,9 +61,7 @@ class TestClassifyFetchError:
 
     def test_classify_corruption_bad_object(self):
         """'bad object' in stderr classifies as corruption."""
-        result = classify_fetch_error(
-            "fatal: bad object HEAD\nerror: git fetch failed"
-        )
+        result = classify_fetch_error("fatal: bad object HEAD\nerror: git fetch failed")
         assert result == "corruption"
 
     def test_classify_transient_connection_refused(self):

@@ -8,7 +8,6 @@ This is required for self-monitoring to detect the repository root directory.
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import subprocess
 
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 

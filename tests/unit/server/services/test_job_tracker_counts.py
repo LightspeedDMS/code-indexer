@@ -7,9 +7,6 @@ Covers AC1 (thread safety) and AC3 (get_active_job_count, get_pending_job_count)
 
 import threading
 
-import pytest
-
-
 
 class TestJobTrackerCounts:
     """Tests for get_active_job_count and get_pending_job_count."""

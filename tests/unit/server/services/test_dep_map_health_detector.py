@@ -17,8 +17,6 @@ All 15 tests map to acceptance criteria AC1-AC9 from Story #342.
 import json
 from pathlib import Path
 
-import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers for building synthetic dep-map output directories
@@ -151,9 +149,7 @@ def make_healthy_output_dir(output_dir: Path, domain_names=None) -> None:
 def _build_valid_index_for_domains(domain_names: list) -> str:
     """Build a valid _index.md content for the given domain names."""
     repos = ["repo-alpha", "repo-beta"]
-    catalog_rows = "\n".join(
-        f"| {name} | Domain {name} | 2 |" for name in domain_names
-    )
+    catalog_rows = "\n".join(f"| {name} | Domain {name} | 2 |" for name in domain_names)
     matrix_rows = "\n".join(f"| {repo} | {domain_names[0]} |" for repo in repos)
     return f"""\
 ---
@@ -196,6 +192,7 @@ def _get_detector():
     from code_indexer.server.services.dep_map_health_detector import (
         DepMapHealthDetector,
     )
+
     return DepMapHealthDetector()
 
 
@@ -621,7 +618,10 @@ class TestDetectIncompleteDomain:
             [{"name": "bad-domain", "description": "d", "participating_repos": []}],
         )
         # Large enough to pass size check but no YAML frontmatter
-        content = "x" * 1200 + "\n# Domain Analysis: bad-domain\n\n## Overview\n\nSome content.\n\n## Repository Roles\n\nRoles.\n\n## Intra-Domain Dependencies\n\nNone.\n\n## Cross-Domain Connections\n\nNone.\n"
+        content = (
+            "x" * 1200
+            + "\n# Domain Analysis: bad-domain\n\n## Overview\n\nSome content.\n\n## Repository Roles\n\nRoles.\n\n## Intra-Domain Dependencies\n\nNone.\n\n## Cross-Domain Connections\n\nNone.\n"
+        )
         (tmp_path / "bad-domain.md").write_text(content)
         make_index_md(tmp_path)
 
@@ -704,7 +704,9 @@ class TestDetectHealthyNoFalsePositives:
 
     def test_detect_healthy_multiple_domains(self, tmp_path):
         """Multiple well-formed domains all pass without false positives."""
-        make_healthy_output_dir(tmp_path, domain_names=["domain-a", "domain-b", "domain-c"])
+        make_healthy_output_dir(
+            tmp_path, domain_names=["domain-a", "domain-b", "domain-c"]
+        )
 
         detector = _get_detector()
         report = detector.detect(tmp_path)
@@ -723,7 +725,9 @@ class TestDetectHealthyNoFalsePositives:
 
         # Empty domain list with no files is a valid (if empty) state
         # No domain_count_mismatch since both are 0
-        mismatch_anomalies = [a for a in report.anomalies if a.type == "domain_count_mismatch"]
+        mismatch_anomalies = [
+            a for a in report.anomalies if a.type == "domain_count_mismatch"
+        ]
         assert len(mismatch_anomalies) == 0
 
 
@@ -795,7 +799,11 @@ class TestDetectMultipleAnomalies:
         make_domains_json(
             tmp_path,
             [
-                {"name": "critical-domain", "description": "d", "participating_repos": []},
+                {
+                    "name": "critical-domain",
+                    "description": "d",
+                    "participating_repos": [],
+                },
                 {"name": "small-domain", "description": "d", "participating_repos": []},
             ],
         )
@@ -841,7 +849,12 @@ class TestDetectUncoveredRepos:
         """Repos in known_repos but not in any domain's participating_repos produce anomaly."""
         make_healthy_output_dir(tmp_path)
         # make_healthy_output_dir creates domains with participating_repos: [repo-alpha, repo-beta]
-        known_repos = {"repo-alpha", "repo-beta", "uncovered-repo-1", "uncovered-repo-2"}
+        known_repos = {
+            "repo-alpha",
+            "repo-beta",
+            "uncovered-repo-1",
+            "uncovered-repo-2",
+        }
 
         detector = _get_detector()
         report = detector.detect(tmp_path, known_repos=known_repos)

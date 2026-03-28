@@ -7,13 +7,13 @@ A user with role=admin but not in the "admins" group got 404 on the wiki.
 Fix: both _check_wiki_access() and _check_user_wiki_access() now accept either
 group-based admin OR role-based admin.
 """
+
 import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -41,6 +41,7 @@ def _make_app(
 ) -> FastAPI:
     """Build a minimal FastAPI app wired to wiki_router for access control tests."""
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()
@@ -84,9 +85,9 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, set(), is_admin_group=False)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert resp.status_code == 200, (
-                "User with role=admin must bypass group check even if not in admins group"
-            )
+            assert (
+                resp.status_code == 200
+            ), "User with role=admin must bypass group check even if not in admins group"
 
     def test_admins_group_member_can_access_wiki(self):
         """Existing behavior: user in admins group (is_admin_user=True) still works."""
@@ -97,9 +98,9 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, set(), is_admin_group=True)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert resp.status_code == 200, (
-                "User in admins group must still be able to access the wiki"
-            )
+            assert (
+                resp.status_code == 200
+            ), "User in admins group must still be able to access the wiki"
 
     def test_normal_user_with_group_access_can_access_wiki(self):
         """Non-admin user with the repo in their accessible repos gets 200."""
@@ -109,9 +110,9 @@ class TestAdminRoleWikiAccess:
             app = _make_app(user, tmpdir, {"test-repo"}, is_admin_group=False)
             client = TestClient(app)
             resp = client.get("/wiki/test-repo/")
-            assert resp.status_code == 200, (
-                "Normal user with accessible repo must reach the wiki"
-            )
+            assert (
+                resp.status_code == 200
+            ), "Normal user with accessible repo must reach the wiki"
 
     def test_normal_user_without_access_gets_404(self):
         """Non-admin user with no group access gets 404 (invisible repo)."""
@@ -119,6 +120,4 @@ class TestAdminRoleWikiAccess:
         app = _make_app(user, user_accessible_repos=set(), is_admin_group=False)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/wiki/test-repo/")
-        assert resp.status_code == 404, (
-            "Normal user without access must receive 404"
-        )
+        assert resp.status_code == 404, "Normal user without access must receive 404"

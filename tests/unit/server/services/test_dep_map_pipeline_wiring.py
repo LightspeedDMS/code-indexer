@@ -6,7 +6,6 @@ _finalize_analysis must call _reconcile_domains_json (AC4) then _generate_index_
 instead of run_pass_3_index (Claude-based Pass 3).
 """
 
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 from code_indexer.server.services.dependency_map_service import DependencyMapService
@@ -51,9 +50,13 @@ class TestFinalizeAnalysisPipelineWiring:
         config = Mock()
         config.dependency_map_interval_hours = 24
 
-        with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_get_commit_hashes", return_value={}):
-            svc._finalize_analysis(config, _make_paths(tmp_path), repo_list, domain_list)
+        with (
+            patch.object(svc, "_stage_then_swap"),
+            patch.object(svc, "_get_commit_hashes", return_value={}),
+        ):
+            svc._finalize_analysis(
+                config, _make_paths(tmp_path), repo_list, domain_list
+            )
 
         svc._analyzer._reconcile_domains_json.assert_called_once_with(
             _make_paths(tmp_path)["staging_dir"], domain_list
@@ -70,8 +73,10 @@ class TestFinalizeAnalysisPipelineWiring:
         config.dependency_map_interval_hours = 24
         paths = _make_paths(tmp_path)
 
-        with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_get_commit_hashes", return_value={}):
+        with (
+            patch.object(svc, "_stage_then_swap"),
+            patch.object(svc, "_get_commit_hashes", return_value={}),
+        ):
             svc._finalize_analysis(config, paths, repo_list, domain_list)
 
         svc._analyzer._generate_index_md.assert_called_once_with(
@@ -86,9 +91,13 @@ class TestFinalizeAnalysisPipelineWiring:
         config = Mock()
         config.dependency_map_interval_hours = 24
 
-        with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_get_commit_hashes", return_value={}):
-            svc._finalize_analysis(config, _make_paths(tmp_path), repo_list, domain_list)
+        with (
+            patch.object(svc, "_stage_then_swap"),
+            patch.object(svc, "_get_commit_hashes", return_value={}),
+        ):
+            svc._finalize_analysis(
+                config, _make_paths(tmp_path), repo_list, domain_list
+            )
 
         svc._analyzer.run_pass_3_index.assert_not_called()
 
@@ -112,10 +121,15 @@ class TestFinalizeAnalysisPipelineWiring:
         config = Mock()
         config.dependency_map_interval_hours = 24
 
-        with patch.object(svc, "_stage_then_swap"), \
-             patch.object(svc, "_get_commit_hashes", return_value={}):
-            svc._finalize_analysis(config, _make_paths(tmp_path), repo_list, domain_list)
+        with (
+            patch.object(svc, "_stage_then_swap"),
+            patch.object(svc, "_get_commit_hashes", return_value={}),
+        ):
+            svc._finalize_analysis(
+                config, _make_paths(tmp_path), repo_list, domain_list
+            )
 
-        assert call_order == ["reconcile", "generate"], (
-            f"Expected reconcile before generate, got: {call_order}"
-        )
+        assert call_order == [
+            "reconcile",
+            "generate",
+        ], f"Expected reconcile before generate, got: {call_order}"

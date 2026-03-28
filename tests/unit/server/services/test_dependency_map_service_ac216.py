@@ -9,8 +9,7 @@ Tests for:
 - H3: _generate_index_md output is parseable by _parse_repo_to_domain_mapping (roundtrip)
 """
 
-from pathlib import Path
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock
 
 from code_indexer.server.services.dependency_map_service import DependencyMapService
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
@@ -101,7 +100,13 @@ class TestPass3NotCalled:
         cidx_meta_path = tmp_path / "cidx-meta"
 
         # Domain list returned by Pass 1
-        domain_list = [{"name": "auth", "description": "Auth domain", "participating_repos": ["repo1"]}]
+        domain_list = [
+            {
+                "name": "auth",
+                "description": "Auth domain",
+                "participating_repos": ["repo1"],
+            }
+        ]
         svc._analyzer.run_pass_1_synthesis.return_value = domain_list
         svc._analyzer.run_pass_2_per_domain.return_value = None
 
@@ -119,7 +124,14 @@ class TestPass3NotCalled:
             "cidx_meta_read_path": cidx_meta_path,
             "golden_repos_root": tmp_path,
         }
-        repo_list = [{"alias": "repo1", "clone_path": str(tmp_path / "repo1"), "file_count": 5, "total_bytes": 100}]
+        repo_list = [
+            {
+                "alias": "repo1",
+                "clone_path": str(tmp_path / "repo1"),
+                "file_count": 5,
+                "total_bytes": 100,
+            }
+        ]
 
         svc._execute_analysis_passes(config, paths, repo_list)
 
@@ -146,12 +158,21 @@ class TestRecordRunMetricsCalled:
 
         # Write domain files
         domain_list = [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["repo1"]},
+            {
+                "name": "auth",
+                "description": "Auth domain",
+                "participating_repos": ["repo1"],
+            },
         ]
         (staging_dir / "auth.md").write_text("auth content here")
 
         repo_list = [
-            {"alias": "repo1", "clone_path": str(tmp_path / "repo1"), "file_count": 5, "total_bytes": 100},
+            {
+                "alias": "repo1",
+                "clone_path": str(tmp_path / "repo1"),
+                "file_count": 5,
+                "total_bytes": 100,
+            },
         ]
 
         config = Mock()
@@ -175,9 +196,9 @@ class TestRecordRunMetricsCalled:
         svc._finalize_analysis(config, paths, repo_list, domain_list)
 
         # The critical assertion: record_run_metrics must be called
-        assert svc._tracking_backend.record_run_metrics.called, (
-            "record_run_metrics must be called during _finalize_analysis"
-        )
+        assert (
+            svc._tracking_backend.record_run_metrics.called
+        ), "record_run_metrics must be called during _finalize_analysis"
 
         # Verify required metric keys are present
         call_args = svc._tracking_backend.record_run_metrics.call_args
@@ -204,12 +225,21 @@ class TestRecordRunMetricsCalled:
         cidx_meta_path = tmp_path / "cidx-meta"
 
         domain_list = [
-            {"name": "auth", "description": "Auth domain", "participating_repos": ["repo1"]},
+            {
+                "name": "auth",
+                "description": "Auth domain",
+                "participating_repos": ["repo1"],
+            },
         ]
         (staging_dir / "auth.md").write_text("auth content")
 
         repo_list = [
-            {"alias": "repo1", "clone_path": str(tmp_path / "repo1"), "file_count": 5, "total_bytes": 100},
+            {
+                "alias": "repo1",
+                "clone_path": str(tmp_path / "repo1"),
+                "file_count": 5,
+                "total_bytes": 100,
+            },
         ]
 
         config = Mock()
@@ -255,7 +285,7 @@ class TestInvokeDomainDiscoveryPublicMethod:
         # Set up domains file
         dep_map_dir = tmp_path / "cidx-meta" / "dependency-map"
         dep_map_dir.mkdir(parents=True)
-        domains_data = [
+        _domains_data = [
             {"name": "auth", "description": "Auth domain", "participating_repos": []},
         ]
         (dep_map_dir / "_domains.json").write_text(
@@ -263,9 +293,13 @@ class TestInvokeDomainDiscoveryPublicMethod:
         )
 
         # Mock invoke_domain_discovery to return valid JSON
-        svc._analyzer.invoke_domain_discovery.return_value = '[{"repo": "new-repo", "domain": "auth"}]'
+        svc._analyzer.invoke_domain_discovery.return_value = (
+            '[{"repo": "new-repo", "domain": "auth"}]'
+        )
         svc._analyzer.build_domain_discovery_prompt.return_value = "prompt"
-        svc._analyzer._extract_json = Mock(return_value=[{"repo": "new-repo", "domain": "auth"}])
+        svc._analyzer._extract_json = Mock(
+            return_value=[{"repo": "new-repo", "domain": "auth"}]
+        )
 
         config = Mock()
         config.dependency_map_pass_timeout_seconds = 300
@@ -274,14 +308,16 @@ class TestInvokeDomainDiscoveryPublicMethod:
         new_repos = [{"alias": "new-repo", "clone_path": str(tmp_path / "new-repo")}]
         existing_domains = ["auth"]
 
-        svc._discover_and_assign_new_repos(new_repos, existing_domains, dep_map_dir, config)
-
-        # invoke_domain_discovery must be called (public method)
-        assert svc._analyzer.invoke_domain_discovery.called, (
-            "invoke_domain_discovery (public) must be called, not _invoke_claude_cli (private)"
+        svc._discover_and_assign_new_repos(
+            new_repos, existing_domains, dep_map_dir, config
         )
 
-    def test_discover_and_assign_does_not_call_private_invoke_claude_cli(self, tmp_path):
+        # invoke_domain_discovery must be called (public method)
+        assert svc._analyzer.invoke_domain_discovery.called, "invoke_domain_discovery (public) must be called, not _invoke_claude_cli (private)"
+
+    def test_discover_and_assign_does_not_call_private_invoke_claude_cli(
+        self, tmp_path
+    ):
         """H1: _invoke_claude_cli (private) must NOT be called directly from _discover_and_assign_new_repos."""
         svc = _make_service(tmp_path)
 
@@ -291,7 +327,7 @@ class TestInvokeDomainDiscoveryPublicMethod:
             '[{"name": "auth", "description": "Auth domain", "participating_repos": []}]'
         )
 
-        svc._analyzer.invoke_domain_discovery.return_value = '[]'
+        svc._analyzer.invoke_domain_discovery.return_value = "[]"
         svc._analyzer.build_domain_discovery_prompt.return_value = "prompt"
         svc._analyzer._extract_json = Mock(return_value=[])
 
@@ -302,12 +338,12 @@ class TestInvokeDomainDiscoveryPublicMethod:
         new_repos = [{"alias": "new-repo", "clone_path": str(tmp_path / "new-repo")}]
         existing_domains = ["auth"]
 
-        svc._discover_and_assign_new_repos(new_repos, existing_domains, dep_map_dir, config)
+        svc._discover_and_assign_new_repos(
+            new_repos, existing_domains, dep_map_dir, config
+        )
 
         # _invoke_claude_cli must NOT be called directly on the mock analyzer
-        assert not svc._analyzer._invoke_claude_cli.called, (
-            "_invoke_claude_cli (private) must not be called directly; use invoke_domain_discovery instead"
-        )
+        assert not svc._analyzer._invoke_claude_cli.called, "_invoke_claude_cli (private) must not be called directly; use invoke_domain_discovery instead"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +369,10 @@ class TestGenerateIndexMdParseRoundtrip:
         gm = Mock()
         gm.golden_repos_dir = str(tmp_path)
         tracking = Mock()
-        tracking.get_tracking.return_value = {"status": "pending", "commit_hashes": None}
+        tracking.get_tracking.return_value = {
+            "status": "pending",
+            "commit_hashes": None,
+        }
         config_mgr = Mock()
 
         # Use real analyzer for integration test
@@ -344,18 +383,40 @@ class TestGenerateIndexMdParseRoundtrip:
         staging_dir.mkdir()
 
         domain_list = [
-            {"name": "authentication", "description": "Auth domain", "participating_repos": ["repo-auth", "repo-login"]},
-            {"name": "data-processing", "description": "Data domain", "participating_repos": ["repo-data"]},
+            {
+                "name": "authentication",
+                "description": "Auth domain",
+                "participating_repos": ["repo-auth", "repo-login"],
+            },
+            {
+                "name": "data-processing",
+                "description": "Data domain",
+                "participating_repos": ["repo-data"],
+            },
         ]
         repo_list = [
-            {"alias": "repo-auth", "clone_path": str(tmp_path / "repo-auth"), "description_summary": "Auth repo"},
-            {"alias": "repo-login", "clone_path": str(tmp_path / "repo-login"), "description_summary": "Login repo"},
-            {"alias": "repo-data", "clone_path": str(tmp_path / "repo-data"), "description_summary": "Data repo"},
+            {
+                "alias": "repo-auth",
+                "clone_path": str(tmp_path / "repo-auth"),
+                "description_summary": "Auth repo",
+            },
+            {
+                "alias": "repo-login",
+                "clone_path": str(tmp_path / "repo-login"),
+                "description_summary": "Login repo",
+            },
+            {
+                "alias": "repo-data",
+                "clone_path": str(tmp_path / "repo-data"),
+                "description_summary": "Data repo",
+            },
         ]
 
         # Write domain files so _build_cross_domain_graph doesn't fail
         for domain in domain_list:
-            (staging_dir / f"{domain['name']}.md").write_text(f"# {domain['name']} domain")
+            (staging_dir / f"{domain['name']}.md").write_text(
+                f"# {domain['name']} domain"
+            )
 
         # Step 1: Generate _index.md programmatically
         real_analyzer._generate_index_md(staging_dir, domain_list, repo_list)
@@ -367,19 +428,25 @@ class TestGenerateIndexMdParseRoundtrip:
         repo_to_domains = svc._parse_repo_to_domain_mapping(index_file)
 
         # Step 3: Verify correct mappings are returned
-        assert "repo-auth" in repo_to_domains, "repo-auth must appear in parsed mappings"
-        assert "repo-login" in repo_to_domains, "repo-login must appear in parsed mappings"
-        assert "repo-data" in repo_to_domains, "repo-data must appear in parsed mappings"
+        assert (
+            "repo-auth" in repo_to_domains
+        ), "repo-auth must appear in parsed mappings"
+        assert (
+            "repo-login" in repo_to_domains
+        ), "repo-login must appear in parsed mappings"
+        assert (
+            "repo-data" in repo_to_domains
+        ), "repo-data must appear in parsed mappings"
 
-        assert "authentication" in repo_to_domains["repo-auth"], (
-            "repo-auth must be mapped to 'authentication' domain"
-        )
-        assert "authentication" in repo_to_domains["repo-login"], (
-            "repo-login must be mapped to 'authentication' domain"
-        )
-        assert "data-processing" in repo_to_domains["repo-data"], (
-            "repo-data must be mapped to 'data-processing' domain"
-        )
+        assert (
+            "authentication" in repo_to_domains["repo-auth"]
+        ), "repo-auth must be mapped to 'authentication' domain"
+        assert (
+            "authentication" in repo_to_domains["repo-login"]
+        ), "repo-login must be mapped to 'authentication' domain"
+        assert (
+            "data-processing" in repo_to_domains["repo-data"]
+        ), "repo-data must be mapped to 'data-processing' domain"
 
     def test_generate_index_md_uses_domain_singular_header(self, tmp_path):
         """H3: _generate_index_md uses 'Domain' column header (singular), consistent with parser expectations."""
@@ -399,6 +466,6 @@ class TestGenerateIndexMdParseRoundtrip:
 
         content = (staging_dir / "_index.md").read_text()
         # The matrix table header should use "Domain" (singular) to match parser
-        assert "| Repository | Domain |" in content, (
-            "_index.md Repo-to-Domain Matrix must use 'Domain' (singular) column header"
-        )
+        assert (
+            "| Repository | Domain |" in content
+        ), "_index.md Repo-to-Domain Matrix must use 'Domain' (singular) column header"

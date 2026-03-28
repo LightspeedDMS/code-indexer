@@ -14,8 +14,7 @@ until production code is implemented.
 """
 
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, call, MagicMock
+from unittest.mock import Mock, patch, MagicMock
 
 from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
 from code_indexer.global_repos.query_tracker import QueryTracker
@@ -116,18 +115,27 @@ def scheduler_with_real_registry(
 
 def _make_subprocess_mock(cp_calls_list=None):
     """Return a mock subprocess.run that records cp calls and succeeds."""
+
     def mock_subprocess_run(cmd, **kwargs):
-        if cp_calls_list is not None and isinstance(cmd, list) and len(cmd) > 0 and cmd[0] == "cp":
+        if (
+            cp_calls_list is not None
+            and isinstance(cmd, list)
+            and len(cmd) > 0
+            and cmd[0] == "cp"
+        ):
             cp_calls_list.append(cmd)
         result = Mock()
         result.returncode = 0
         result.stdout = ""
         result.stderr = ""
         return result
+
     return mock_subprocess_run
 
 
-def _setup_git_repo(golden_repos_dir, alias_manager, registry, alias_name="test-repo-global"):
+def _setup_git_repo(
+    golden_repos_dir, alias_manager, registry, alias_name="test-repo-global"
+):
     """Helper: create git repo dir, alias, and registry entry."""
     repo_name = alias_name.replace("-global", "")
     remote_repo_dir = golden_repos_dir / repo_name
@@ -163,12 +171,13 @@ class TestReconcileAcquiresWriteLock:
 
         The lock alias is the repo_name (alias without -global suffix).
         """
-        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(
-            parents=True
-        )
+        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(parents=True)
 
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "my-repo-global", "repo_url": "git@github.com:org/my-repo.git"},
+            {
+                "alias_name": "my-repo-global",
+                "repo_url": "git@github.com:org/my-repo.git",
+            },
         ]
 
         lock_calls: list = []
@@ -179,13 +188,14 @@ class TestReconcileAcquiresWriteLock:
             lock_calls.append(("acquire", alias, owner_name))
             return original_acquire(alias, owner_name=owner_name)
 
-        with patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             scheduler.reconcile_golden_repos()
 
         assert any(
-            op == "acquire" and "my-repo" in alias
-            for op, alias, _ in lock_calls
+            op == "acquire" and "my-repo" in alias for op, alias, _ in lock_calls
         ), (
             f"acquire_write_lock must be called with 'my-repo' before restore. "
             f"Got calls: {lock_calls}"
@@ -198,12 +208,13 @@ class TestReconcileAcquiresWriteLock:
         Fix 1: release_write_lock() must be called AFTER restoration completes,
         so the RefreshScheduler can proceed with normal refresh cycles.
         """
-        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(
-            parents=True
-        )
+        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(parents=True)
 
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "my-repo-global", "repo_url": "git@github.com:org/my-repo.git"},
+            {
+                "alias_name": "my-repo-global",
+                "repo_url": "git@github.com:org/my-repo.git",
+            },
         ]
 
         lock_calls: list = []
@@ -219,30 +230,31 @@ class TestReconcileAcquiresWriteLock:
             lock_calls.append(("release", alias, owner_name))
             return original_release(alias, owner_name=owner_name)
 
-        with patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire), \
-             patch.object(scheduler, "release_write_lock", side_effect=tracking_release), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire),
+            patch.object(scheduler, "release_write_lock", side_effect=tracking_release),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             scheduler.reconcile_golden_repos()
 
         acquire_calls = [(op, alias) for op, alias, _ in lock_calls if op == "acquire"]
         release_calls = [(op, alias) for op, alias, _ in lock_calls if op == "release"]
 
-        assert len(acquire_calls) >= 1, (
-            f"Expected at least 1 acquire call, got: {lock_calls}"
-        )
-        assert len(release_calls) >= 1, (
-            f"Expected at least 1 release call after acquire, got: {lock_calls}"
-        )
+        assert (
+            len(acquire_calls) >= 1
+        ), f"Expected at least 1 acquire call, got: {lock_calls}"
+        assert (
+            len(release_calls) >= 1
+        ), f"Expected at least 1 release call after acquire, got: {lock_calls}"
 
         # Verify acquire precedes release for the same alias
         for acq_op, acq_alias in acquire_calls:
             matching_releases = [
-                (op, alias) for op, alias in release_calls
-                if alias == acq_alias
+                (op, alias) for op, alias in release_calls if alias == acq_alias
             ]
-            assert len(matching_releases) >= 1, (
-                f"Lock acquired for {acq_alias} but never released. Calls: {lock_calls}"
-            )
+            assert (
+                len(matching_releases) >= 1
+            ), f"Lock acquired for {acq_alias} but never released. Calls: {lock_calls}"
 
     def test_reconcile_releases_lock_even_on_restore_exception(
         self, scheduler, golden_repos_dir, mock_registry
@@ -274,8 +286,12 @@ class TestReconcileAcquiresWriteLock:
         def failing_restore(alias_name, master_path):
             raise RuntimeError("Simulated disk failure during cp")
 
-        with patch.object(scheduler, "release_write_lock", side_effect=tracking_release), \
-             patch.object(scheduler, "_restore_master_from_versioned", side_effect=failing_restore):
+        with (
+            patch.object(scheduler, "release_write_lock", side_effect=tracking_release),
+            patch.object(
+                scheduler, "_restore_master_from_versioned", side_effect=failing_restore
+            ),
+        ):
             # Must not propagate the exception (AC7 non-blocking)
             scheduler.reconcile_golden_repos()
 
@@ -291,12 +307,13 @@ class TestReconcileAcquiresWriteLock:
         Fix 1: The write lock must be acquired with owner_name='reconciliation'
         so that log messages and lock files correctly identify the holder.
         """
-        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(
-            parents=True
-        )
+        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(parents=True)
 
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "my-repo-global", "repo_url": "git@github.com:org/my-repo.git"},
+            {
+                "alias_name": "my-repo-global",
+                "repo_url": "git@github.com:org/my-repo.git",
+            },
         ]
 
         acquire_owner_names: list = []
@@ -307,8 +324,10 @@ class TestReconcileAcquiresWriteLock:
             acquire_owner_names.append(owner_name)
             return original_acquire(alias, owner_name=owner_name)
 
-        with patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             scheduler.reconcile_golden_repos()
 
         assert any(name == "reconciliation" for name in acquire_owner_names), (
@@ -327,7 +346,10 @@ class TestReconcileAcquiresWriteLock:
         (golden_repos_dir / "my-repo").mkdir(parents=True)
 
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "my-repo-global", "repo_url": "git@github.com:org/my-repo.git"},
+            {
+                "alias_name": "my-repo-global",
+                "repo_url": "git@github.com:org/my-repo.git",
+            },
         ]
 
         lock_calls: list = []
@@ -338,8 +360,10 @@ class TestReconcileAcquiresWriteLock:
             lock_calls.append(("acquire", alias, owner_name))
             return original_acquire(alias, owner_name=owner_name)
 
-        with patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             scheduler.reconcile_golden_repos()
 
         assert len(lock_calls) == 0, (
@@ -368,8 +392,10 @@ class TestReconcileAcquiresWriteLock:
             lock_calls.append(("acquire", alias, owner_name))
             return original_acquire(alias, owner_name=owner_name)
 
-        with patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(scheduler, "acquire_write_lock", side_effect=tracking_acquire),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             scheduler.reconcile_golden_repos()
 
         assert len(lock_calls) == 0, (
@@ -386,18 +412,19 @@ class TestReconcileAcquiresWriteLock:
         This validates that the RefreshScheduler's write lock check (Fix 2)
         would correctly block a concurrent refresh during restoration.
         """
-        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(
-            parents=True
-        )
+        (golden_repos_dir / ".versioned" / "my-repo" / "v_9000000").mkdir(parents=True)
 
         mock_registry.list_global_repos.return_value = [
-            {"alias_name": "my-repo-global", "repo_url": "git@github.com:org/my-repo.git"},
+            {
+                "alias_name": "my-repo-global",
+                "repo_url": "git@github.com:org/my-repo.git",
+            },
         ]
 
         # Track whether lock was visible to is_write_locked during restore
         lock_visible_during_restore: list = []
 
-        original_restore = scheduler._restore_master_from_versioned
+        _original_restore = scheduler._restore_master_from_versioned
 
         def checking_restore(alias_name, master_path):
             # At this point, reconciliation should have acquired the lock
@@ -408,13 +435,19 @@ class TestReconcileAcquiresWriteLock:
             master_path.mkdir(parents=True, exist_ok=True)
             return True
 
-        with patch.object(scheduler, "_restore_master_from_versioned", side_effect=checking_restore), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(
+                scheduler,
+                "_restore_master_from_versioned",
+                side_effect=checking_restore,
+            ),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             scheduler.reconcile_golden_repos()
 
-        assert len(lock_visible_during_restore) >= 1, (
-            "checking_restore must have been called at least once"
-        )
+        assert (
+            len(lock_visible_during_restore) >= 1
+        ), "checking_restore must have been called at least once"
         assert all(lock_visible_during_restore), (
             f"Write lock must be visible (True) during _restore_master_from_versioned. "
             f"Got: {lock_visible_during_restore}"
@@ -450,15 +483,20 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
         scheduler = scheduler_with_real_registry
 
         # Acquire the write lock for this git repo (simulating reconciliation)
-        acquired = scheduler.acquire_write_lock("test-repo", owner_name="reconciliation")
+        acquired = scheduler.acquire_write_lock(
+            "test-repo", owner_name="reconciliation"
+        )
         assert acquired is True, "Must be able to acquire write lock for test"
 
         try:
-            with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-                 patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-                 patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_git_cls, \
-                 patch.object(scheduler, "_create_new_index") as mock_create_index:
-
+            with (
+                patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+                patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+                patch(
+                    "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+                ) as mock_git_cls,
+                patch.object(scheduler, "_create_new_index") as mock_create_index,
+            ):
                 result = scheduler._execute_refresh("test-repo-global")
 
                 # GitPullUpdater must NOT be instantiated
@@ -466,13 +504,13 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
                 # No snapshot/index creation
                 mock_create_index.assert_not_called()
 
-                assert result["success"] is True, (
-                    f"Result must be success=True when skipping locked git repo. Got: {result}"
-                )
+                assert (
+                    result["success"] is True
+                ), f"Result must be success=True when skipping locked git repo. Got: {result}"
                 message = result.get("message", "")
-                assert "skip" in message.lower() or "lock" in message.lower(), (
-                    f"Result message must indicate skip due to write lock. Got: '{message}'"
-                )
+                assert (
+                    "skip" in message.lower() or "lock" in message.lower()
+                ), f"Result message must indicate skip due to write lock. Got: '{message}'"
         finally:
             scheduler.release_write_lock("test-repo", owner_name="reconciliation")
 
@@ -492,14 +530,17 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
         scheduler = scheduler_with_real_registry
 
         # Ensure no lock is held
-        assert not scheduler.is_write_locked("test-repo"), (
-            "Write lock must NOT be held before this test"
-        )
+        assert not scheduler.is_write_locked(
+            "test-repo"
+        ), "Write lock must NOT be held before this test"
 
-        with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-             patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_cls:
-
+        with (
+            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+            patch(
+                "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+            ) as mock_cls,
+        ):
             mock_updater = MagicMock()
             mock_updater.has_changes.return_value = False
             mock_cls.return_value = mock_updater
@@ -525,11 +566,16 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
 
         scheduler = scheduler_with_real_registry
 
-        with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-             patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-             patch.object(scheduler, "is_write_locked", return_value=False) as mock_is_locked, \
-             patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_cls:
-
+        with (
+            patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+            patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+            patch.object(
+                scheduler, "is_write_locked", return_value=False
+            ) as mock_is_locked,
+            patch(
+                "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+            ) as mock_cls,
+        ):
             mock_updater = MagicMock()
             mock_updater.has_changes.return_value = False
             mock_cls.return_value = mock_updater
@@ -554,23 +600,25 @@ class TestExecuteRefreshGitRepoWriteLockCheck:
 
         scheduler = scheduler_with_real_registry
 
-        acquired = scheduler.acquire_write_lock("test-repo", owner_name="reconciliation")
+        acquired = scheduler.acquire_write_lock(
+            "test-repo", owner_name="reconciliation"
+        )
         assert acquired is True
 
         try:
-            with patch.object(scheduler, "_detect_existing_indexes", return_value={}), \
-                 patch.object(scheduler, "_reconcile_registry_with_filesystem"), \
-                 patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater"):
-
+            with (
+                patch.object(scheduler, "_detect_existing_indexes", return_value={}),
+                patch.object(scheduler, "_reconcile_registry_with_filesystem"),
+                patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater"),
+            ):
                 result = scheduler._execute_refresh("test-repo-global")
 
-                assert result.get("success") is True, (
-                    f"Skipped refresh must return success=True, got: {result}"
-                )
-                assert result.get("alias") == "test-repo-global" or \
-                       "test-repo" in str(result), (
-                    f"Result must include alias info: {result}"
-                )
+                assert (
+                    result.get("success") is True
+                ), f"Skipped refresh must return success=True, got: {result}"
+                assert result.get("alias") == "test-repo-global" or "test-repo" in str(
+                    result
+                ), f"Result must include alias info: {result}"
         finally:
             scheduler.release_write_lock("test-repo", owner_name="reconciliation")
 
@@ -657,20 +705,28 @@ class TestBothFixesInteraction:
 
         # Intercept _restore_master_from_versioned to simulate the race:
         # while restoring, check that the refresh skips
-        original_restore = reconcile_scheduler._restore_master_from_versioned
+        _original_restore = reconcile_scheduler._restore_master_from_versioned
 
         def race_condition_restore(alias_name_arg, master_path):
             # At this point reconciliation holds the write lock (Fix 1)
             # Simulate the refresh scheduler timer firing concurrently:
-            with patch.object(refresh_scheduler, "_detect_existing_indexes", return_value={}), \
-                 patch.object(refresh_scheduler, "_reconcile_registry_with_filesystem"), \
-                 patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_git:
+            with (
+                patch.object(
+                    refresh_scheduler, "_detect_existing_indexes", return_value={}
+                ),
+                patch.object(refresh_scheduler, "_reconcile_registry_with_filesystem"),
+                patch(
+                    "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+                ) as mock_git,
+            ):
                 mock_git.return_value.has_changes.return_value = False
 
                 refresh_result = refresh_scheduler._execute_refresh(alias_name)
 
-                if "skip" in refresh_result.get("message", "").lower() or \
-                   "lock" in refresh_result.get("message", "").lower():
+                if (
+                    "skip" in refresh_result.get("message", "").lower()
+                    or "lock" in refresh_result.get("message", "").lower()
+                ):
                     refresh_was_skipped.append(True)
                 else:
                     refresh_was_skipped.append(False)
@@ -682,18 +738,23 @@ class TestBothFixesInteraction:
             master_path.mkdir(parents=True, exist_ok=True)
             return True
 
-        with patch.object(reconcile_scheduler, "_restore_master_from_versioned",
-                          side_effect=race_condition_restore), \
-             patch("subprocess.run", side_effect=_make_subprocess_mock()):
+        with (
+            patch.object(
+                reconcile_scheduler,
+                "_restore_master_from_versioned",
+                side_effect=race_condition_restore,
+            ),
+            patch("subprocess.run", side_effect=_make_subprocess_mock()),
+        ):
             reconcile_scheduler.reconcile_golden_repos()
 
-        assert len(refresh_was_skipped) >= 1, (
-            "race_condition_restore must have been called (master was missing)"
-        )
+        assert (
+            len(refresh_was_skipped) >= 1
+        ), "race_condition_restore must have been called (master was missing)"
         assert all(refresh_was_skipped), (
             f"Refresh must have been SKIPPED while reconciliation held the write lock. "
             f"Got skip results: {refresh_was_skipped}"
         )
-        assert len(git_pull_was_called) == 0, (
-            "GitPullUpdater must NOT have been called during reconciliation lock hold"
-        )
+        assert (
+            len(git_pull_was_called) == 0
+        ), "GitPullUpdater must NOT have been called during reconciliation lock hold"

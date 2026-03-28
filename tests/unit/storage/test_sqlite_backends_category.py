@@ -62,7 +62,7 @@ class TestUpdateCategory:
         # Verify update
         repo = backend.get_repo("test-repo")
         assert repo["category_id"] == cat_id
-        assert repo["category_auto_assigned"] == True
+        assert repo["category_auto_assigned"] is True
 
     def test_update_category_sets_auto_assigned_flag(self, backend, category_backend):
         """update_category sets category_auto_assigned flag correctly."""
@@ -78,7 +78,7 @@ class TestUpdateCategory:
 
         repo = backend.get_repo("test-repo")
         assert repo["category_id"] == cat_id
-        assert repo["category_auto_assigned"] == False
+        assert repo["category_auto_assigned"] is False
 
     def test_update_category_can_set_null(self, backend, category_backend):
         """update_category can set category_id to NULL (Unassigned)."""
@@ -97,7 +97,7 @@ class TestUpdateCategory:
 
         repo = backend.get_repo("test-repo")
         assert repo["category_id"] is None
-        assert repo["category_auto_assigned"] == True
+        assert repo["category_auto_assigned"] is True
 
 
 class TestListReposWithCategories:
@@ -123,7 +123,7 @@ class TestListReposWithCategories:
         assert len(repos) == 1
         assert repos[0]["alias"] == "test-repo"
         assert repos[0]["category_id"] == cat_id
-        assert repos[0]["category_auto_assigned"] == True
+        assert repos[0]["category_auto_assigned"] is True
 
     def test_list_shows_null_category_as_none(self, backend):
         """list_repos_with_categories shows NULL category_id as None."""
@@ -134,4 +134,4 @@ class TestListReposWithCategories:
         repos = backend.list_repos_with_categories()
 
         assert repos[0]["category_id"] is None
-        assert repos[0]["category_auto_assigned"] == False
+        assert repos[0]["category_auto_assigned"] is False

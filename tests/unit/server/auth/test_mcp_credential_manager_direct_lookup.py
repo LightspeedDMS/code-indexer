@@ -14,7 +14,7 @@ Uses real SQLite databases and real MCPCredentialManager with zero mocking.
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 class _MinimalUserManager:
@@ -174,9 +174,7 @@ class TestMcpCredentialManagerDirectLookup:
     Story #269 Scenario 4 and 6.
     """
 
-    def test_uses_direct_sql_when_backend_supports_it(
-        self, tmp_path: Path
-    ) -> None:
+    def test_uses_direct_sql_when_backend_supports_it(self, tmp_path: Path) -> None:
         """
         Scenario 4 (via manager): MCP credential lookup uses direct SQL.
 
@@ -195,16 +193,16 @@ class TestMcpCredentialManagerDirectLookup:
 
         user_manager = _MinimalUserManager(str(db_path))
         # Verify the backend has the direct SQL method (this is a precondition)
-        assert hasattr(user_manager, "get_mcp_credential_by_client_id"), (
-            "_MinimalUserManager must expose get_mcp_credential_by_client_id"
-        )
+        assert hasattr(
+            user_manager, "get_mcp_credential_by_client_id"
+        ), "_MinimalUserManager must expose get_mcp_credential_by_client_id"
 
         mgr = MCPCredentialManager(user_manager=user_manager)
         result = mgr.get_credential_by_client_id(client_id)
 
-        assert result is not None, (
-            f"Expected (username, credential) for client_id={client_id}, got None"
-        )
+        assert (
+            result is not None
+        ), f"Expected (username, credential) for client_id={client_id}, got None"
         username, credential = result
         assert username == "user2"
         assert credential["client_id"] == client_id
@@ -243,9 +241,9 @@ class TestMcpCredentialManagerDirectLookup:
         mgr = MCPCredentialManager(user_manager=user_manager)
         result = mgr.get_credential_by_client_id("mcp_iter_001")
 
-        assert result is not None, (
-            "Expected fallback iteration to find credential 'mcp_iter_001'"
-        )
+        assert (
+            result is not None
+        ), "Expected fallback iteration to find credential 'mcp_iter_001'"
         username, credential = result
         assert username == "user1"
         assert credential["client_id"] == "mcp_iter_001"

@@ -14,10 +14,11 @@ Tests:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
-from code_indexer.server.services.langfuse_trace_sync_service import LangfuseTraceSyncService
+from code_indexer.server.services.langfuse_trace_sync_service import (
+    LangfuseTraceSyncService,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -30,8 +31,11 @@ def _make_service(job_tracker=None, config_getter=None):
     if config_getter is None:
         # Default: disabled langfuse config so _do_sync_all_projects returns early
         from code_indexer.server.utils.config_manager import ServerConfig
+
         default_config = ServerConfig(server_dir="/tmp")
-        config_getter = lambda: default_config
+
+        def config_getter():
+            return default_config
 
     return LangfuseTraceSyncService(
         config_getter=config_getter,
@@ -47,6 +51,7 @@ def _make_enabled_config(tmp_path):
         LangfuseConfig,
         LangfusePullProject,
     )
+
     return ServerConfig(
         server_dir=str(tmp_path),
         langfuse_config=LangfuseConfig(
@@ -96,6 +101,7 @@ class TestLangfuseTraceSyncServiceConstructor:
         Then no TypeError is raised
         """
         from code_indexer.server.utils.config_manager import ServerConfig
+
         service = LangfuseTraceSyncService(
             config_getter=lambda: ServerConfig(server_dir="/tmp"),
             data_dir="/tmp",
@@ -144,7 +150,9 @@ class TestLangfuseJobRegistration:
         with patch.object(service, "sync_project"):
             service._do_sync_all_projects()
 
-        jobs = job_tracker.query_jobs(operation_type="langfuse_sync", status="completed")
+        jobs = job_tracker.query_jobs(
+            operation_type="langfuse_sync", status="completed"
+        )
         assert len(jobs) >= 1
 
     def test_langfuse_sync_job_fails_when_sync_raises(self, job_tracker, tmp_path):
@@ -158,7 +166,9 @@ class TestLangfuseJobRegistration:
         config = _make_enabled_config(tmp_path)
         service = _make_service(job_tracker=job_tracker, config_getter=lambda: config)
 
-        with patch.object(service, "sync_project", side_effect=RuntimeError("API unreachable")):
+        with patch.object(
+            service, "sync_project", side_effect=RuntimeError("API unreachable")
+        ):
             service._do_sync_all_projects()
 
         # Should have a failed job
@@ -196,7 +206,9 @@ class TestLangfuseJobRegistration:
         broken_tracker = MagicMock(spec=JobTracker)
         broken_tracker.register_job.side_effect = RuntimeError("DB unavailable")
 
-        service = _make_service(job_tracker=broken_tracker, config_getter=lambda: config)
+        service = _make_service(
+            job_tracker=broken_tracker, config_getter=lambda: config
+        )
 
         # Should not raise - defensive try/except in service
         with patch.object(service, "sync_project"):
@@ -220,8 +232,11 @@ class TestLangfuseDisabledNoJob:
         Then no langfuse_sync job is registered
         """
         from code_indexer.server.utils.config_manager import ServerConfig
+
         disabled_config = ServerConfig(server_dir=str(tmp_path))
-        service = _make_service(job_tracker=job_tracker, config_getter=lambda: disabled_config)
+        service = _make_service(
+            job_tracker=job_tracker, config_getter=lambda: disabled_config
+        )
 
         service._do_sync_all_projects()
 

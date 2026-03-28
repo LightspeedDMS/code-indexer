@@ -12,10 +12,9 @@ Acceptance criteria tested:
 - AC5: Server shutdown cancels debounce timer cleanly
 """
 
-import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -662,10 +661,13 @@ class TestOnRepoAddedWithDebouncer:
                 )
 
         # Should log a warning about no debouncer
-        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
-        assert any("debouncer" in msg.lower() or "skipped" in msg.lower() for msg in warning_messages), (
-            f"Expected warning about missing debouncer, got: {warning_messages}"
-        )
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any(
+            "debouncer" in msg.lower() or "skipped" in msg.lower()
+            for msg in warning_messages
+        ), f"Expected warning about missing debouncer, got: {warning_messages}"
 
     def test_on_repo_added_batch_scenario_md_files_all_created(
         self,
@@ -806,7 +808,9 @@ class TestOnRepoRemovedWithDebouncer:
                 golden_repos_dir=temp_golden_repos_dir,
             )
 
-        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        ]
         assert any(
             "debouncer" in msg.lower() or "skipped" in msg.lower()
             for msg in warning_messages

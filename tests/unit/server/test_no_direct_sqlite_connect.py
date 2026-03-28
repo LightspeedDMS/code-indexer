@@ -11,28 +11,24 @@ Allowed exceptions (files that legitimately use direct sqlite3.connect()):
                                 (BEGIN IMMEDIATE would corrupt shared thread-local state)
 """
 
-import ast
 import re
 from pathlib import Path
 from typing import List, Tuple
 
 # Root of the server source tree
 _SERVER_SRC = (
-    Path(__file__).parent.parent.parent.parent
-    / "src"
-    / "code_indexer"
-    / "server"
+    Path(__file__).parent.parent.parent.parent / "src" / "code_indexer" / "server"
 )
 
 # Files (relative to _SERVER_SRC) that are explicitly allowed to call
 # sqlite3.connect() directly.  Paths use forward slashes for cross-platform
 # matching.
 _ALLOWED_FILES = {
-    "storage/database_manager.py",       # implements the connection manager itself
-    "startup/database_init.py",          # one-time init before manager is ready
+    "storage/database_manager.py",  # implements the connection manager itself
+    "startup/database_init.py",  # one-time init before manager is ready
     "services/database_health_service.py",  # _check_not_locked() needs an isolated
-                                            # connection to avoid corrupting in-flight
-                                            # transactions on the shared thread-local conn
+    # connection to avoid corrupting in-flight
+    # transactions on the shared thread-local conn
 }
 
 
@@ -81,9 +77,7 @@ def test_no_direct_sqlite_connect_outside_allowed_list() -> None:
             violations.append((rel, lines))
 
     if violations:
-        detail = "\n".join(
-            f"  {rel}: lines {lines}" for rel, lines in violations
-        )
+        detail = "\n".join(f"  {rel}: lines {lines}" for rel, lines in violations)
         raise AssertionError(
             f"Bug #434 regression: direct sqlite3.connect() found in "
             f"{len(violations)} file(s) that should use DatabaseConnectionManager:\n"

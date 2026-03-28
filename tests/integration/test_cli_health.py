@@ -8,7 +8,6 @@ Story #57: CLI cidx health Command
 
 import json
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -42,11 +41,11 @@ def healthy_index(temp_project_dir):
     M = 16
 
     # Initialize index
-    index = hnswlib.Index(space='l2', dim=dim)
+    index = hnswlib.Index(space="l2", dim=dim)
     index.init_index(max_elements=num_elements, ef_construction=ef_construction, M=M)
 
     # Add some vectors
-    data = np.random.random((num_elements, dim)).astype('float32')
+    data = np.random.random((num_elements, dim)).astype("float32")
     ids = np.arange(num_elements)
     index.add_items(data, ids)
 
@@ -65,7 +64,7 @@ def corrupted_index(temp_project_dir):
     index_path = index_dir / "hnsw.bin"
 
     # Write corrupted data (not a valid HNSW index)
-    with open(index_path, 'wb') as f:
+    with open(index_path, "wb") as f:
         f.write(b"CORRUPTED DATA NOT A VALID HNSW INDEX")
 
     return index_path
@@ -78,9 +77,7 @@ class TestHealthCommandIntegrationHealthyIndex:
         """Test health check with healthy index - default output."""
         runner = CliRunner()
         result = runner.invoke(
-            cli,
-            ["health", "--index-path", str(healthy_index)],
-            catch_exceptions=False
+            cli, ["health", "--index-path", str(healthy_index)], catch_exceptions=False
         )
 
         assert result.exit_code == 0
@@ -96,7 +93,7 @@ class TestHealthCommandIntegrationHealthyIndex:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(healthy_index), "--json"],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         assert result.exit_code == 0
@@ -120,7 +117,7 @@ class TestHealthCommandIntegrationHealthyIndex:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(healthy_index), "--quiet"],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         assert result.exit_code == 0
@@ -137,9 +134,7 @@ class TestHealthCommandIntegrationNoIndex:
 
         runner = CliRunner()
         result = runner.invoke(
-            cli,
-            ["health", "--index-path", str(index_path)],
-            catch_exceptions=False
+            cli, ["health", "--index-path", str(index_path)], catch_exceptions=False
         )
 
         assert result.exit_code == 2
@@ -155,7 +150,7 @@ class TestHealthCommandIntegrationNoIndex:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(index_path), "--json"],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         assert result.exit_code == 2
@@ -178,7 +173,7 @@ class TestHealthCommandIntegrationNoIndex:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(index_path), "--quiet"],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         assert result.exit_code == 2
@@ -194,7 +189,7 @@ class TestHealthCommandIntegrationCorruptedIndex:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(corrupted_index)],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         # Corrupted index should be detected (exit code 1)
@@ -209,7 +204,7 @@ class TestHealthCommandIntegrationCorruptedIndex:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(corrupted_index), "--json"],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         # Corrupted index should be detected
@@ -237,7 +232,7 @@ class TestHealthCommandIntegrationNotReadable:
             result = runner.invoke(
                 cli,
                 ["health", "--index-path", str(healthy_index)],
-                catch_exceptions=False
+                catch_exceptions=False,
             )
 
             # Exit code should be 2 because Click validates path before our command runs
@@ -263,11 +258,7 @@ class TestHealthCommandIntegrationDefaultPath:
             # Change to temp directory so default path is used
             os.chdir(temp_project_dir)
 
-            result = runner.invoke(
-                cli,
-                ["health"],
-                catch_exceptions=False
-            )
+            result = runner.invoke(cli, ["health"], catch_exceptions=False)
 
             # Should find the index at .code-indexer/index/hnsw.bin
             assert result.exit_code == 0
@@ -286,15 +277,13 @@ class TestHealthCommandIntegrationDefaultPath:
             # Change to temp directory where no index exists
             os.chdir(temp_project_dir)
 
-            result = runner.invoke(
-                cli,
-                ["health"],
-                catch_exceptions=False
-            )
+            result = runner.invoke(cli, ["health"], catch_exceptions=False)
 
             # Should report no index found
             assert result.exit_code == 2
-            assert "NOT FOUND" in result.output or "Index file not found" in result.output
+            assert (
+                "NOT FOUND" in result.output or "Index file not found" in result.output
+            )
         finally:
             # Restore original directory
             os.chdir(original_dir)
@@ -307,9 +296,7 @@ class TestHealthCommandIntegrationTimingMetrics:
         """Test that timing information is displayed."""
         runner = CliRunner()
         result = runner.invoke(
-            cli,
-            ["health", "--index-path", str(healthy_index)],
-            catch_exceptions=False
+            cli, ["health", "--index-path", str(healthy_index)], catch_exceptions=False
         )
 
         assert result.exit_code == 0
@@ -322,7 +309,7 @@ class TestHealthCommandIntegrationTimingMetrics:
         result = runner.invoke(
             cli,
             ["health", "--index-path", str(healthy_index), "--json"],
-            catch_exceptions=False
+            catch_exceptions=False,
         )
 
         assert result.exit_code == 0

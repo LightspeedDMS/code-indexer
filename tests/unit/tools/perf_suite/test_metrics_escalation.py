@@ -12,10 +12,11 @@ from __future__ import annotations
 import sys
 import os
 
-import pytest
 
 # Add the perf-suite directory to path so we can import from it
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite")
+)
 
 
 def _make_metrics(scenario_name: str, p50: float, error_rate: float = 0.0) -> object:
@@ -121,7 +122,7 @@ class TestEscalationResultDataclass:
     """Tests for the EscalationResult dataclass."""
 
     def test_basic_construction(self):
-        from metrics import EscalationResult, InflectionResult, MetricsResult
+        from metrics import EscalationResult, InflectionResult
 
         scenario = object()  # placeholder
         level_metrics = {
@@ -244,7 +245,7 @@ class TestDetectInflection:
         level_results = {
             1: _make_metrics("s", 100.0),
             2: _make_metrics("s", 130.0),
-            5: _make_metrics("s", 210.0),   # first crossing: 210 > 200
+            5: _make_metrics("s", 210.0),  # first crossing: 210 > 200
             10: _make_metrics("s", 400.0),
         }
 
@@ -311,7 +312,7 @@ class TestDetectInflection:
 
         # Levels start at 2, not 1
         level_results = {
-            2: _make_metrics("s", 80.0),   # baseline = 80ms, threshold = 160ms
+            2: _make_metrics("s", 80.0),  # baseline = 80ms, threshold = 160ms
             5: _make_metrics("s", 100.0),
             10: _make_metrics("s", 170.0),  # 170 > 160 -> inflection
         }

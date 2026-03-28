@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.startup.api_key_seeding import seed_api_keys_on_startup
 
@@ -66,10 +65,13 @@ class TestBlankConfigClearsEnv:
         config_service = _make_config_service(anthropic_api_key="")
         mock_sync_svc = _make_sync_service()
 
-        with patch(
-            "code_indexer.server.services.api_key_management.ApiKeySyncService",
-            return_value=mock_sync_svc,
-        ), patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-was-in-env"}):
+        with (
+            patch(
+                "code_indexer.server.services.api_key_management.ApiKeySyncService",
+                return_value=mock_sync_svc,
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-was-in-env"}),
+        ):
             seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
@@ -86,10 +88,13 @@ class TestBlankConfigClearsEnv:
 
         # Assert inside the patch.dict scope so the real env value (if any)
         # is not restored yet — we verify what the function left in the env.
-        with patch(
-            "code_indexer.server.services.api_key_management.ApiKeySyncService",
-            return_value=mock_sync_svc,
-        ), patch.dict(os.environ, {"VOYAGE_API_KEY": "pa-voyage-was-in-env"}):
+        with (
+            patch(
+                "code_indexer.server.services.api_key_management.ApiKeySyncService",
+                return_value=mock_sync_svc,
+            ),
+            patch.dict(os.environ, {"VOYAGE_API_KEY": "pa-voyage-was-in-env"}),
+        ):
             seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
@@ -103,10 +108,13 @@ class TestBlankConfigClearsEnv:
         config_service = _make_config_service(anthropic_api_key="")
         mock_sync_svc = _make_sync_service()
 
-        with patch(
-            "code_indexer.server.services.api_key_management.ApiKeySyncService",
-            return_value=mock_sync_svc,
-        ), patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-from-env-key"}):
+        with (
+            patch(
+                "code_indexer.server.services.api_key_management.ApiKeySyncService",
+                return_value=mock_sync_svc,
+            ),
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-from-env-key"}),
+        ):
             result = seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
@@ -130,12 +138,18 @@ class TestBlankConfigClearsEnv:
         )
         mock_sync_svc = _make_sync_service()
 
-        env_copy = {k: v for k, v in os.environ.items()
-                    if k not in ("ANTHROPIC_API_KEY", "VOYAGE_API_KEY")}
-        with patch(
-            "code_indexer.server.services.api_key_management.ApiKeySyncService",
-            return_value=mock_sync_svc,
-        ), patch.dict(os.environ, env_copy, clear=True):
+        env_copy = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("ANTHROPIC_API_KEY", "VOYAGE_API_KEY")
+        }
+        with (
+            patch(
+                "code_indexer.server.services.api_key_management.ApiKeySyncService",
+                return_value=mock_sync_svc,
+            ),
+            patch.dict(os.environ, env_copy, clear=True),
+        ):
             result = seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),

@@ -96,6 +96,7 @@ def _import_service():
     from code_indexer.server.services.dependency_map_dashboard_service import (
         DependencyMapDashboardService,
     )
+
     return DependencyMapDashboardService
 
 
@@ -307,7 +308,9 @@ class TestGetJobStatus:
         """get_job_status() passes raw status from tracking backend."""
         DependencyMapDashboardService = _import_service()
         service = DependencyMapDashboardService(
-            tracking_backend=_make_tracking_backend(status="running", last_run=_hours_ago_iso(0.5)),
+            tracking_backend=_make_tracking_backend(
+                status="running", last_run=_hours_ago_iso(0.5)
+            ),
             config_manager=_make_config_manager(enabled_config),
             dependency_map_service=_make_dep_map_service(),
         )
@@ -478,6 +481,7 @@ def _cleanup_tmp_dirs():
     """Clean up temp directories created by _make_service_for_coverage."""
     yield
     import shutil
+
     for d in _tmp_dirs_to_clean:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -798,7 +802,11 @@ class TestRepoCoverageCalculation:
             stored_hashes={"r1": "h1", "r2": "h2", "r3": "h3"},
         )
         service._current_commits_provider = lambda alias: {
-            "r1": "h1", "r2": "h2", "r3": "h3", "r4": "x", "r5": "x"
+            "r1": "h1",
+            "r2": "h2",
+            "r3": "h3",
+            "r4": "x",
+            "r5": "x",
         }[alias]
 
         result = service.get_repo_coverage()
@@ -817,7 +825,11 @@ class TestRepoCoverageCalculation:
             ],
             stored_hashes={"r1": "h1"},
         )
-        service._current_commits_provider = lambda alias: {"r1": "h1", "r2": "x", "r3": "x"}[alias]
+        service._current_commits_provider = lambda alias: {
+            "r1": "h1",
+            "r2": "x",
+            "r3": "x",
+        }[alias]
 
         result = service.get_repo_coverage()
 
@@ -840,8 +852,16 @@ class TestRepoDomainMapping:
     def test_domain_map_populated_from_domains_json(self):
         """AC5: Domains extracted from _domains.json and reverse-mapped to repos."""
         domains_data = [
-            {"name": "auth-domain", "description": "Auth", "participating_repos": ["repo-a", "repo-b"]},
-            {"name": "data-domain", "description": "Data", "participating_repos": ["repo-b", "repo-c"]},
+            {
+                "name": "auth-domain",
+                "description": "Auth",
+                "participating_repos": ["repo-a", "repo-b"],
+            },
+            {
+                "name": "data-domain",
+                "description": "Data",
+                "participating_repos": ["repo-b", "repo-c"],
+            },
         ]
         service = _make_service_for_coverage(
             golden_repos=[
@@ -858,7 +878,10 @@ class TestRepoDomainMapping:
 
         repos_by_alias = {r["alias"]: r for r in result["repos"]}
         assert repos_by_alias["repo-a"]["domains"] == ["auth-domain"]
-        assert set(repos_by_alias["repo-b"]["domains"]) == {"auth-domain", "data-domain"}
+        assert set(repos_by_alias["repo-b"]["domains"]) == {
+            "auth-domain",
+            "data-domain",
+        }
         assert repos_by_alias["repo-c"]["domains"] == ["data-domain"]
 
     def test_unanalyzed_repo_shows_empty_domain_list(self):
@@ -973,7 +996,9 @@ class TestRepoCoverageAccessFiltering:
             ],
             stored_hashes={"repo-1": "h1", "old-repo": "old"},
         )
-        service._current_commits_provider = lambda alias: "h1" if alias == "repo-1" else None
+        service._current_commits_provider = (
+            lambda alias: "h1" if alias == "repo-1" else None
+        )
 
         result = service.get_repo_coverage(accessible_repos={"repo-1"})
 
@@ -1094,24 +1119,30 @@ class TestDependencyMapServicePublicAccessors:
 
     def test_get_activated_repos_public_method_exists(self):
         """DependencyMapService.get_activated_repos() must be a public method."""
-        from code_indexer.server.services.dependency_map_service import DependencyMapService
-
-        assert hasattr(DependencyMapService, "get_activated_repos"), (
-            "DependencyMapService must have a public get_activated_repos() method"
+        from code_indexer.server.services.dependency_map_service import (
+            DependencyMapService,
         )
+
+        assert hasattr(
+            DependencyMapService, "get_activated_repos"
+        ), "DependencyMapService must have a public get_activated_repos() method"
 
     def test_golden_repos_dir_public_property_exists(self):
         """DependencyMapService.golden_repos_dir must be a public property."""
-        from code_indexer.server.services.dependency_map_service import DependencyMapService
-
-        assert hasattr(DependencyMapService, "golden_repos_dir"), (
-            "DependencyMapService must have a public golden_repos_dir property"
+        from code_indexer.server.services.dependency_map_service import (
+            DependencyMapService,
         )
+
+        assert hasattr(
+            DependencyMapService, "golden_repos_dir"
+        ), "DependencyMapService must have a public golden_repos_dir property"
 
     def test_get_activated_repos_delegates_to_private(self):
         """get_activated_repos() returns same result as _get_activated_repos()."""
-        from unittest.mock import Mock, patch
-        from code_indexer.server.services.dependency_map_service import DependencyMapService
+        from unittest.mock import Mock
+        from code_indexer.server.services.dependency_map_service import (
+            DependencyMapService,
+        )
 
         golden_repos_manager = Mock()
         golden_repos_manager.list_golden_repos.return_value = []
@@ -1136,7 +1167,9 @@ class TestDependencyMapServicePublicAccessors:
     def test_golden_repos_dir_property_returns_manager_dir(self):
         """golden_repos_dir property returns the golden_repos_manager's directory."""
         from unittest.mock import Mock
-        from code_indexer.server.services.dependency_map_service import DependencyMapService
+        from code_indexer.server.services.dependency_map_service import (
+            DependencyMapService,
+        )
 
         golden_repos_manager = Mock()
         golden_repos_manager.list_golden_repos.return_value = []

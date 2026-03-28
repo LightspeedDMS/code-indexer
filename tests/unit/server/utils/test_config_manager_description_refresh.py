@@ -7,7 +7,6 @@ Tests that the new description_refresh_enabled field defaults to False and can b
 import json
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.utils.config_manager import (
     ServerConfigManager,

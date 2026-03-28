@@ -15,13 +15,14 @@ from __future__ import annotations
 import asyncio
 import sys
 import os
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
 # Add the perf-suite directory to path so we can import from it
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite")
+)
 
 from cli_helpers import parse_concurrency_levels  # noqa: E402
 
@@ -29,6 +30,7 @@ from cli_helpers import parse_concurrency_levels  # noqa: E402
 # ---------------------------------------------------------------------------
 # Helpers: fake scenario and fake request execution for unit testing
 # ---------------------------------------------------------------------------
+
 
 def _make_scenario(name: str = "test_scenario") -> Any:
     """Create a minimal Scenario for testing."""
@@ -76,6 +78,7 @@ def _make_error_result(response_time_ms: float = 10.0) -> Any:
 # Tests for run_concurrent_requests()
 # ---------------------------------------------------------------------------
 
+
 class TestRunConcurrentRequests:
     """Tests for escalation.run_concurrent_requests() - semaphore-based concurrency."""
 
@@ -83,7 +86,6 @@ class TestRunConcurrentRequests:
     async def test_returns_correct_count_of_results(self):
         """run_concurrent_requests returns exactly `count` RequestResult objects."""
         from escalation import run_concurrent_requests
-        from metrics import RequestResult
 
         call_count = 0
 
@@ -173,7 +175,6 @@ class TestRunConcurrentRequests:
     async def test_errors_captured_not_raised(self):
         """Request exceptions should be captured as error RequestResult, not re-raised."""
         from escalation import run_concurrent_requests
-        from metrics import RequestResult
 
         async def failing_execute(perf_client, http_client, scenario):
             return _make_error_result()
@@ -225,6 +226,7 @@ class TestRunConcurrentRequests:
 # ---------------------------------------------------------------------------
 # Tests for run_scenario_escalation()
 # ---------------------------------------------------------------------------
+
 
 class TestRunScenarioEscalation:
     """Tests for escalation.run_scenario_escalation() - multi-level escalation."""
@@ -372,6 +374,7 @@ class TestRunScenarioEscalation:
 # Tests for backward compatibility: run_scenario() still works at concurrency=1
 # ---------------------------------------------------------------------------
 
+
 class TestRunScenarioBackwardCompatibility:
     """run_scenario() from runner.py must still work as before."""
 
@@ -386,6 +389,7 @@ class TestRunScenarioBackwardCompatibility:
 
         # Patch _execute_single_request via monkey-patching runner module
         import runner as runner_module
+
         original = runner_module._execute_single_request
         runner_module._execute_single_request = fake_execute
 
@@ -406,6 +410,7 @@ class TestRunScenarioBackwardCompatibility:
 # ---------------------------------------------------------------------------
 # Tests for parse_concurrency_levels() validation
 # ---------------------------------------------------------------------------
+
 
 def test_parse_concurrency_levels_rejects_zero():
     """Zero concurrency level should cause sys.exit."""

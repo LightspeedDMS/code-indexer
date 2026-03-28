@@ -8,8 +8,6 @@ Bug #188: Vector Storage false positive on temporal collections
 
 import json
 import sqlite3
-import tempfile
-from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -47,7 +45,9 @@ class TestBug186ClaudeDelegationNoneType:
             assert "not configured" in result.message.lower()
 
     @pytest.mark.asyncio
-    async def test_check_claude_delegation_credentials_with_missing_config_file(self, tmp_path):
+    async def test_check_claude_delegation_credentials_with_missing_config_file(
+        self, tmp_path
+    ):
         """
         Test that check_claude_delegation_credentials() handles None from load_config() gracefully.
 
@@ -137,7 +137,9 @@ class TestBug188VectorStorageTemporalCollections:
         (collection_dir / "temporal_metadata.db").touch()
         (collection_dir / "temporal_progress.json").write_text("{}")
         (collection_dir / "collection_meta.json").write_text(
-            json.dumps({"vector_size": 1024, "collection_name": "code-indexer-temporal"})
+            json.dumps(
+                {"vector_size": 1024, "collection_name": "code-indexer-temporal"}
+            )
         )
         (collection_dir / "projection_matrix.npy").touch()
 
@@ -167,10 +169,7 @@ class TestBug188VectorStorageTemporalCollections:
         # Create HNSW collection files (no temporal_metadata.db)
         (collection_dir / "hnsw_index.bin").touch()
         (collection_dir / "collection_meta.json").write_text(
-            json.dumps({
-                "vector_size": 1024,
-                "hnsw_index": {"vector_dim": 1024}
-            })
+            json.dumps({"vector_size": 1024, "hnsw_index": {"vector_dim": 1024}})
         )
 
         # Mock HNSWIndexManager to avoid actually loading the index
@@ -209,4 +208,7 @@ class TestBug188VectorStorageTemporalCollections:
         # Should detect missing files
         assert result is not None
         assert result["repo"] == "test-repo"
-        assert "missing" in result["issue"].lower() or "projection_matrix" in result["issue"].lower()
+        assert (
+            "missing" in result["issue"].lower()
+            or "projection_matrix" in result["issue"].lower()
+        )

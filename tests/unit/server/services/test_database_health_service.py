@@ -10,7 +10,7 @@ import os
 import sqlite3
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, call as mock_call
+from unittest.mock import patch
 
 import pytest
 
@@ -301,9 +301,7 @@ class TestCheckNotLockedUsesIndependentConnection:
         )
         assert result.passed is True
 
-    def test_check_not_locked_closes_its_own_connection(
-        self, tmp_path: Path
-    ) -> None:
+    def test_check_not_locked_closes_its_own_connection(self, tmp_path: Path) -> None:
         """
         The independent connection opened by _check_not_locked() must be
         explicitly closed after use to avoid a resource leak.
@@ -391,9 +389,7 @@ class TestManagerPathChecks:
             "to obtain its connection"
         )
 
-    def test_check_read_uses_database_connection_manager(
-        self, tmp_path: Path
-    ) -> None:
+    def test_check_read_uses_database_connection_manager(self, tmp_path: Path) -> None:
         """_check_read() must call DatabaseConnectionManager.get_instance()."""
         db_path = self._make_real_db(tmp_path, "read_test.db")
 
@@ -417,9 +413,7 @@ class TestManagerPathChecks:
             "to obtain its connection"
         )
 
-    def test_check_write_uses_database_connection_manager(
-        self, tmp_path: Path
-    ) -> None:
+    def test_check_write_uses_database_connection_manager(self, tmp_path: Path) -> None:
         """_check_write() must call DatabaseConnectionManager.get_instance()."""
         db_path = self._make_real_db(tmp_path, "write_test.db")
 

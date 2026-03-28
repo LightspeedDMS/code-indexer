@@ -1,9 +1,7 @@
 """Tests for WikiCacheInvalidator service (Story #304)."""
-import os
-import tempfile
-from unittest.mock import MagicMock, patch
 
-import pytest
+from unittest.mock import MagicMock
+
 
 from code_indexer.server.wiki.wiki_cache import WikiCache
 
@@ -163,7 +161,9 @@ class TestWikiCacheInvalidatorSingleton:
 
     def test_module_level_singleton_exists(self):
         """wiki_cache_invalidator module-level singleton must be importable."""
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
         from code_indexer.server.wiki.wiki_cache_invalidator import WikiCacheInvalidator
 
         assert isinstance(wiki_cache_invalidator, WikiCacheInvalidator)

@@ -14,9 +14,9 @@ Tests cover:
 - JSON progress line parsing
 - CLI --progress-json flag registration
 """
+
 import json
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import List, Optional
 
 import pytest
 
@@ -161,7 +161,9 @@ class TestTemporalOnly:
         # 200 commits * 2.5 = 500, CoW = 20 → temporal_weight = 500/520 ≈ 0.9615
         allocator = make_allocator(["temporal"], file_count=0, commit_count=200)
         temporal_phase = next(p for p in allocator.phases if p.name == "temporal")
-        expected_weight = (200 * COST_PER_COMMIT) / (200 * COST_PER_COMMIT + COST_COW_FIXED)
+        expected_weight = (200 * COST_PER_COMMIT) / (
+            200 * COST_PER_COMMIT + COST_COW_FIXED
+        )
         assert temporal_phase.weight == pytest.approx(expected_weight, abs=0.001)
 
 
@@ -174,29 +176,39 @@ class TestSemanticPlusTemporal:
     """AC3: Composite job distributes progress across phases proportionally."""
 
     def test_all_three_phases_present(self):
-        allocator = make_allocator(["semantic", "temporal"], file_count=500, commit_count=200)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=500, commit_count=200
+        )
         names = [p.name for p in allocator.phases]
         assert "semantic" in names
         assert "temporal" in names
         assert "cow" in names
 
     def test_ranges_sum_to_100(self):
-        allocator = make_allocator(["semantic", "temporal"], file_count=500, commit_count=200)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=500, commit_count=200
+        )
         total = sum(p.range_end - p.range_start for p in allocator.phases)
         assert total == pytest.approx(100.0, abs=0.01)
 
     def test_execution_order_semantic_first(self):
-        allocator = make_allocator(["semantic", "temporal"], file_count=500, commit_count=200)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=500, commit_count=200
+        )
         names = [p.name for p in allocator.phases]
         assert names.index("semantic") < names.index("temporal")
 
     def test_cow_always_last(self):
-        allocator = make_allocator(["semantic", "temporal"], file_count=500, commit_count=200)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=500, commit_count=200
+        )
         assert allocator.phases[-1].name == "cow"
 
     def test_phases_contiguous(self):
         """Each phase range_start must equal previous phase range_end."""
-        allocator = make_allocator(["semantic", "temporal"], file_count=500, commit_count=200)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=500, commit_count=200
+        )
         for i in range(1, len(allocator.phases)):
             assert allocator.phases[i].range_start == pytest.approx(
                 allocator.phases[i - 1].range_end, abs=0.001
@@ -224,33 +236,43 @@ class TestDynamicWeightAllocation:
     def test_small_repo_semantic_approx_34_percent(self):
         # 200 * 1.0 = 200 semantic, 150 * 2.5 = 375 temporal, 20 cow
         # total = 595, semantic_pct = 200/595 ≈ 33.6% ≈ 34%
-        allocator = make_allocator(["semantic", "temporal"], file_count=200, commit_count=150)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=200, commit_count=150
+        )
         semantic = next(p for p in allocator.phases if p.name == "semantic")
         assert abs(semantic.weight * 100 - 33.6) < 2.0  # within 2% of expected
 
     def test_small_repo_temporal_approx_63_percent(self):
         # 375 / 595 ≈ 63%
-        allocator = make_allocator(["semantic", "temporal"], file_count=200, commit_count=150)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=200, commit_count=150
+        )
         temporal = next(p for p in allocator.phases if p.name == "temporal")
         assert abs(temporal.weight * 100 - 63.0) < 2.0
 
     def test_large_repo_semantic_approx_80_percent(self):
         # 5000 * 1.0 = 5000 semantic, 500 * 2.5 = 1250 temporal, 20 cow
         # total = 6270, semantic_pct = 5000/6270 ≈ 79.7% ≈ 80%
-        allocator = make_allocator(["semantic", "temporal"], file_count=5000, commit_count=500)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=5000, commit_count=500
+        )
         semantic = next(p for p in allocator.phases if p.name == "semantic")
         assert abs(semantic.weight * 100 - 79.7) < 2.0
 
     def test_large_repo_temporal_approx_19_percent(self):
         # 1250 / 6270 ≈ 19.9% ≈ 19%
-        allocator = make_allocator(["semantic", "temporal"], file_count=5000, commit_count=500)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=5000, commit_count=500
+        )
         temporal = next(p for p in allocator.phases if p.name == "temporal")
         assert abs(temporal.weight * 100 - 19.9) < 2.0
 
     def test_commit_heavy_repo_temporal_dominates(self):
         # 200 files * 1.0 = 200, 88000 commits * 2.5 = 220000, 20 cow
         # temporal_pct = 220000 / 220220 ≈ 99.9%
-        allocator = make_allocator(["semantic", "temporal"], file_count=200, commit_count=88000)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=200, commit_count=88000
+        )
         temporal = next(p for p in allocator.phases if p.name == "temporal")
         assert temporal.weight > 0.99
 
@@ -265,7 +287,9 @@ class TestDynamicWeightAllocation:
             max_commits=100,
         )
         temporal = next(p for p in allocator.phases if p.name == "temporal")
-        expected_weight = (100 * COST_PER_COMMIT) / (200 + 100 * COST_PER_COMMIT + COST_COW_FIXED)
+        expected_weight = (100 * COST_PER_COMMIT) / (
+            200 + 100 * COST_PER_COMMIT + COST_COW_FIXED
+        )
         assert temporal.weight == pytest.approx(expected_weight, abs=0.001)
 
 
@@ -360,7 +384,9 @@ class TestMapPhaseProgress:
 
     def test_second_phase_mapping(self):
         """Temporal phase should map into its range, not from 0."""
-        allocator = make_allocator(["semantic", "temporal"], file_count=500, commit_count=200)
+        allocator = make_allocator(
+            ["semantic", "temporal"], file_count=500, commit_count=200
+        )
         temporal_phase = next(p for p in allocator.phases if p.name == "temporal")
         # Progress at start of temporal phase
         result = allocator.map_phase_progress("temporal", 0, 100)
@@ -404,7 +430,9 @@ class TestPhaseStartEnd:
     def test_cow_phase_start(self):
         allocator = make_allocator(["semantic"], file_count=500, commit_count=0)
         cow_phase = next(p for p in allocator.phases if p.name == "cow")
-        assert allocator.phase_start("cow") == pytest.approx(cow_phase.range_start, abs=0.01)
+        assert allocator.phase_start("cow") == pytest.approx(
+            cow_phase.range_start, abs=0.01
+        )
 
     def test_cow_phase_end_is_100(self):
         allocator = make_allocator(["semantic"], file_count=500, commit_count=0)
@@ -579,7 +607,6 @@ class TestCliProgressJsonFlag:
 
     def test_progress_json_option_registered(self):
         """The --progress-json flag must be a registered option on cidx index."""
-        from click.testing import CliRunner
         from code_indexer.cli import cli
 
         # Get the index command
@@ -591,9 +618,9 @@ class TestCliProgressJsonFlag:
         for param in index_cmd.params:
             option_names.extend(param.opts)
 
-        assert "--progress-json" in option_names, (
-            f"--progress-json must be a registered option. Found: {option_names}"
-        )
+        assert (
+            "--progress-json" in option_names
+        ), f"--progress-json must be a registered option. Found: {option_names}"
 
     def test_progress_json_is_flag(self):
         """--progress-json should be a boolean flag (is_flag=True)."""
@@ -631,7 +658,7 @@ class TestProgressJsonEmission:
 
         emit_progress_json(current=50, total=100, info="indexing files")
         captured = capsys.readouterr()
-        lines = [l for l in captured.out.strip().split("\n") if l.strip()]
+        lines = [line for line in captured.out.strip().split("\n") if line.strip()]
         assert len(lines) == 1
         data = json.loads(lines[0])
         assert data["current"] == 50
@@ -654,5 +681,5 @@ class TestProgressJsonEmission:
         emit_progress_json(current=10, total=100, info="a")
         emit_progress_json(current=20, total=100, info="b")
         captured = capsys.readouterr()
-        lines = [l for l in captured.out.strip().split("\n") if l.strip()]
+        lines = [line for line in captured.out.strip().split("\n") if line.strip()]
         assert len(lines) == 2

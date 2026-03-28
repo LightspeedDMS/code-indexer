@@ -6,7 +6,6 @@ configuration, ensuring Claude CLI explorations can leverage CIDX tools.
 """
 
 import base64
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -297,9 +296,7 @@ class TestRegisterInClaudeCode:
         assert "--header" in args
 
         # Verify Basic auth header format
-        expected_auth = base64.b64encode(
-            b"mcp_test123:mcp_sec_test456"
-        ).decode("ascii")
+        expected_auth = base64.b64encode(b"mcp_test123:mcp_sec_test456").decode("ascii")
         assert f"Authorization: Basic {expected_auth}" in args
 
         # Verify scope and name

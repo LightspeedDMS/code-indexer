@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from unittest.mock import Mock
 
-import pytest
 
 from code_indexer.server.services.dependency_map_service import DependencyMapService
 from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
@@ -86,7 +85,9 @@ Small domain with single repo.
 Standalone utility library.
 """
 
-CHANGE_SUMMARY_RESPONSE = "Summary of changes: repo-a added new embedding model support."
+CHANGE_SUMMARY_RESPONSE = (
+    "Summary of changes: repo-a added new embedding model support."
+)
 
 UPDATED_FULL_RESPONSE = """\
 # Domain Analysis: cidx-platform
@@ -132,7 +133,9 @@ execution, result ranking, and score filtering for semantic code queries.
 """
 
 
-def _make_service_with_mock_analyzer(tmp_path: Path, mock_analyzer: Mock) -> DependencyMapService:
+def _make_service_with_mock_analyzer(
+    tmp_path: Path, mock_analyzer: Mock
+) -> DependencyMapService:
     """Create a DependencyMapService with a mock analyzer for unit testing."""
     config_manager = Mock()
     config = ClaudeIntegrationConfig(
@@ -167,7 +170,9 @@ def _make_config() -> ClaudeIntegrationConfig:
 class TestTruncationGuardAC3:
     """AC3: Truncation guard prevents data loss from summary-only responses."""
 
-    def test_short_response_does_not_overwrite_long_existing_content(self, tmp_path: Path):
+    def test_short_response_does_not_overwrite_long_existing_content(
+        self, tmp_path: Path
+    ):
         """
         Given a domain file with 2000+ chars of documentation
         And Claude CLI returns only a short change summary (~200 chars)
@@ -181,9 +186,12 @@ class TestTruncationGuardAC3:
 
         # Confirm existing body is large (> 500 chars)
         existing_body = FULL_DOMAIN_CONTENT.split("---\n\n", 1)[-1]
-        assert len(existing_body) > 500, f"Test setup: body should be >500 chars, got {len(existing_body)}"
-        assert len(CHANGE_SUMMARY_RESPONSE) < len(existing_body) * 0.5, \
-            "Test setup: short response should be < 50% of existing body"
+        assert (
+            len(existing_body) > 500
+        ), f"Test setup: body should be >500 chars, got {len(existing_body)}"
+        assert (
+            len(CHANGE_SUMMARY_RESPONSE) < len(existing_body) * 0.5
+        ), "Test setup: short response should be < 50% of existing body"
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
@@ -211,8 +219,9 @@ class TestTruncationGuardAC3:
             f"Expected preserved content ({len(original_content)} chars), "
             f"but file changed to ({len(result_content)} chars)"
         )
-        assert CHANGE_SUMMARY_RESPONSE not in result_content, \
-            "Short summary-only response should NOT appear in file after truncation guard fires"
+        assert (
+            CHANGE_SUMMARY_RESPONSE not in result_content
+        ), "Short summary-only response should NOT appear in file after truncation guard fires"
 
     def test_truncation_guard_logs_warning(self, tmp_path: Path, caplog):
         """
@@ -241,13 +250,19 @@ class TestTruncationGuardAC3:
             )
 
         # Should have logged a warning mentioning "short" or length discrepancy
-        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        ]
         assert any(
-            "short" in msg.lower() or "truncat" in msg.lower() or "preserv" in msg.lower()
+            "short" in msg.lower()
+            or "truncat" in msg.lower()
+            or "preserv" in msg.lower()
             for msg in warning_messages
         ), f"Expected truncation warning in logs. Got warnings: {warning_messages}"
 
-    def test_truncation_guard_threshold_exactly_50_percent_of_body(self, tmp_path: Path):
+    def test_truncation_guard_threshold_exactly_50_percent_of_body(
+        self, tmp_path: Path
+    ):
         """
         The threshold is response_len < existing_body_len * 0.5 AND existing_body > 500.
         A response at exactly 50% should NOT trigger the guard (boundary test).
@@ -282,8 +297,9 @@ class TestTruncationGuardAC3:
 
         # At exactly 50%, guard should NOT fire — file should be updated
         result_content = domain_file.read_text()
-        assert response_at_50_pct in result_content, \
-            "At exactly 50% threshold, truncation guard should NOT fire"
+        assert (
+            response_at_50_pct in result_content
+        ), "At exactly 50% threshold, truncation guard should NOT fire"
 
 
 class TestLegitimateShortUpdatesAC4:
@@ -302,11 +318,13 @@ class TestLegitimateShortUpdatesAC4:
         # Verify small domain body is <= 500 chars (guard should not fire)
         parts = SMALL_DOMAIN_CONTENT.split("---\n\n", 1)
         existing_body = parts[-1] if len(parts) > 1 else SMALL_DOMAIN_CONTENT
-        assert len(existing_body) <= 500, (
-            f"Test setup: SMALL_DOMAIN_CONTENT body should be <=500 chars, got {len(existing_body)}"
-        )
+        assert (
+            len(existing_body) <= 500
+        ), f"Test setup: SMALL_DOMAIN_CONTENT body should be <=500 chars, got {len(existing_body)}"
 
-        short_but_valid_response = "# Domain Analysis: tiny-domain\n\n## Overview\n\nUpdated content."
+        short_but_valid_response = (
+            "# Domain Analysis: tiny-domain\n\n## Overview\n\nUpdated content."
+        )
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
@@ -326,8 +344,9 @@ class TestLegitimateShortUpdatesAC4:
 
         # File should be updated (guard did not fire)
         result_content = domain_file.read_text()
-        assert short_but_valid_response in result_content, \
-            "Small domains should accept short responses (guard only applies when body > 500 chars)"
+        assert (
+            short_but_valid_response in result_content
+        ), "Small domains should accept short responses (guard only applies when body > 500 chars)"
 
     def test_large_domain_accepts_proportional_long_response(self, tmp_path: Path):
         """
@@ -356,11 +375,13 @@ class TestLegitimateShortUpdatesAC4:
         )
 
         result_content = domain_file.read_text()
-        assert UPDATED_FULL_RESPONSE in result_content, \
-            "Full proportional response should update the file normally"
+        assert (
+            UPDATED_FULL_RESPONSE in result_content
+        ), "Full proportional response should update the file normally"
         # Confirm key sections of updated response are present
-        assert "voyage-3-large" in result_content, \
-            "Updated content should contain the new analysis details"
+        assert (
+            "voyage-3-large" in result_content
+        ), "Updated content should contain the new analysis details"
 
     def test_empty_existing_content_does_not_crash(self, tmp_path: Path):
         """
@@ -372,7 +393,9 @@ class TestLegitimateShortUpdatesAC4:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = "# Domain Analysis: empty-domain\n\nNew content."
+        mock_analyzer.invoke_delta_merge.return_value = (
+            "# Domain Analysis: empty-domain\n\nNew content."
+        )
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
@@ -417,14 +440,17 @@ class TestLegitimateShortUpdatesAC4:
         )
 
         result_content = domain_file.read_text()
-        assert proportional_response in result_content, \
-            "Proportional update to no-frontmatter file should succeed"
+        assert (
+            proportional_response in result_content
+        ), "Proportional update to no-frontmatter file should succeed"
 
 
 class TestFrontmatterTimestampAC1:
     """AC1: Delta analysis preserves full document structure."""
 
-    def test_update_frontmatter_timestamp_preserves_body_structure(self, tmp_path: Path):
+    def test_update_frontmatter_timestamp_preserves_body_structure(
+        self, tmp_path: Path
+    ):
         """
         _update_frontmatter_timestamp must replace the body with new_body
         and only update the last_analyzed timestamp in frontmatter.
@@ -468,7 +494,9 @@ Updated repo roles with evidence.
 |----------|----------|-----------------|---------|
 | repo-b | repo-a | Code-level | Imports EmbeddingStore |
 """
-        result = service._update_frontmatter_timestamp(existing, new_body, "cidx-platform")
+        result = service._update_frontmatter_timestamp(
+            existing, new_body, "cidx-platform"
+        )
 
         # Frontmatter fields (other than last_analyzed) must be preserved
         assert "domain: cidx-platform" in result
@@ -488,7 +516,9 @@ Updated repo roles with evidence.
         assert "Old overview content." not in result
         assert "Old repo roles." not in result
 
-    def test_delta_update_with_full_response_preserves_all_sections(self, tmp_path: Path):
+    def test_delta_update_with_full_response_preserves_all_sections(
+        self, tmp_path: Path
+    ):
         """
         AC1: When delta response is a full document, all sections are preserved in output.
         """

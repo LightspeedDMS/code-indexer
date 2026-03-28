@@ -4,10 +4,11 @@ Test error formatter JSON serialization edge cases.
 Tests Bug #152 fix: _serialize_value_for_json() handling of bytes and callable types.
 """
 
-import pytest
 from datetime import datetime, timezone
 from pathlib import Path
-from src.code_indexer.server.middleware.error_formatters import _serialize_value_for_json
+from src.code_indexer.server.middleware.error_formatters import (
+    _serialize_value_for_json,
+)
 
 
 class TestSerializeValueForJson:
@@ -39,6 +40,7 @@ class TestSerializeValueForJson:
 
     def test_serialize_callable_with_name(self):
         """Test serialization of callable with __name__ attribute."""
+
         # Given: A function
         def test_function():
             pass
@@ -53,7 +55,7 @@ class TestSerializeValueForJson:
     def test_serialize_lambda_callable(self):
         """Test serialization of lambda (callable without proper __name__)."""
         # Given: A lambda function
-        test_lambda = lambda x: x
+        test_lambda = lambda x: x  # noqa: E731
 
         # When: Serializing it
         result = _serialize_value_for_json(test_lambda)
@@ -77,13 +79,7 @@ class TestSerializeValueForJson:
     def test_serialize_nested_dict_with_bytes(self):
         """Test serialization of nested dict containing bytes."""
         # Given: A nested dict with bytes
-        test_dict = {
-            "normal": "value",
-            "nested": {
-                "data": b"binary data",
-                "count": 42
-            }
-        }
+        test_dict = {"normal": "value", "nested": {"data": b"binary data", "count": 42}}
 
         # When: Serializing it
         result = _serialize_value_for_json(test_dict)
@@ -91,17 +87,16 @@ class TestSerializeValueForJson:
         # Then: Should recursively serialize bytes
         assert result == {
             "normal": "value",
-            "nested": {
-                "data": "<bytes:11 bytes>",
-                "count": 42
-            }
+            "nested": {"data": "<bytes:11 bytes>", "count": 42},
         }
 
     def test_serialize_list_with_callable(self):
         """Test serialization of list containing callable."""
+
         # Given: A list with callable
         def sample_func():
             pass
+
         test_list = ["item1", sample_func, "item3"]
 
         # When: Serializing it
@@ -126,6 +121,7 @@ class TestSerializeValueForJson:
 
     def test_serialize_complex_nested_structure(self):
         """Test serialization of complex structure with multiple edge case types."""
+
         # Given: A complex structure with various types
         def my_callback():
             pass
@@ -135,9 +131,7 @@ class TestSerializeValueForJson:
             "file": Path("/test.txt"),
             "data": b"binary",
             "handler": my_callback,
-            "nested": [
-                {"inner_bytes": b"test", "inner_func": len}
-            ]
+            "nested": [{"inner_bytes": b"test", "inner_func": len}],
         }
 
         # When: Serializing it
@@ -151,5 +145,5 @@ class TestSerializeValueForJson:
             "handler": "<function:my_callback>",
             "nested": [
                 {"inner_bytes": "<bytes:4 bytes>", "inner_func": "<function:len>"}
-            ]
+            ],
         }

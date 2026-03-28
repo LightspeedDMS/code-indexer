@@ -9,9 +9,6 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-import pytest
-
-
 
 class TestJobTrackerComplete:
     """Tests for complete_job (AC1)."""

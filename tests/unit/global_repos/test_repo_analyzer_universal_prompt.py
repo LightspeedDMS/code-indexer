@@ -6,7 +6,6 @@ to discover repo type dynamically by examining folder structure.
 """
 
 import pytest
-from pathlib import Path
 from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 
 
@@ -31,13 +30,17 @@ class TestUniversalPromptGeneration:
         # Verify Langfuse-specific extraction instructions
         assert "user" in prompt.lower()  # user_identity
         assert "project" in prompt.lower()  # projects_detected
-        assert "activity" in prompt.lower() or "summary" in prompt.lower()  # activity_summary
+        assert (
+            "activity" in prompt.lower() or "summary" in prompt.lower()
+        )  # activity_summary
 
         # Verify output format instructions
         assert "repo_type" in prompt.lower()  # Must include repo_type in YAML
         assert "yaml" in prompt.lower() or "frontmatter" in prompt.lower()
 
-    def test_get_prompt_refresh_mode_passes_last_analyzed_and_description(self, tmp_path):
+    def test_get_prompt_refresh_mode_passes_last_analyzed_and_description(
+        self, tmp_path
+    ):
         """AC2: get_prompt('refresh', ...) returns universal refresh prompt with last_analyzed and existing_description."""
         analyzer = RepoAnalyzer(str(tmp_path))
 
@@ -47,7 +50,7 @@ class TestUniversalPromptGeneration:
         prompt = analyzer.get_prompt(
             mode="refresh",
             last_analyzed=last_analyzed,
-            existing_description=existing_description
+            existing_description=existing_description,
         )
 
         # Verify it's a single prompt
@@ -58,7 +61,9 @@ class TestUniversalPromptGeneration:
         assert last_analyzed in prompt or "last analyzed" in prompt.lower()
 
         # Verify existing_description passed to Claude
-        assert existing_description in prompt or "existing description" in prompt.lower()
+        assert (
+            existing_description in prompt or "existing description" in prompt.lower()
+        )
 
         # Verify git log instruction for change detection
         assert "git log" in prompt.lower()
@@ -87,12 +92,12 @@ class TestUniversalPromptGeneration:
         prompt_refresh_1 = analyzer.get_prompt(
             mode="refresh",
             last_analyzed="2025-01-01T00:00:00Z",
-            existing_description="desc"
+            existing_description="desc",
         )
         prompt_refresh_2 = analyzer.get_prompt(
             mode="refresh",
             last_analyzed="2025-01-01T00:00:00Z",
-            existing_description="desc"
+            existing_description="desc",
         )
         assert prompt_refresh_1 == prompt_refresh_2
 
@@ -106,7 +111,10 @@ class TestUniversalPromptGeneration:
         assert ".git" in prompt or "git directory" in prompt.lower()
 
         # Should teach Claude to look for UUID folders (Langfuse traces)
-        assert "uuid" in prompt.lower() or "universally unique identifier" in prompt.lower()
+        assert (
+            "uuid" in prompt.lower()
+            or "universally unique identifier" in prompt.lower()
+        )
 
         # Should teach Claude to look for JSON trace files
         assert "json" in prompt.lower()
@@ -123,7 +131,7 @@ class TestUniversalPromptGeneration:
         prompt = analyzer.get_prompt(
             mode="refresh",
             last_analyzed=last_analyzed,
-            existing_description="Some description"
+            existing_description="Some description",
         )
 
         # Should instruct git log with date filter
@@ -141,11 +149,15 @@ class TestUniversalPromptGeneration:
         prompt = analyzer.get_prompt(
             mode="refresh",
             last_analyzed="2025-01-10T00:00:00Z",
-            existing_description="Existing"
+            existing_description="Existing",
         )
 
         # Should explicitly state traces are immutable
-        assert "immutable" in prompt.lower() or "unchanging" in prompt.lower() or "established" in prompt.lower()
+        assert (
+            "immutable" in prompt.lower()
+            or "unchanging" in prompt.lower()
+            or "established" in prompt.lower()
+        )
 
         # Should instruct focus on new files
         assert "new" in prompt.lower()

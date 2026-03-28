@@ -4,13 +4,11 @@ Unit tests for per-repo category update route (Story #183).
 Tests the Web UI route for manually updating a golden repo's category assignment.
 """
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-from fastapi import Request
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import create_app
@@ -77,8 +75,12 @@ def admin_session_cookie(client):
     )
 
     # Should redirect to /admin/ on success
-    assert response.status_code == 303, f"Login failed with status {response.status_code}"
-    assert response.headers.get("location") == "/admin/", f"Unexpected redirect: {response.headers.get('location')}"
+    assert (
+        response.status_code == 303
+    ), f"Login failed with status {response.status_code}"
+    assert (
+        response.headers.get("location") == "/admin/"
+    ), f"Unexpected redirect: {response.headers.get('location')}"
 
     # Extract session cookie from response
     session_cookies = response.cookies
@@ -115,7 +117,9 @@ def test_update_repo_category_requires_admin_session(client):
     assert response.status_code in [302, 303, 401, 403]
 
 
-def test_update_repo_category_with_valid_data_succeeds(client, admin_session_cookie, csrf_token, temp_db):
+def test_update_repo_category_with_valid_data_succeeds(
+    client, admin_session_cookie, csrf_token, temp_db
+):
     """Test updating repo category with valid data succeeds."""
     # Get the actual database path used by the app
     app_db_path = str(Path(temp_db).parent / "data" / "cidx_server.db")
@@ -141,7 +145,9 @@ def test_update_repo_category_with_valid_data_succeeds(client, admin_session_coo
     )
 
     # Assert: Success response
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text[:200]}"
+    assert (
+        response.status_code == 200
+    ), f"Expected 200, got {response.status_code}: {response.text[:200]}"
 
     # Verify database update
     repo = backend.get_repo("test-repo")
@@ -149,7 +155,9 @@ def test_update_repo_category_with_valid_data_succeeds(client, admin_session_coo
     assert repo["category_auto_assigned"] is False  # Manual override
 
 
-def test_update_repo_category_to_unassigned(client, admin_session_cookie, csrf_token, temp_db):
+def test_update_repo_category_to_unassigned(
+    client, admin_session_cookie, csrf_token, temp_db
+):
     """Test updating repo category to Unassigned (NULL)."""
     # Get the actual database path used by the app
     app_db_path = str(Path(temp_db).parent / "data" / "cidx_server.db")
@@ -171,19 +179,26 @@ def test_update_repo_category_to_unassigned(client, admin_session_cookie, csrf_t
     # Act: Set to Unassigned (empty string or "null")
     response = client.post(
         "/admin/golden-repos/test-repo/category",
-        data={"category_id": "", "csrf_token": csrf_token},  # Empty string means Unassigned
+        data={
+            "category_id": "",
+            "csrf_token": csrf_token,
+        },  # Empty string means Unassigned
         cookies=admin_session_cookie,
     )
 
     # Assert: Success response
-    assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text[:200]}"
+    assert (
+        response.status_code == 200
+    ), f"Expected 200, got {response.status_code}: {response.text[:200]}"
 
     # Verify database update
     repo = backend.get_repo("test-repo")
     assert repo["category_id"] is None
 
 
-def test_update_repo_category_nonexistent_repo_returns_error(client, admin_session_cookie, csrf_token, temp_db):
+def test_update_repo_category_nonexistent_repo_returns_error(
+    client, admin_session_cookie, csrf_token, temp_db
+):
     """Test updating category for non-existent repo returns error."""
     # Get the actual database path used by the app
     app_db_path = str(Path(temp_db).parent / "data" / "cidx_server.db")
@@ -203,7 +218,9 @@ def test_update_repo_category_nonexistent_repo_returns_error(client, admin_sessi
     assert response.status_code in [400, 404, 500]
 
 
-def test_update_repo_category_invalid_category_id_returns_error(client, admin_session_cookie, csrf_token, temp_db):
+def test_update_repo_category_invalid_category_id_returns_error(
+    client, admin_session_cookie, csrf_token, temp_db
+):
     """Test updating repo with invalid category_id returns error."""
     # Get the actual database path used by the app
     app_db_path = str(Path(temp_db).parent / "data" / "cidx_server.db")

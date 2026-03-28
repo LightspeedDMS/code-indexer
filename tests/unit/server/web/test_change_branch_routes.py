@@ -16,7 +16,6 @@ Tests:
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from fastapi import Request
-from fastapi.responses import JSONResponse
 
 
 def _make_request():
@@ -66,6 +65,7 @@ class TestChangeBranchRoute:
 
         assert result.status_code == 401
         import json
+
         body = json.loads(result.body)
         assert body["error"] == "Authentication required"
 
@@ -88,6 +88,7 @@ class TestChangeBranchRoute:
 
         assert result.status_code == 400
         import json
+
         body = json.loads(result.body)
         assert "branch" in body["error"]
 
@@ -100,7 +101,10 @@ class TestChangeBranchRoute:
         mock_request.json = AsyncMock(return_value={"branch": "feature/new"})
 
         mock_manager = MagicMock()
-        mock_manager.change_branch_async.return_value = {"success": True, "job_id": "job-001"}
+        mock_manager.change_branch_async.return_value = {
+            "success": True,
+            "job_id": "job-001",
+        }
 
         with (
             patch(
@@ -119,10 +123,13 @@ class TestChangeBranchRoute:
 
         assert result.status_code == 202
         import json
+
         body = json.loads(result.body)
         assert body["success"] is True
         assert body["job_id"] == "job-001"
-        mock_manager.change_branch_async.assert_called_once_with("my-repo", "feature/new", "admin")
+        mock_manager.change_branch_async.assert_called_once_with(
+            "my-repo", "feature/new", "admin"
+        )
 
     @pytest.mark.asyncio
     async def test_change_branch_returns_404_on_not_found(self):
@@ -133,7 +140,9 @@ class TestChangeBranchRoute:
         mock_request.json = AsyncMock(return_value={"branch": "main"})
 
         mock_manager = MagicMock()
-        mock_manager.change_branch_async.side_effect = FileNotFoundError("Repo not found")
+        mock_manager.change_branch_async.side_effect = FileNotFoundError(
+            "Repo not found"
+        )
 
         with (
             patch(
@@ -152,6 +161,7 @@ class TestChangeBranchRoute:
 
         assert result.status_code == 404
         import json
+
         body = json.loads(result.body)
         assert "not found" in body["error"].lower()
 
@@ -217,6 +227,7 @@ class TestChangeBranchRoute:
 
         assert result.status_code == 400
         import json
+
         body = json.loads(result.body)
         assert "Invalid branch" in body["error"]
 
@@ -253,14 +264,15 @@ class TestChangeBranchAsyncRoute:
                 alias="my-repo",
             )
 
-        assert result.status_code == 202, (
-            "Route must return HTTP 202 Accepted when job is submitted"
-        )
+        assert (
+            result.status_code == 202
+        ), "Route must return HTTP 202 Accepted when job is submitted"
         import json
+
         body = json.loads(result.body)
-        assert body.get("job_id") == "job-abc-123", (
-            "Response must include job_id from change_branch_async()"
-        )
+        assert (
+            body.get("job_id") == "job-abc-123"
+        ), "Response must include job_id from change_branch_async()"
         mock_manager.change_branch_async.assert_called_once_with(
             "my-repo", "feature/new", "admin"
         )
@@ -294,10 +306,11 @@ class TestChangeBranchAsyncRoute:
                 alias="my-repo",
             )
 
-        assert result.status_code == 200, (
-            "Route must return HTTP 200 when already on target branch (job_id=None)"
-        )
+        assert (
+            result.status_code == 200
+        ), "Route must return HTTP 200 when already on target branch (job_id=None)"
         import json
+
         body = json.loads(result.body)
         assert body.get("success") is True
 
@@ -330,14 +343,15 @@ class TestChangeBranchAsyncRoute:
                 alias="my-repo",
             )
 
-        assert result.status_code == 409, (
-            "Route must return HTTP 409 when DuplicateJobError raised"
-        )
+        assert (
+            result.status_code == 409
+        ), "Route must return HTTP 409 when DuplicateJobError raised"
         import json
+
         body = json.loads(result.body)
-        assert "existing_job_id" in body, (
-            "Response must include existing_job_id from DuplicateJobError"
-        )
+        assert (
+            "existing_job_id" in body
+        ), "Response must include existing_job_id from DuplicateJobError"
         assert body["existing_job_id"] == "existing-job-id"
 
     @pytest.mark.asyncio
@@ -364,7 +378,7 @@ class TestChangeBranchAsyncRoute:
                 return_value=mock_manager,
             ),
         ):
-            result = await change_golden_repo_branch(
+            _result = await change_golden_repo_branch(
                 request=mock_request,
                 alias="my-repo",
             )
@@ -394,6 +408,7 @@ class TestGetBranchesRoute:
 
         assert result.status_code == 401
         import json
+
         body = json.loads(result.body)
         assert body["error"] == "Authentication required"
 
@@ -420,6 +435,7 @@ class TestGetBranchesRoute:
 
         assert result.status_code == 500
         import json
+
         body = json.loads(result.body)
         assert "not available" in body["error"]
 
@@ -454,6 +470,7 @@ class TestGetBranchesRoute:
 
         assert result.status_code == 200
         import json
+
         body = json.loads(result.body)
         assert "branches" in body
         assert len(body["branches"]) == 2
@@ -490,5 +507,6 @@ class TestGetBranchesRoute:
 
         assert result.status_code == 404
         import json
+
         body = json.loads(result.body)
         assert "not found" in body["error"].lower()

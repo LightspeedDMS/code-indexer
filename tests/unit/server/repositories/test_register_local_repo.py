@@ -6,17 +6,14 @@ that consolidates three separate registration patterns in app.py.
 """
 
 import tempfile
-import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import threading
-import time
 
 import pytest
 
 from src.code_indexer.server.repositories.golden_repo_manager import (
     GoldenRepoManager,
-    GoldenRepo,
 )
 from src.code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
@@ -85,7 +82,9 @@ class TestRegisterLocalRepo:
             folder_path=test_folder,
             fire_lifecycle_hooks=False,
         )
-        assert result2 is False, "Duplicate registration should return False (idempotent)"
+        assert (
+            result2 is False
+        ), "Duplicate registration should return False (idempotent)"
 
     def test_register_local_repo_validates_alias_path_traversal(
         self, golden_repo_manager, test_folder
@@ -226,11 +225,14 @@ class TestRegisterLocalRepo:
         mock_group_manager = MagicMock()
         golden_repo_manager.group_access_manager = mock_group_manager
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.on_repo_added"
-        ) as mock_meta_hook, patch(
-            "code_indexer.server.services.group_access_hooks.on_repo_added"
-        ) as mock_group_hook:
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.on_repo_added"
+            ) as mock_meta_hook,
+            patch(
+                "code_indexer.server.services.group_access_hooks.on_repo_added"
+            ) as mock_group_hook,
+        ):
             golden_repo_manager.register_local_repo(
                 alias="test-repo",
                 folder_path=test_folder,
@@ -260,11 +262,14 @@ class TestRegisterLocalRepo:
         mock_group_manager = MagicMock()
         golden_repo_manager.group_access_manager = mock_group_manager
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.on_repo_added"
-        ) as mock_meta_hook, patch(
-            "code_indexer.server.services.group_access_hooks.on_repo_added"
-        ) as mock_group_hook:
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.on_repo_added"
+            ) as mock_meta_hook,
+            patch(
+                "code_indexer.server.services.group_access_hooks.on_repo_added"
+            ) as mock_group_hook,
+        ):
             golden_repo_manager.register_local_repo(
                 alias="test-repo",
                 folder_path=test_folder,
@@ -286,11 +291,14 @@ class TestRegisterLocalRepo:
         # Ensure group_access_manager is None
         golden_repo_manager.group_access_manager = None
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.on_repo_added"
-        ) as mock_meta_hook, patch(
-            "code_indexer.server.services.group_access_hooks.on_repo_added"
-        ) as mock_group_hook:
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.on_repo_added"
+            ) as mock_meta_hook,
+            patch(
+                "code_indexer.server.services.group_access_hooks.on_repo_added"
+            ) as mock_group_hook,
+        ):
             golden_repo_manager.register_local_repo(
                 alias="test-repo",
                 folder_path=test_folder,
@@ -415,11 +423,14 @@ class TestRegisterLocalRepo:
         mock_group_manager = MagicMock()
         golden_repo_manager.group_access_manager = mock_group_manager
 
-        with patch(
-            "code_indexer.global_repos.meta_description_hook.on_repo_added"
-        ) as mock_meta_hook, patch(
-            "code_indexer.server.services.group_access_hooks.on_repo_added"
-        ) as mock_group_hook:
+        with (
+            patch(
+                "code_indexer.global_repos.meta_description_hook.on_repo_added"
+            ) as mock_meta_hook,
+            patch(
+                "code_indexer.server.services.group_access_hooks.on_repo_added"
+            ) as mock_group_hook,
+        ):
             # Make hooks raise exceptions
             mock_meta_hook.side_effect = Exception("Meta hook failed")
             mock_group_hook.side_effect = Exception("Group hook failed")

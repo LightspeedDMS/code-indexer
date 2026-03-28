@@ -75,7 +75,7 @@ class TestDiscoveryBranchesCredentialRetrieval:
             mock_get_token_manager.return_value = mock_token_manager
             mock_service_class.return_value = mock_service
 
-            response = client.post(
+            _response = client.post(
                 "/admin/api/discovery/branches",
                 json={
                     "repos": [
@@ -153,7 +153,7 @@ class TestDiscoveryBranchesCredentialRetrieval:
             mock_get_token_manager.return_value = mock_token_manager
             mock_service_class.return_value = mock_service
 
-            response = client.post(
+            _response = client.post(
                 "/admin/api/discovery/branches",
                 json={
                     "repos": [
@@ -221,7 +221,7 @@ class TestDiscoveryBranchesCredentialRetrieval:
             mock_get_token_manager.return_value = mock_token_manager
             mock_service_class.return_value = mock_service
 
-            response = client.post(
+            _response = client.post(
                 "/admin/api/discovery/branches",
                 json={
                     "repos": [
@@ -305,7 +305,7 @@ class TestDiscoveryBranchesCredentialRetrieval:
             mock_get_token_manager.return_value = mock_token_manager
             mock_service_class.return_value = mock_service
 
-            response = client.post(
+            _response = client.post(
                 "/admin/api/discovery/branches",
                 json={
                     "repos": [

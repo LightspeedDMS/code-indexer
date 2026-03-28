@@ -12,14 +12,14 @@ Tests cover:
 TDD RED PHASE: Tests written before production code changes exist.
 """
 
-import pytest
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-STRUCTURED_TABLE_HEADER = "| This Repo | Depends On | Target Domain | Type | Why | Evidence |"
+STRUCTURED_TABLE_HEADER = (
+    "| This Repo | Depends On | Target Domain | Type | Why | Evidence |"
+)
 SENTINEL_TEXT = "No verified cross-domain dependencies."
 
 DEPENDENCY_TYPES_ENUM = [
@@ -35,6 +35,7 @@ DEPENDENCY_TYPES_ENUM = [
 def _make_analyzer(tmp_path):
     """Build a minimal DependencyMapAnalyzer for prompt testing."""
     from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+
     return DependencyMapAnalyzer(
         golden_repos_root=tmp_path,
         cidx_meta_path=tmp_path / "cidx-meta",
@@ -53,9 +54,10 @@ class TestNegationIndicatorsRemoved:
     def test_negation_indicators_not_in_module(self):
         """AC7: NEGATION_INDICATORS must not be importable from dependency_map_analyzer."""
         import code_indexer.global_repos.dependency_map_analyzer as mod
-        assert not hasattr(mod, "NEGATION_INDICATORS"), (
-            "NEGATION_INDICATORS constant must be removed from dependency_map_analyzer module"
-        )
+
+        assert not hasattr(
+            mod, "NEGATION_INDICATORS"
+        ), "NEGATION_INDICATORS constant must be removed from dependency_map_analyzer module"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -264,9 +266,9 @@ class TestDeltaMergePromptSchema:
     def test_self_correction_references_table_format(self, tmp_path):
         """AC3: Delta merge self-correction rules reference table format."""
         prompt = _build_delta_merge_prompt(tmp_path)
-        assert "table" in prompt.lower(), (
-            "Delta merge self-correction rules must reference table format"
-        )
+        assert (
+            "table" in prompt.lower()
+        ), "Delta merge self-correction rules must reference table format"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -15,7 +15,6 @@ This test verifies:
 """
 
 import inspect
-import pytest
 from unittest.mock import Mock, patch
 
 
@@ -57,7 +56,9 @@ def _make_manager_for_wiring_test(scheduler=None):
     golden_repo.enable_temporal = False
 
     manager.golden_repos = {"test-repo": golden_repo}
-    manager.get_actual_repo_path = Mock(return_value="/fake/data/golden-repos/test-repo")
+    manager.get_actual_repo_path = Mock(
+        return_value="/fake/data/golden-repos/test-repo"
+    )
 
     captured_workers = []
 
@@ -89,9 +90,7 @@ def test_with_scheduler_wired_write_lock_is_acquired():
         "code_indexer.server.repositories.golden_repo_manager.subprocess.run"
     ) as mock_run:
         mock_run.return_value = Mock(returncode=0, stdout="ok", stderr="")
-        with patch(
-            "code_indexer.server.repositories.golden_repo_manager.Path"
-        ):
+        with patch("code_indexer.server.repositories.golden_repo_manager.Path"):
             manager.add_indexes_to_golden_repo(
                 alias="test-repo",
                 index_types=["semantic"],

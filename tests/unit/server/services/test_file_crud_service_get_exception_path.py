@@ -4,7 +4,6 @@ Tests for FileCRUDService.get_write_exception_path() method (Story #197).
 Tests the public method to retrieve exception paths for registered aliases.
 """
 
-import pytest
 from pathlib import Path
 from code_indexer.server.services.file_crud_service import FileCRUDService
 

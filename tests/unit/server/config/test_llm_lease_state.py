@@ -5,9 +5,7 @@ Uses tmp_path fixture for full test isolation.
 """
 
 import json
-import os
 
-import pytest
 
 from code_indexer.server.config.llm_lease_state import (
     LlmLeaseState,
@@ -18,6 +16,7 @@ from code_indexer.server.config.llm_lease_state import (
 # ---------------------------------------------------------------------------
 # load_state() — no file scenario
 # ---------------------------------------------------------------------------
+
 
 class TestLoadStateNoFile:
     def test_load_returns_none_when_no_file_exists(self, tmp_path):
@@ -35,6 +34,7 @@ class TestLoadStateNoFile:
 # ---------------------------------------------------------------------------
 # save_state() + load_state() roundtrip
 # ---------------------------------------------------------------------------
+
 
 class TestSaveLoadRoundtrip:
     def test_roundtrip_preserves_lease_id(self, tmp_path):
@@ -94,6 +94,7 @@ class TestSaveLoadRoundtrip:
 # File permissions
 # ---------------------------------------------------------------------------
 
+
 class TestFilePermissions:
     def test_saved_file_has_0o600_permissions(self, tmp_path):
         manager = LlmLeaseStateManager(server_dir_path=str(tmp_path))
@@ -119,6 +120,7 @@ class TestFilePermissions:
 # ---------------------------------------------------------------------------
 # Encryption verification
 # ---------------------------------------------------------------------------
+
 
 class TestEncryption:
     def test_raw_file_content_is_not_plaintext_json(self, tmp_path):
@@ -160,6 +162,7 @@ class TestEncryption:
 # clear_state()
 # ---------------------------------------------------------------------------
 
+
 class TestClearState:
     def test_clear_state_deletes_file(self, tmp_path):
         manager = LlmLeaseStateManager(server_dir_path=str(tmp_path))
@@ -191,6 +194,7 @@ class TestClearState:
 # credential_type field
 # ---------------------------------------------------------------------------
 
+
 class TestCredentialTypeField:
     def test_credential_type_defaults_to_oauth(self, tmp_path):
         """LlmLeaseState created without credential_type defaults to 'oauth'."""
@@ -211,7 +215,9 @@ class TestCredentialTypeField:
         assert loaded is not None
         assert loaded.credential_type == "api_key"
 
-    def test_backward_compat_old_state_file_without_credential_type_loads_as_oauth(self, tmp_path):
+    def test_backward_compat_old_state_file_without_credential_type_loads_as_oauth(
+        self, tmp_path
+    ):
         """State files written before credential_type was added load with default 'oauth'."""
         # Simulate an old state file: save a state, then corrupt the JSON by
         # stripping credential_type from the plaintext before it is encrypted.

@@ -19,14 +19,12 @@ All 15 tests map to the 5-phase repair algorithm in DepMapRepairExecutor.
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-import pytest
 
 # Reuse helpers from health detector tests
 from tests.unit.server.services.test_dep_map_health_detector import (
     VALID_DOMAIN_CONTENT,
-    VALID_INDEX_CONTENT,
     make_domain_file,
     make_domains_json,
     make_healthy_output_dir,
@@ -41,7 +39,9 @@ from tests.unit.server.services.test_dep_map_health_detector import (
 
 def _get_health_detector():
     """Import DepMapHealthDetector -- real instance, no mocking."""
-    from code_indexer.server.services.dep_map_health_detector import DepMapHealthDetector
+    from code_indexer.server.services.dep_map_health_detector import (
+        DepMapHealthDetector,
+    )
 
     return DepMapHealthDetector()
 
@@ -55,7 +55,9 @@ def _get_index_regenerator():
 
 def _get_executor(domain_analyzer=None, journal_callback=None):
     """Build a DepMapRepairExecutor with real health detector and index regenerator."""
-    from code_indexer.server.services.dep_map_repair_executor import DepMapRepairExecutor
+    from code_indexer.server.services.dep_map_repair_executor import (
+        DepMapRepairExecutor,
+    )
 
     return DepMapRepairExecutor(
         health_detector=_get_health_detector(),
@@ -73,7 +75,9 @@ def _get_executor(domain_analyzer=None, journal_callback=None):
 def make_success_analyzer():
     """Return a domain_analyzer that always writes valid content and returns True."""
 
-    def analyzer(output_dir: Path, domain: Dict, domain_list: List, repo_list: List) -> bool:
+    def analyzer(
+        output_dir: Path, domain: Dict, domain_list: List, repo_list: List
+    ) -> bool:
         content = VALID_DOMAIN_CONTENT.replace("test-domain", domain["name"])
         (output_dir / f"{domain['name']}.md").write_text(content)
         return True
@@ -84,7 +88,9 @@ def make_success_analyzer():
 def make_failing_analyzer():
     """Return a domain_analyzer that always writes 0 bytes (simulates failure)."""
 
-    def analyzer(output_dir: Path, domain: Dict, domain_list: List, repo_list: List) -> bool:
+    def analyzer(
+        output_dir: Path, domain: Dict, domain_list: List, repo_list: List
+    ) -> bool:
         (output_dir / f"{domain['name']}.md").write_text("")
         return False
 
@@ -95,7 +101,9 @@ def make_nth_attempt_success_analyzer(succeed_on_attempt: int):
     """Return a domain_analyzer that fails N-1 times then succeeds on Nth attempt."""
     call_counts: Dict[str, int] = {}
 
-    def analyzer(output_dir: Path, domain: Dict, domain_list: List, repo_list: List) -> bool:
+    def analyzer(
+        output_dir: Path, domain: Dict, domain_list: List, repo_list: List
+    ) -> bool:
         name = domain["name"]
         call_counts[name] = call_counts.get(name, 0) + 1
         if call_counts[name] < succeed_on_attempt:
@@ -164,7 +172,13 @@ class TestRepairZeroCharDomain:
         """0-byte domain file is repaired by domain_analyzer, file has content after."""
         make_domains_json(
             tmp_path,
-            [{"name": "broken-domain", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "broken-domain",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         # Create zero-byte domain file
         (tmp_path / "broken-domain.md").write_text("")
@@ -186,7 +200,13 @@ class TestRepairZeroCharDomain:
         """Successfully repairing a zero-char domain yields status='completed'."""
         make_domains_json(
             tmp_path,
-            [{"name": "empty-domain", "description": "d", "participating_repos": ["repo-alpha", "repo-beta"]}],
+            [
+                {
+                    "name": "empty-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                }
+            ],
         )
         (tmp_path / "empty-domain.md").write_text("")
         make_index_md(tmp_path)
@@ -215,8 +235,16 @@ class TestRepairMissingDomain:
         make_domains_json(
             tmp_path,
             [
-                {"name": "missing-domain", "description": "d", "participating_repos": ["repo-a"]},
-                {"name": "present-domain", "description": "d", "participating_repos": ["repo-b"]},
+                {
+                    "name": "missing-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-a"],
+                },
+                {
+                    "name": "present-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-b"],
+                },
             ],
         )
         # Only present-domain.md exists; missing-domain.md does not
@@ -314,7 +342,7 @@ class TestRepairOrphanRemoved:
         health_report = detector.detect(tmp_path)
 
         executor = _get_executor()
-        result = executor.execute(tmp_path, health_report)
+        _result = executor.execute(tmp_path, health_report)
 
         assert not orphan1.exists()
         assert not orphan2.exists()
@@ -350,7 +378,7 @@ class TestRepairDomainsJsonReconciled:
 
         # No domain_analyzer -- Phase 1 skipped. Let Phase 3 reconcile JSON.
         executor = _get_executor(domain_analyzer=None)
-        result = executor.execute(tmp_path, health_report)
+        _result = executor.execute(tmp_path, health_report)
 
         # _domains.json should now list only domains with files on disk
         updated_json = json.loads((tmp_path / "_domains.json").read_text())
@@ -371,7 +399,11 @@ class TestRepairDomainsJsonReconciled:
                     "description": "Very important domain",
                     "participating_repos": ["repo-x", "repo-y"],
                 },
-                {"name": "ghost-domain", "description": "Ghost", "participating_repos": []},
+                {
+                    "name": "ghost-domain",
+                    "description": "Ghost",
+                    "participating_repos": [],
+                },
             ],
         )
         make_domain_file(tmp_path, "important-domain")
@@ -385,7 +417,9 @@ class TestRepairDomainsJsonReconciled:
         executor.execute(tmp_path, health_report)
 
         updated_json = json.loads((tmp_path / "_domains.json").read_text())
-        important = next((d for d in updated_json if d["name"] == "important-domain"), None)
+        important = next(
+            (d for d in updated_json if d["name"] == "important-domain"), None
+        )
         assert important is not None
         assert important["description"] == "Very important domain"
 
@@ -402,7 +436,13 @@ class TestRepairIndexRegeneratedWhenMissing:
         """Deleting _index.md triggers Phase 4 to regenerate it with proper sections."""
         make_domains_json(
             tmp_path,
-            [{"name": "my-domain", "description": "d", "participating_repos": ["repo-a"]}],
+            [
+                {
+                    "name": "my-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-a"],
+                }
+            ],
         )
         make_domain_file(tmp_path, "my-domain")
         # Do NOT create _index.md
@@ -434,7 +474,13 @@ class TestRepairIndexRegeneratedAfterDomainFix:
         """After fixing a broken domain, _index.md is regenerated even if it had no anomaly."""
         make_domains_json(
             tmp_path,
-            [{"name": "broken-domain", "description": "d", "participating_repos": ["repo-alpha", "repo-beta"]}],
+            [
+                {
+                    "name": "broken-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                }
+            ],
         )
         # Zero-char domain -- triggers critical anomaly
         (tmp_path / "broken-domain.md").write_text("")
@@ -466,7 +512,13 @@ class TestRepairRetryOnFailure:
         """Analyzer fails twice then succeeds on 3rd attempt -- domain is fixed."""
         make_domains_json(
             tmp_path,
-            [{"name": "flaky-domain", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "flaky-domain",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "flaky-domain.md").write_text("")
         make_index_md(tmp_path)
@@ -497,7 +549,13 @@ class TestRepairMaxRetriesExhausted:
         """Analyzer always fails -- error reported after 3 attempts, status='failed' or 'partial'."""
         make_domains_json(
             tmp_path,
-            [{"name": "always-broken", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "always-broken",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "always-broken.md").write_text("")
         make_index_md(tmp_path)
@@ -517,7 +575,13 @@ class TestRepairMaxRetriesExhausted:
         """Exactly 3 attempts are made before giving up (not 2, not 4)."""
         make_domains_json(
             tmp_path,
-            [{"name": "retry-counter", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "retry-counter",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "retry-counter.md").write_text("")
         make_index_md(tmp_path)
@@ -552,7 +616,13 @@ class TestRepairPostValidationHealthy:
         """All anomalies fixed -> final_health_status='healthy', status='completed'."""
         make_domains_json(
             tmp_path,
-            [{"name": "to-fix-domain", "description": "d", "participating_repos": ["repo-alpha", "repo-beta"]}],
+            [
+                {
+                    "name": "to-fix-domain",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                }
+            ],
         )
         (tmp_path / "to-fix-domain.md").write_text("")
         # No _index.md
@@ -583,7 +653,13 @@ class TestRepairPostValidationPartial:
         """Failed domain repair leaves anomaly -- status='partial' or 'failed'."""
         make_domains_json(
             tmp_path,
-            [{"name": "unfixable-domain", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "unfixable-domain",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "unfixable-domain.md").write_text("")
         # Orphan that can be removed (free fix)
@@ -619,7 +695,13 @@ class TestRepairJournalCallbackCalled:
         """journal_callback receives start, progress, and completion messages."""
         make_domains_json(
             tmp_path,
-            [{"name": "logged-domain", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "logged-domain",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "logged-domain.md").write_text("")
         make_index_md(tmp_path)
@@ -648,7 +730,13 @@ class TestRepairJournalCallbackCalled:
         """When no journal_callback provided, repair runs without errors."""
         make_domains_json(
             tmp_path,
-            [{"name": "silent-domain", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "silent-domain",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "silent-domain.md").write_text("")
         make_index_md(tmp_path)
@@ -657,7 +745,9 @@ class TestRepairJournalCallbackCalled:
         health_report = detector.detect(tmp_path)
 
         # No journal_callback -- should not raise
-        executor = _get_executor(domain_analyzer=make_success_analyzer(), journal_callback=None)
+        executor = _get_executor(
+            domain_analyzer=make_success_analyzer(), journal_callback=None
+        )
         result = executor.execute(tmp_path, health_report)
 
         # Should complete normally
@@ -677,9 +767,21 @@ class TestRepairMultipleBrokenDomains:
         make_domains_json(
             tmp_path,
             [
-                {"name": "domain-x", "description": "d", "participating_repos": ["repo-alpha", "repo-beta"]},
-                {"name": "domain-y", "description": "d", "participating_repos": ["repo-alpha", "repo-beta"]},
-                {"name": "domain-z", "description": "d", "participating_repos": ["repo-alpha", "repo-beta"]},
+                {
+                    "name": "domain-x",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                },
+                {
+                    "name": "domain-y",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                },
+                {
+                    "name": "domain-z",
+                    "description": "d",
+                    "participating_repos": ["repo-alpha", "repo-beta"],
+                },
             ],
         )
         # All three are zero-char
@@ -744,7 +846,13 @@ class TestRepairNoAnalyzerSkipsPhase1:
         """With no domain_analyzer, broken domain files are left as-is (Phase 1 skipped)."""
         make_domains_json(
             tmp_path,
-            [{"name": "broken-domain", "description": "d", "participating_repos": ["r"]}],
+            [
+                {
+                    "name": "broken-domain",
+                    "description": "d",
+                    "participating_repos": ["r"],
+                }
+            ],
         )
         (tmp_path / "broken-domain.md").write_text("")
         make_index_md(tmp_path)
@@ -1177,9 +1285,9 @@ Additional integration tests verify backward compatibility on every release.
         executor.execute(tmp_path, health_report)
 
         # Bug B fix: file must NOT exist when analyzer is called
-        assert len(file_existed_when_analyzer_called) > 0, (
-            "Analyzer was never called -- check test setup"
-        )
+        assert (
+            len(file_existed_when_analyzer_called) > 0
+        ), "Analyzer was never called -- check test setup"
         assert not any(file_existed_when_analyzer_called), (
             "Bug B: broken domain file was NOT deleted before calling the analyzer. "
             f"file_existed_when_analyzer_called={file_existed_when_analyzer_called}"
@@ -1223,7 +1331,9 @@ Additional integration tests verify backward compatibility on every release.
         result = executor.execute(tmp_path, health_report)
 
         # Must succeed: analyzer called once, domain in fixed list
-        assert analyzer_calls[0] == 1, f"Expected 1 analyzer call, got {analyzer_calls[0]}"
+        assert (
+            analyzer_calls[0] == 1
+        ), f"Expected 1 analyzer call, got {analyzer_calls[0]}"
         assert any(
             "absent-domain" in f for f in result.fixed
         ), f"absent-domain should be fixed. fixed={result.fixed}"

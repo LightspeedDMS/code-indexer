@@ -27,7 +27,6 @@ preserved). The graceful skip happens inside _execute_refresh(), not in
 _scheduler_loop().
 """
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -139,12 +138,8 @@ class TestUninitializedLocalRepoSkippedGracefully:
             )
 
         with patch.object(scheduler, "_index_source", side_effect=fail_if_called):
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     # Must NOT raise - must return a success dict
                     result = scheduler._execute_refresh(alias_name)
 
@@ -174,20 +169,22 @@ class TestUninitializedLocalRepoSkippedGracefully:
         scheduler.alias_manager.read_alias = MagicMock(return_value=str(source_dir))
 
         with patch.object(scheduler, "_index_source"):
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
         message = result.get("message", "").lower()
         # The message should convey that initialization is missing
         # Accept any of: "not initialized", "uninitialized", "no .code-indexer",
         # "skipped", "initialization"
-        skip_keywords = ["not initialized", "uninitialized", "no .code-indexer",
-                         "skipped", "initialization", "not yet initialized"]
+        skip_keywords = [
+            "not initialized",
+            "uninitialized",
+            "no .code-indexer",
+            "skipped",
+            "initialization",
+            "not yet initialized",
+        ]
         assert any(kw in message for kw in skip_keywords), (
             f"AC1: Result message '{result.get('message')}' does not indicate "
             f"that the local repo was skipped due to missing initialization. "
@@ -220,23 +217,20 @@ class TestUninitializedLocalRepoSkippedGracefully:
         index_source_calls = []
 
         with patch.object(
-            scheduler, "_index_source",
-            side_effect=lambda *a, **k: index_source_calls.append(a)
+            scheduler,
+            "_index_source",
+            side_effect=lambda *a, **k: index_source_calls.append(a),
         ):
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
-        assert result["success"] is True, (
-            "AC1: Langfuse per-user repo must not fail when .code-indexer/ is absent."
-        )
-        assert index_source_calls == [], (
-            "AC1: _index_source() must not be called for uninitialized Langfuse repos."
-        )
+        assert (
+            result["success"] is True
+        ), "AC1: Langfuse per-user repo must not fail when .code-indexer/ is absent."
+        assert (
+            index_source_calls == []
+        ), "AC1: _index_source() must not be called for uninitialized Langfuse repos."
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +268,8 @@ class TestInitializedLocalRepoProceedsNormally:
             return False  # No changes
 
         with patch.object(scheduler, "_has_local_changes", side_effect=capture_mtime):
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
         assert len(mtime_calls) == 1, (
@@ -320,9 +310,7 @@ class TestInitializedLocalRepoProceedsNormally:
                 with patch.object(
                     scheduler, "_detect_existing_indexes", return_value={}
                 ):
-                    with patch.object(
-                        scheduler, "_reconcile_registry_with_filesystem"
-                    ):
+                    with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         with pytest.raises(RuntimeError):
                             scheduler._execute_refresh(alias_name)
 
@@ -359,16 +347,13 @@ class TestInitializedLocalRepoProceedsNormally:
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",
             return_value=mock_updater,
         ) as mock_git_cls:
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     result = scheduler._execute_refresh(alias_name)
 
-        mock_git_cls.assert_called_once(), (
-            "AC2 (regression): GitPullUpdater must still be used for git repos."
+        (
+            mock_git_cls.assert_called_once(),
+            ("AC2 (regression): GitPullUpdater must still be used for git repos."),
         )
         assert result["success"] is True
 
@@ -404,12 +389,8 @@ class TestNoFailedJobsForUninitializedLocalRepos:
         mock_registry.get_global_repo.return_value = repo_info
         scheduler.alias_manager.read_alias = MagicMock(return_value=str(source_dir))
 
-        with patch.object(
-            scheduler, "_detect_existing_indexes", return_value={}
-        ):
-            with patch.object(
-                scheduler, "_reconcile_registry_with_filesystem"
-            ):
+        with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+            with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                 # This must NOT raise - any exception would cause a failed job
                 try:
                     result = scheduler._execute_refresh(alias_name)
@@ -453,16 +434,10 @@ class TestNoFailedJobsForUninitializedLocalRepos:
                 "enable_scip": False,
             }
             mock_registry.get_global_repo.return_value = repo_info
-            scheduler.alias_manager.read_alias = MagicMock(
-                return_value=str(source_dir)
-            )
+            scheduler.alias_manager.read_alias = MagicMock(return_value=str(source_dir))
 
-            with patch.object(
-                scheduler, "_detect_existing_indexes", return_value={}
-            ):
-                with patch.object(
-                    scheduler, "_reconcile_registry_with_filesystem"
-                ):
+            with patch.object(scheduler, "_detect_existing_indexes", return_value={}):
+                with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                     try:
                         result = scheduler._execute_refresh(alias)
                         results.append(result)
@@ -474,9 +449,9 @@ class TestNoFailedJobsForUninitializedLocalRepos:
 
         assert len(results) == 3, "All 3 uninitialized repos must return a result"
         for result in results:
-            assert result["success"] is True, (
-                f"AC3: All uninitialized repos must return success=True. Got: {result}"
-            )
+            assert (
+                result["success"] is True
+            ), f"AC3: All uninitialized repos must return success=True. Got: {result}"
 
     def test_scheduler_loop_does_not_produce_failures_for_uninitialized_local_repos(
         self, scheduler, golden_repos_dir, mock_registry
@@ -539,9 +514,7 @@ class TestNoFailedJobsForUninitializedLocalRepos:
                 with patch.object(
                     scheduler, "_detect_existing_indexes", return_value={}
                 ):
-                    with patch.object(
-                        scheduler, "_reconcile_registry_with_filesystem"
-                    ):
+                    with patch.object(scheduler, "_reconcile_registry_with_filesystem"):
                         with patch.object(
                             scheduler, "_has_local_changes", return_value=False
                         ):
@@ -562,8 +535,7 @@ class TestNoFailedJobsForUninitializedLocalRepos:
 
         # After the fix: no exceptions should be raised for langfuse-user-global
         uninitialized_failures = [
-            (alias, exc) for alias, exc in exception_raised_for
-            if "langfuse" in alias
+            (alias, exc) for alias, exc in exception_raised_for if "langfuse" in alias
         ]
         assert uninitialized_failures == [], (
             f"AC3: Uninitialized local repos must not raise exceptions in the "

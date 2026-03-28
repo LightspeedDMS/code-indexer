@@ -11,10 +11,6 @@ dict and SQLite background_jobs table.
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
-from code_indexer.server.services.job_tracker import JobTracker
-
 
 # ---------------------------------------------------------------------------
 # AC2: cleanup_old_jobs method exists and returns count
@@ -42,7 +38,9 @@ class TestCleanupOldJobsMethod:
         When cleanup_old_jobs is called
         Then it should return 0 (int)
         """
-        result = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        result = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
         assert isinstance(result, int)
         assert result == 0
 
@@ -101,7 +99,9 @@ class TestCleanupDeletesOldCompletedJobs:
             db_path, "old-job-001", "langfuse_sync", "completed", age_hours=25
         )
 
-        count = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        count = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
 
         assert count == 1
 
@@ -126,7 +126,9 @@ class TestCleanupDeletesOldCompletedJobs:
             db_path, "recent-job-001", "langfuse_sync", "completed", age_hours=2
         )
 
-        count = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        count = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
 
         assert count == 0
 
@@ -150,7 +152,9 @@ class TestCleanupDeletesOldCompletedJobs:
             db_path, "other-op-job", "scheduled_catchup", "completed", age_hours=25
         )
 
-        count = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        count = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
 
         assert count == 0
 
@@ -176,12 +180,21 @@ class TestCleanupDeletesOldCompletedJobs:
             """INSERT INTO background_jobs
                (job_id, operation_type, status, created_at, username, progress)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            ("running-old", "langfuse_sync", "running", created_at.isoformat(), "system", 50),
+            (
+                "running-old",
+                "langfuse_sync",
+                "running",
+                created_at.isoformat(),
+                "system",
+                50,
+            ),
         )
         conn.commit()
         conn.close()
 
-        count = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        count = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
 
         assert count == 0
 
@@ -192,7 +205,9 @@ class TestCleanupDeletesOldCompletedJobs:
         assert cursor.fetchone()[0] == 1
         conn.close()
 
-    def test_deletes_multiple_old_jobs_and_returns_correct_count(self, job_tracker, db_path):
+    def test_deletes_multiple_old_jobs_and_returns_correct_count(
+        self, job_tracker, db_path
+    ):
         """
         Multiple old completed jobs are all deleted and count is correct.
 
@@ -205,7 +220,9 @@ class TestCleanupDeletesOldCompletedJobs:
                 db_path, f"old-{i}", "langfuse_sync", "completed", age_hours=age
             )
 
-        count = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        count = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
 
         assert count == 3
 
@@ -252,7 +269,9 @@ class TestCleanupRemovesFromActiveJobsDict:
                 job.completed_at = datetime.now(timezone.utc) - timedelta(hours=25)
 
         # Run cleanup
-        count = job_tracker.cleanup_old_jobs(operation_type="langfuse_sync", max_age_hours=24)
+        count = job_tracker.cleanup_old_jobs(
+            operation_type="langfuse_sync", max_age_hours=24
+        )
 
         # Job should be cleaned up (from SQLite at minimum)
         assert count >= 0  # Count may vary based on implementation details

@@ -12,7 +12,7 @@ This keeps the -global suffix convention encapsulated in the scheduler layer,
 not in callers (handlers, REST endpoints, Web UI).
 """
 
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -56,8 +56,14 @@ def mock_background_job_manager():
     return manager
 
 
-def _make_scheduler(golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-                    background_job_manager=None, registry=None):
+def _make_scheduler(
+    golden_repos_dir,
+    config_mgr,
+    query_tracker,
+    cleanup_manager,
+    background_job_manager=None,
+    registry=None,
+):
     """Helper to create a RefreshScheduler with optional mock registry."""
     return RefreshScheduler(
         golden_repos_dir=str(golden_repos_dir),
@@ -83,6 +89,7 @@ class TestResolveGlobalAlias:
     ):
         """_resolve_global_alias('my-repo') must return 'my-repo-global' when found."""
         mock_registry = MagicMock()
+
         # Bare alias NOT found in registry (get_global_repo returns None)
         # Global alias IS found
         def registry_get_global_repo(alias_name):
@@ -93,8 +100,11 @@ class TestResolveGlobalAlias:
         mock_registry.get_global_repo = MagicMock(side_effect=registry_get_global_repo)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-            registry=mock_registry
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
+            registry=mock_registry,
         )
 
         result = scheduler._resolve_global_alias("my-repo")
@@ -112,8 +122,11 @@ class TestResolveGlobalAlias:
         )
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-            registry=mock_registry
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
+            registry=mock_registry,
         )
 
         result = scheduler._resolve_global_alias("my-repo-global")
@@ -129,8 +142,11 @@ class TestResolveGlobalAlias:
         mock_registry.get_global_repo = MagicMock(return_value=None)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-            registry=mock_registry
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
+            registry=mock_registry,
         )
 
         with pytest.raises(ValueError, match="nonexistent"):
@@ -147,8 +163,11 @@ class TestResolveGlobalAlias:
         )
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-            registry=mock_registry
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
+            registry=mock_registry,
         )
 
         result = scheduler._resolve_global_alias("cidx-meta-global")
@@ -165,8 +184,11 @@ class TestResolveGlobalAlias:
         mock_registry.get_global_repo = MagicMock(return_value=None)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-            registry=mock_registry
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
+            registry=mock_registry,
         )
 
         with pytest.raises(ValueError) as exc_info:
@@ -184,8 +206,11 @@ class TestTriggerRefreshAcceptsBareAlias:
 
     def test_trigger_refresh_with_bare_alias_submits_global_alias_to_bjm(
         self,
-        golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-        mock_background_job_manager
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_background_job_manager,
     ):
         """trigger_refresh_for_repo('my-repo') must resolve and submit 'my-repo-global' to BJM."""
         mock_registry = MagicMock()
@@ -198,22 +223,32 @@ class TestTriggerRefreshAcceptsBareAlias:
         mock_registry.get_global_repo = MagicMock(side_effect=registry_get_global_repo)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
             background_job_manager=mock_background_job_manager,
             registry=mock_registry,
         )
 
-        with patch.object(scheduler, "_submit_refresh_job", return_value="job-bare-001") as mock_submit:
+        with patch.object(
+            scheduler, "_submit_refresh_job", return_value="job-bare-001"
+        ) as mock_submit:
             job_id = scheduler.trigger_refresh_for_repo("my-repo")
 
         # Must call _submit_refresh_job with the resolved global alias
-        mock_submit.assert_called_once_with("my-repo-global", submitter_username="system", force_reset=False)
+        mock_submit.assert_called_once_with(
+            "my-repo-global", submitter_username="system", force_reset=False
+        )
         assert job_id == "job-bare-001"
 
     def test_trigger_refresh_with_global_alias_passes_through(
         self,
-        golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-        mock_background_job_manager
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_background_job_manager,
     ):
         """trigger_refresh_for_repo('my-repo-global') passes through unchanged."""
         mock_registry = MagicMock()
@@ -222,28 +257,41 @@ class TestTriggerRefreshAcceptsBareAlias:
         )
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
             background_job_manager=mock_background_job_manager,
             registry=mock_registry,
         )
 
-        with patch.object(scheduler, "_submit_refresh_job", return_value="job-global-001") as mock_submit:
+        with patch.object(
+            scheduler, "_submit_refresh_job", return_value="job-global-001"
+        ) as mock_submit:
             job_id = scheduler.trigger_refresh_for_repo("my-repo-global")
 
-        mock_submit.assert_called_once_with("my-repo-global", submitter_username="system", force_reset=False)
+        mock_submit.assert_called_once_with(
+            "my-repo-global", submitter_username="system", force_reset=False
+        )
         assert job_id == "job-global-001"
 
     def test_trigger_refresh_with_nonexistent_alias_raises_value_error(
         self,
-        golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-        mock_background_job_manager
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_background_job_manager,
     ):
         """trigger_refresh_for_repo('bad-alias') must raise ValueError for unknown repo."""
         mock_registry = MagicMock()
         mock_registry.get_global_repo = MagicMock(return_value=None)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
             background_job_manager=mock_background_job_manager,
             registry=mock_registry,
         )
@@ -253,8 +301,11 @@ class TestTriggerRefreshAcceptsBareAlias:
 
     def test_trigger_refresh_returns_job_id_from_bjm_with_bare_alias(
         self,
-        golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
-        mock_background_job_manager
+        golden_repos_dir,
+        config_mgr,
+        query_tracker,
+        cleanup_manager,
+        mock_background_job_manager,
     ):
         """trigger_refresh_for_repo must return the job_id from BackgroundJobManager."""
         mock_registry = MagicMock()
@@ -267,7 +318,10 @@ class TestTriggerRefreshAcceptsBareAlias:
         mock_registry.get_global_repo = MagicMock(side_effect=registry_get_global_repo)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
             background_job_manager=mock_background_job_manager,
             registry=mock_registry,
         )
@@ -281,8 +335,7 @@ class TestTriggerRefreshAcceptsBareAlias:
         assert call_kwargs.kwargs["repo_alias"] == "code-indexer-global"
 
     def test_trigger_refresh_with_bare_alias_no_bjm_calls_execute_refresh(
-        self,
-        golden_repos_dir, config_mgr, query_tracker, cleanup_manager
+        self, golden_repos_dir, config_mgr, query_tracker, cleanup_manager
     ):
         """In CLI mode (no BJM), bare alias resolves and _execute_refresh is called."""
         mock_registry = MagicMock()
@@ -295,7 +348,10 @@ class TestTriggerRefreshAcceptsBareAlias:
         mock_registry.get_global_repo = MagicMock(side_effect=registry_get_global_repo)
 
         scheduler = _make_scheduler(
-            golden_repos_dir, config_mgr, query_tracker, cleanup_manager,
+            golden_repos_dir,
+            config_mgr,
+            query_tracker,
+            cleanup_manager,
             registry=mock_registry,
         )
 

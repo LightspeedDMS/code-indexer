@@ -17,8 +17,6 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 import json
 import sqlite3
 
-import pytest
-
 
 class TestMigrateFlat:
     """Tests for migrate_flat_file_to_sqlite() function (AC4)."""
@@ -224,8 +222,7 @@ class TestMigrateFlat:
 
         log_file = tmp_path / "password_audit.log"
         log_file.write_text(
-            "This line has no JSON at all\n"
-            "Another plain text line\n"
+            "This line has no JSON at all\n" "Another plain text line\n"
         )
 
         db_path = tmp_path / "groups.db"

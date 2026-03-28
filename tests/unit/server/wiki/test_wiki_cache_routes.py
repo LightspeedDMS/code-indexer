@@ -1,4 +1,5 @@
 """Route integration tests for wiki cache behavior (Story #283)."""
+
 import os
 import tempfile
 import time
@@ -8,7 +9,11 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_wiki_user_hybrid,
+    get_current_user_hybrid,
+)
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -20,6 +25,7 @@ def _make_user(username):
 
 def _make_app(authenticated_user, actual_repo_path):
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()
@@ -62,7 +68,7 @@ class TestCacheRouteIntegration:
             assert "First content" in resp1.text
 
             # Modify file content but keep same stat (simulates cached result being served)
-            original_stat = f.stat()
+            _original_stat = f.stat()
             # Second request - should return 200 (from cache or re-rendered)
             resp2 = client.get("/wiki/test-repo/article")
             assert resp2.status_code == 200

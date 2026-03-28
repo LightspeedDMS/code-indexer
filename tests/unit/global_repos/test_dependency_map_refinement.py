@@ -9,8 +9,6 @@ The refinement prompt is EDITORIAL (fact-checking existing docs against source c
 not AUTHORIAL (not rewriting from scratch).
 """
 
-import pytest
-
 
 def _make_analyzer(tmp_path):
     """Build a minimal DependencyMapAnalyzer for prompt testing."""
@@ -113,8 +111,7 @@ class TestBuildRefinementPromptContainsExistingBody:
         # The existing content should be in a clearly labeled section
         prompt_lower = prompt.lower()
         assert any(
-            kw in prompt_lower
-            for kw in ["existing", "current", "document", "content"]
+            kw in prompt_lower for kw in ["existing", "current", "document", "content"]
         ), "Prompt must have a section label for the existing content"
 
 
@@ -156,10 +153,10 @@ class TestBuildRefinementPromptFormat:
             participating_repos=SAMPLE_REPOS,
         )
         # First non-empty line should be a markdown heading
-        lines = [l for l in prompt.splitlines() if l.strip()]
-        assert lines[0].startswith("#"), (
-            f"Prompt should start with a markdown heading, got: {lines[0]!r}"
-        )
+        lines = [line for line in prompt.splitlines() if line.strip()]
+        assert lines[0].startswith(
+            "#"
+        ), f"Prompt should start with a markdown heading, got: {lines[0]!r}"
 
     def test_prompt_is_editorial_not_authorial(self, tmp_path):
         """Prompt must frame the task as fact-checking, not rewriting."""
@@ -214,8 +211,7 @@ class TestBuildRefinementPromptFormat:
         )
         prompt_lower = prompt.lower()
         assert any(
-            kw in prompt_lower
-            for kw in ["output", "return", "respond", "provide"]
+            kw in prompt_lower for kw in ["output", "return", "respond", "provide"]
         ), "Prompt must include output format instructions"
 
     def test_returns_string(self, tmp_path):

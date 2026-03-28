@@ -8,13 +8,9 @@ the first phase (e.g., 90%). This causes visible progress regressions in the UI.
 Fix: run_with_popen_progress must track the last reported progress value and
 never call progress_callback with a value lower than the last reported.
 """
-import json
-import sys
-import tempfile
-from pathlib import Path
-from typing import List
 
-import pytest
+import sys
+from typing import List
 
 
 class TestMonotonicProgressGuard:
@@ -36,7 +32,9 @@ class TestMonotonicProgressGuard:
         from code_indexer.services.progress_subprocess_runner import (
             run_with_popen_progress,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         # Two phases: semantic (0-60%) and fts (60-90%) + cow appended automatically
@@ -110,7 +108,9 @@ class TestMonotonicProgressGuard:
         from code_indexer.services.progress_subprocess_runner import (
             run_with_popen_progress,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         allocator.calculate_weights(
@@ -162,7 +162,9 @@ class TestMonotonicProgressGuard:
         from code_indexer.services.progress_subprocess_runner import (
             run_with_popen_progress,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         allocator.calculate_weights(

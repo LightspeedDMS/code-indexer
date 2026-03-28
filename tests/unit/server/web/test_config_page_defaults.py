@@ -4,7 +4,6 @@ Test config page default values for claude_cli.
 Tests Bug #153 fix: _get_current_config() providing defaults when claude_cli is empty dict.
 """
 
-import pytest
 from unittest.mock import Mock, patch
 
 from code_indexer.server.web.routes import _get_current_config
@@ -34,7 +33,9 @@ class TestConfigPageDefaults:
 
         # When: Getting current config
         # Patch at source module since get_config_service is imported via 'from' statement
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
             mock_config_service = Mock()
             mock_config_service.get_all_settings.return_value = settings
             mock_service.return_value = mock_config_service
@@ -53,7 +54,9 @@ class TestConfigPageDefaults:
         settings = self._create_base_settings(claude_cli_value={})
 
         # When: Getting current config
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
             mock_config_service = Mock()
             mock_config_service.get_all_settings.return_value = settings
             mock_service.return_value = mock_config_service
@@ -72,7 +75,9 @@ class TestConfigPageDefaults:
         settings = self._create_base_settings(claude_cli_value=None)
 
         # When: Getting current config
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
             mock_config_service = Mock()
             mock_config_service.get_all_settings.return_value = settings
             mock_service.return_value = mock_config_service
@@ -88,13 +93,17 @@ class TestConfigPageDefaults:
     def test_claude_cli_partial_config_preserves_values(self):
         """Test that partial claude_cli config preserves existing values and fills missing."""
         # Given: Settings with partial claude_cli config
-        settings = self._create_base_settings(claude_cli_value={
-            "max_concurrent_claude_cli": 5,
-            # Other fields missing
-        })
+        settings = self._create_base_settings(
+            claude_cli_value={
+                "max_concurrent_claude_cli": 5,
+                # Other fields missing
+            }
+        )
 
         # When: Getting current config
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
             mock_config_service = Mock()
             mock_config_service.get_all_settings.return_value = settings
             mock_service.return_value = mock_config_service
@@ -112,7 +121,9 @@ class TestConfigPageDefaults:
         settings = self._create_base_settings(claude_cli_value={})
 
         # When: Getting current config
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
             mock_config_service = Mock()
             mock_config_service.get_all_settings.return_value = settings
             mock_service.return_value = mock_config_service
@@ -130,7 +141,9 @@ class TestConfigPageDefaults:
         settings = self._create_base_settings(claude_cli_value=None)
 
         # When: Getting current config
-        with patch("code_indexer.server.services.config_service.get_config_service") as mock_service:
+        with patch(
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_service:
             mock_config_service = Mock()
             mock_config_service.get_all_settings.return_value = settings
             mock_service.return_value = mock_config_service

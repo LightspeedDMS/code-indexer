@@ -14,10 +14,7 @@ Tests verify:
 TDD: These tests are written BEFORE the implementation exists (RED phase).
 """
 
-import json
 import sqlite3
-
-import pytest
 
 
 class TestGetPrLogs:
@@ -30,19 +27,38 @@ class TestGetPrLogs:
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
 
-        service.log("system", "pr_creation_success", "auth", "my-repo",
-                    '{"job_id": "j1", "pr_url": "https://gh.com/1", "repo_alias": "my-repo"}')
-        service.log("system", "pr_creation_failure", "auth", "my-repo",
-                    '{"job_id": "j2", "repo_alias": "my-repo"}')
-        service.log("system", "pr_creation_disabled", "auth", "other-repo",
-                    '{"job_id": "j3", "repo_alias": "other-repo"}')
+        service.log(
+            "system",
+            "pr_creation_success",
+            "auth",
+            "my-repo",
+            '{"job_id": "j1", "pr_url": "https://gh.com/1", "repo_alias": "my-repo"}',
+        )
+        service.log(
+            "system",
+            "pr_creation_failure",
+            "auth",
+            "my-repo",
+            '{"job_id": "j2", "repo_alias": "my-repo"}',
+        )
+        service.log(
+            "system",
+            "pr_creation_disabled",
+            "auth",
+            "other-repo",
+            '{"job_id": "j3", "repo_alias": "other-repo"}',
+        )
         service.log("admin", "group_create", "group", "g1")  # Not a PR event
 
         logs = service.get_pr_logs()
 
         assert len(logs) == 3
         action_types = {log["action_type"] for log in logs}
-        assert action_types == {"pr_creation_success", "pr_creation_failure", "pr_creation_disabled"}
+        assert action_types == {
+            "pr_creation_success",
+            "pr_creation_failure",
+            "pr_creation_disabled",
+        }
 
     def test_get_pr_logs_excludes_non_pr_events(self, tmp_path):
         """get_pr_logs() does not include non-PR events."""
@@ -52,8 +68,13 @@ class TestGetPrLogs:
         service = AuditLogService(db_path)
 
         service.log("admin", "group_create", "group", "g1")
-        service.log("system", "git_cleanup", "auth", "/repo",
-                    '{"event_type": "git_cleanup", "repo_path": "/repo", "files_cleared": []}')
+        service.log(
+            "system",
+            "git_cleanup",
+            "auth",
+            "/repo",
+            '{"event_type": "git_cleanup", "repo_path": "/repo", "files_cleared": []}',
+        )
         service.log("system", "authentication_failure", "auth", "user1")
 
         logs = service.get_pr_logs()
@@ -67,10 +88,20 @@ class TestGetPrLogs:
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
 
-        service.log("system", "pr_creation_success", "auth", "repo-a",
-                    '{"job_id": "j1", "repo_alias": "repo-a"}')
-        service.log("system", "pr_creation_success", "auth", "repo-b",
-                    '{"job_id": "j2", "repo_alias": "repo-b"}')
+        service.log(
+            "system",
+            "pr_creation_success",
+            "auth",
+            "repo-a",
+            '{"job_id": "j1", "repo_alias": "repo-a"}',
+        )
+        service.log(
+            "system",
+            "pr_creation_success",
+            "auth",
+            "repo-b",
+            '{"job_id": "j2", "repo_alias": "repo-b"}',
+        )
 
         logs = service.get_pr_logs(repo_alias="repo-a")
 
@@ -83,8 +114,13 @@ class TestGetPrLogs:
 
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
-        service.log("system", "pr_creation_success", "auth", "repo-a",
-                    '{"job_id": "j1", "repo_alias": "repo-a"}')
+        service.log(
+            "system",
+            "pr_creation_success",
+            "auth",
+            "repo-a",
+            '{"job_id": "j1", "repo_alias": "repo-a"}',
+        )
 
         logs = service.get_pr_logs(repo_alias="nonexistent")
 
@@ -98,8 +134,13 @@ class TestGetPrLogs:
         service = AuditLogService(db_path)
 
         for i in range(10):
-            service.log("system", "pr_creation_success", "auth", f"repo-{i}",
-                        f'{{"job_id": "j{i}", "repo_alias": "repo-{i}"}}')
+            service.log(
+                "system",
+                "pr_creation_success",
+                "auth",
+                f"repo-{i}",
+                f'{{"job_id": "j{i}", "repo_alias": "repo-{i}"}}',
+            )
 
         logs = service.get_pr_logs(limit=3)
 
@@ -113,8 +154,13 @@ class TestGetPrLogs:
         service = AuditLogService(db_path)
 
         for i in range(5):
-            service.log("system", "pr_creation_success", "auth", f"repo-{i}",
-                        f'{{"job_id": "j{i}", "repo_alias": "repo-{i}"}}')
+            service.log(
+                "system",
+                "pr_creation_success",
+                "auth",
+                f"repo-{i}",
+                f'{{"job_id": "j{i}", "repo_alias": "repo-{i}"}}',
+            )
 
         logs_p1 = service.get_pr_logs(limit=3, offset=0)
         logs_p2 = service.get_pr_logs(limit=3, offset=3)
@@ -134,13 +180,25 @@ class TestGetPrLogs:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-01-01T10:00:00", "system", "pr_creation_success", "auth", "r1",
-             '{"event_type": "pr_creation_success", "repo_alias": "r1"}'),
+            (
+                "2026-01-01T10:00:00",
+                "system",
+                "pr_creation_success",
+                "auth",
+                "r1",
+                '{"event_type": "pr_creation_success", "repo_alias": "r1"}',
+            ),
         )
         cursor.execute(
             "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-03-01T10:00:00", "system", "pr_creation_success", "auth", "r2",
-             '{"event_type": "pr_creation_success", "repo_alias": "r2"}'),
+            (
+                "2026-03-01T10:00:00",
+                "system",
+                "pr_creation_success",
+                "auth",
+                "r2",
+                '{"event_type": "pr_creation_success", "repo_alias": "r2"}',
+            ),
         )
         conn.commit()
         conn.close()
@@ -173,11 +231,21 @@ class TestGetCleanupLogs:
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
 
-        service.log("system", "git_cleanup", "auth", "/path/to/repo",
-                    '{"event_type": "git_cleanup", "repo_path": "/path/to/repo", "files_cleared": []}')
+        service.log(
+            "system",
+            "git_cleanup",
+            "auth",
+            "/path/to/repo",
+            '{"event_type": "git_cleanup", "repo_path": "/path/to/repo", "files_cleared": []}',
+        )
         service.log("admin", "group_create", "group", "g1")  # Not cleanup
-        service.log("system", "pr_creation_success", "auth", "r1",
-                    '{"event_type": "pr_creation_success"}')  # Not cleanup
+        service.log(
+            "system",
+            "pr_creation_success",
+            "auth",
+            "r1",
+            '{"event_type": "pr_creation_success"}',
+        )  # Not cleanup
 
         logs = service.get_cleanup_logs()
 
@@ -205,10 +273,20 @@ class TestGetCleanupLogs:
         db_path = tmp_path / "groups.db"
         service = AuditLogService(db_path)
 
-        service.log("system", "git_cleanup", "auth", "/repo-a",
-                    '{"event_type": "git_cleanup", "repo_path": "/repo-a", "files_cleared": []}')
-        service.log("system", "git_cleanup", "auth", "/repo-b",
-                    '{"event_type": "git_cleanup", "repo_path": "/repo-b", "files_cleared": []}')
+        service.log(
+            "system",
+            "git_cleanup",
+            "auth",
+            "/repo-a",
+            '{"event_type": "git_cleanup", "repo_path": "/repo-a", "files_cleared": []}',
+        )
+        service.log(
+            "system",
+            "git_cleanup",
+            "auth",
+            "/repo-b",
+            '{"event_type": "git_cleanup", "repo_path": "/repo-b", "files_cleared": []}',
+        )
 
         logs = service.get_cleanup_logs(repo_path="/repo-a")
 
@@ -223,8 +301,13 @@ class TestGetCleanupLogs:
         service = AuditLogService(db_path)
 
         for i in range(10):
-            service.log("system", "git_cleanup", "auth", f"/repo-{i}",
-                        f'{{"event_type": "git_cleanup", "repo_path": "/repo-{i}", "files_cleared": []}}')
+            service.log(
+                "system",
+                "git_cleanup",
+                "auth",
+                f"/repo-{i}",
+                f'{{"event_type": "git_cleanup", "repo_path": "/repo-{i}", "files_cleared": []}}',
+            )
 
         logs = service.get_cleanup_logs(limit=4)
 
@@ -241,13 +324,25 @@ class TestGetCleanupLogs:
         cursor = conn.cursor()
         cursor.execute(
             "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-01-01T10:00:00", "system", "git_cleanup", "auth", "/old-repo",
-             '{"event_type": "git_cleanup", "repo_path": "/old-repo", "files_cleared": []}'),
+            (
+                "2026-01-01T10:00:00",
+                "system",
+                "git_cleanup",
+                "auth",
+                "/old-repo",
+                '{"event_type": "git_cleanup", "repo_path": "/old-repo", "files_cleared": []}',
+            ),
         )
         cursor.execute(
             "INSERT INTO audit_logs (timestamp, admin_id, action_type, target_type, target_id, details) VALUES (?, ?, ?, ?, ?, ?)",
-            ("2026-03-01T10:00:00", "system", "git_cleanup", "auth", "/new-repo",
-             '{"event_type": "git_cleanup", "repo_path": "/new-repo", "files_cleared": []}'),
+            (
+                "2026-03-01T10:00:00",
+                "system",
+                "git_cleanup",
+                "auth",
+                "/new-repo",
+                '{"event_type": "git_cleanup", "repo_path": "/new-repo", "files_cleared": []}',
+            ),
         )
         conn.commit()
         conn.close()

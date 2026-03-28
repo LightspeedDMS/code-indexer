@@ -27,7 +27,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,9 +49,7 @@ class HealthCheckResult(BaseModel):
     loadable: bool = Field(description="Whether index can be loaded by hnswlib")
 
     # Integrity metrics (from hnswlib.Index.check_integrity())
-    element_count: Optional[int] = Field(
-        None, description="Number of vectors in index"
-    )
+    element_count: Optional[int] = Field(None, description="Number of vectors in index")
     connections_checked: Optional[int] = Field(
         None, description="Total neighbor connections validated"
     )

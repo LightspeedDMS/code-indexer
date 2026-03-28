@@ -8,8 +8,6 @@ Minimal patching: only user_manager is replaced with a test double.
 import json
 from datetime import datetime, timezone
 
-import pytest
-
 
 def _make_admin_user():
     """Create a User with admin role for handler tests."""
@@ -165,6 +163,6 @@ class TestHandleAdminListSystemMcpCredentials:
         """HANDLER_REGISTRY must contain 'admin_list_system_mcp_credentials'."""
         from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 
-        assert "admin_list_system_mcp_credentials" in HANDLER_REGISTRY, (
-            "Handler 'admin_list_system_mcp_credentials' not found in HANDLER_REGISTRY"
-        )
+        assert (
+            "admin_list_system_mcp_credentials" in HANDLER_REGISTRY
+        ), "Handler 'admin_list_system_mcp_credentials' not found in HANDLER_REGISTRY"

@@ -128,7 +128,7 @@ class TestGetServerGlobalRegistry:
         expected_db_path = custom_data_dir / "cidx_server.db"
         _initialize_db_schema(str(expected_db_path))
 
-        registry = get_server_global_registry(
+        _registry = get_server_global_registry(
             golden_repos_dir=str(golden_repos_dir),
             server_data_dir=str(custom_data_dir),
         )
@@ -154,7 +154,7 @@ class TestGetServerGlobalRegistry:
         # golden_repos_dir doesn't exist yet
         assert not golden_repos_dir.exists()
 
-        registry = get_server_global_registry(
+        _registry = get_server_global_registry(
             golden_repos_dir=str(golden_repos_dir),
             server_data_dir=str(server_data_dir),
         )

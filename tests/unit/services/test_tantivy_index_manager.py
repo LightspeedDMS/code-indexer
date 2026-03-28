@@ -5,11 +5,17 @@ Tests ensure proper Tantivy integration for building FTS indexes
 alongside semantic vector indexes.
 """
 
+from __future__ import annotations
+
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
 
 class TestTantivyIndexManager:
@@ -310,7 +316,9 @@ class TestTantivyIndexManager:
             manager.initialize_index()
 
             # Add documents with distinct paths
-            for i, path in enumerate(["src/auth.py", "src/user.py", "tests/test_auth.py"]):
+            for i, path in enumerate(
+                ["src/auth.py", "src/user.py", "tests/test_auth.py"]
+            ):
                 manager.add_document(
                     {
                         "path": path,
@@ -326,7 +334,11 @@ class TestTantivyIndexManager:
 
             # get_all_indexed_paths() must return all 3 paths without using segment_readers
             result = manager.get_all_indexed_paths()
-            assert sorted(result) == ["src/auth.py", "src/user.py", "tests/test_auth.py"]
+            assert sorted(result) == [
+                "src/auth.py",
+                "src/user.py",
+                "tests/test_auth.py",
+            ]
 
     def test_get_all_indexed_paths_deduplicates(self):
         """get_all_indexed_paths() returns unique paths even when multiple docs share a path.
@@ -360,9 +372,9 @@ class TestTantivyIndexManager:
 
             # Must return the path exactly once (deduplicated)
             result = manager.get_all_indexed_paths()
-            assert result == [shared_path], (
-                f"Expected exactly ['{shared_path}'], got {result}"
-            )
+            assert result == [
+                shared_path
+            ], f"Expected exactly ['{shared_path}'], got {result}"
 
     def test_get_all_indexed_paths_empty_index(self):
         """get_all_indexed_paths() returns empty list when index has no documents."""
@@ -940,13 +952,17 @@ class TestContainsValidBooleanOps:
 
     def test_valid_or(self):
         """'term1 OR term2' has valid OR with operands on both sides — returns True."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("term1 OR term2") is True
 
     def test_valid_and(self):
         """'term1 AND term2' has valid AND with operands on both sides — returns True."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("term1 AND term2") is True
 
@@ -957,73 +973,97 @@ class TestContainsValidBooleanOps:
         given'). NOT is only valid in compound expressions like 'auth NOT token'
         where a positive term also exists.
         """
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("NOT term1") is False
 
     def test_compound_not(self):
         """'auth NOT token' has NOT with positive term on left — returns True."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("auth NOT token") is True
 
     def test_chained_ops(self):
         """'a OR b AND c' contains valid boolean ops — returns True."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("a OR b AND c") is True
 
     def test_multiple_ors(self):
         """'a OR b OR c' contains multiple valid OR ops — returns True."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("a OR b OR c") is True
 
     def test_no_operators(self):
         """'hello world' has no boolean operators — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("hello world") is False
 
     def test_single_term(self):
         """'hello' is a single term with no operators — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("hello") is False
 
     def test_empty_string(self):
         """Empty string has no operators — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("") is False
 
     def test_lowercase_or(self):
         """'term or other' uses lowercase 'or' which is not a Tantivy operator — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("term or other") is False
 
     def test_trailing_or(self):
         """'term OR' has trailing OR with no right operand — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("term OR") is False
 
     def test_leading_or(self):
         """'OR term' has leading OR with no left operand — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("OR term") is False
 
     def test_adjacent_operators(self):
         """'term OR AND other' has OR with an operator on its right (not a valid operand) — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("term OR AND other") is False
 
     def test_bare_not(self):
         """'NOT' alone has no right operand — returns False."""
-        from code_indexer.services.tantivy_index_manager import _contains_valid_boolean_ops
+        from code_indexer.services.tantivy_index_manager import (
+            _contains_valid_boolean_ops,
+        )
 
         assert _contains_valid_boolean_ops("NOT") is False
 
@@ -1172,16 +1212,18 @@ class TestBuildSearchQueryBoolean:
 
             # "auth OR login" should match both auth.py (contains "authenticate") AND
             # login.py (contains "login") — union semantics
-            results = manager.search(query_text="authenticate OR login", edit_distance=0)
+            results = manager.search(
+                query_text="authenticate OR login", edit_distance=0
+            )
 
             # Should find documents from both files
             paths = [r["path"] for r in results]
-            assert any("auth.py" in p for p in paths), (
-                f"Expected auth.py in results for 'authenticate OR login', got: {paths}"
-            )
-            assert any("login.py" in p for p in paths), (
-                f"Expected login.py in results for 'authenticate OR login', got: {paths}"
-            )
+            assert any(
+                "auth.py" in p for p in paths
+            ), f"Expected auth.py in results for 'authenticate OR login', got: {paths}"
+            assert any(
+                "login.py" in p for p in paths
+            ), f"Expected login.py in results for 'authenticate OR login', got: {paths}"
 
     def test_search_non_boolean_unchanged(self):
         """Full search() with 'hello world' (no boolean ops) returns only docs with both terms."""
@@ -1190,9 +1232,9 @@ class TestBuildSearchQueryBoolean:
 
             # "hello world" — neither term exists in our test docs, so 0 results
             results = manager.search(query_text="hello world", edit_distance=0)
-            assert results == [], (
-                f"Expected no results for 'hello world' with AND semantics, got: {results}"
-            )
+            assert (
+                results == []
+            ), f"Expected no results for 'hello world' with AND semantics, got: {results}"
 
     def test_compound_not_query_returns_valid_query(self):
         """Compound 'authenticate NOT token' routes through boolean parse_query path.

@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.research_assistant_service import (
     ResearchAssistantService,
@@ -22,7 +21,9 @@ class TestGitHubTokenInit:
     def test_init_accepts_github_token(self, tmp_path: Path) -> None:
         """Test __init__ accepts github_token parameter and stores it."""
         db_path = str(tmp_path / "test.db")
-        service = ResearchAssistantService(db_path=db_path, github_token="test_token_123")
+        service = ResearchAssistantService(
+            db_path=db_path, github_token="test_token_123"
+        )
 
         assert hasattr(service, "_github_token")
         assert service._github_token == "test_token_123"
@@ -40,14 +41,18 @@ class TestSubprocessEnvironment:
     """Test subprocess receives GitHub token in environment (AC3)."""
 
     @patch("subprocess.run")
-    @patch("code_indexer.server.services.research_assistant_service.ResearchAssistantService._get_or_create_claude_session_id")
+    @patch(
+        "code_indexer.server.services.research_assistant_service.ResearchAssistantService._get_or_create_claude_session_id"
+    )
     def test_run_claude_env_includes_github_token(
         self, mock_get_session_id: MagicMock, mock_subprocess: MagicMock, tmp_path: Path
     ) -> None:
         """Test subprocess.run receives GITHUB_TOKEN and GH_TOKEN in env when token is set."""
         # Setup
         db_path = str(tmp_path / "test.db")
-        service = ResearchAssistantService(db_path=db_path, github_token="github_token_xyz")
+        service = ResearchAssistantService(
+            db_path=db_path, github_token="github_token_xyz"
+        )
 
         # Create a test session
         session_folder = tmp_path / "session_folder"
@@ -90,7 +95,9 @@ class TestSubprocessEnvironment:
 
     @patch.dict("os.environ", {}, clear=True)
     @patch("subprocess.run")
-    @patch("code_indexer.server.services.research_assistant_service.ResearchAssistantService._get_or_create_claude_session_id")
+    @patch(
+        "code_indexer.server.services.research_assistant_service.ResearchAssistantService._get_or_create_claude_session_id"
+    )
     def test_run_claude_env_omits_token_when_none(
         self, mock_get_session_id: MagicMock, mock_subprocess: MagicMock, tmp_path: Path
     ) -> None:
@@ -134,8 +141,12 @@ class TestSubprocessEnvironment:
             # Env should be empty (we mocked os.environ to empty)
             # Our code should NOT add GITHUB_TOKEN/GH_TOKEN when _github_token is None
             env = call_kwargs.get("env", {})
-            assert "GITHUB_TOKEN" not in env, "GITHUB_TOKEN should not be added when token is None"
-            assert "GH_TOKEN" not in env, "GH_TOKEN should not be added when token is None"
+            assert (
+                "GITHUB_TOKEN" not in env
+            ), "GITHUB_TOKEN should not be added when token is None"
+            assert (
+                "GH_TOKEN" not in env
+            ), "GH_TOKEN should not be added when token is None"
 
 
 class TestSessionFolderSymlinks:
@@ -149,7 +160,14 @@ class TestSessionFolderSymlinks:
 
         # Create fake CIDX repo root with bundled issue_manager.py
         fake_repo_root = tmp_path / "fake_repo"
-        bundled_script = fake_repo_root / "src" / "code_indexer" / "server" / "scripts" / "issue_manager.py"
+        bundled_script = (
+            fake_repo_root
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "scripts"
+            / "issue_manager.py"
+        )
         bundled_script.parent.mkdir(parents=True)
         bundled_script.write_text("# Bundled issue_manager.py")
 
@@ -196,9 +214,14 @@ class TestSessionFolderSymlinks:
                 assert not issue_manager_link.exists()
 
                 # Verify warning was logged
-                assert any("issue_manager.py not found" in record.message for record in caplog.records)
+                assert any(
+                    "issue_manager.py not found" in record.message
+                    for record in caplog.records
+                )
 
-    def test_session_folder_falls_back_to_home_issue_manager(self, tmp_path: Path) -> None:
+    def test_session_folder_falls_back_to_home_issue_manager(
+        self, tmp_path: Path
+    ) -> None:
         """Test _ensure_session_folder_setup falls back to ~/.claude/ when bundled copy missing."""
         # Setup
         db_path = str(tmp_path / "test.db")
@@ -210,7 +233,9 @@ class TestSessionFolderSymlinks:
 
         # Create fake home WITH issue_manager.py (fallback)
         fake_home = tmp_path / "fake_home"
-        issue_manager_source = fake_home / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        issue_manager_source = (
+            fake_home / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        )
         issue_manager_source.parent.mkdir(parents=True)
         issue_manager_source.write_text("# Fallback issue_manager.py")
 
@@ -237,7 +262,9 @@ class TestSessionFolderSymlinks:
         # Create fake issue_manager.py source
         fake_home = tmp_path / "fake_home"
         fake_home.mkdir()
-        issue_manager_source = fake_home / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        issue_manager_source = (
+            fake_home / ".claude" / "scripts" / "utils" / "issue_manager.py"
+        )
         issue_manager_source.parent.mkdir(parents=True)
         issue_manager_source.write_text("# Fake issue_manager.py")
 
@@ -265,7 +292,14 @@ class TestPromptTemplate:
 
     def test_prompt_contains_github_issue_section(self) -> None:
         """Test prompt template contains GITHUB BUG REPORT CREATION section."""
-        prompt_path = Path(__file__).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "config" / "research_assistant_prompt.md"
+        prompt_path = (
+            Path(__file__).parent.parent.parent.parent.parent
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "config"
+            / "research_assistant_prompt.md"
+        )
 
         assert prompt_path.exists(), f"Prompt template not found at {prompt_path}"
 
@@ -274,7 +308,14 @@ class TestPromptTemplate:
 
     def test_prompt_contains_bug_report_format(self) -> None:
         """Test prompt template specifies required bug report sections (AC2)."""
-        prompt_path = Path(__file__).parent.parent.parent.parent.parent / "src" / "code_indexer" / "server" / "config" / "research_assistant_prompt.md"
+        prompt_path = (
+            Path(__file__).parent.parent.parent.parent.parent
+            / "src"
+            / "code_indexer"
+            / "server"
+            / "config"
+            / "research_assistant_prompt.md"
+        )
 
         content = prompt_path.read_text()
 

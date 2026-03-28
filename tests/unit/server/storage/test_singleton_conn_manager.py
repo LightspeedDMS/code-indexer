@@ -14,7 +14,6 @@ import os
 import re
 import tempfile
 
-import pytest
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -33,7 +32,9 @@ class TestSingletonConnectionManager:
         try:
             mgr1 = DatabaseConnectionManager.get_instance(db_path)
             mgr2 = DatabaseConnectionManager.get_instance(db_path)
-            assert mgr1 is mgr2, "Same db_path must return the same instance (singleton)"
+            assert (
+                mgr1 is mgr2
+            ), "Same db_path must return the same instance (singleton)"
         finally:
             os.unlink(db_path)
 
@@ -46,7 +47,9 @@ class TestSingletonConnectionManager:
         try:
             mgr1 = DatabaseConnectionManager.get_instance(path1)
             mgr2 = DatabaseConnectionManager.get_instance(path2)
-            assert mgr1 is not mgr2, "Different db_paths must return different instances"
+            assert (
+                mgr1 is not mgr2
+            ), "Different db_paths must return different instances"
         finally:
             os.unlink(path1)
             os.unlink(path2)
@@ -59,9 +62,9 @@ class TestSingletonConnectionManager:
         try:
             mgr1 = DatabaseConnectionManager.get_instance(rel_path)
             mgr2 = DatabaseConnectionManager.get_instance(abs_path)
-            assert mgr1 is mgr2, (
-                "Relative and absolute paths to the same file must return the same instance"
-            )
+            assert (
+                mgr1 is mgr2
+            ), "Relative and absolute paths to the same file must return the same instance"
         finally:
             os.unlink(rel_path)
 
@@ -90,9 +93,9 @@ class TestSingletonConnectionManager:
 
         try:
             assert not errors, f"Thread errors: {errors}"
-            assert len(set(results)) == 1, (
-                "All concurrent threads must get the same instance id"
-            )
+            assert (
+                len(set(results)) == 1
+            ), "All concurrent threads must get the same instance id"
         finally:
             os.unlink(db_path)
 
@@ -110,19 +113,21 @@ class TestSingletonConnectionManager:
 
     def test_instances_dict_is_class_level(self):
         """_instances must be a class-level dict, not instance-level."""
-        assert hasattr(DatabaseConnectionManager, "_instances"), (
-            "DatabaseConnectionManager must have a class-level _instances dict"
-        )
+        assert hasattr(
+            DatabaseConnectionManager, "_instances"
+        ), "DatabaseConnectionManager must have a class-level _instances dict"
         assert isinstance(DatabaseConnectionManager._instances, dict)
 
     def test_instance_lock_is_class_level(self):
         """_instance_lock must be a class-level threading.Lock."""
         import threading
 
-        assert hasattr(DatabaseConnectionManager, "_instance_lock"), (
-            "DatabaseConnectionManager must have a class-level _instance_lock"
+        assert hasattr(
+            DatabaseConnectionManager, "_instance_lock"
+        ), "DatabaseConnectionManager must have a class-level _instance_lock"
+        assert isinstance(
+            DatabaseConnectionManager._instance_lock, type(threading.Lock())
         )
-        assert isinstance(DatabaseConnectionManager._instance_lock, type(threading.Lock()))
 
     def test_all_sqlite_backends_use_get_instance(self):
         """
@@ -197,9 +202,9 @@ class TestSingletonConnectionManager:
         abs_path = os.path.abspath(db_path)
         try:
             mgr = DatabaseConnectionManager.get_instance(db_path)
-            assert abs_path in DatabaseConnectionManager._instances, (
-                "get_instance must store the instance in _instances keyed by absolute path"
-            )
+            assert (
+                abs_path in DatabaseConnectionManager._instances
+            ), "get_instance must store the instance in _instances keyed by absolute path"
             assert DatabaseConnectionManager._instances[abs_path] is mgr
         finally:
             os.unlink(db_path)

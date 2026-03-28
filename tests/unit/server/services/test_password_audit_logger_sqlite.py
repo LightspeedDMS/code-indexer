@@ -16,8 +16,6 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 
 import json
 
-import pytest
-
 
 class TestPasswordChangeAuditLoggerSQLiteInit:
     """Tests for PasswordChangeAuditLogger initialization with AuditLogService."""

@@ -9,9 +9,7 @@ database persistence for tracking issues created by self-monitoring.
 import hashlib
 import json
 import logging
-import os
 import re
-import socket
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional

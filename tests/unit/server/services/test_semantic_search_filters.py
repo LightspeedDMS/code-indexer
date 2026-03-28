@@ -11,7 +11,6 @@ Tests cover:
 
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
-import pytest
 
 from code_indexer.server.models.api_models import SemanticSearchRequest
 from code_indexer.server.services.search_service import SemanticSearchService
@@ -98,7 +97,10 @@ class TestFilterConditionsBuilder:
     def test_path_filter_produces_must_clause(self):
         """path_filter should produce a must clause with key=path, match.text."""
         result = SemanticSearchService()._build_filter_conditions(
-            path_filter="*/src/*", language=None, exclude_language=None, exclude_path=None
+            path_filter="*/src/*",
+            language=None,
+            exclude_language=None,
+            exclude_path=None,
         )
         assert "must" in result
         assert {"key": "path", "match": {"text": "*/src/*"}} in result["must"]
@@ -106,7 +108,10 @@ class TestFilterConditionsBuilder:
     def test_language_filter_produces_must_clause(self):
         """language filter should produce a must clause using LanguageMapper."""
         result = SemanticSearchService()._build_filter_conditions(
-            path_filter=None, language="python", exclude_language=None, exclude_path=None
+            path_filter=None,
+            language="python",
+            exclude_language=None,
+            exclude_path=None,
         )
         assert "must" in result
         # LanguageMapper produces should-clause for python (multiple extensions)
@@ -120,7 +125,10 @@ class TestFilterConditionsBuilder:
     def test_exclude_language_produces_must_not_clause(self):
         """exclude_language should produce must_not conditions."""
         result = SemanticSearchService()._build_filter_conditions(
-            path_filter=None, language=None, exclude_language="javascript", exclude_path=None
+            path_filter=None,
+            language=None,
+            exclude_language="javascript",
+            exclude_path=None,
         )
         assert "must_not" in result
         must_not = result["must_not"]
@@ -133,7 +141,10 @@ class TestFilterConditionsBuilder:
     def test_exclude_path_produces_must_not_clause(self):
         """exclude_path should produce must_not conditions for path."""
         result = SemanticSearchService()._build_filter_conditions(
-            path_filter=None, language=None, exclude_language=None, exclude_path="*/tests/*"
+            path_filter=None,
+            language=None,
+            exclude_language=None,
+            exclude_path="*/tests/*",
         )
         assert "must_not" in result
         must_not = result["must_not"]
@@ -155,7 +166,10 @@ class TestFilterConditionsBuilder:
     def test_path_and_language_both_in_must(self):
         """Both path_filter and language should appear in must clause."""
         result = SemanticSearchService()._build_filter_conditions(
-            path_filter="*/src/*", language="python", exclude_language=None, exclude_path=None
+            path_filter="*/src/*",
+            language="python",
+            exclude_language=None,
+            exclude_path=None,
         )
         assert "must" in result
         assert len(result["must"]) == 2
@@ -204,7 +218,11 @@ class TestSemanticSearchServiceFiltersWired:
     @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     @patch("code_indexer.server.services.search_service.ConfigManager")
     def test_no_filters_calls_search_without_filter_conditions(
-        self, mock_config_manager, mock_embedding_factory, mock_backend_factory, tmp_path
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
     ):
         """When no filters set, filter_conditions should be empty dict or None."""
         from code_indexer.server.services.search_service import SemanticSearchService
@@ -215,9 +233,7 @@ class TestSemanticSearchServiceFiltersWired:
 
         # Setup mocks
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
 
         mock_embedding = MagicMock()
         mock_embedding_factory.create.return_value = mock_embedding
@@ -242,15 +258,19 @@ class TestSemanticSearchServiceFiltersWired:
 
         # filter_conditions should be absent or empty dict when no filters given
         filter_conds = call_kwargs.kwargs.get("filter_conditions", {})
-        assert not filter_conds, (
-            f"Expected no filter_conditions when no filters set, got: {filter_conds}"
-        )
+        assert (
+            not filter_conds
+        ), f"Expected no filter_conditions when no filters set, got: {filter_conds}"
 
     @patch("code_indexer.server.services.search_service.BackendFactory")
     @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     @patch("code_indexer.server.services.search_service.ConfigManager")
     def test_path_filter_passed_to_vector_store(
-        self, mock_config_manager, mock_embedding_factory, mock_backend_factory, tmp_path
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
     ):
         """path_filter in request must be passed as filter_conditions to vector store search."""
         from code_indexer.server.services.search_service import SemanticSearchService
@@ -259,9 +279,7 @@ class TestSemanticSearchServiceFiltersWired:
         (tmp_path / ".code-indexer").mkdir()
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
 
         mock_embedding = MagicMock()
         mock_embedding_factory.create.return_value = mock_embedding
@@ -292,7 +310,11 @@ class TestSemanticSearchServiceFiltersWired:
     @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     @patch("code_indexer.server.services.search_service.ConfigManager")
     def test_exclude_path_passed_to_vector_store(
-        self, mock_config_manager, mock_embedding_factory, mock_backend_factory, tmp_path
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
     ):
         """exclude_path in request must appear in must_not filter_conditions."""
         from code_indexer.server.services.search_service import SemanticSearchService
@@ -301,9 +323,7 @@ class TestSemanticSearchServiceFiltersWired:
         (tmp_path / ".code-indexer").mkdir()
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
 
         mock_embedding = MagicMock()
         mock_embedding_factory.create.return_value = mock_embedding
@@ -328,13 +348,19 @@ class TestSemanticSearchServiceFiltersWired:
 
         assert filter_conds, "filter_conditions must be set when exclude_path given"
         assert "must_not" in filter_conds
-        assert {"key": "path", "match": {"text": "*/tests/*"}} in filter_conds["must_not"]
+        assert {"key": "path", "match": {"text": "*/tests/*"}} in filter_conds[
+            "must_not"
+        ]
 
     @patch("code_indexer.server.services.search_service.BackendFactory")
     @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     @patch("code_indexer.server.services.search_service.ConfigManager")
     def test_language_filter_passed_to_vector_store(
-        self, mock_config_manager, mock_embedding_factory, mock_backend_factory, tmp_path
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
     ):
         """language in request must appear in must filter_conditions using LanguageMapper."""
         from code_indexer.server.services.search_service import SemanticSearchService
@@ -343,9 +369,7 @@ class TestSemanticSearchServiceFiltersWired:
         (tmp_path / ".code-indexer").mkdir()
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
 
         mock_embedding = MagicMock()
         mock_embedding_factory.create.return_value = mock_embedding
@@ -378,7 +402,11 @@ class TestSemanticSearchServiceFiltersWired:
     @patch("code_indexer.server.services.search_service.EmbeddingProviderFactory")
     @patch("code_indexer.server.services.search_service.ConfigManager")
     def test_exclude_language_passed_to_vector_store(
-        self, mock_config_manager, mock_embedding_factory, mock_backend_factory, tmp_path
+        self,
+        mock_config_manager,
+        mock_embedding_factory,
+        mock_backend_factory,
+        tmp_path,
     ):
         """exclude_language in request must appear in must_not filter_conditions."""
         from code_indexer.server.services.search_service import SemanticSearchService
@@ -387,9 +415,7 @@ class TestSemanticSearchServiceFiltersWired:
         (tmp_path / ".code-indexer").mkdir()
 
         mock_config = MagicMock()
-        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = (
-            mock_config
-        )
+        mock_config_manager.create_with_backtrack.return_value.get_config.return_value = mock_config
 
         mock_embedding = MagicMock()
         mock_embedding_factory.create.return_value = mock_embedding
@@ -415,7 +441,9 @@ class TestSemanticSearchServiceFiltersWired:
         assert filter_conds, "filter_conditions must be set when exclude_language given"
         assert "must_not" in filter_conds
         # Java has single extension "java"
-        assert {"key": "language", "match": {"value": "java"}} in filter_conds["must_not"]
+        assert {"key": "language", "match": {"value": "java"}} in filter_conds[
+            "must_not"
+        ]
 
 
 # ===========================================================================

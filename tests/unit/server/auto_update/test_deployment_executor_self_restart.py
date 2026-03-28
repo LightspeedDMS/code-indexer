@@ -7,8 +7,6 @@ to its own code and restarts the service to load new code.
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
 import json
-import hashlib
-import pytest
 
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 
@@ -204,9 +202,7 @@ class TestAutoUpdateSelfRestartDetection:
         with patch.object(executor, "_calculate_auto_update_hash") as mock_hash:
             mock_hash.return_value = "same_hash"  # Same hash before and after
 
-            with patch.object(
-                executor, "_restart_auto_update_service"
-            ) as mock_restart:
+            with patch.object(executor, "_restart_auto_update_service") as mock_restart:
                 result = executor.execute()
 
                 # Should NOT restart, should continue deployment
@@ -243,7 +239,9 @@ class TestAutoUpdateSelfRestartDetection:
         with patch.object(executor, "_calculate_auto_update_hash") as mock_hash:
             mock_hash.side_effect = ["hash1", "hash2"]  # Different hashes
 
-            with patch("code_indexer.server.auto_update.deployment_executor.PENDING_REDEPLOY_MARKER") as mock_marker:
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.PENDING_REDEPLOY_MARKER"
+            ) as mock_marker:
                 with patch.object(executor, "_write_status_file"):
                     with patch.object(executor, "_restart_auto_update_service"):
                         result = executor.execute()
@@ -262,11 +260,15 @@ class TestAutoUpdateSelfRestartDetection:
         with patch.object(executor, "_calculate_auto_update_hash") as mock_hash:
             mock_hash.side_effect = ["hash1", "hash2"]
 
-            with patch("code_indexer.server.auto_update.deployment_executor.PENDING_REDEPLOY_MARKER") as mock_marker:
+            with patch(
+                "code_indexer.server.auto_update.deployment_executor.PENDING_REDEPLOY_MARKER"
+            ) as mock_marker:
                 mock_marker.touch.side_effect = Exception("Permission denied")
 
                 with patch.object(executor, "_write_status_file"):
-                    with patch.object(executor, "_restart_auto_update_service") as mock_restart:
+                    with patch.object(
+                        executor, "_restart_auto_update_service"
+                    ) as mock_restart:
                         result = executor.execute()
 
                         # Should still restart even if marker creation fails

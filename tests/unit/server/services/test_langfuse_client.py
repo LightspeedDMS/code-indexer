@@ -10,8 +10,6 @@ Tests cover:
 - New end_trace functionality (Bug #135 fix)
 """
 
-import pytest
-import sys
 from unittest.mock import Mock, patch, MagicMock
 
 # Import will fail initially - TDD red phase
@@ -219,7 +217,7 @@ class TestLangfuseClientTraceOperations:
         )
 
         metadata = {"topic": "authentication", "strategy": "deep-dive"}
-        result = client.create_trace(
+        _result = client.create_trace(
             name="research", session_id="s1", metadata=metadata, user_id="user-123"
         )
 
@@ -280,7 +278,7 @@ class TestLangfuseClientSpanOperations:
         input_data = {"query": "vector store", "limit": 5}
         output_data = {"results": 3, "duration_ms": 245}
 
-        result = client.create_span(
+        _result = client.create_span(
             trace_id="t1",
             name="search_code",
             metadata={"tool": "search_code"},
@@ -338,7 +336,7 @@ class TestLangfuseClientScoring:
         mock_score = Mock()
         mock_langfuse_class.return_value.create_score.return_value = mock_score
 
-        result = client.score(
+        _result = client.score(
             trace_id="t1", name="quality", value=0.9, comment="Excellent results"
         )
 
@@ -534,7 +532,7 @@ class TestStory185LangfuseClientChanges:
         )
 
         user_prompt = "Find all authentication functions in the codebase"
-        result = client.create_trace(
+        _result = client.create_trace(
             name="Auth Investigation",
             session_id="s1",
             input=user_prompt,
@@ -565,7 +563,7 @@ class TestStory185LangfuseClientChanges:
         )
 
         tags = ["bugfix", "high-priority", "authentication"]
-        result = client.create_trace(
+        _result = client.create_trace(
             name="Bug Investigation",
             session_id="s1",
             tags=tags,
@@ -647,7 +645,9 @@ class TestStory185LangfuseClientChanges:
         result = client.update_current_trace_in_context(span=mock_span, output=output)
 
         assert result is True
-        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(output=output)
+        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(
+            output=output
+        )
 
     @patch("langfuse.Langfuse")
     def test_update_trace_with_metadata_only(self, mock_langfuse_class):
@@ -664,10 +664,14 @@ class TestStory185LangfuseClientChanges:
         mock_span.__exit__ = Mock(return_value=None)
 
         metadata = {"outcome": "success", "intel_frustration": 0.2}
-        result = client.update_current_trace_in_context(span=mock_span, metadata=metadata)
+        result = client.update_current_trace_in_context(
+            span=mock_span, metadata=metadata
+        )
 
         assert result is True
-        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(metadata=metadata)
+        mock_langfuse_class.return_value.update_current_trace.assert_called_once_with(
+            metadata=metadata
+        )
 
     @patch("langfuse.Langfuse")
     def test_update_trace_handles_errors(self, mock_langfuse_class):

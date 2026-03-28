@@ -8,7 +8,6 @@ errors when the service runs as a different user than the repo owner.
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import subprocess
 
 from code_indexer.server.auto_update.deployment_executor import DeploymentExecutor
 

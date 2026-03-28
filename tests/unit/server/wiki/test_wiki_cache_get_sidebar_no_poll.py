@@ -2,7 +2,7 @@
 
 AC4: Sidebar cache serves without filesystem poll on cache hit (no rglob in hot path).
 """
-import json
+
 import os
 import tempfile
 from pathlib import Path
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.server.wiki.wiki_cache import WikiCache, _max_mtime_of_md_files
+from code_indexer.server.wiki.wiki_cache import WikiCache
 
 
 @pytest.fixture

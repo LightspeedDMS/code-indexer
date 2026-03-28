@@ -7,8 +7,6 @@ and that BackgroundJobsConfig.cleanup_max_age_hours is removed.
 TDD: These tests are written BEFORE implementation to define expected behavior.
 """
 
-import pytest
-
 from code_indexer.server.utils.config_manager import (
     DataRetentionConfig,
     BackgroundJobsConfig,

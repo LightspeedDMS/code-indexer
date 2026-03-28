@@ -12,7 +12,6 @@ Following TDD methodology: Write failing tests FIRST, then implement.
 
 import pytest
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -25,6 +24,7 @@ class TestResearchAssistantClaudeRetry:
     def temp_db(self):
         """Create temporary database for testing."""
         import os
+
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
         yield db_path
@@ -55,19 +55,20 @@ class TestResearchAssistantClaudeRetry:
         captured_commands = []
 
         def mock_run(*args, **kwargs):
-            captured_commands.append(args[0] if args else kwargs.get('args'))
+            captured_commands.append(args[0] if args else kwargs.get("args"))
             result = MagicMock()
             result.returncode = 0
             result.stdout = "Test response"
             result.stderr = ""
             return result
 
-        with patch('subprocess.run', side_effect=mock_run):
+        with patch("subprocess.run", side_effect=mock_run):
             # Execute first prompt
-            job_id = research_service.execute_prompt(session_id, "First question")
+            _job_id = research_service.execute_prompt(session_id, "First question")
 
             # Wait for background thread
             import time
+
             time.sleep(0.2)
 
         # Verify command used --session-id (not --resume)
@@ -89,26 +90,31 @@ class TestResearchAssistantClaudeRetry:
         captured_commands = []
 
         def mock_run(*args, **kwargs):
-            captured_commands.append(args[0] if args else kwargs.get('args'))
+            captured_commands.append(args[0] if args else kwargs.get("args"))
             result = MagicMock()
             result.returncode = 0
             result.stdout = "Test response"
             result.stderr = ""
             return result
 
-        with patch('subprocess.run', side_effect=mock_run):
+        with patch("subprocess.run", side_effect=mock_run):
             # Execute subsequent prompt
-            job_id = research_service.execute_prompt(session_id, "Second question")
+            _job_id = research_service.execute_prompt(session_id, "Second question")
 
             # Wait for background thread
             import time
+
             time.sleep(0.2)
 
         # Verify command used --resume (not --session-id)
-        assert len(captured_commands) == 1, "Should execute Claude CLI once (successful resume)"
+        assert (
+            len(captured_commands) == 1
+        ), "Should execute Claude CLI once (successful resume)"
         cmd = captured_commands[0]
         assert "--resume" in cmd, "Subsequent message must try --resume first"
-        assert "--session-id" not in cmd, "Successful resume should not use --session-id"
+        assert (
+            "--session-id" not in cmd
+        ), "Successful resume should not use --session-id"
 
     def test_retry_logic_on_no_conversation_found(self, research_service):
         """Test Bug #153: Retry with --session-id when --resume fails with 'No conversation found'."""
@@ -124,7 +130,7 @@ class TestResearchAssistantClaudeRetry:
         call_count = [0]
 
         def mock_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get('args')
+            cmd = args[0] if args else kwargs.get("args")
             captured_commands.append(cmd)
             call_count[0] += 1
 
@@ -149,23 +155,28 @@ class TestResearchAssistantClaudeRetry:
             # Should not reach here
             assert False, "Should only call subprocess.run twice (resume + retry)"
 
-        with patch('subprocess.run', side_effect=mock_run):
+        with patch("subprocess.run", side_effect=mock_run):
             # Execute subsequent prompt
-            job_id = research_service.execute_prompt(session_id, "Second question")
+            _job_id = research_service.execute_prompt(session_id, "Second question")
 
             # Wait for background thread
             import time
+
             time.sleep(0.2)
 
         # Verify retry logic was triggered
-        assert len(captured_commands) == 2, "Should execute Claude CLI twice (resume failed, retry succeeded)"
+        assert (
+            len(captured_commands) == 2
+        ), "Should execute Claude CLI twice (resume failed, retry succeeded)"
         assert "--resume" in captured_commands[0], "First attempt must use --resume"
         assert "--session-id" in captured_commands[1], "Retry must use --session-id"
 
         # Verify job completed successfully
-        status = research_service.poll_job(job_id)
+        status = research_service.poll_job(_job_id)
         assert status["status"] == "complete", "Job should complete after retry"
-        assert status["response"] == "Test response", "Should return response from retry"
+        assert (
+            status["response"] == "Test response"
+        ), "Should return response from retry"
 
     def test_retry_logic_on_not_found_error(self, research_service):
         """Test Bug #153: Retry with --session-id when --resume fails with 'not found' (lowercase)."""
@@ -181,7 +192,7 @@ class TestResearchAssistantClaudeRetry:
         call_count = [0]
 
         def mock_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get('args')
+            cmd = args[0] if args else kwargs.get("args")
             captured_commands.append(cmd)
             call_count[0] += 1
 
@@ -206,12 +217,13 @@ class TestResearchAssistantClaudeRetry:
             # Should not reach here
             assert False, "Should only call subprocess.run twice"
 
-        with patch('subprocess.run', side_effect=mock_run):
+        with patch("subprocess.run", side_effect=mock_run):
             # Execute subsequent prompt
-            job_id = research_service.execute_prompt(session_id, "Second question")
+            _job_id = research_service.execute_prompt(session_id, "Second question")
 
             # Wait for background thread
             import time
+
             time.sleep(0.2)
 
         # Verify retry logic was triggered
@@ -232,7 +244,7 @@ class TestResearchAssistantClaudeRetry:
         captured_commands = []
 
         def mock_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get('args')
+            cmd = args[0] if args else kwargs.get("args")
             captured_commands.append(cmd)
 
             result = MagicMock()
@@ -241,16 +253,19 @@ class TestResearchAssistantClaudeRetry:
             result.stderr = ""
             return result
 
-        with patch('subprocess.run', side_effect=mock_run):
+        with patch("subprocess.run", side_effect=mock_run):
             # Execute subsequent prompt
-            job_id = research_service.execute_prompt(session_id, "Second question")
+            _job_id = research_service.execute_prompt(session_id, "Second question")
 
             # Wait for background thread
             import time
+
             time.sleep(0.2)
 
         # Verify NO retry happened (only one call)
-        assert len(captured_commands) == 1, "Should execute Claude CLI ONCE (no retry needed)"
+        assert (
+            len(captured_commands) == 1
+        ), "Should execute Claude CLI ONCE (no retry needed)"
         assert "--resume" in captured_commands[0], "Should use --resume"
         assert "--session-id" not in captured_commands[0], "Should NOT use --session-id"
 
@@ -267,7 +282,7 @@ class TestResearchAssistantClaudeRetry:
         captured_commands = []
 
         def mock_run(*args, **kwargs):
-            cmd = args[0] if args else kwargs.get('args')
+            cmd = args[0] if args else kwargs.get("args")
             captured_commands.append(cmd)
 
             result = MagicMock()
@@ -276,19 +291,22 @@ class TestResearchAssistantClaudeRetry:
             result.stderr = "Permission denied"
             return result
 
-        with patch('subprocess.run', side_effect=mock_run):
+        with patch("subprocess.run", side_effect=mock_run):
             # Execute subsequent prompt
-            job_id = research_service.execute_prompt(session_id, "Second question")
+            _job_id = research_service.execute_prompt(session_id, "Second question")
 
             # Wait for background thread
             import time
+
             time.sleep(0.2)
 
         # Verify NO retry happened (only one call)
-        assert len(captured_commands) == 1, "Should execute Claude CLI ONCE (no retry on non-'not found' errors)"
+        assert (
+            len(captured_commands) == 1
+        ), "Should execute Claude CLI ONCE (no retry on non-'not found' errors)"
         assert "--resume" in captured_commands[0], "Should use --resume"
 
         # Verify job failed
-        status = research_service.poll_job(job_id)
+        status = research_service.poll_job(_job_id)
         assert status["status"] == "error", "Job should fail on non-retryable errors"
         assert "Permission denied" in status["error"], "Should preserve original error"

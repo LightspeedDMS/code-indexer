@@ -1046,12 +1046,18 @@ class TestRefreshSchedulerIndexReconciliation:
 
         # Mock subprocess.run to avoid actual cidx commands
         with patch("subprocess.run") as mock_run:
+
             def mock_subprocess(*args, **kwargs):
                 # Create .code-indexer/index directory when cidx index is called
                 # This satisfies the validation check in _create_new_index
                 command = args[0] if args else kwargs.get("args", [])
                 cwd = kwargs.get("cwd")
-                if cwd and "cidx" in command and "index" in command and "scip" not in command:
+                if (
+                    cwd
+                    and "cidx" in command
+                    and "index" in command
+                    and "scip" not in command
+                ):
                     # This is "cidx index" command - create the index directory
                     index_dir = Path(cwd) / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
@@ -1060,7 +1066,7 @@ class TestRefreshSchedulerIndexReconciliation:
             mock_run.side_effect = mock_subprocess
 
             # Execute: Create new index
-            index_path = scheduler._create_new_index(
+            _index_path = scheduler._create_new_index(
                 alias_name="test-repo-global", source_path=str(repo_dir)
             )
 
@@ -1068,13 +1074,23 @@ class TestRefreshSchedulerIndexReconciliation:
             scip_calls = [
                 call
                 for call in mock_run.call_args_list
-                if len(call[0]) > 0 and isinstance(call[0][0], list) and len(call[0][0]) > 0 and call[0][0][0] == "cidx" and "scip" in call[0][0]
+                if len(call[0]) > 0
+                and isinstance(call[0][0], list)
+                and len(call[0][0]) > 0
+                and call[0][0][0] == "cidx"
+                and "scip" in call[0][0]
             ]
-            assert len(scip_calls) > 0, f"cidx scip generate should be called when enable_scip=True. All calls: {[call[0][0] for call in mock_run.call_args_list if len(call[0]) > 0]}"
+            assert (
+                len(scip_calls) > 0
+            ), f"cidx scip generate should be called when enable_scip=True. All calls: {[call[0][0] for call in mock_run.call_args_list if len(call[0]) > 0]}"
 
             # Verify the scip command was: ["cidx", "scip", "generate"]
             scip_command = scip_calls[0][0][0]
-            assert scip_command == ["cidx", "scip", "generate"], f"Expected ['cidx', 'scip', 'generate'], got {scip_command}"
+            assert scip_command == [
+                "cidx",
+                "scip",
+                "generate",
+            ], f"Expected ['cidx', 'scip', 'generate'], got {scip_command}"
 
     def test_refresh_skips_scip_index_when_disabled(self, tmp_path) -> None:
         """AC4: _create_new_index should NOT run SCIP generation when enable_scip=False."""
@@ -1113,12 +1129,18 @@ class TestRefreshSchedulerIndexReconciliation:
 
         # Mock subprocess.run to avoid actual cidx commands
         with patch("subprocess.run") as mock_run:
+
             def mock_subprocess(*args, **kwargs):
                 # Create .code-indexer/index directory when cidx index is called
                 # This satisfies the validation check in _create_new_index
                 command = args[0] if args else kwargs.get("args", [])
                 cwd = kwargs.get("cwd")
-                if cwd and "cidx" in command and "index" in command and "scip" not in command:
+                if (
+                    cwd
+                    and "cidx" in command
+                    and "index" in command
+                    and "scip" not in command
+                ):
                     # This is "cidx index" command - create the index directory
                     index_dir = Path(cwd) / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
@@ -1127,7 +1149,7 @@ class TestRefreshSchedulerIndexReconciliation:
             mock_run.side_effect = mock_subprocess
 
             # Execute: Create new index
-            index_path = scheduler._create_new_index(
+            _index_path = scheduler._create_new_index(
                 alias_name="test-repo-global", source_path=str(repo_dir)
             )
 
@@ -1135,9 +1157,15 @@ class TestRefreshSchedulerIndexReconciliation:
             scip_calls = [
                 call
                 for call in mock_run.call_args_list
-                if len(call[0]) > 0 and isinstance(call[0][0], list) and len(call[0][0]) > 0 and call[0][0][0] == "cidx" and "scip" in call[0][0]
+                if len(call[0]) > 0
+                and isinstance(call[0][0], list)
+                and len(call[0][0]) > 0
+                and call[0][0][0] == "cidx"
+                and "scip" in call[0][0]
             ]
-            assert len(scip_calls) == 0, "cidx scip generate should NOT be called when enable_scip=False"
+            assert (
+                len(scip_calls) == 0
+            ), "cidx scip generate should NOT be called when enable_scip=False"
 
     def test_refresh_uses_configured_scip_timeout(self, tmp_path) -> None:
         """AC4: _create_new_index should use cidx_scip_generate_timeout from ServerResourceConfig."""
@@ -1168,6 +1196,7 @@ class TestRefreshSchedulerIndexReconciliation:
 
         # Create custom resource config with specific SCIP timeout
         from code_indexer.server.utils.config_manager import ServerResourceConfig
+
         custom_resource_config = ServerResourceConfig()
         custom_resource_config.cidx_scip_generate_timeout = 3000  # 50 minutes
 
@@ -1184,6 +1213,7 @@ class TestRefreshSchedulerIndexReconciliation:
         captured_timeouts = []
 
         with patch("subprocess.run") as mock_run:
+
             def mock_subprocess(*args, **kwargs):
                 # Capture timeout for SCIP commands
                 command = args[0] if args else kwargs.get("args", [])
@@ -1191,7 +1221,12 @@ class TestRefreshSchedulerIndexReconciliation:
                     captured_timeouts.append(kwargs.get("timeout"))
                 # Create .code-indexer/index directory when cidx index is called
                 cwd = kwargs.get("cwd")
-                if cwd and "cidx" in command and "index" in command and "scip" not in command:
+                if (
+                    cwd
+                    and "cidx" in command
+                    and "index" in command
+                    and "scip" not in command
+                ):
                     index_dir = Path(cwd) / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
                 return MagicMock(returncode=0, stdout="", stderr="")
@@ -1199,13 +1234,15 @@ class TestRefreshSchedulerIndexReconciliation:
             mock_run.side_effect = mock_subprocess
 
             # Execute: Create new index
-            index_path = scheduler._create_new_index(
+            _index_path = scheduler._create_new_index(
                 alias_name="test-repo-global", source_path=str(repo_dir)
             )
 
             # Verify: SCIP command used custom timeout
             assert len(captured_timeouts) == 1, "Should have captured one SCIP timeout"
-            assert captured_timeouts[0] == 3000, f"Expected timeout=3000, got {captured_timeouts[0]}"
+            assert (
+                captured_timeouts[0] == 3000
+            ), f"Expected timeout=3000, got {captured_timeouts[0]}"
 
     def test_refresh_scip_failure_raises_runtime_error(self, tmp_path) -> None:
         """AC5: SCIP generation failures should raise RuntimeError and fail the refresh."""
@@ -1248,12 +1285,15 @@ class TestRefreshSchedulerIndexReconciliation:
 
         # Mock subprocess.run to simulate SCIP failure
         with patch("subprocess.run") as mock_run:
+
             def mock_subprocess(*args, **kwargs):
                 # First calls succeed (cp, git, cidx index)
                 # SCIP call fails
                 command = args[0] if args else kwargs.get("args", [])
                 if "scip" in command:
-                    raise subprocess.CalledProcessError(1, command, stderr="SCIP indexer failed: invalid syntax")
+                    raise subprocess.CalledProcessError(
+                        1, command, stderr="SCIP indexer failed: invalid syntax"
+                    )
                 # Other calls succeed
                 return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -1323,7 +1363,9 @@ class TestRefreshSchedulerIndexReconciliation:
         )
 
         # Mock GitPullUpdater to avoid actual git operations
-        with patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_updater_cls:
+        with patch(
+            "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+        ) as mock_updater_cls:
             mock_updater = MagicMock()
             mock_updater.has_changes.return_value = False  # No changes = skip refresh
             mock_updater.get_source_path.return_value = str(repo_dir)
@@ -1407,19 +1449,27 @@ class TestRefreshSchedulerIndexReconciliation:
         temporal_dir.mkdir()
 
         # Mock GitPullUpdater and _create_new_index
-        with patch("code_indexer.global_repos.refresh_scheduler.GitPullUpdater") as mock_updater_cls:
+        with patch(
+            "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
+        ) as mock_updater_cls:
             mock_updater = MagicMock()
-            mock_updater.has_changes.return_value = True  # Has changes = perform refresh
+            mock_updater.has_changes.return_value = (
+                True  # Has changes = perform refresh
+            )
             mock_updater.get_source_path.return_value = str(repo_dir)
             mock_updater_cls.return_value = mock_updater
 
             # Mock _create_new_index to return path with temporal
-            with patch.object(scheduler, "_create_new_index", return_value=str(new_index_path)):
+            with patch.object(
+                scheduler, "_create_new_index", return_value=str(new_index_path)
+            ):
                 # Execute: Run refresh (will call reconcile at START and END)
                 scheduler._execute_refresh("test-repo-global")
 
                 # Verify: Reconciliation called at START and END
-                assert len(reconciliation_calls) >= 2, "Should call reconciliation at START+END"
+                assert (
+                    len(reconciliation_calls) >= 2
+                ), "Should call reconciliation at START+END"
 
                 # Verify START call detected no temporal (from repo_dir)
                 first_call = reconciliation_calls[0]

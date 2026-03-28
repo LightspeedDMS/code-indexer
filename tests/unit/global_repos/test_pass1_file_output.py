@@ -12,8 +12,6 @@ Tests verify:
 """
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -96,7 +94,9 @@ def valid_domain_json(repo_list):
 class TestPass1PromptFileOutputInstructions:
     """AC1: The prompt instructs Claude to write JSON to a file and validate it."""
 
-    def _capture_prompt(self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json):
+    def _capture_prompt(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
         """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
         captured_prompt = {}
 
@@ -105,14 +105,18 @@ class TestPass1PromptFileOutputInstructions:
             return valid_domain_json
 
         analyzer._invoke_claude_cli = fake_invoke
-        analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
         return captured_prompt["value"]
 
     def test_prompt_contains_pass1_file_path_relative(
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must include the relative path from cwd for the output file."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         # The relative path from cwd (golden-repos root) to the staging file
         assert "cidx-meta/dependency-map.staging/pass1_domains.json" in prompt
@@ -121,7 +125,9 @@ class TestPass1PromptFileOutputInstructions:
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must include the absolute path to the output file."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         expected_abs_path = str(staging_dir / "pass1_domains.json")
         assert expected_abs_path in prompt
@@ -130,7 +136,9 @@ class TestPass1PromptFileOutputInstructions:
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must instruct Claude to validate with python3 -m json.tool."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         assert "python3 -m json.tool" in prompt
 
@@ -138,17 +146,25 @@ class TestPass1PromptFileOutputInstructions:
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must explicitly say NOT to output JSON to stdout."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         # Must contain some form of "do not output to stdout" instruction
         prompt_lower = prompt.lower()
-        assert "do not output" in prompt_lower or "not output" in prompt_lower or "only write" in prompt_lower
+        assert (
+            "do not output" in prompt_lower
+            or "not output" in prompt_lower
+            or "only write" in prompt_lower
+        )
 
     def test_prompt_instructs_self_correction_on_validation_failure(
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must instruct Claude to fix errors and re-validate until valid."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         prompt_lower = prompt.lower()
         # Must contain some instruction about fixing/re-validating
@@ -167,7 +183,9 @@ class TestPass1PromptFileOutputInstructions:
 class TestPass1PromptPrimacy:
     """AC1: Output format instructions must appear BEFORE repo descriptions (primacy/recency)."""
 
-    def _capture_prompt(self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json):
+    def _capture_prompt(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
         """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
         captured_prompt = {}
 
@@ -176,20 +194,26 @@ class TestPass1PromptPrimacy:
             return valid_domain_json
 
         analyzer._invoke_claude_cli = fake_invoke
-        analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
         return captured_prompt["value"]
 
     def test_file_output_instructions_appear_before_repo_descriptions(
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Output format + file instructions must appear before the repo descriptions section."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         file_instruction_pos = prompt.find("pass1_domains.json")
         repo_desc_section_pos = prompt.find("## Repository Descriptions")
 
         assert file_instruction_pos != -1, "File instruction not found in prompt"
-        assert repo_desc_section_pos != -1, "Repo descriptions section not found in prompt"
+        assert (
+            repo_desc_section_pos != -1
+        ), "Repo descriptions section not found in prompt"
         assert file_instruction_pos < repo_desc_section_pos, (
             f"File output instruction (pos {file_instruction_pos}) must appear "
             f"BEFORE repo descriptions (pos {repo_desc_section_pos})"
@@ -199,14 +223,20 @@ class TestPass1PromptPrimacy:
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """JSON schema must appear before repo descriptions."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         # JSON schema contains the array example or field names
         schema_pos = prompt.find("participating_repos")
         repo_desc_section_pos = prompt.find("## Repository Descriptions")
 
-        assert schema_pos != -1, "JSON schema ('participating_repos') not found in prompt"
-        assert repo_desc_section_pos != -1, "Repo descriptions section not found in prompt"
+        assert (
+            schema_pos != -1
+        ), "JSON schema ('participating_repos') not found in prompt"
+        assert (
+            repo_desc_section_pos != -1
+        ), "Repo descriptions section not found in prompt"
         assert schema_pos < repo_desc_section_pos, (
             f"JSON schema (pos {schema_pos}) must appear "
             f"BEFORE repo descriptions (pos {repo_desc_section_pos})"
@@ -231,7 +261,9 @@ class TestPass1FileBasedReadPath:
             return "Claude processed the task and wrote the file."
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
         assert len(result) == 1
         assert result[0]["name"] == "authentication"
@@ -266,7 +298,9 @@ class TestPass1FileBasedReadPath:
             return "Done."
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
         assert len(result) == 2
         names = {d["name"] for d in result}
@@ -291,9 +325,13 @@ class TestPass1FileCleanup:
             return "Done."
 
         analyzer._invoke_claude_cli = fake_invoke
-        analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
-        assert not pass1_file.exists(), "pass1_domains.json must be deleted after successful parse"
+        assert (
+            not pass1_file.exists()
+        ), "pass1_domains.json must be deleted after successful parse"
 
     def test_file_deleted_even_after_invalid_json_in_file(
         self, analyzer, staging_dir, repo_list, repo_descriptions
@@ -322,12 +360,16 @@ class TestPass1FileCleanup:
         # Should fall through to stdout extraction and not crash
         # (file has invalid JSON → fallback to stdout)
         try:
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
         except Exception:
             pass  # May or may not succeed depending on retry behavior
 
         # File must be deleted regardless
-        assert not pass1_file.exists(), "pass1_domains.json must be deleted even after invalid JSON parse"
+        assert (
+            not pass1_file.exists()
+        ), "pass1_domains.json must be deleted even after invalid JSON parse"
 
 
 # ─── AC2: Stdout fallback ────────────────────────────────────────────────────
@@ -340,18 +382,27 @@ class TestPass1StdoutFallback:
         self, analyzer, staging_dir, repo_list, repo_descriptions, valid_domain_json
     ):
         """When file is not written, falls back to _extract_json on stdout."""
+
         def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
             # Does NOT write a file — stdout has the JSON
             return valid_domain_json
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
         assert len(result) == 1
         assert result[0]["name"] == "authentication"
 
     def test_stdout_fallback_logs_warning(
-        self, analyzer, staging_dir, repo_list, repo_descriptions, valid_domain_json, caplog
+        self,
+        analyzer,
+        staging_dir,
+        repo_list,
+        repo_descriptions,
+        valid_domain_json,
+        caplog,
     ):
         """When falling back to stdout extraction, a WARNING must be logged."""
         import logging
@@ -361,19 +412,33 @@ class TestPass1StdoutFallback:
 
         analyzer._invoke_claude_cli = fake_invoke
 
-        with caplog.at_level(logging.WARNING, logger="code_indexer.global_repos.dependency_map_analyzer"):
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        with caplog.at_level(
+            logging.WARNING, logger="code_indexer.global_repos.dependency_map_analyzer"
+        ):
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         # Should have a warning about fallback to stdout
-        warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
         has_fallback_warning = any(
             "fallback" in msg.lower() or "stdout" in msg.lower()
             for msg in warning_messages
         )
-        assert has_fallback_warning, f"Expected fallback warning, got warnings: {warning_messages}"
+        assert (
+            has_fallback_warning
+        ), f"Expected fallback warning, got warnings: {warning_messages}"
 
     def test_file_read_logs_info(
-        self, analyzer, staging_dir, repo_list, repo_descriptions, valid_domain_json, caplog
+        self,
+        analyzer,
+        staging_dir,
+        repo_list,
+        repo_descriptions,
+        valid_domain_json,
+        caplog,
     ):
         """When file-based read succeeds, logs INFO with file path and size."""
         import logging
@@ -386,15 +451,21 @@ class TestPass1StdoutFallback:
 
         analyzer._invoke_claude_cli = fake_invoke
 
-        with caplog.at_level(logging.INFO, logger="code_indexer.global_repos.dependency_map_analyzer"):
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        with caplog.at_level(
+            logging.INFO, logger="code_indexer.global_repos.dependency_map_analyzer"
+        ):
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
         has_file_info = any(
             "pass1" in msg.lower() and ("file" in msg.lower() or "bytes" in msg.lower())
             for msg in info_messages
         )
-        assert has_file_info, f"Expected INFO about file read, got info messages: {info_messages}"
+        assert (
+            has_file_info
+        ), f"Expected INFO about file read, got info messages: {info_messages}"
 
 
 # ─── AC3 + AC4: Retry logic ──────────────────────────────────────────────────
@@ -421,9 +492,13 @@ class TestPass1RetryLogic:
                 return "Done."
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
-        assert call_count[0] == 2, f"Expected 2 invocations (initial + retry), got {call_count[0]}"
+        assert (
+            call_count[0] == 2
+        ), f"Expected 2 invocations (initial + retry), got {call_count[0]}"
         assert len(result) >= 1
 
     def test_retry_prompt_contains_file_reminder(
@@ -444,9 +519,13 @@ class TestPass1RetryLogic:
                 return "Done."
 
         analyzer._invoke_claude_cli = fake_invoke
-        analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
-        assert len(prompts_received) == 2, f"Expected 2 prompts, got {len(prompts_received)}"
+        assert (
+            len(prompts_received) == 2
+        ), f"Expected 2 prompts, got {len(prompts_received)}"
         retry_prompt = prompts_received[1]
         retry_lower = retry_prompt.lower()
         # Retry prompt must emphasize the file requirement
@@ -455,40 +534,50 @@ class TestPass1RetryLogic:
             or "must write" in retry_lower
             or "write" in retry_lower
         )
-        assert has_file_reminder, f"Retry prompt missing file reminder. Got: {retry_prompt[:300]}"
+        assert (
+            has_file_reminder
+        ), f"Retry prompt missing file reminder. Got: {retry_prompt[:300]}"
 
     def test_raises_runtime_error_when_both_attempts_fail(
         self, analyzer, staging_dir, repo_list, repo_descriptions
     ):
         """RuntimeError is raised when both attempts fail (no file, no parseable stdout)."""
+
         def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
             return "I analyzed the repositories and here are my findings: lots of interesting code."
 
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         error_msg = str(exc_info.value).lower()
-        assert "pass 1" in error_msg, f"Error must mention 'Pass 1'. Got: {exc_info.value}"
+        assert (
+            "pass 1" in error_msg
+        ), f"Error must mention 'Pass 1'. Got: {exc_info.value}"
 
     def test_error_message_includes_file_path_info(
         self, analyzer, staging_dir, repo_list, repo_descriptions
     ):
         """RuntimeError message must include diagnostic info about the file path checked."""
+
         def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
             return "Narrative response without valid JSON"
 
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         error_msg = str(exc_info.value)
         # Error must contain the file path for diagnostics
-        assert "pass1_domains.json" in error_msg, (
-            f"Error must include file path. Got: {error_msg}"
-        )
+        assert (
+            "pass1_domains.json" in error_msg
+        ), f"Error must include file path. Got: {error_msg}"
 
     def test_retry_reads_file_on_second_attempt(
         self, analyzer, staging_dir, repo_list, repo_descriptions, valid_domain_json
@@ -506,7 +595,9 @@ class TestPass1RetryLogic:
                 return "File written."
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
         assert len(result) == 1
         assert result[0]["name"] == "authentication"
@@ -526,7 +617,9 @@ class TestPass1RetryLogic:
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError):
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         # Must be exactly 2 calls (first attempt + one retry)
         assert call_count[0] == 2, f"Expected exactly 2 calls, got {call_count[0]}"
@@ -551,7 +644,9 @@ class TestPass1RetryLogic:
                 return "Done."
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
         assert call_count[0] == 2
         assert len(result) >= 1
@@ -563,7 +658,9 @@ class TestPass1RetryLogic:
 class TestPass1CanaryFileWriteTest:
     """Tests for the STEP 0 mandatory canary file write test added to the Pass 1 prompt."""
 
-    def _capture_prompt(self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json):
+    def _capture_prompt(
+        self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+    ):
         """Helper: run pass 1 and capture the prompt sent to Claude CLI."""
         captured_prompt = {}
 
@@ -572,14 +669,18 @@ class TestPass1CanaryFileWriteTest:
             return valid_domain_json
 
         analyzer._invoke_claude_cli = fake_invoke
-        analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
         return captured_prompt["value"]
 
     def test_prompt_contains_canary_test_command(
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must include the canary echo command to test file writing."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         assert "CANARY_OK" in prompt
         assert ".canary" in prompt
@@ -589,7 +690,9 @@ class TestPass1CanaryFileWriteTest:
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt must include the CANARY_FAIL output instruction."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         assert "CANARY_FAIL" in prompt
         assert "STOP IMMEDIATELY" in prompt
@@ -598,7 +701,9 @@ class TestPass1CanaryFileWriteTest:
         self, analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
     ):
         """Prompt CANARY_FAIL line must include the staging directory path."""
-        prompt = self._capture_prompt(analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json)
+        prompt = self._capture_prompt(
+            analyzer, staging_dir, repo_descriptions, repo_list, valid_domain_json
+        )
 
         staging_dir_abs = str(staging_dir)
         assert staging_dir_abs in prompt
@@ -607,9 +712,7 @@ class TestPass1CanaryFileWriteTest:
         self, analyzer, staging_dir, repo_descriptions, repo_list
     ):
         """When CANARY_FAIL appears in output, RuntimeError is raised immediately."""
-        canary_fail_output = (
-            "CANARY_FAIL: Cannot write to /some/dir — [reason: Claude permission denied]"
-        )
+        canary_fail_output = "CANARY_FAIL: Cannot write to /some/dir — [reason: Claude permission denied]"
 
         def fake_invoke(prompt, timeout, max_turns, allowed_tools=None, **kwargs):
             return canary_fail_output
@@ -617,7 +720,9 @@ class TestPass1CanaryFileWriteTest:
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         error_msg = str(exc_info.value)
         assert "canary" in error_msg.lower()
@@ -637,13 +742,15 @@ class TestPass1CanaryFileWriteTest:
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         error_msg = str(exc_info.value)
         staging_dir_abs = str(staging_dir)
-        assert staging_dir_abs in error_msg, (
-            f"RuntimeError must include staging dir path. Got: {error_msg}"
-        )
+        assert (
+            staging_dir_abs in error_msg
+        ), f"RuntimeError must include staging dir path. Got: {error_msg}"
 
     def test_canary_fail_does_not_retry(
         self, analyzer, staging_dir, repo_descriptions, repo_list
@@ -658,11 +765,13 @@ class TestPass1CanaryFileWriteTest:
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError):
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
-        assert call_count[0] == 1, (
-            f"CANARY_FAIL must not trigger retry. Expected 1 call, got {call_count[0]}"
-        )
+        assert (
+            call_count[0] == 1
+        ), f"CANARY_FAIL must not trigger retry. Expected 1 call, got {call_count[0]}"
 
     def test_canary_fail_multiline_output_extracts_fail_line(
         self, analyzer, staging_dir, repo_descriptions, repo_list
@@ -681,7 +790,9 @@ class TestPass1CanaryFileWriteTest:
         analyzer._invoke_claude_cli = fake_invoke
 
         with pytest.raises(RuntimeError) as exc_info:
-            analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, repo_descriptions, repo_list, max_turns=10
+            )
 
         error_msg = str(exc_info.value)
         # Should extract just the CANARY_FAIL line
@@ -699,7 +810,9 @@ class TestPass1CanaryFileWriteTest:
             return "CANARY_OK\nFile written successfully."
 
         analyzer._invoke_claude_cli = fake_invoke
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list, max_turns=10)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list, max_turns=10
+        )
 
         assert len(result) == 1
         assert result[0]["name"] == "authentication"

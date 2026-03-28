@@ -5,7 +5,6 @@ Tests that golden_repo_manager automatically creates target folders for local://
 URLs that point to non-existent paths.
 """
 
-import pytest
 import tempfile
 import shutil
 from pathlib import Path

@@ -370,7 +370,7 @@ class TestBackwardCompatibility:
 
         # Should load without errors
         config_manager = ConfigManager(config_path)
-        config = config_manager.load()
+        _config = config_manager.load()
 
         # Should return defaults when querying daemon config
         daemon_config = config_manager.get_daemon_config()

@@ -9,8 +9,6 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 
 import sqlite3
 
-import pytest
-
 
 class TestAuditLogServiceInit:
     """Tests for AuditLogService.__init__() - schema creation."""
@@ -193,7 +191,6 @@ class TestAuditLogServiceLog:
         conn.close()
 
         # Timestamp must be parseable ISO format
-        from datetime import datetime
         ts = row["timestamp"]
         assert ts is not None
         assert len(ts) > 10  # More than just a date

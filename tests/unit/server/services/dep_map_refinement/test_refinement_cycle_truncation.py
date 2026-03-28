@@ -13,7 +13,6 @@ TDD RED PHASE: Tests written before production code exists.
 from pathlib import Path
 from unittest.mock import Mock
 
-import pytest
 
 from .conftest import (
     FULL_DOMAIN_BODY,
@@ -106,9 +105,8 @@ class TestTruncationGuardAcceptsNormalOutput:
         (dep_map / "auth-domain.md").write_text(FULL_DOMAIN_CONTENT)
 
         body_len = len(FULL_DOMAIN_BODY)
-        good_result = (
-            "# Domain Analysis: auth-domain\n\n## Overview\n\n"
-            + "x" * int(body_len * 0.5)
+        good_result = "# Domain Analysis: auth-domain\n\n## Overview\n\n" + "x" * int(
+            body_len * 0.5
         )
 
         mock_analyzer = Mock()
@@ -173,9 +171,9 @@ class TestTruncationGuardSkipsShortOriginals:
             "---\ndomain: tiny\nlast_analyzed: 2024-01-01T00:00:00+00:00\n---\n\n"
             + short_body
         )
-        assert len(short_body) <= 500, (
-            f"Test setup: body must be <=500 chars, got {len(short_body)}"
-        )
+        assert (
+            len(short_body) <= 500
+        ), f"Test setup: body must be <=500 chars, got {len(short_body)}"
 
         (dep_map / "tiny.md").write_text(short_content)
 

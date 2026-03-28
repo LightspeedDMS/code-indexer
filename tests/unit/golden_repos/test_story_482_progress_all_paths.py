@@ -10,6 +10,7 @@ Tests verify that progress_callback is wired through:
 Each test verifies that progress_callback is actually called with values that
 come from within the function itself (not just the manager-injected 25%).
 """
+
 import inspect
 import tempfile
 from pathlib import Path
@@ -94,7 +95,6 @@ class TestPathAPostCloneWorkflowProgress:
             GoldenRepoManager,
         )
         from unittest.mock import patch, MagicMock
-        import subprocess
 
         received = []
 
@@ -114,8 +114,14 @@ class TestPathAPostCloneWorkflowProgress:
             from code_indexer.services import progress_subprocess_runner as psr_mod
 
             def fake_popen_progress(
-                command, phase_name, allocator, progress_callback,
-                all_stdout, all_stderr, cwd, error_label=None
+                command,
+                phase_name,
+                allocator,
+                progress_callback,
+                all_stdout,
+                all_stderr,
+                cwd,
+                error_label=None,
             ):
                 if progress_callback is not None:
                     progress_callback(
@@ -129,8 +135,12 @@ class TestPathAPostCloneWorkflowProgress:
                         detail=f"{phase_name}: done",
                     )
 
-            with patch("subprocess.run", return_value=fake_run_result), \
-                 patch.object(psr_mod, "run_with_popen_progress", side_effect=fake_popen_progress):
+            with (
+                patch("subprocess.run", return_value=fake_run_result),
+                patch.object(
+                    psr_mod, "run_with_popen_progress", side_effect=fake_popen_progress
+                ),
+            ):
                 manager._execute_post_clone_workflow(
                     clone_path=tmpdir,
                     force_init=True,
@@ -141,7 +151,7 @@ class TestPathAPostCloneWorkflowProgress:
         # Must have received at least one progress callback call
         assert len(received) > 0, (
             "PATH A: _execute_post_clone_workflow must call progress_callback. "
-            f"Got zero calls."
+            "Got zero calls."
         )
         # Must have received calls with phase info
         calls_with_phase = [c for c in received if c.get("phase") is not None]
@@ -210,8 +220,14 @@ class TestPathCIndexSourceProgress:
         scheduler.registry = mock_registry
 
         def fake_popen_progress(
-            command, phase_name, allocator, progress_callback,
-            all_stdout, all_stderr, cwd, error_label=None
+            command,
+            phase_name,
+            allocator,
+            progress_callback,
+            all_stdout,
+            all_stderr,
+            cwd,
+            error_label=None,
         ):
             if progress_callback is not None:
                 progress_callback(
@@ -232,8 +248,12 @@ class TestPathCIndexSourceProgress:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Patch subprocess.run to avoid real cidx calls (needs_reconcile check uses it too)
-            with patch("subprocess.run", return_value=fake_run_result), \
-                 patch.object(psr_mod, "run_with_popen_progress", side_effect=fake_popen_progress):
+            with (
+                patch("subprocess.run", return_value=fake_run_result),
+                patch.object(
+                    psr_mod, "run_with_popen_progress", side_effect=fake_popen_progress
+                ),
+            ):
                 scheduler._index_source(
                     alias_name="test-alias-global",
                     source_path=tmpdir,
@@ -242,8 +262,7 @@ class TestPathCIndexSourceProgress:
 
         # Must have received at least one progress callback call
         assert len(received) > 0, (
-            "PATH C: _index_source must call progress_callback. "
-            f"Got zero calls."
+            "PATH C: _index_source must call progress_callback. " "Got zero calls."
         )
         # Must have received calls with phase info
         calls_with_phase = [c for c in received if c.get("phase") is not None]
@@ -333,7 +352,7 @@ class TestPathDChangeBranchCoarseProgress:
             GoldenRepo,
         )
         from datetime import datetime, timezone
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock
 
         received = []
 
@@ -364,7 +383,9 @@ class TestPathDChangeBranchCoarseProgress:
             manager._cb_swap_alias = MagicMock()
             manager._sqlite_backend = MagicMock()
             manager._sqlite_backend.update_default_branch = MagicMock()
-            manager._sqlite_backend.invalidate_description_refresh_tracking = MagicMock()
+            manager._sqlite_backend.invalidate_description_refresh_tracking = (
+                MagicMock()
+            )
             manager._sqlite_backend.invalidate_dependency_map_tracking = MagicMock()
             manager.resource_config = None
 
@@ -376,8 +397,7 @@ class TestPathDChangeBranchCoarseProgress:
 
         # Must have received at least one progress callback call
         assert len(received) > 0, (
-            "PATH D: change_branch must call progress_callback. "
-            f"Got zero calls."
+            "PATH D: change_branch must call progress_callback. " "Got zero calls."
         )
         # Progress values must be ascending and cover a meaningful range
         pct_values = [c["pct"] for c in received]
@@ -450,7 +470,9 @@ class TestPathEActivatedRepoIndexManagerProgress:
         from code_indexer.server.services.activated_repo_index_manager import (
             ActivatedRepoIndexManager,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         # Verify the parameter exists first
         sig = inspect.signature(ActivatedRepoIndexManager._execute_all_index_types)
@@ -463,9 +485,7 @@ class TestPathEActivatedRepoIndexManagerProgress:
         manager.logger = logging.getLogger("test")
 
         # Mock _execute_single_index_type to avoid real subprocess calls
-        manager._execute_single_index_type = MagicMock(
-            return_value={"success": True}
-        )
+        manager._execute_single_index_type = MagicMock(return_value={"success": True})
 
         # Allocator 1: semantic dominates (many files, zero commits)
         alloc_semantic_heavy = ProgressPhaseAllocator()
@@ -489,6 +509,7 @@ class TestPathEActivatedRepoIndexManagerProgress:
         def make_cb(store):
             def cb(pct, message=""):
                 store.append(pct)
+
             return cb
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -551,9 +572,9 @@ class TestPathEActivatedRepoIndexManagerProgress:
 
         # The hardcoded values 50 and 90 should not appear since ProgressPhaseAllocator
         # now determines all progress values dynamically.
-        assert 50 not in received_values, (
-            f"PATH E: hardcoded 50% milestone still present. Values: {received_values}"
-        )
-        assert 90 not in received_values, (
-            f"PATH E: hardcoded 90% milestone still present. Values: {received_values}"
-        )
+        assert (
+            50 not in received_values
+        ), f"PATH E: hardcoded 50% milestone still present. Values: {received_values}"
+        assert (
+            90 not in received_values
+        ), f"PATH E: hardcoded 90% milestone still present. Values: {received_values}"

@@ -11,8 +11,6 @@ Note: API endpoint tests exist in tests/unit/server/routers/test_repository_heal
 This file focuses on frontend integration concerns.
 """
 
-import pytest
-
 from code_indexer.services.hnsw_health_service import HealthCheckResult
 
 

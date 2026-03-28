@@ -15,7 +15,6 @@ Story #620 Priority 2A Acceptance Criteria:
 import pytest
 import threading
 import time
-import json
 from unittest.mock import Mock, patch
 from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 
@@ -34,6 +33,7 @@ def mock_data_dir(tmp_path):
 def manager(mock_data_dir):
     """Create GoldenRepoManager instance for testing."""
     mgr = GoldenRepoManager(data_dir=mock_data_dir)
+
     # Mock background_job_manager dependency
     # Execute worker functions synchronously for testing
     def mock_submit_job(operation_type, func, submitter_username, is_admin, repo_alias):
@@ -223,6 +223,7 @@ def test_concurrent_add_remove_serialized(manager):
         patch.object(manager, "_execute_post_clone_workflow"),
         patch.object(manager, "_cleanup_repository_files", return_value=True),
     ):
+
         def add_operation():
             try:
                 manager.add_golden_repo(
@@ -284,6 +285,7 @@ def test_metadata_lock_prevents_corruption(manager):
     def concurrent_repo_add(repo_index):
         """Simulate concurrent repo additions."""
         from code_indexer.server.repositories.golden_repo_manager import GoldenRepo
+
         try:
             for j in range(3):
                 new_alias = f"repo{repo_index}-added-{j}"

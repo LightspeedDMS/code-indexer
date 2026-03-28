@@ -79,14 +79,18 @@ class TestFTSCacheParallelLoads:
         def load_a():
             barrier.wait()
             try:
-                results[0] = cache.get_or_load(key_a, self._make_slow_fts_loader(load_delay, "fts_a"))
+                results[0] = cache.get_or_load(
+                    key_a, self._make_slow_fts_loader(load_delay, "fts_a")
+                )
             except Exception as e:
                 errors[0] = e
 
         def load_b():
             barrier.wait()
             try:
-                results[1] = cache.get_or_load(key_b, self._make_slow_fts_loader(load_delay, "fts_b"))
+                results[1] = cache.get_or_load(
+                    key_b, self._make_slow_fts_loader(load_delay, "fts_b")
+                )
             except Exception as e:
                 errors[1] = e
 
@@ -296,12 +300,14 @@ class TestFTSCacheLoaderFailure:
         # Sentinel must be removed after failure
         normalized_key = str(Path(key).resolve())
         loading_dict = getattr(cache, "_loading", {})
-        assert normalized_key not in loading_dict, (
-            f"Stale FTS sentinel found in _loading after failure"
-        )
+        assert (
+            normalized_key not in loading_dict
+        ), "Stale FTS sentinel found in _loading after failure"
 
         # Cache must NOT contain a stale entry
-        assert normalized_key not in cache._cache, "Failed load must not leave a FTS cache entry"
+        assert (
+            normalized_key not in cache._cache
+        ), "Failed load must not leave a FTS cache entry"
 
     def test_loader_failure_waiter_retries(self, tmp_path: Path) -> None:
         """
@@ -356,9 +362,13 @@ class TestFTSCacheLoaderFailure:
         t1.join(timeout=5.0)
         t2.join(timeout=5.0)
 
-        assert results_errors[0] is not None, "Thread-1 should have received the IOError"
+        assert (
+            results_errors[0] is not None
+        ), "Thread-1 should have received the IOError"
         assert isinstance(results_errors[0], IOError)
-        assert results_errors[1] is None, f"Thread-2 should not have raised: {results_errors[1]}"
+        assert (
+            results_errors[1] is None
+        ), f"Thread-2 should not have raised: {results_errors[1]}"
         assert results_values[1] is not None, "Thread-2 should have gotten a FTS result"
         result_index, result_schema = results_values[1]
         assert result_index is mock_index
@@ -381,9 +391,9 @@ class TestFTSCacheLoaderFailure:
 
         # Verify no stale sentinel
         loading_dict = getattr(cache, "_loading", {})
-        assert normalized_key not in loading_dict, (
-            f"Stale FTS sentinel found in _loading after failure: {loading_dict}"
-        )
+        assert (
+            normalized_key not in loading_dict
+        ), f"Stale FTS sentinel found in _loading after failure: {loading_dict}"
 
         # Second attempt must succeed
         mock_index = MagicMock()
@@ -551,9 +561,13 @@ class TestFTSCacheEdgeCases:
 
         assert len(errors) == 0, f"FTS operations raised exceptions: {errors}"
         assert "load" in completed, "FTS load thread must complete without deadlock"
-        assert "cleanup" in completed, "FTS cleanup thread must complete without deadlock"
+        assert (
+            "cleanup" in completed
+        ), "FTS cleanup thread must complete without deadlock"
 
-    def test_reload_on_access_not_affected_by_sentinel_pattern(self, tmp_path: Path) -> None:
+    def test_reload_on_access_not_affected_by_sentinel_pattern(
+        self, tmp_path: Path
+    ) -> None:
         """
         The reload_on_access behavior (cache HIT path) must remain unchanged.
         This is explicitly out of scope for the sentinel pattern.
@@ -622,5 +636,9 @@ class TestFTSCacheEdgeCases:
         assert all(e is None for e in errors), f"FTS errors: {[e for e in errors if e]}"
         assert all(r is not None for r in results), "All FTS threads must get results"
         assert load_count == 1, f"FTS loader called {load_count} times, expected 1"
-        assert all(r[0] is mock_index for r in results), "All threads must get same FTS index"
-        assert all(r[1] is mock_schema for r in results), "All threads must get same schema"
+        assert all(
+            r[0] is mock_index for r in results
+        ), "All threads must get same FTS index"
+        assert all(
+            r[1] is mock_schema for r in results
+        ), "All threads must get same schema"

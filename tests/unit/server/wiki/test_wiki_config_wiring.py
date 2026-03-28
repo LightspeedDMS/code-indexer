@@ -10,12 +10,12 @@ These tests verify that:
 
 TDD Red Phase: written BEFORE production code changes.
 """
+
 import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -216,10 +216,7 @@ class TestWikiRoutesHonourWikiConfig:
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir)
             (repo_dir / "home.md").write_text(
-                "Article Number: KA-00002\n"
-                "---\n"
-                "# Home\n"
-                "Welcome."
+                "Article Number: KA-00002\n" "---\n" "# Home\n" "Welcome."
             )
             app = _make_wiki_app(tmpdir, wiki_config=wiki_config)
             client = TestClient(app)
@@ -241,11 +238,9 @@ class TestWebRoutesPopulateViewsUsesWikiConfig:
     def test_populate_views_receives_wiki_config_from_config_service(self):
         """When enable_views_seeding=False is configured, the background
         populate_views_from_front_matter call must NOT seed views."""
-        import threading
-        import time
         from code_indexer.server.utils.config_manager import WikiConfig
 
-        wiki_config = WikiConfig(
+        _wiki_config = WikiConfig(
             enable_header_block_parsing=True,
             enable_article_number=True,
             enable_publication_status=True,
@@ -284,13 +279,14 @@ class TestWebRoutesPopulateViewsUsesWikiConfig:
                 # from config_service and pass it to the background thread.
                 # This is tested by inspecting the route handler source.
                 import inspect
+
                 handler_source = inspect.getsource(toggle_route.endpoint)
 
                 # The handler MUST fetch wiki_config from config_service
-                assert "wiki_config" in handler_source, (
-                    "wiki-toggle handler must reference wiki_config"
-                )
+                assert (
+                    "wiki_config" in handler_source
+                ), "wiki-toggle handler must reference wiki_config"
                 # The handler MUST pass it to populate_views_from_front_matter
-                assert "populate_views_from_front_matter" in handler_source, (
-                    "wiki-toggle handler must call populate_views_from_front_matter"
-                )
+                assert (
+                    "populate_views_from_front_matter" in handler_source
+                ), "wiki-toggle handler must call populate_views_from_front_matter"

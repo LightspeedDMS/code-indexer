@@ -15,13 +15,16 @@ import sys
 import os
 from datetime import datetime, timezone
 
-import pytest
 
 # Add the perf-suite directory to path so we can import from it
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite"))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(__file__), "../../../../tools/perf-suite")
+)
 
 
-def _make_scenario(name: str, endpoint: str = "search_code", repo_alias: str = "test-global") -> object:
+def _make_scenario(
+    name: str, endpoint: str = "search_code", repo_alias: str = "test-global"
+) -> object:
     """Create a minimal Scenario for testing."""
     from config import Scenario
 
@@ -55,7 +58,9 @@ def _make_metrics(scenario_name: str, p50: float, error_rate: float = 0.0) -> ob
     )
 
 
-def _make_escalation_result(name: str, levels: list, repo_alias: str = "test-global") -> object:
+def _make_escalation_result(
+    name: str, levels: list, repo_alias: str = "test-global"
+) -> object:
     """Create an EscalationResult for testing."""
     from metrics import EscalationResult, InflectionResult
 
@@ -290,7 +295,11 @@ class TestWriteEscalationResults:
         """Each scenario entry includes endpoint and repo_alias for cross-repo comparison."""
         from output import write_escalation_results
 
-        results = [_make_escalation_result("semantic_search_tries", [1], repo_alias="tries-global")]
+        results = [
+            _make_escalation_result(
+                "semantic_search_tries", [1], repo_alias="tries-global"
+            )
+        ]
         started_at = datetime.now(timezone.utc)
         finished_at = datetime.now(timezone.utc)
 
@@ -378,4 +387,8 @@ class TestPrintEscalationSummary:
         print_escalation_summary([result])
         captured = capsys.readouterr()
         # Should mention the inflection level or some degradation info
-        assert "10" in captured.out or "inflection" in captured.out.lower() or "degradat" in captured.out.lower()
+        assert (
+            "10" in captured.out
+            or "inflection" in captured.out.lower()
+            or "degradat" in captured.out.lower()
+        )

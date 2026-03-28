@@ -6,9 +6,7 @@ Tests the /api/server-time endpoint that provides server time for client clock s
 Following TDD methodology: Write failing tests FIRST, then implement.
 """
 
-import json
 from datetime import datetime, timezone
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient

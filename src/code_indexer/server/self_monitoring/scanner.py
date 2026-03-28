@@ -8,10 +8,9 @@ and implements three-tier deduplication algorithm.
 import datetime
 import json
 import logging
-import os
 import sqlite3
 import subprocess
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -471,7 +470,7 @@ class LogScanner:
         if "status" not in response:
             raise ValueError("Missing required field: status")
 
-        return response
+        return cast(Dict, response)
 
     def get_issue_prefix(self, classification: str) -> str:
         """

@@ -3,10 +3,11 @@
 Validates that mutation handlers trigger wiki_cache_invalidator
 after successful operations (AC1, AC2, AC8, AC9).
 """
+
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -95,7 +96,9 @@ class TestHandlersCallInvalidator:
     def test_handle_create_file_calls_invalidator_for_md(self):
         """handle_create_file must call wiki_cache_invalidator.invalidate_for_file_change."""
         from code_indexer.server.mcp.handlers import handle_create_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -139,7 +142,9 @@ class TestHandlersCallInvalidator:
     def test_handle_edit_file_calls_invalidator_for_md(self):
         """handle_edit_file must call wiki_cache_invalidator.invalidate_for_file_change."""
         from code_indexer.server.mcp.handlers import handle_edit_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -185,7 +190,9 @@ class TestHandlersCallInvalidator:
     def test_handle_delete_file_calls_invalidator_for_md(self):
         """handle_delete_file must call wiki_cache_invalidator.invalidate_for_file_change."""
         from code_indexer.server.mcp.handlers import handle_delete_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -228,7 +235,9 @@ class TestHandlersCallInvalidator:
     def test_invalidation_not_called_for_non_md_create(self):
         """handle_create_file must NOT call invalidator for .py files (AC5)."""
         from code_indexer.server.mcp.handlers import handle_create_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -276,7 +285,9 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_pull_calls_invalidator(self):
         """git_pull handler must call wiki_cache_invalidator after successful pull."""
         from code_indexer.server.mcp.handlers import git_pull
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -298,7 +309,9 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_branch_switch_calls_invalidator(self):
         """git_branch_switch handler must call wiki_cache_invalidator after successful switch."""
         from code_indexer.server.mcp.handlers import git_branch_switch
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -327,7 +340,9 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_reset_calls_invalidator_on_success(self):
         """git_reset handler must call wiki_cache_invalidator after successful reset."""
         from code_indexer.server.mcp.handlers import git_reset
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -353,7 +368,9 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_clean_calls_invalidator_on_success(self):
         """git_clean handler must call wiki_cache_invalidator after successful clean."""
         from code_indexer.server.mcp.handlers import git_clean
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -382,7 +399,9 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_merge_abort_calls_invalidator_on_success(self):
         """git_merge_abort handler must call wiki_cache_invalidator after successful abort."""
         from code_indexer.server.mcp.handlers import git_merge_abort
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -408,7 +427,9 @@ class TestGitOperationInvalidationHookAC2:
     def test_git_checkout_file_calls_invalidator_on_success(self):
         """git_checkout_file handler must call wiki_cache_invalidator after successful checkout."""
         from code_indexer.server.mcp.handlers import git_checkout_file
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)
@@ -441,7 +462,9 @@ class TestWriteModeExitInvalidationHookAC9:
     def test_handle_exit_write_mode_calls_invalidator(self):
         """handle_exit_write_mode must call wiki_cache_invalidator after triggering refresh."""
         from code_indexer.server.mcp.handlers import handle_exit_write_mode
-        from code_indexer.server.wiki.wiki_cache_invalidator import wiki_cache_invalidator
+        from code_indexer.server.wiki.wiki_cache_invalidator import (
+            wiki_cache_invalidator,
+        )
 
         mock_cache = MagicMock(spec=WikiCache)
         wiki_cache_invalidator.set_wiki_cache(mock_cache)

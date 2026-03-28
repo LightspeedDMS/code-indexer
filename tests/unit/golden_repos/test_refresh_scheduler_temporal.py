@@ -11,8 +11,7 @@ Only subprocess.run is mocked (prevents actual child processes), and the
 registry is mocked to supply deterministic repo_info data.
 """
 
-from unittest.mock import MagicMock, patch, call
-import pytest
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +33,12 @@ def _make_scheduler(registry):
     return scheduler
 
 
-def _make_registry(alias_name, enable_temporal=True, temporal_options=None, repo_url="git@github.com:org/repo.git"):
+def _make_registry(
+    alias_name,
+    enable_temporal=True,
+    temporal_options=None,
+    repo_url="git@github.com:org/repo.git",
+):
     """Build a mock registry that returns the given repo_info for get_global_repo."""
     registry = MagicMock()
     repo_info = {
@@ -67,15 +71,26 @@ def _capture_subprocess_cmds(scheduler, alias_name, source_path):
         return result
 
     def recording_popen_progress(
-        command, phase_name, allocator, progress_callback,
-        all_stdout, all_stderr, cwd, error_label=None
+        command,
+        phase_name,
+        allocator,
+        progress_callback,
+        all_stdout,
+        all_stderr,
+        cwd,
+        error_label=None,
     ):
         captured.append(list(command))
         # No-op: don't actually spawn subprocess
 
     import code_indexer.services.progress_subprocess_runner as psr_mod
-    with patch("subprocess.run", side_effect=recording_run), \
-         patch.object(psr_mod, "run_with_popen_progress", side_effect=recording_popen_progress):
+
+    with (
+        patch("subprocess.run", side_effect=recording_run),
+        patch.object(
+            psr_mod, "run_with_popen_progress", side_effect=recording_popen_progress
+        ),
+    ):
         scheduler._index_source(alias_name, str(source_path))
 
     return captured
@@ -111,13 +126,11 @@ class TestRefreshSchedulerTemporalAllBranches:
         cmds = _capture_subprocess_cmds(scheduler, alias, tmp_path)
 
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
-        assert temporal_cmds, (
-            f"AC5: No temporal command issued. All commands: {cmds}"
-        )
+        assert temporal_cmds, f"AC5: No temporal command issued. All commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert "--all-branches" in temporal_cmd, (
-            f"AC5: all_branches=True must produce '--all-branches'. Got: {temporal_cmd}"
-        )
+        assert (
+            "--all-branches" in temporal_cmd
+        ), f"AC5: all_branches=True must produce '--all-branches'. Got: {temporal_cmd}"
 
     def test_all_branches_false_omits_flag(self, tmp_path):
         """AC5: all_branches=False must NOT produce --all-branches."""
@@ -132,9 +145,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert "--all-branches" not in temporal_cmd, (
-            f"AC5: all_branches=False must NOT produce '--all-branches'. Got: {temporal_cmd}"
-        )
+        assert (
+            "--all-branches" not in temporal_cmd
+        ), f"AC5: all_branches=False must NOT produce '--all-branches'. Got: {temporal_cmd}"
 
     def test_scheduler_temporal_no_clear_flag(self, tmp_path):
         """
@@ -152,9 +165,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert "--clear" not in temporal_cmd, (
-            f"AC5: scheduled refresh must NOT include '--clear'. Got: {temporal_cmd}"
-        )
+        assert (
+            "--clear" not in temporal_cmd
+        ), f"AC5: scheduled refresh must NOT include '--clear'. Got: {temporal_cmd}"
 
     def test_scheduler_applies_max_commits(self, tmp_path):
         """AC5: max_commits from temporal_options is applied by the scheduler."""
@@ -169,7 +182,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert "--max-commits" in temporal_cmd, f"Missing --max-commits. Got: {temporal_cmd}"
+        assert (
+            "--max-commits" in temporal_cmd
+        ), f"Missing --max-commits. Got: {temporal_cmd}"
         idx = temporal_cmd.index("--max-commits")
         assert temporal_cmd[idx + 1] == "200"
 
@@ -186,7 +201,9 @@ class TestRefreshSchedulerTemporalAllBranches:
         temporal_cmds = [c for c in cmds if "--index-commits" in c]
         assert temporal_cmds, f"No temporal command issued. Commands: {cmds}"
         temporal_cmd = temporal_cmds[0]
-        assert "--diff-context" in temporal_cmd, f"Missing --diff-context. Got: {temporal_cmd}"
+        assert (
+            "--diff-context" in temporal_cmd
+        ), f"Missing --diff-context. Got: {temporal_cmd}"
         idx = temporal_cmd.index("--diff-context")
         assert temporal_cmd[idx + 1] == "3"
 
@@ -215,6 +232,6 @@ class TestRefreshSchedulerTemporalAllBranches:
             f"Got: {temporal_cmd}"
         )
         idx = temporal_cmd.index("--diff-context")
-        assert temporal_cmd[idx + 1] == "0", (
-            f"diff_context=0 must produce '--diff-context 0'. Got value: {temporal_cmd[idx + 1]}"
-        )
+        assert (
+            temporal_cmd[idx + 1] == "0"
+        ), f"diff_context=0 must produce '--diff-context 0'. Got value: {temporal_cmd[idx + 1]}"

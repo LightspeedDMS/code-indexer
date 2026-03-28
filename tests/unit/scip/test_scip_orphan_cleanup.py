@@ -7,9 +7,7 @@ index.scip.db files for projects that no longer exist in the codebase.
 """
 
 from pathlib import Path
-from typing import List
 
-import pytest
 
 from code_indexer.scip.generator import SCIPGenerator
 from code_indexer.scip.discovery import DiscoveredProject
@@ -44,9 +42,9 @@ class TestCleanupOrphanScipDatabases:
     def test_method_exists_on_generator(self, tmp_path: Path):
         """SCIPGenerator has _cleanup_orphan_scip_databases() method."""
         generator = _make_generator(tmp_path)
-        assert hasattr(generator, "_cleanup_orphan_scip_databases"), (
-            "SCIPGenerator must have _cleanup_orphan_scip_databases() method"
-        )
+        assert hasattr(
+            generator, "_cleanup_orphan_scip_databases"
+        ), "SCIPGenerator must have _cleanup_orphan_scip_databases() method"
 
     def test_returns_zero_when_scip_dir_missing(self, tmp_path: Path):
         """Returns 0 when .code-indexer/scip/ directory doesn't exist."""
@@ -101,14 +99,14 @@ class TestCleanupOrphanScipDatabases:
         assert result == 1, f"Expected 1 orphan removed, got {result}"
 
         # Orphan should be deleted
-        assert not orphan_db.exists(), (
-            f"Orphan database should have been deleted: {orphan_db}"
-        )
+        assert (
+            not orphan_db.exists()
+        ), f"Orphan database should have been deleted: {orphan_db}"
 
         # Live project should still exist
-        assert (scip_dir / "src" / "liveproject" / "index.scip.db").exists(), (
-            "Live project database should NOT be deleted"
-        )
+        assert (
+            scip_dir / "src" / "liveproject" / "index.scip.db"
+        ).exists(), "Live project database should NOT be deleted"
 
     def test_deletes_multiple_orphans(self, tmp_path: Path):
         """Multiple orphan databases are all deleted."""
@@ -191,7 +189,7 @@ class TestGenerateCallsOrphanCleanup:
 
     def test_generate_calls_cleanup_after_discovery(self, tmp_path: Path):
         """generate() calls _cleanup_orphan_scip_databases() with discovered projects."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
 
         generator = _make_generator(tmp_path)
 
@@ -201,15 +199,14 @@ class TestGenerateCallsOrphanCleanup:
 
             # Patch discovery to avoid filesystem scanning
             from code_indexer.scip.discovery import ProjectDiscovery
+
             with patch.object(ProjectDiscovery, "discover", return_value=[]):
                 generator.generate()
 
             # Cleanup should have been called with the discovered projects (empty list)
             mock_cleanup.assert_called_once()
             call_args = mock_cleanup.call_args[0][0]  # First positional arg
-            assert call_args == [], (
-                f"Expected empty discovered list, got {call_args}"
-            )
+            assert call_args == [], f"Expected empty discovered list, got {call_args}"
 
     def test_rebuild_projects_calls_cleanup_after_discovery(self, tmp_path: Path):
         """rebuild_projects() calls _cleanup_orphan_scip_databases() with discovered projects."""
@@ -220,7 +217,12 @@ class TestGenerateCallsOrphanCleanup:
         scip_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a minimal status file so rebuild_projects() can load it
-        from code_indexer.scip.status import StatusTracker, OverallStatus, GenerationStatus
+        from code_indexer.scip.status import (
+            StatusTracker,
+            OverallStatus,
+            GenerationStatus,
+        )
+
         tracker = StatusTracker(scip_dir)
         status = GenerationStatus(
             overall_status=OverallStatus.SUCCESS,
@@ -236,12 +238,16 @@ class TestGenerateCallsOrphanCleanup:
 
             # Patch discovery to avoid filesystem scanning
             from code_indexer.scip.discovery import ProjectDiscovery
+
             with patch.object(ProjectDiscovery, "discover", return_value=[]):
                 # rebuild_projects with empty list - no projects to rebuild
                 generator.rebuild_projects(project_paths=[], failed_only=False)
 
             # Cleanup should have been called
-            mock_cleanup.assert_called_once(), (
-                "rebuild_projects() must call _cleanup_orphan_scip_databases() "
-                "to remove stale SCIP data after branch changes"
+            (
+                mock_cleanup.assert_called_once(),
+                (
+                    "rebuild_projects() must call _cleanup_orphan_scip_databases() "
+                    "to remove stale SCIP data after branch changes"
+                ),
             )

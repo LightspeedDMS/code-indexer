@@ -16,10 +16,11 @@ import threading
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
-from code_indexer.server.lifecycle.global_repos_lifecycle import GlobalReposLifecycleManager
+from code_indexer.server.lifecycle.global_repos_lifecycle import (
+    GlobalReposLifecycleManager,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +110,9 @@ class TestStartupReconcileJobRegistration:
             reconcile_done.set()
 
         with patch.object(
-            manager.refresh_scheduler, "reconcile_golden_repos", side_effect=fake_reconcile
+            manager.refresh_scheduler,
+            "reconcile_golden_repos",
+            side_effect=fake_reconcile,
         ):
             manager.start()
             reconcile_done.wait(timeout=5.0)
@@ -138,19 +141,25 @@ class TestStartupReconcileJobRegistration:
             reconcile_done.set()
 
         with patch.object(
-            manager.refresh_scheduler, "reconcile_golden_repos", side_effect=fake_reconcile
+            manager.refresh_scheduler,
+            "reconcile_golden_repos",
+            side_effect=fake_reconcile,
         ):
             manager.start()
             reconcile_done.wait(timeout=5.0)
 
         time.sleep(0.2)  # Wait for job completion
 
-        jobs = job_tracker.query_jobs(operation_type="startup_reconcile", status="completed")
+        jobs = job_tracker.query_jobs(
+            operation_type="startup_reconcile", status="completed"
+        )
         assert len(jobs) >= 1
 
         manager.stop()
 
-    def test_startup_reconcile_job_fails_when_reconcile_raises(self, tmp_path, job_tracker):
+    def test_startup_reconcile_job_fails_when_reconcile_raises(
+        self, tmp_path, job_tracker
+    ):
         """
         startup_reconcile job transitions to failed when reconciliation raises.
 
@@ -199,7 +208,9 @@ class TestStartupReconcileJobRegistration:
             reconcile_done.set()
 
         with patch.object(
-            manager.refresh_scheduler, "reconcile_golden_repos", side_effect=fake_reconcile
+            manager.refresh_scheduler,
+            "reconcile_golden_repos",
+            side_effect=fake_reconcile,
         ):
             manager.start()
             reconcile_done.wait(timeout=5.0)
@@ -225,7 +236,9 @@ class TestStartupReconcileJobRegistration:
             reconcile_done.set()
 
         with patch.object(
-            manager.refresh_scheduler, "reconcile_golden_repos", side_effect=fake_reconcile
+            manager.refresh_scheduler,
+            "reconcile_golden_repos",
+            side_effect=fake_reconcile,
         ):
             manager.start()
             reconcile_done.wait(timeout=5.0)

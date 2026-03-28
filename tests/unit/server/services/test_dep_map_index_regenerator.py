@@ -12,18 +12,9 @@ Test strategy:
 All 7 tests map to acceptance criteria AC14 from Story #342.
 """
 
-import json
-from pathlib import Path
-
-import pytest
-
 # Reuse helpers from health detector tests
 from tests.unit.server.services.test_dep_map_health_detector import (
-    VALID_DOMAIN_CONTENT,
-    VALID_INDEX_CONTENT,
     make_domains_json,
-    make_domain_file,
-    make_index_md,
 )
 
 
@@ -37,6 +28,7 @@ def _get_regenerator():
     from code_indexer.server.services.dep_map_index_regenerator import (
         IndexRegenerator,
     )
+
     return IndexRegenerator()
 
 
@@ -49,9 +41,7 @@ def make_domain_md_content(name: str, repos: list, description: str = None) -> s
     """Build a valid domain .md file content with given name and repos."""
     desc = description or f"Domain {name}"
     repos_yaml = "\n".join(f"  - {r}" for r in repos)
-    repos_roles = "\n".join(
-        f"- **{r}**: Participates in {name}." for r in repos
-    )
+    repos_roles = "\n".join(f"- **{r}**: Participates in {name}." for r in repos)
     return f"""\
 ---
 name: {name}
@@ -382,9 +372,7 @@ class TestRegenerateEmptyDomains:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def make_domain_md_with_outgoing(
-    name: str, repos: list, outgoing_rows: list
-) -> str:
+def make_domain_md_with_outgoing(name: str, repos: list, outgoing_rows: list) -> str:
     """
     Build a domain .md file with a populated Outgoing Dependencies table.
 

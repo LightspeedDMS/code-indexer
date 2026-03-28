@@ -8,8 +8,6 @@ only _require_admin_session and user_manager are replaced.
 
 from datetime import datetime, timezone
 
-import pytest
-
 
 _FAKE_SYSTEM_CREDS = [
     {
@@ -43,18 +41,19 @@ class TestRestApiSystemCredentials:
         app.include_router(web_router, prefix="/admin")
 
         client = TestClient(app, raise_server_exceptions=False)
-        response = client.get(
-            "/admin/api/system-credentials", follow_redirects=False
-        )
+        response = client.get("/admin/api/system-credentials", follow_redirects=False)
 
         assert response.status_code != 404, (
             "Route /admin/api/system-credentials does not exist (404). "
             "The endpoint must be implemented."
         )
         # Without session: reject or redirect
-        assert response.status_code in (200, 401, 403, 302), (
-            f"Unexpected status without session: {response.status_code}"
-        )
+        assert response.status_code in (
+            200,
+            401,
+            403,
+            302,
+        ), f"Unexpected status without session: {response.status_code}"
 
     def test_endpoint_returns_200_with_system_credentials_for_admin(self) -> None:
         """Admin session returns 200 JSON with 'system_credentials' list."""
@@ -88,13 +87,13 @@ class TestRestApiSystemCredentials:
             client = TestClient(app, raise_server_exceptions=True)
             response = client.get("/admin/api/system-credentials")
 
-            assert response.status_code == 200, (
-                f"Expected 200, got {response.status_code}: {response.text}"
-            )
+            assert (
+                response.status_code == 200
+            ), f"Expected 200, got {response.status_code}: {response.text}"
             data = response.json()
-            assert "system_credentials" in data, (
-                f"Expected 'system_credentials' key, got: {list(data.keys())}"
-            )
+            assert (
+                "system_credentials" in data
+            ), f"Expected 'system_credentials' key, got: {list(data.keys())}"
             assert isinstance(data["system_credentials"], list)
             assert len(data["system_credentials"]) == 1
         finally:
@@ -136,8 +135,13 @@ class TestRestApiSystemCredentials:
 
             cred = data["system_credentials"][0]
             required_fields = {
-                "credential_id", "client_id_prefix", "name",
-                "created_at", "last_used_at", "owner", "is_system",
+                "credential_id",
+                "client_id_prefix",
+                "name",
+                "created_at",
+                "last_used_at",
+                "owner",
+                "is_system",
             }
             missing = required_fields - set(cred.keys())
             assert not missing, f"Missing credential fields in response: {missing}"

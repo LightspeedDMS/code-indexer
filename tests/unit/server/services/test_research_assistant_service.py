@@ -10,7 +10,6 @@ import pytest
 import sqlite3
 import tempfile
 from pathlib import Path
-from datetime import datetime
 
 
 class TestResearchAssistantStorage:
@@ -20,6 +19,7 @@ class TestResearchAssistantStorage:
     def temp_db(self):
         """Create temporary database for testing."""
         import os
+
         # Create temp dir and database path
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
@@ -193,9 +193,10 @@ class TestResearchAssistantStorage:
             research_service.add_message(session_id, "invalid_role", "Test")
 
         # Should raise constraint violation
-        assert "constraint" in str(exc_info.value).lower() or "check" in str(
-            exc_info.value
-        ).lower(), "Invalid role should violate CHECK constraint"
+        assert (
+            "constraint" in str(exc_info.value).lower()
+            or "check" in str(exc_info.value).lower()
+        ), "Invalid role should violate CHECK constraint"
 
     def test_foreign_key_constraint_enforced(self, research_service):
         """Test AC6: Foreign key constraint enforces session_id validity."""
@@ -204,9 +205,10 @@ class TestResearchAssistantStorage:
             research_service.add_message("nonexistent_session", "user", "Test")
 
         # Should raise foreign key violation
-        assert "foreign" in str(exc_info.value).lower() or "constraint" in str(
-            exc_info.value
-        ).lower(), "Invalid session_id should violate FOREIGN KEY constraint"
+        assert (
+            "foreign" in str(exc_info.value).lower()
+            or "constraint" in str(exc_info.value).lower()
+        ), "Invalid session_id should violate FOREIGN KEY constraint"
 
     # AC3: Session Folder Tests
 
@@ -217,10 +219,8 @@ class TestResearchAssistantStorage:
         folder_path = Path(session["folder_path"])
 
         # Verify folder exists
-        assert folder_path.exists(), \
-            f"Session folder must be created at {folder_path}"
-        assert folder_path.is_dir(), \
-            "Session folder must be a directory"
+        assert folder_path.exists(), f"Session folder must be created at {folder_path}"
+        assert folder_path.is_dir(), "Session folder must be a directory"
 
     def test_session_folder_contains_softlink_to_source(self, research_service):
         """Test AC3: Session folder contains softlink to code-indexer source."""
@@ -230,15 +230,12 @@ class TestResearchAssistantStorage:
         # Look for softlink named 'code-indexer' or 'source' in session folder
         softlink_path = folder_path / "code-indexer"
 
-        assert softlink_path.exists(), \
-            f"Softlink must exist at {softlink_path}"
-        assert softlink_path.is_symlink(), \
-            "code-indexer path must be a symbolic link"
+        assert softlink_path.exists(), f"Softlink must exist at {softlink_path}"
+        assert softlink_path.is_symlink(), "code-indexer path must be a symbolic link"
 
         # Verify it points to valid location
         target = softlink_path.resolve()
-        assert target.exists(), \
-            "Softlink must point to existing directory"
+        assert target.exists(), "Softlink must point to existing directory"
 
 
 class TestResearchSessionManagement:
@@ -248,6 +245,7 @@ class TestResearchSessionManagement:
     def temp_db(self):
         """Create temporary database for testing."""
         import os
+
         # Create temp dir and database path
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
@@ -294,22 +292,19 @@ class TestResearchSessionManagement:
         folder_path = Path(session["folder_path"])
 
         # Verify folder exists
-        assert folder_path.exists(), \
-            f"Session folder must be created at {folder_path}"
-        assert folder_path.is_dir(), \
-            "Session folder must be a directory"
+        assert folder_path.exists(), f"Session folder must be created at {folder_path}"
+        assert folder_path.is_dir(), "Session folder must be a directory"
 
         # Verify folder is in correct location
         expected_parent = Path.home() / ".cidx-server" / "research"
-        assert folder_path.parent == expected_parent, \
-            f"Session folder must be in {expected_parent}"
+        assert (
+            folder_path.parent == expected_parent
+        ), f"Session folder must be in {expected_parent}"
 
         # Verify softlink exists
         softlink = folder_path / "code-indexer"
-        assert softlink.exists(), \
-            f"Softlink must exist at {softlink}"
-        assert softlink.is_symlink(), \
-            "code-indexer path must be a symbolic link"
+        assert softlink.exists(), f"Softlink must exist at {softlink}"
+        assert softlink.is_symlink(), "code-indexer path must be a symbolic link"
 
     def test_create_session_returns_full_dict(self, research_service):
         """Test AC2: create_session returns dict with all required fields."""
@@ -326,8 +321,9 @@ class TestResearchSessionManagement:
         """Test AC2: New session has 'New Session' name until first prompt."""
         session = research_service.create_session()
 
-        assert session["name"] == "New Session", \
-            "New session must have default name 'New Session'"
+        assert (
+            session["name"] == "New Session"
+        ), "New session must have default name 'New Session'"
 
     # AC1: Get All Sessions Tests
 
@@ -362,23 +358,21 @@ class TestResearchSessionManagement:
         sessions = research_service.get_all_sessions()
 
         # Most recent should be first
-        assert sessions[0]["id"] == session3["id"], \
-            "Most recent session must be first"
-        assert sessions[1]["id"] == session2["id"], \
-            "Second most recent session must be second"
-        assert sessions[2]["id"] == session1["id"], \
-            "Oldest session must be last"
+        assert sessions[0]["id"] == session3["id"], "Most recent session must be first"
+        assert (
+            sessions[1]["id"] == session2["id"]
+        ), "Second most recent session must be second"
+        assert sessions[2]["id"] == session1["id"], "Oldest session must be last"
 
     def test_get_all_sessions_empty_list(self, research_service):
         """Test AC1: get_all_sessions returns empty list when no sessions exist."""
         sessions = research_service.get_all_sessions()
 
-        assert sessions == [], \
-            "Must return empty list when no sessions exist"
+        assert sessions == [], "Must return empty list when no sessions exist"
 
     def test_get_all_sessions_includes_all_fields(self, research_service):
         """Test AC1: Each session includes all required fields."""
-        session = research_service.create_session()
+        _session = research_service.create_session()
         sessions = research_service.get_all_sessions()
 
         assert len(sessions) == 1, "Must have one session"
@@ -396,7 +390,7 @@ class TestResearchSessionManagement:
         """Test AC3: get_session retrieves a specific session by ID."""
         # Create multiple sessions
         session1 = research_service.create_session()
-        session2 = research_service.create_session()
+        _session2 = research_service.create_session()
 
         # Retrieve specific session
         retrieved = research_service.get_session(session1["id"])
@@ -404,15 +398,15 @@ class TestResearchSessionManagement:
         assert retrieved is not None, "Must retrieve session"
         assert retrieved["id"] == session1["id"], "Must retrieve correct session"
         assert retrieved["name"] == session1["name"], "Name must match"
-        assert retrieved["folder_path"] == session1["folder_path"], \
-            "Folder path must match"
+        assert (
+            retrieved["folder_path"] == session1["folder_path"]
+        ), "Folder path must match"
 
     def test_get_session_not_found(self, research_service):
         """Test AC3: get_session returns None for non-existent session."""
         retrieved = research_service.get_session("nonexistent-uuid")
 
-        assert retrieved is None, \
-            "Must return None for non-existent session"
+        assert retrieved is None, "Must return None for non-existent session"
 
     # AC4: Rename Session Tests
 
@@ -433,12 +427,14 @@ class TestResearchSessionManagement:
 
         # Verify name was updated
         updated = research_service.get_session(session["id"])
-        assert updated["name"] == "My Investigation", \
-            "Session name must be updated in database"
+        assert (
+            updated["name"] == "My Investigation"
+        ), "Session name must be updated in database"
 
         # Verify updated_at timestamp changed
-        assert updated["updated_at"] != original_updated_at, \
-            "updated_at timestamp must be updated on rename"
+        assert (
+            updated["updated_at"] != original_updated_at
+        ), "updated_at timestamp must be updated on rename"
 
     def test_rename_session_validates_length(self, research_service):
         """Test AC4: rename_session validates name length (1-100 chars)."""
@@ -470,7 +466,7 @@ class TestResearchSessionManagement:
             "Session-123",
             "Investigation 42",
             "Bug-Analysis-2024",
-            "Test123 ABC-xyz"
+            "Test123 ABC-xyz",
         ]
 
         for name in valid_names:
@@ -494,8 +490,7 @@ class TestResearchSessionManagement:
         """Test AC4: rename_session returns False for non-existent session."""
         result = research_service.rename_session("nonexistent-uuid", "New Name")
 
-        assert result is False, \
-            "Must return False for non-existent session"
+        assert result is False, "Must return False for non-existent session"
 
     # AC2/AC4: Generate Session Name Tests
 
@@ -517,8 +512,9 @@ class TestResearchSessionManagement:
 
         assert "\n" not in name, "Must remove newlines"
         assert "\r" not in name, "Must remove carriage returns"
-        assert name == "Line 1 Line 2 Line 3 Line 4", \
-            "Must replace newlines with spaces"
+        assert (
+            name == "Line 1 Line 2 Line 3 Line 4"
+        ), "Must replace newlines with spaces"
 
     def test_generate_session_name_empty(self, research_service):
         """Test AC2/AC4: generate_session_name returns 'New Session' for empty input."""
@@ -528,8 +524,9 @@ class TestResearchSessionManagement:
 
         # Only whitespace
         name = research_service.generate_session_name("   \n\r  ")
-        assert name == "New Session", \
-            "Must return 'New Session' for whitespace-only string"
+        assert (
+            name == "New Session"
+        ), "Must return 'New Session' for whitespace-only string"
 
     # AC5: Delete Session Tests
 
@@ -564,8 +561,7 @@ class TestResearchSessionManagement:
 
         # Verify messages are also deleted (CASCADE)
         messages_after = research_service.get_messages(session["id"])
-        assert len(messages_after) == 0, \
-            "Messages must be CASCADE deleted with session"
+        assert len(messages_after) == 0, "Messages must be CASCADE deleted with session"
 
     def test_delete_session_removes_folder(self, research_service):
         """Test AC5: delete_session removes session folder from filesystem."""
@@ -580,15 +576,15 @@ class TestResearchSessionManagement:
         assert result is True, "Delete must succeed"
 
         # Verify folder is removed
-        assert not folder_path.exists(), \
-            "Session folder must be removed from filesystem"
+        assert (
+            not folder_path.exists()
+        ), "Session folder must be removed from filesystem"
 
     def test_delete_session_not_found(self, research_service):
         """Test AC5: delete_session returns False for non-existent session."""
         result = research_service.delete_session("nonexistent-uuid")
 
-        assert result is False, \
-            "Must return False for non-existent session"
+        assert result is False, "Must return False for non-existent session"
 
 
 class TestFileUploadService:
@@ -598,6 +594,7 @@ class TestFileUploadService:
     def temp_db(self):
         """Create temporary database for testing."""
         import os
+
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
         yield db_path
@@ -635,8 +632,9 @@ class TestFileUploadService:
         assert "\x00" not in result, "Must remove null bytes"
 
         result = research_service.sanitize_filename("file\x01\x02name.txt")
-        assert "\x01" not in result and "\x02" not in result, \
-            "Must remove control characters"
+        assert (
+            "\x01" not in result and "\x02" not in result
+        ), "Must remove control characters"
 
     def test_sanitize_filename_replaces_spaces_with_underscores(self, research_service):
         """Test AC2: sanitize_filename replaces spaces with underscores."""
@@ -663,19 +661,18 @@ class TestFileUploadService:
     def test_get_unique_filename_no_collision(self, research_service):
         """Test AC2: get_unique_filename returns original name if no collision."""
         import os
+
         temp_dir = tempfile.mkdtemp()
         try:
             upload_dir = Path(temp_dir)
 
             result = research_service.get_unique_filename(upload_dir, "file.txt")
-            assert result == "file.txt", \
-                "Must return original name when no collision"
+            assert result == "file.txt", "Must return original name when no collision"
         finally:
             os.rmdir(temp_dir)
 
     def test_get_unique_filename_handles_collision(self, research_service):
         """Test AC2: get_unique_filename adds suffix for duplicates."""
-        import os
         temp_dir = tempfile.mkdtemp()
         try:
             upload_dir = Path(temp_dir)
@@ -684,17 +681,16 @@ class TestFileUploadService:
             (upload_dir / "file.txt").touch()
 
             result = research_service.get_unique_filename(upload_dir, "file.txt")
-            assert result == "file_1.txt", \
-                "Must add _1 suffix for first duplicate"
+            assert result == "file_1.txt", "Must add _1 suffix for first duplicate"
 
             # Create second duplicate
             (upload_dir / "file_1.txt").touch()
 
             result = research_service.get_unique_filename(upload_dir, "file.txt")
-            assert result == "file_2.txt", \
-                "Must add _2 suffix for second duplicate"
+            assert result == "file_2.txt", "Must add _2 suffix for second duplicate"
         finally:
             import shutil
+
             shutil.rmtree(temp_dir)
 
     # AC2: File Upload and Storage Tests
@@ -710,13 +706,14 @@ class TestFileUploadService:
         # Verify uploads folder doesn't exist yet
         if uploads_dir.exists():
             import shutil
+
             shutil.rmtree(uploads_dir)
 
         # Create mock file
         content = b"test content"
         file = UploadFile(filename="test.txt", file=io.BytesIO(content))
 
-        result = research_service.upload_file(session["id"], file)
+        _result = research_service.upload_file(session["id"], file)
 
         # Verify uploads folder was created
         assert uploads_dir.exists(), "Must create uploads folder"
@@ -737,8 +734,7 @@ class TestFileUploadService:
         result = research_service.upload_file(session["id"], file)
 
         assert result["success"] is True, "Upload must succeed"
-        assert result["filename"] == "my_file_name.txt", \
-            "Must use sanitized filename"
+        assert result["filename"] == "my_file_name.txt", "Must use sanitized filename"
 
         # Verify file exists on filesystem
         saved_file = uploads_dir / "my_file_name.txt"
@@ -762,8 +758,9 @@ class TestFileUploadService:
         content2 = b"content 2"
         file2 = UploadFile(filename="file.txt", file=io.BytesIO(content2))
         result2 = research_service.upload_file(session["id"], file2)
-        assert result2["filename"] == "file_1.txt", \
-            "Duplicate upload must get _1 suffix"
+        assert (
+            result2["filename"] == "file_1.txt"
+        ), "Duplicate upload must get _1 suffix"
 
         # Verify both files exist
         assert (uploads_dir / "file.txt").exists(), "First file must exist"
@@ -807,8 +804,19 @@ class TestFileUploadService:
         session = research_service.create_session()
 
         allowed_extensions = [
-            '.txt', '.log', '.json', '.yaml', '.yml', '.py', '.md',
-            '.csv', '.xml', '.html', '.cfg', '.conf', '.ini'
+            ".txt",
+            ".log",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".py",
+            ".md",
+            ".csv",
+            ".xml",
+            ".html",
+            ".cfg",
+            ".conf",
+            ".ini",
         ]
 
         for ext in allowed_extensions:
@@ -826,7 +834,7 @@ class TestFileUploadService:
 
         session = research_service.create_session()
 
-        rejected_extensions = ['.exe', '.sh', '.bat', '.com', '.dll']
+        rejected_extensions = [".exe", ".sh", ".bat", ".com", ".dll"]
 
         for ext in rejected_extensions:
             content = b"malicious content"
@@ -835,9 +843,10 @@ class TestFileUploadService:
             result = research_service.upload_file(session["id"], file)
 
             assert result["success"] is False, f"Must reject {ext} files"
-            assert "not allowed" in result["error"].lower() or \
-                   "rejected" in result["error"].lower(), \
-                f"Error message must explain rejection for {ext}"
+            assert (
+                "not allowed" in result["error"].lower()
+                or "rejected" in result["error"].lower()
+            ), f"Error message must explain rejection for {ext}"
 
     def test_upload_file_rejects_archive_extensions(self, research_service):
         """Test AC6: upload_file rejects archive files."""
@@ -846,7 +855,7 @@ class TestFileUploadService:
 
         session = research_service.create_session()
 
-        rejected_extensions = ['.zip', '.tar', '.gz', '.rar', '.7z']
+        rejected_extensions = [".zip", ".tar", ".gz", ".rar", ".7z"]
 
         for ext in rejected_extensions:
             content = b"archive content"
@@ -872,8 +881,9 @@ class TestFileUploadService:
         result = research_service.upload_file(session["id"], file)
 
         assert result["success"] is False, "Must reject file larger than 10MB"
-        assert "size" in result["error"].lower() or "10" in result["error"].lower(), \
-            "Error message must mention size limit"
+        assert (
+            "size" in result["error"].lower() or "10" in result["error"].lower()
+        ), "Error message must mention size limit"
 
     def test_upload_file_enforces_max_session_size(self, research_service):
         """Test AC6: upload_file rejects files that would exceed 100MB session limit."""
@@ -887,18 +897,21 @@ class TestFileUploadService:
             content = b"x" * int(9.5 * 1024 * 1024)  # 9.5MB each
             file = UploadFile(filename=f"file{i}.txt", file=io.BytesIO(content))
             result = research_service.upload_file(session["id"], file)
-            assert result["success"] is True, f"File {i} should succeed (under 100MB total)"
+            assert (
+                result["success"] is True
+            ), f"File {i} should succeed (under 100MB total)"
 
         # Try to upload one more file (would exceed 100MB)
         content = b"x" * (6 * 1024 * 1024)  # 6MB (total would be 101MB)
         file = UploadFile(filename="final.txt", file=io.BytesIO(content))
         result = research_service.upload_file(session["id"], file)
 
-        assert result["success"] is False, \
-            "Must reject file that would exceed 100MB session limit"
-        assert "session" in result["error"].lower() and \
-               ("limit" in result["error"].lower() or "100" in result["error"]), \
-            "Error message must mention session limit"
+        assert (
+            result["success"] is False
+        ), "Must reject file that would exceed 100MB session limit"
+        assert "session" in result["error"].lower() and (
+            "limit" in result["error"].lower() or "100" in result["error"]
+        ), "Error message must mention session limit"
 
     # AC4: List/Delete/Get File Tests
 

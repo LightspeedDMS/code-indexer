@@ -19,7 +19,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from code_indexer.server.clients.forge_client import ForgeAuthenticationError, get_forge_client
+from code_indexer.server.clients.forge_client import get_forge_client
 from code_indexer.server.storage.sqlite_backends import GitCredentialsSqliteBackend
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,11 @@ class GitCredentialManager:
         iv = os.urandom(AES_BLOCK_SIZE)
         padder = padding.PKCS7(128).padder()
         padded_data = padder.update(plaintext.encode("utf-8")) + padder.finalize()
-        cipher = Cipher(algorithms.AES(self._encryption_key), modes.CBC(iv), backend=default_backend())
+        cipher = Cipher(
+            algorithms.AES(self._encryption_key),
+            modes.CBC(iv),
+            backend=default_backend(),
+        )
         encryptor = cipher.encryptor()
         encrypted_data = encryptor.update(padded_data) + encryptor.finalize()
         return base64.b64encode(iv + encrypted_data).decode("utf-8")
@@ -66,12 +70,16 @@ class GitCredentialManager:
         combined = base64.b64decode(encrypted.encode("utf-8"))
         iv = combined[:AES_BLOCK_SIZE]
         encrypted_data = combined[AES_BLOCK_SIZE:]
-        cipher = Cipher(algorithms.AES(self._encryption_key), modes.CBC(iv), backend=default_backend())
+        cipher = Cipher(
+            algorithms.AES(self._encryption_key),
+            modes.CBC(iv),
+            backend=default_backend(),
+        )
         decryptor = cipher.decryptor()
         padded_data = decryptor.update(encrypted_data) + decryptor.finalize()
         unpadder = padding.PKCS7(128).unpadder()
         data = unpadder.update(padded_data) + unpadder.finalize()
-        return data.decode("utf-8")
+        return str(data.decode("utf-8"))
 
     async def configure_credential(
         self,
@@ -122,7 +130,9 @@ class GitCredentialManager:
             entry = {k: v for k, v in cred.items() if k != "encrypted_token"}
             try:
                 plaintext = self._decrypt_token(cred["encrypted_token"])
-                entry["token_suffix"] = plaintext[-4:] if len(plaintext) >= 4 else plaintext
+                entry["token_suffix"] = (
+                    plaintext[-4:] if len(plaintext) >= 4 else plaintext
+                )
             except Exception:
                 logger.warning(
                     "Failed to decrypt token for credential %s (user=%s) — possible key derivation mismatch",
@@ -138,10 +148,14 @@ class GitCredentialManager:
         """Delete credential by id. Raises PermissionError if not owned by username."""
         deleted = self._backend.delete_credential(username, credential_id)
         if not deleted:
-            raise PermissionError("Credential not found or does not belong to your account.")
+            raise PermissionError(
+                "Credential not found or does not belong to your account."
+            )
         return True
 
-    def get_credential_for_host(self, username: str, forge_host: str) -> Optional[Dict[str, Any]]:
+    def get_credential_for_host(
+        self, username: str, forge_host: str
+    ) -> Optional[Dict[str, Any]]:
         """Return credential with decrypted token, or None if not found."""
         cred = self._backend.get_credential_for_host(username, forge_host)
         if cred is None:

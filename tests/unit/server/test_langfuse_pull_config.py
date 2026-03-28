@@ -10,15 +10,12 @@ Tests the extension of LangfuseConfig with pull-specific settings:
 
 import json
 import tempfile
-from pathlib import Path
 from dataclasses import asdict
 
-import pytest
 
 from code_indexer.server.utils.config_manager import (
     LangfuseConfig,
     LangfusePullProject,
-    ServerConfig,
     ServerConfigManager,
 )
 from code_indexer.server.services.config_service import ConfigService
@@ -194,11 +191,25 @@ class TestConfigPersistence:
             # Verify pull settings persisted
             assert loaded_config.langfuse_config.pull_enabled is True
             assert len(loaded_config.langfuse_config.pull_projects) == 2
-            assert isinstance(loaded_config.langfuse_config.pull_projects[0], LangfusePullProject)
-            assert loaded_config.langfuse_config.pull_projects[0].public_key == "pk-analytics"
-            assert loaded_config.langfuse_config.pull_projects[0].secret_key == "sk-analytics"
-            assert loaded_config.langfuse_config.pull_projects[1].public_key == "pk-monitoring"
-            assert loaded_config.langfuse_config.pull_projects[1].secret_key == "sk-monitoring"
+            assert isinstance(
+                loaded_config.langfuse_config.pull_projects[0], LangfusePullProject
+            )
+            assert (
+                loaded_config.langfuse_config.pull_projects[0].public_key
+                == "pk-analytics"
+            )
+            assert (
+                loaded_config.langfuse_config.pull_projects[0].secret_key
+                == "sk-analytics"
+            )
+            assert (
+                loaded_config.langfuse_config.pull_projects[1].public_key
+                == "pk-monitoring"
+            )
+            assert (
+                loaded_config.langfuse_config.pull_projects[1].secret_key
+                == "sk-monitoring"
+            )
             assert loaded_config.langfuse_config.pull_sync_interval_seconds == 450
             assert loaded_config.langfuse_config.pull_trace_age_days == 45
 
@@ -310,16 +321,20 @@ class TestConfigServiceIntegration:
             service = ConfigService(tmpdir)
 
             # Update projects as JSON string
-            projects_json = json.dumps([
-                {"public_key": "pk1", "secret_key": "sk1"},
-                {"public_key": "pk2", "secret_key": "sk2"},
-            ])
+            projects_json = json.dumps(
+                [
+                    {"public_key": "pk1", "secret_key": "sk1"},
+                    {"public_key": "pk2", "secret_key": "sk2"},
+                ]
+            )
 
             service.update_setting("langfuse", "pull_projects", projects_json)
 
             config = service.get_config()
             assert len(config.langfuse_config.pull_projects) == 2
-            assert isinstance(config.langfuse_config.pull_projects[0], LangfusePullProject)
+            assert isinstance(
+                config.langfuse_config.pull_projects[0], LangfusePullProject
+            )
             assert config.langfuse_config.pull_projects[0].public_key == "pk1"
             assert config.langfuse_config.pull_projects[0].secret_key == "sk1"
             assert config.langfuse_config.pull_projects[1].public_key == "pk2"

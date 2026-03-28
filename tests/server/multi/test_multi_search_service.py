@@ -45,7 +45,7 @@ class TestMultiSearchServiceThreadedExecution:
 
             # This will fail until implementation exists
             try:
-                response = service.search(request)
+                _response = service.search(request)
                 # Should have submitted 2 tasks (one per repo)
                 assert mock_submit.call_count == 2
             except AttributeError:
@@ -418,11 +418,11 @@ class TestMultiSearchServiceEdgeCases:
         from code_indexer.server.multi.multi_search_service import MultiSearchService
 
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
-        service = MultiSearchService(config)
+        _service = MultiSearchService(config)
 
         # Request validation should catch this before service execution
         with pytest.raises(Exception):  # Pydantic validation error
-            request = MultiSearchRequest(
+            _request = MultiSearchRequest(
                 repositories=[],
                 query="authentication",
                 search_type="semantic",
@@ -435,11 +435,11 @@ class TestMultiSearchServiceEdgeCases:
         from code_indexer.server.multi.multi_search_service import MultiSearchService
 
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
-        service = MultiSearchService(config)
+        _service = MultiSearchService(config)
 
         # Request validation should catch this
         with pytest.raises(Exception):  # Pydantic validation error
-            request = MultiSearchRequest(
+            _request = MultiSearchRequest(
                 repositories=["repo1"],
                 query="authentication",
                 search_type="invalid_type",  # type: ignore

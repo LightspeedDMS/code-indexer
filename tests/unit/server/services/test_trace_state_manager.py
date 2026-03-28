@@ -11,8 +11,7 @@ Tests cover:
 - Edge cases (ending non-existent traces, empty stacks)
 """
 
-import pytest
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 
 # Import will fail initially - TDD red phase
 from code_indexer.server.services.trace_state_manager import (
@@ -265,7 +264,7 @@ class TestTraceStateManagerNestedTraces:
 
         manager = TraceStateManager(mock_client)
 
-        context1 = manager.start_trace(session_id="session-1", name="parent")
+        _context1 = manager.start_trace(session_id="session-1", name="parent")
         context2 = manager.start_trace(session_id="session-1", name="child")
 
         # Child should reference parent
@@ -344,7 +343,6 @@ class TestTraceStateManagerThreadSafety:
         manager = TraceStateManager(mock_client)
 
         assert hasattr(manager, "_lock")
-        import threading
 
         # Lock is a factory function, so check type name instead
         assert type(manager._lock).__name__ == "lock"
@@ -435,7 +433,7 @@ class TestStory185ParameterChanges:
 
         manager = TraceStateManager(mock_client)
 
-        context = manager.start_trace(
+        _context = manager.start_trace(
             session_id="session-1",
             name="Test Task",
             input="Please find all authentication code",
@@ -455,7 +453,7 @@ class TestStory185ParameterChanges:
 
         manager = TraceStateManager(mock_client)
 
-        context = manager.start_trace(
+        _context = manager.start_trace(
             session_id="session-1",
             name="Test Task",
             tags=["bugfix", "high-priority"],
@@ -483,7 +481,7 @@ class TestStory185ParameterChanges:
             "iteration": 2,
         }
 
-        context = manager.start_trace(
+        _context = manager.start_trace(
             session_id="session-1", name="Bug Investigation", intel=intel
         )
 
@@ -506,7 +504,7 @@ class TestStory185ParameterChanges:
 
         manager = TraceStateManager(mock_client)
 
-        context = manager.start_trace(
+        _context = manager.start_trace(
             session_id="session-1",
             name="Test Task",
             strategy="depth-first",
@@ -562,7 +560,10 @@ class TestStory185ParameterChanges:
         mock_client.update_current_trace_in_context.assert_called_once()
         call_args = mock_client.update_current_trace_in_context.call_args
         assert call_args.kwargs["span"] == mock_trace
-        assert call_args.kwargs["output"] == "I found the authentication code in src/auth.py..."
+        assert (
+            call_args.kwargs["output"]
+            == "I found the authentication code in src/auth.py..."
+        )
 
     def test_end_trace_accepts_intel_parameter(self):
         """end_trace should accept optional 'intel' parameter to update prompt metadata."""

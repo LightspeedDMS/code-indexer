@@ -4,12 +4,12 @@ Verifies that when no home.md exists, the root page renders using the full
 article.html template (with sidebar, toolbar, breadcrumbs) instead of the
 bare index.html template.
 """
+
 import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -25,6 +25,7 @@ def _make_user(username):
 
 def _make_app(actual_repo_path=None, user_accessible_repos=None, wiki_enabled=True):
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()

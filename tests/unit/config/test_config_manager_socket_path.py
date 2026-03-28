@@ -98,7 +98,7 @@ class TestConfigManagerSocketPath:
             mock_generate.return_value = mock_socket_path
 
             manager = ConfigManager(config_path)
-            socket_path = manager.get_socket_path()
+            _socket_path = manager.get_socket_path()
 
             # Should create mapping file with repo path and socket path
             mock_create_mapping.assert_called_once_with(

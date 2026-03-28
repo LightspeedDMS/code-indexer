@@ -12,7 +12,7 @@ import pytest
 import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 from code_indexer.server.routers.research_assistant import router
 from code_indexer.server.web.auth import require_admin_session, SessionData
 
@@ -46,7 +46,9 @@ def client(app):
 @pytest.fixture
 def mock_service():
     """Create mock ResearchAssistantService."""
-    with patch('code_indexer.server.routers.research_assistant.ResearchAssistantService') as mock:
+    with patch(
+        "code_indexer.server.routers.research_assistant.ResearchAssistantService"
+    ) as mock:
         yield mock.return_value
 
 
@@ -91,8 +93,7 @@ class TestSessionCRUDRoutes:
         ]
 
         response = client.put(
-            f"/admin/research/sessions/{session_id}",
-            data={"new_name": new_name}
+            f"/admin/research/sessions/{session_id}", data={"new_name": new_name}
         )
 
         assert response.status_code == 200
@@ -107,8 +108,7 @@ class TestSessionCRUDRoutes:
         mock_service.rename_session.return_value = False
 
         response = client.put(
-            f"/admin/research/sessions/{session_id}",
-            data={"new_name": invalid_name}
+            f"/admin/research/sessions/{session_id}", data={"new_name": invalid_name}
         )
 
         assert response.status_code == 400

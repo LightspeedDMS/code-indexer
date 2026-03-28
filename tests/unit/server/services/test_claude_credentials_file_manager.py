@@ -8,7 +8,6 @@ import json
 import time
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.services.claude_credentials_file_manager import (
     ClaudeCredentialsFileManager,
@@ -18,6 +17,7 @@ from code_indexer.server.services.claude_credentials_file_manager import (
 # ---------------------------------------------------------------------------
 # write_credentials()
 # ---------------------------------------------------------------------------
+
 
 class TestWriteCredentials:
     def test_write_creates_file(self, tmp_path):
@@ -161,6 +161,7 @@ class TestWriteCredentials:
 # read_credentials()
 # ---------------------------------------------------------------------------
 
+
 class TestReadCredentials:
     def test_read_returns_none_when_file_missing(self, tmp_path):
         creds_path = tmp_path / ".credentials.json"
@@ -214,6 +215,7 @@ class TestReadCredentials:
 # delete_credentials()
 # ---------------------------------------------------------------------------
 
+
 class TestDeleteCredentials:
     def test_delete_removes_file(self, tmp_path):
         creds_path = tmp_path / ".credentials.json"
@@ -248,6 +250,7 @@ class TestDeleteCredentials:
 # ---------------------------------------------------------------------------
 # Default path
 # ---------------------------------------------------------------------------
+
 
 class TestDefaultPath:
     def test_default_path_is_claude_credentials_json(self):

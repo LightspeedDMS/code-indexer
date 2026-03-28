@@ -16,7 +16,6 @@ Fixture `job_tracker` is provided by conftest.py in this directory.
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
 from code_indexer.server.routers.api_keys import trigger_catchup_on_api_key_save
@@ -59,12 +58,15 @@ class TestImmediateCatchupJobRegistration:
         mock_manager = MagicMock()
         mock_manager.process_all_fallbacks.return_value = mock_result
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_claude_cli_manager",
-            return_value=mock_manager,
-        ), patch(
-            "code_indexer.server.routers.api_keys.get_job_tracker",
-            return_value=job_tracker,
+        with (
+            patch(
+                "code_indexer.server.routers.api_keys.get_claude_cli_manager",
+                return_value=mock_manager,
+            ),
+            patch(
+                "code_indexer.server.routers.api_keys.get_job_tracker",
+                return_value=job_tracker,
+            ),
         ):
             trigger_catchup_on_api_key_save("sk-ant-valid-key")
 
@@ -85,18 +87,23 @@ class TestImmediateCatchupJobRegistration:
         mock_manager = MagicMock()
         mock_manager.process_all_fallbacks.return_value = mock_result
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_claude_cli_manager",
-            return_value=mock_manager,
-        ), patch(
-            "code_indexer.server.routers.api_keys.get_job_tracker",
-            return_value=job_tracker,
+        with (
+            patch(
+                "code_indexer.server.routers.api_keys.get_claude_cli_manager",
+                return_value=mock_manager,
+            ),
+            patch(
+                "code_indexer.server.routers.api_keys.get_job_tracker",
+                return_value=job_tracker,
+            ),
         ):
             trigger_catchup_on_api_key_save("sk-ant-valid-key")
 
         time.sleep(BACKGROUND_THREAD_WAIT_SECONDS)
 
-        jobs = job_tracker.query_jobs(operation_type="immediate_catchup", status="completed")
+        jobs = job_tracker.query_jobs(
+            operation_type="immediate_catchup", status="completed"
+        )
         assert len(jobs) >= 1
 
     def test_immediate_catchup_job_fails_when_exception_raised(self, job_tracker):
@@ -108,14 +115,19 @@ class TestImmediateCatchupJobRegistration:
         Then an immediate_catchup job exists with failed status
         """
         mock_manager = MagicMock()
-        mock_manager.process_all_fallbacks.side_effect = RuntimeError("Claude unavailable")
+        mock_manager.process_all_fallbacks.side_effect = RuntimeError(
+            "Claude unavailable"
+        )
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_claude_cli_manager",
-            return_value=mock_manager,
-        ), patch(
-            "code_indexer.server.routers.api_keys.get_job_tracker",
-            return_value=job_tracker,
+        with (
+            patch(
+                "code_indexer.server.routers.api_keys.get_claude_cli_manager",
+                return_value=mock_manager,
+            ),
+            patch(
+                "code_indexer.server.routers.api_keys.get_job_tracker",
+                return_value=job_tracker,
+            ),
         ):
             trigger_catchup_on_api_key_save("sk-ant-valid-key")
 
@@ -138,12 +150,15 @@ class TestImmediateCatchupJobRegistration:
         mock_manager = MagicMock()
         mock_manager.process_all_fallbacks.return_value = mock_result
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_claude_cli_manager",
-            return_value=mock_manager,
-        ), patch(
-            "code_indexer.server.routers.api_keys.get_job_tracker",
-            return_value=None,
+        with (
+            patch(
+                "code_indexer.server.routers.api_keys.get_claude_cli_manager",
+                return_value=mock_manager,
+            ),
+            patch(
+                "code_indexer.server.routers.api_keys.get_job_tracker",
+                return_value=None,
+            ),
         ):
             result = trigger_catchup_on_api_key_save("sk-ant-valid-key")
 
@@ -164,12 +179,15 @@ class TestImmediateCatchupJobRegistration:
         mock_manager = MagicMock()
         mock_manager.process_all_fallbacks.return_value = mock_result
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_claude_cli_manager",
-            return_value=mock_manager,
-        ), patch(
-            "code_indexer.server.routers.api_keys.get_job_tracker",
-            return_value=broken_tracker,
+        with (
+            patch(
+                "code_indexer.server.routers.api_keys.get_claude_cli_manager",
+                return_value=mock_manager,
+            ),
+            patch(
+                "code_indexer.server.routers.api_keys.get_job_tracker",
+                return_value=broken_tracker,
+            ),
         ):
             result = trigger_catchup_on_api_key_save("sk-ant-valid-key")
 

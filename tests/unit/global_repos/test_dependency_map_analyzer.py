@@ -68,9 +68,7 @@ class TestPass1Synthesis:
     """Test Pass 1: Domain synthesis (AC1)."""
 
     @patch("subprocess.run")
-    def test_run_pass_1_invokes_claude_cli(
-        self, mock_subprocess, tmp_path
-    ):
+    def test_run_pass_1_invokes_claude_cli(self, mock_subprocess, tmp_path):
         """Test that run_pass_1_synthesis invokes Claude CLI with correct parameters."""
         # Mock subprocess response
         mock_subprocess.return_value = MagicMock(
@@ -103,11 +101,21 @@ class TestPass1Synthesis:
 
         # Provide repo_list with matching aliases and clone_paths for validation
         repo_list = [
-            {"alias": "auth-service", "description_summary": "Auth service", "clone_path": "/path/to/auth-service"},
-            {"alias": "web-app", "description_summary": "Web application", "clone_path": "/path/to/web-app"},
+            {
+                "alias": "auth-service",
+                "description_summary": "Auth service",
+                "clone_path": "/path/to/auth-service",
+            },
+            {
+                "alias": "web-app",
+                "description_summary": "Web application",
+                "clone_path": "/path/to/web-app",
+            },
         ]
 
-        result = analyzer.run_pass_1_synthesis(staging_dir, repo_descriptions, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, repo_descriptions, repo_list=repo_list, max_turns=50
+        )
 
         # Verify subprocess called with correct arguments
         mock_subprocess.assert_called_once()
@@ -124,7 +132,9 @@ class TestPass1Synthesis:
         assert "-p" not in cmd
         assert "Identify domain clusters" in call_args[1]["input"]  # Prompt via stdin
         assert call_args[1]["cwd"] == str(tmp_path)
-        assert call_args[1]["timeout"] == 600  # full pass_timeout (Pass 1 is heaviest phase)
+        assert (
+            call_args[1]["timeout"] == 600
+        )  # full pass_timeout (Pass 1 is heaviest phase)
 
         # Verify result
         assert len(result) == 1
@@ -158,10 +168,16 @@ class TestPass1Synthesis:
 
             # Provide repo_list with matching alias and clone_path for validation
             repo_list = [
-                {"alias": "repo1", "description_summary": "First repository", "clone_path": "/path/to/repo1"},
+                {
+                    "alias": "repo1",
+                    "description_summary": "First repository",
+                    "clone_path": "/path/to/repo1",
+                },
             ]
 
-            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+            analyzer.run_pass_1_synthesis(
+                staging_dir, {}, repo_list=repo_list, max_turns=50
+            )
 
             domains_file = staging_dir / "_domains.json"
             assert domains_file.exists()
@@ -175,12 +191,13 @@ class TestPass2PerDomain:
     """Test Pass 2: Per-domain analysis (AC1)."""
 
     @patch("subprocess.run")
-    def test_run_pass_2_invokes_claude_cli(
-        self, mock_subprocess, tmp_path
-    ):
+    def test_run_pass_2_invokes_claude_cli(self, mock_subprocess, tmp_path):
         """Test that run_pass_2_per_domain invokes Claude CLI with domain context."""
         # Generate output >1000 chars to avoid retry logic
-        content = "# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry. " + "X" * 1000
+        content = (
+            "# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry. "
+            + "X" * 1000
+        )
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=content,
@@ -203,7 +220,9 @@ class TestPass2PerDomain:
 
         domain_list = [domain]
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, domain_list, repo_list=[], max_turns=60)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, domain_list, repo_list=[], max_turns=60
+        )
 
         # Verify subprocess called with full timeout
         mock_subprocess.assert_called_once()
@@ -221,7 +240,8 @@ class TestPass2PerDomain:
             # Must be >1000 chars to pass quality gate (Fix 3)
             mock_subprocess.return_value = MagicMock(
                 returncode=0,
-                stdout="Based on my analysis:\n\n# Authentication\n\nDomain analysis content here. " + "X" * 1000,
+                stdout="Based on my analysis:\n\n# Authentication\n\nDomain analysis content here. "
+                + "X" * 1000,
             )
 
             analyzer = DependencyMapAnalyzer(
@@ -264,7 +284,10 @@ class TestPass2PerDomain:
     ):
         """Test that run_pass_2_per_domain prompt includes Technology Stack Verification mandate."""
         # Generate output >1000 chars to avoid retry logic
-        content = "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. " + "Y" * 1000
+        content = (
+            "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. "
+            + "Y" * 1000
+        )
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=content,
@@ -299,16 +322,17 @@ class TestPass2PerDomain:
         assert "Search for dependency manifests" in prompt
         assert "Check actual source file extensions" in prompt
         assert "Do NOT assume technology based on tool names" in prompt
-        assert "If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X" in prompt
+        assert (
+            "If a repo uses a library written in language X as a binding/wrapper in language Y, the repo's primary language is Y, not X"
+            in prompt
+        )
 
 
 class TestPass3Index:
     """Test Pass 3: Index generation (AC1)."""
 
     @patch("subprocess.run")
-    def test_run_pass_3_invokes_claude_cli(
-        self, mock_subprocess, tmp_path
-    ):
+    def test_run_pass_3_invokes_claude_cli(self, mock_subprocess, tmp_path):
         """Test that run_pass_3_index invokes Claude CLI with index generation prompt."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
@@ -361,7 +385,9 @@ class TestPass3Index:
             staging_dir = tmp_path / "staging"
             staging_dir.mkdir()
 
-            domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
+            domain_list = [
+                {"name": "d1", "description": "Domain 1", "participating_repos": []}
+            ]
             repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
 
             analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=30)
@@ -382,7 +408,9 @@ class TestPassOneValidation:
     """Test Pass 1 post-processing validation logic."""
 
     @patch("subprocess.run")
-    def test_strips_markdown_headings_from_auto_created_description(self, mock_subprocess, tmp_path):
+    def test_strips_markdown_headings_from_auto_created_description(
+        self, mock_subprocess, tmp_path
+    ):
         """Unassigned repos with heading-prefixed descriptions get cleaned up."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
@@ -396,16 +424,24 @@ class TestPassOneValidation:
         staging = tmp_path / "staging"
         staging.mkdir()
         repo_list = [
-            {"alias": "my-repo", "description_summary": "## My Repo Description", "clone_path": "/path/to/my-repo"},
+            {
+                "alias": "my-repo",
+                "description_summary": "## My Repo Description",
+                "clone_path": "/path/to/my-repo",
+            },
         ]
-        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging, {}, repo_list=repo_list, max_turns=50
+        )
         assert len(result) == 1
         assert result[0]["name"] == "my-repo"
         assert result[0]["description"] == "My Repo Description"
         assert "##" not in result[0]["description"]
 
     @patch("subprocess.run")
-    def test_alias_only_description_gets_standalone_suffix(self, mock_subprocess, tmp_path):
+    def test_alias_only_description_gets_standalone_suffix(
+        self, mock_subprocess, tmp_path
+    ):
         """When description equals alias name, use '(standalone repository)' suffix."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
@@ -419,9 +455,15 @@ class TestPassOneValidation:
         staging = tmp_path / "staging"
         staging.mkdir()
         repo_list = [
-            {"alias": "my-repo", "description_summary": "my-repo", "clone_path": "/path/to/my-repo"},
+            {
+                "alias": "my-repo",
+                "description_summary": "my-repo",
+                "clone_path": "/path/to/my-repo",
+            },
         ]
-        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging, {}, repo_list=repo_list, max_turns=50
+        )
         assert result[0]["description"] == "my-repo (standalone repository)"
 
     @patch("subprocess.run")
@@ -429,12 +471,18 @@ class TestPassOneValidation:
         """Repos with .versioned/ paths should not be filtered out."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([{
-                "name": "test-domain",
-                "description": "Test domain",
-                "participating_repos": ["flask-large"],
-                "repo_paths": {"flask-large": "/golden-repos/.versioned/flask-large/v_20260214"},
-            }]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test domain",
+                        "participating_repos": ["flask-large"],
+                        "repo_paths": {
+                            "flask-large": "/golden-repos/.versioned/flask-large/v_20260214"
+                        },
+                    }
+                ]
+            ),
         )
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
@@ -444,9 +492,15 @@ class TestPassOneValidation:
         staging = tmp_path / "staging"
         staging.mkdir()
         repo_list = [
-            {"alias": "flask-large", "description_summary": "Flask framework", "clone_path": "/golden-repos/flask-large"},
+            {
+                "alias": "flask-large",
+                "description_summary": "Flask framework",
+                "clone_path": "/golden-repos/flask-large",
+            },
         ]
-        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging, {}, repo_list=repo_list, max_turns=50
+        )
         # flask-large should NOT be filtered - the .versioned path contains the alias
         domain_repos = result[0]["participating_repos"]
         assert "flask-large" in domain_repos
@@ -456,12 +510,16 @@ class TestPassOneValidation:
         """Repos with paths not containing the alias should be filtered out."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([{
-                "name": "test-domain",
-                "description": "Test domain",
-                "participating_repos": ["my-repo"],
-                "repo_paths": {"my-repo": "/totally/wrong/directory"},
-            }]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test domain",
+                        "participating_repos": ["my-repo"],
+                        "repo_paths": {"my-repo": "/totally/wrong/directory"},
+                    }
+                ]
+            ),
         )
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
@@ -471,9 +529,15 @@ class TestPassOneValidation:
         staging = tmp_path / "staging"
         staging.mkdir()
         repo_list = [
-            {"alias": "my-repo", "description_summary": "My repository", "clone_path": "/path/to/my-repo"},
+            {
+                "alias": "my-repo",
+                "description_summary": "My repository",
+                "clone_path": "/path/to/my-repo",
+            },
         ]
-        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging, {}, repo_list=repo_list, max_turns=50
+        )
         # my-repo should be filtered from the domain and auto-created as standalone
         # The original domain should be removed (empty after filtering)
         # my-repo should appear as an auto-created standalone domain
@@ -486,12 +550,16 @@ class TestPassOneValidation:
         """Short alias like 'db' should not match path containing 'adobe'."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([{
-                "name": "test-domain",
-                "description": "Test domain",
-                "participating_repos": ["db"],
-                "repo_paths": {"db": "/home/repos/adobe-tools/src"},
-            }]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test domain",
+                        "participating_repos": ["db"],
+                        "repo_paths": {"db": "/home/repos/adobe-tools/src"},
+                    }
+                ]
+            ),
         )
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
@@ -501,9 +569,15 @@ class TestPassOneValidation:
         staging = tmp_path / "staging"
         staging.mkdir()
         repo_list = [
-            {"alias": "db", "description_summary": "Database repo", "clone_path": "/path/to/db"},
+            {
+                "alias": "db",
+                "description_summary": "Database repo",
+                "clone_path": "/path/to/db",
+            },
         ]
-        result = analyzer.run_pass_1_synthesis(staging, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging, {}, repo_list=repo_list, max_turns=50
+        )
         # "db" should be filtered because "adobe-tools" doesn't contain "db" as a delimited segment
         standalone = [d for d in result if d["name"] == "db"]
         assert len(standalone) == 1
@@ -557,18 +631,22 @@ class TestPass1PromptGuardrails:
     """Test Pass 1 prompt contains guardrails against non-JSON output."""
 
     @patch("subprocess.run")
-    def test_prompt_contains_internal_verification_instruction(self, mock_subprocess, tmp_path):
+    def test_prompt_contains_internal_verification_instruction(
+        self, mock_subprocess, tmp_path
+    ):
         """Test that Pass 1 prompt instructs Claude to verify internally without outputting verification text."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test",
+                        "participating_repos": ["repo1"],
+                        "repo_paths": {"repo1": "/path/to/repo1"},
+                    }
+                ]
+            ),
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -581,10 +659,16 @@ class TestPass1PromptGuardrails:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, {}, repo_list=repo_list, max_turns=50
+        )
 
         # Verify prompt contains critical guardrails
         mock_subprocess.assert_called_once()
@@ -606,9 +690,7 @@ class TestPass1JsonParseFailure:
     """Test Pass 1 JSON parse failure raises RuntimeError (FIX 3)."""
 
     @patch("subprocess.run")
-    def test_run_pass_1_raises_on_bad_json(
-        self, mock_subprocess, tmp_path
-    ):
+    def test_run_pass_1_raises_on_bad_json(self, mock_subprocess, tmp_path):
         """Test that run_pass_1_synthesis raises RuntimeError on unparseable JSON."""
         # Mock subprocess to return invalid JSON
         mock_subprocess.return_value = MagicMock(
@@ -625,11 +707,15 @@ class TestPass1JsonParseFailure:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"):
+        with pytest.raises(
+            RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"
+        ):
             analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=[], max_turns=50)
 
     @patch("subprocess.run")
-    def test_pass_1_agentic_retry_with_file_reminder_succeeds(self, mock_subprocess, tmp_path):
+    def test_pass_1_agentic_retry_with_file_reminder_succeeds(
+        self, mock_subprocess, tmp_path
+    ):
         """Test Pass 1 agentic retry with file-write reminder succeeds when first attempt returns commentary."""
         # First call (agentic): returns commentary instead of JSON
         # Second call (agentic retry with file-write reminder): returns valid JSON on stdout
@@ -647,14 +733,16 @@ class TestPass1JsonParseFailure:
                 # Agentic retry: valid JSON on stdout (fallback path)
                 return MagicMock(
                     returncode=0,
-                    stdout=json.dumps([
-                        {
-                            "name": "test-domain",
-                            "description": "Test domain",
-                            "participating_repos": ["repo1"],
-                            "repo_paths": {"repo1": "/path/to/repo1"},
-                        }
-                    ]),
+                    stdout=json.dumps(
+                        [
+                            {
+                                "name": "test-domain",
+                                "description": "Test domain",
+                                "participating_repos": ["repo1"],
+                                "repo_paths": {"repo1": "/path/to/repo1"},
+                            }
+                        ]
+                    ),
                 )
 
         mock_subprocess.side_effect = side_effect
@@ -669,10 +757,16 @@ class TestPass1JsonParseFailure:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
-        result = analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, {}, repo_list=repo_list, max_turns=50
+        )
 
         # Verify subprocess was called twice (agentic + agentic retry)
         assert mock_subprocess.call_count == 2
@@ -716,12 +810,20 @@ class TestPass1JsonParseFailure:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
         # Verify RuntimeError is raised with "failed after retry" message (Story #349)
-        with pytest.raises(RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"):
-            analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+        with pytest.raises(
+            RuntimeError, match="Pass 1 \\(Synthesis\\) failed after retry"
+        ):
+            analyzer.run_pass_1_synthesis(
+                staging_dir, {}, repo_list=repo_list, max_turns=50
+            )
 
         # Verify subprocess was called twice
         assert mock_subprocess.call_count == 2
@@ -732,14 +834,16 @@ class TestPass1JsonParseFailure:
         # First call returns valid JSON - no retry needed
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test domain",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test domain",
+                        "participating_repos": ["repo1"],
+                        "repo_paths": {"repo1": "/path/to/repo1"},
+                    }
+                ]
+            ),
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -752,10 +856,16 @@ class TestPass1JsonParseFailure:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
-        result = analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+        result = analyzer.run_pass_1_synthesis(
+            staging_dir, {}, repo_list=repo_list, max_turns=50
+        )
 
         # Verify subprocess was called only once (no retry)
         assert mock_subprocess.call_count == 1
@@ -769,12 +879,13 @@ class TestIncrementalPass2:
     """Test incremental Pass 2 with previous_domain_dir (FIX 9)."""
 
     @patch("subprocess.run")
-    def test_run_pass_2_uses_previous_domain_content(
-        self, mock_subprocess, tmp_path
-    ):
+    def test_run_pass_2_uses_previous_domain_content(self, mock_subprocess, tmp_path):
         """Test that run_pass_2_per_domain includes previous domain content in prompt."""
         # Generate output >1000 chars to avoid retry logic
-        content = "# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry. " + "Z" * 1000
+        content = (
+            "# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry. "
+            + "Z" * 1000
+        )
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=content,
@@ -794,7 +905,10 @@ class TestIncrementalPass2:
         previous_dir = tmp_path / "previous"
         previous_dir.mkdir()
         previous_domain_file = previous_dir / "authentication.md"
-        previous_content = "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nOld content here. " + "Y" * 1000
+        previous_content = (
+            "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nOld content here. "
+            + "Y" * 1000
+        )
         previous_domain_file.write_text(previous_content)
 
         domain = {
@@ -804,7 +918,12 @@ class TestIncrementalPass2:
         }
 
         analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=60, previous_domain_dir=previous_dir
+            staging_dir,
+            domain,
+            [domain],
+            repo_list=[],
+            max_turns=60,
+            previous_domain_dir=previous_dir,
         )
 
         # Verify subprocess was called with prompt containing previous content
@@ -824,14 +943,16 @@ class TestAllowedToolsPerPass:
         """Test that Pass 1 is called with allowed_tools=None (no --allowedTools flag) and max_turns=0 (single-shot)."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test",
+                        "participating_repos": ["repo1"],
+                        "repo_paths": {"repo1": "/path/to/repo1"},
+                    }
+                ]
+            ),
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -844,7 +965,11 @@ class TestAllowedToolsPerPass:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
         analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=0)
@@ -861,7 +986,10 @@ class TestAllowedToolsPerPass:
     def test_pass_2_has_allowed_tools(self, mock_subprocess, tmp_path):
         """Test that Pass 2 is called with --allowedTools mcp__cidx-local__search_code."""
         # Generate output >1000 chars to avoid retry logic
-        content = "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. " + "W" * 1000
+        content = (
+            "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. "
+            + "W" * 1000
+        )
         mock_subprocess.return_value = MagicMock(
             returncode=0,
             stdout=content,
@@ -882,7 +1010,9 @@ class TestAllowedToolsPerPass:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify --allowedTools is present with correct value
         mock_subprocess.assert_called_once()
@@ -909,7 +1039,9 @@ class TestAllowedToolsPerPass:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
+        domain_list = [
+            {"name": "d1", "description": "Domain 1", "participating_repos": []}
+        ]
         repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
 
         analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=0)
@@ -931,14 +1063,16 @@ class TestSingleShotVsAgenticMode:
         """Test that max_turns=0 omits --max-turns flag (single-shot print mode)."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test",
+                        "participating_repos": ["repo1"],
+                        "repo_paths": {"repo1": "/path/to/repo1"},
+                    }
+                ]
+            ),
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -951,7 +1085,11 @@ class TestSingleShotVsAgenticMode:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
         # max_turns=0 should omit --max-turns from command
@@ -975,14 +1113,16 @@ class TestSingleShotVsAgenticMode:
         """Test that max_turns>0 includes --max-turns flag (agentic mode)."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test",
+                        "participating_repos": ["repo1"],
+                        "repo_paths": {"repo1": "/path/to/repo1"},
+                    }
+                ]
+            ),
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -995,11 +1135,17 @@ class TestSingleShotVsAgenticMode:
         staging_dir.mkdir()
 
         repo_list = [
-            {"alias": "repo1", "description_summary": "Repo 1", "clone_path": "/path/to/repo1"},
+            {
+                "alias": "repo1",
+                "description_summary": "Repo 1",
+                "clone_path": "/path/to/repo1",
+            },
         ]
 
         # max_turns=50 should include --max-turns 50
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, {}, repo_list=repo_list, max_turns=50
+        )
 
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
@@ -1031,7 +1177,10 @@ class TestEmptyOutputDetection:
                 return MagicMock(returncode=0, stdout="")
             else:
                 # Must be >1000 chars to pass quality gate (Fix 3)
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nRetry succeeded. " + "X" * 1000)
+                return MagicMock(
+                    returncode=0,
+                    stdout="# Domain Analysis\n\nRetry succeeded. " + "X" * 1000,
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -1050,7 +1199,9 @@ class TestEmptyOutputDetection:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called twice
         assert mock_subprocess.call_count == 2
@@ -1080,7 +1231,11 @@ class TestEmptyOutputDetection:
                 return MagicMock(returncode=0, stdout="Short")
             else:
                 # Must be >1000 chars with heading to pass quality gate (Fix 3)
-                return MagicMock(returncode=0, stdout="# Domain Analysis: test-domain\n\n" + "Detailed analysis content. " * 60)
+                return MagicMock(
+                    returncode=0,
+                    stdout="# Domain Analysis: test-domain\n\n"
+                    + "Detailed analysis content. " * 60,
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -1099,7 +1254,9 @@ class TestEmptyOutputDetection:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called twice
         assert mock_subprocess.call_count == 2
@@ -1207,7 +1364,9 @@ class TestInsufficientOutputThreshold:
     """Test Fix 1: Raise Pass 2 insufficient output threshold to 1000 chars."""
 
     @patch("subprocess.run")
-    def test_pass_2_retries_on_insufficient_output_1000_chars(self, mock_subprocess, tmp_path):
+    def test_pass_2_retries_on_insufficient_output_1000_chars(
+        self, mock_subprocess, tmp_path
+    ):
         """Test that Pass 2 retries when output is <1000 chars (not just <50)."""
         # First call returns 626 chars (insufficient), second call returns full content
         call_count = [0]
@@ -1218,7 +1377,9 @@ class TestInsufficientOutputThreshold:
             if call_count[0] == 1:
                 return MagicMock(returncode=0, stdout=insufficient_output)
             else:
-                return MagicMock(returncode=0, stdout="# Full Analysis\n\n" + "y" * 2000)
+                return MagicMock(
+                    returncode=0, stdout="# Full Analysis\n\n" + "y" * 2000
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -1237,7 +1398,9 @@ class TestInsufficientOutputThreshold:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called twice (original + retry)
         assert mock_subprocess.call_count == 2
@@ -1329,7 +1492,9 @@ class TestPass3MetaCommentaryStripping:
         staging_dir = tmp_path / "staging"
         staging_dir.mkdir()
 
-        domain_list = [{"name": "d1", "description": "Domain 1", "participating_repos": []}]
+        domain_list = [
+            {"name": "d1", "description": "Domain 1", "participating_repos": []}
+        ]
         repo_list = [{"alias": "r1", "description_summary": "Repo 1"}]
 
         analyzer.run_pass_3_index(staging_dir, domain_list, repo_list, max_turns=30)
@@ -1450,7 +1615,9 @@ class TestPass2PromptGuardrails:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=60)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=60
+        )
 
         # Verify prompt contains YAML prohibition
         mock_subprocess.assert_called_once()
@@ -1481,7 +1648,9 @@ class TestPass2PromptGuardrails:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=60)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=60
+        )
 
         # Verify prompt contains speculative content prohibition
         mock_subprocess.assert_called_once()
@@ -1655,13 +1824,15 @@ class TestIteration10QualityGate:
                 # 1.2KB of meta-commentary with NO headings (claude-ai-toolchain case)
                 return MagicMock(
                     returncode=0,
-                    stdout="The domain analysis is complete. All dependencies were verified.\n\n" + "X" * 1000,
+                    stdout="The domain analysis is complete. All dependencies were verified.\n\n"
+                    + "X" * 1000,
                 )
             else:
                 # Valid output with heading
                 return MagicMock(
                     returncode=0,
-                    stdout="# Domain Analysis: test\n\nValid content here.\n\n" + "Y" * 1000,
+                    stdout="# Domain Analysis: test\n\nValid content here.\n\n"
+                    + "Y" * 1000,
                 )
 
         mock_subprocess.side_effect = side_effect
@@ -1681,7 +1852,9 @@ class TestIteration10QualityGate:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called twice (original + retry due to missing headings)
         assert mock_subprocess.call_count == 2
@@ -1725,7 +1898,9 @@ class TestIteration10PromptReinforcement:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=60)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=60
+        )
 
         # Verify prompt contains heading requirement
         mock_subprocess.assert_called_once()
@@ -1733,7 +1908,10 @@ class TestIteration10PromptReinforcement:
         prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         assert "CRITICAL: Your output MUST begin with a markdown heading" in prompt
-        assert "Do NOT start with summary text, meta-commentary, or a description of what you found" in prompt
+        assert (
+            "Do NOT start with summary text, meta-commentary, or a description of what you found"
+            in prompt
+        )
 
 
 class TestIteration11Fix2QualityCheckPrevious:
@@ -1759,7 +1937,10 @@ class TestIteration11Fix2QualityCheckPrevious:
         previous_dir.mkdir()
         previous_domain_file = previous_dir / "test-domain.md"
         # 485 bytes of meta-commentary with no headings (iteration 10 garbage)
-        low_quality_content = "---\nOld frontmatter\n---\n\nPlease approve my write to test-domain.md. " + "X" * 400
+        low_quality_content = (
+            "---\nOld frontmatter\n---\n\nPlease approve my write to test-domain.md. "
+            + "X" * 400
+        )
         previous_domain_file.write_text(low_quality_content)
 
         domain = {
@@ -1769,7 +1950,12 @@ class TestIteration11Fix2QualityCheckPrevious:
         }
 
         analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=60, previous_domain_dir=previous_dir
+            staging_dir,
+            domain,
+            [domain],
+            repo_list=[],
+            max_turns=60,
+            previous_domain_dir=previous_dir,
         )
 
         # Verify subprocess was called with prompt that does NOT include previous content
@@ -1800,7 +1986,10 @@ class TestIteration11Fix2QualityCheckPrevious:
         previous_dir = tmp_path / "previous"
         previous_dir.mkdir()
         previous_domain_file = previous_dir / "test-domain.md"
-        high_quality_content = "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nGood quality content here. " + "Y" * 1000
+        high_quality_content = (
+            "---\nOld frontmatter\n---\n\n# Previous Analysis\n\nGood quality content here. "
+            + "Y" * 1000
+        )
         previous_domain_file.write_text(high_quality_content)
 
         domain = {
@@ -1810,7 +1999,12 @@ class TestIteration11Fix2QualityCheckPrevious:
         }
 
         analyzer.run_pass_2_per_domain(
-            staging_dir, domain, [domain], repo_list=[], max_turns=60, previous_domain_dir=previous_dir
+            staging_dir,
+            domain,
+            [domain],
+            repo_list=[],
+            max_turns=60,
+            previous_domain_dir=previous_dir,
         )
 
         # Verify subprocess was called with prompt that DOES include previous content
@@ -1914,10 +2108,15 @@ class TestIteration11Fix3SkipGarbageWrite:
             call_count[0] += 1
             if call_count[0] == 1:
                 # First attempt: 1232 bytes but no headings (claude-ai-toolchain case)
-                return MagicMock(returncode=0, stdout="Meta-commentary about analysis. " + "X" * 1200)
+                return MagicMock(
+                    returncode=0, stdout="Meta-commentary about analysis. " + "X" * 1200
+                )
             else:
                 # Retry: 485 bytes, no headings (please approve my write case)
-                return MagicMock(returncode=0, stdout="Please approve my write to the file. " + "Y" * 400)
+                return MagicMock(
+                    returncode=0,
+                    stdout="Please approve my write to the file. " + "Y" * 400,
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -1936,14 +2135,18 @@ class TestIteration11Fix3SkipGarbageWrite:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called twice
         assert mock_subprocess.call_count == 2
 
         # Verify domain file was NOT written (FIX 3)
         domain_file = staging_dir / "test-domain.md"
-        assert not domain_file.exists(), "Domain file should NOT be written when both attempts fail quality checks"
+        assert (
+            not domain_file.exists()
+        ), "Domain file should NOT be written when both attempts fail quality checks"
 
     @patch("subprocess.run")
     def test_writes_file_when_retry_succeeds(self, mock_subprocess, tmp_path):
@@ -1957,7 +2160,10 @@ class TestIteration11Fix3SkipGarbageWrite:
                 return MagicMock(returncode=0, stdout="Meta-commentary. " + "X" * 100)
             else:
                 # Retry: succeeds (has heading, >1000 chars)
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nValid content. " + "Y" * 1000)
+                return MagicMock(
+                    returncode=0,
+                    stdout="# Domain Analysis\n\nValid content. " + "Y" * 1000,
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -1976,7 +2182,9 @@ class TestIteration11Fix3SkipGarbageWrite:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify domain file WAS written with retry content
         domain_file = staging_dir / "test-domain.md"
@@ -1995,7 +2203,9 @@ class TestIteration11Fix3SkipGarbageWrite:
             if call_count[0] == 1:
                 return MagicMock(returncode=0, stdout="Short output without headings.")
             else:
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\n" + "X" * 1000)
+                return MagicMock(
+                    returncode=0, stdout="# Domain Analysis\n\n" + "X" * 1000
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -2014,7 +2224,9 @@ class TestIteration11Fix3SkipGarbageWrite:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Should be called TWICE (retry for short output that is NOT max-turns exhaustion)
         assert mock_subprocess.call_count == 2
@@ -2046,7 +2258,9 @@ class TestIteration13HookThresholdFix:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called with correct thresholds in --settings JSON
         mock_subprocess.assert_called_once()
@@ -2061,8 +2275,8 @@ class TestIteration13HookThresholdFix:
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
         # Verify thresholds: early=15, late=30
-        assert "[ \"$C\" -gt 30 ]" in bash_script, "Late threshold should be 30"
-        assert "[ \"$C\" -gt 15 ]" in bash_script, "Early threshold should be 15"
+        assert '[ "$C" -gt 30 ]' in bash_script, "Late threshold should be 30"
+        assert '[ "$C" -gt 15 ]' in bash_script, "Early threshold should be 15"
 
     @patch("subprocess.run")
     def test_hook_thresholds_custom_override(self, mock_subprocess, tmp_path):
@@ -2084,10 +2298,18 @@ class TestIteration13HookThresholdFix:
         domain = {
             "name": "test-domain",
             "description": "Test domain",
-            "participating_repos": ["repo1", "repo2", "repo3", "repo4", "repo5"],  # Large domain
+            "participating_repos": [
+                "repo1",
+                "repo2",
+                "repo3",
+                "repo4",
+                "repo5",
+            ],  # Large domain
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Verify subprocess was called with custom thresholds
         mock_subprocess.assert_called_once()
@@ -2100,8 +2322,12 @@ class TestIteration13HookThresholdFix:
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
         # For large domain (5 repos), thresholds should be (7, 17) not (15, 30)
-        assert "[ \"$C\" -gt 17 ]" in bash_script, "Late threshold should be 17 for large domain"
-        assert "[ \"$C\" -gt 7 ]" in bash_script, "Early threshold should be 7 for large domain"
+        assert (
+            '[ "$C" -gt 17 ]' in bash_script
+        ), "Late threshold should be 17 for large domain"
+        assert (
+            '[ "$C" -gt 7 ]' in bash_script
+        ), "Early threshold should be 7 for large domain"
 
     @patch("subprocess.run")
     def test_hook_thresholds_small_max_turns(self, mock_subprocess, tmp_path):
@@ -2126,7 +2352,9 @@ class TestIteration13HookThresholdFix:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=10)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=10
+        )
 
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
@@ -2139,8 +2367,8 @@ class TestIteration13HookThresholdFix:
 
         # early = max(5, int(10*0.3)) = max(5, 3) = 5
         # late = max(10, int(10*0.6)) = max(10, 6) = 10
-        assert "[ \"$C\" -gt 10 ]" in bash_script, "Late threshold should be 10"
-        assert "[ \"$C\" -gt 5 ]" in bash_script, "Early threshold should be 5"
+        assert '[ "$C" -gt 10 ]' in bash_script, "Late threshold should be 10"
+        assert '[ "$C" -gt 5 ]' in bash_script, "Early threshold should be 5"
 
 
 class TestIteration13LargeDomainDetection:
@@ -2166,13 +2394,20 @@ class TestIteration13LargeDomainDetection:
         domain = {
             "name": "test-domain",
             "description": "Test domain",
-            "participating_repos": ["repo1", "repo2", "repo3", "repo4"],  # 4 repos = large
+            "participating_repos": [
+                "repo1",
+                "repo2",
+                "repo3",
+                "repo4",
+            ],  # 4 repos = large
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         mock_subprocess.assert_called_once()
-        call_args = mock_subprocess.call_args[0][0]
+        _call_args = mock_subprocess.call_args[0][0]
         prompt = mock_subprocess.call_args[1]["input"]  # Prompt passed via stdin
 
         # Verify output-first prompt characteristics
@@ -2206,7 +2441,9 @@ class TestIteration13LargeDomainDetection:
             "participating_repos": ["repo1", "repo2", "repo3"],  # 3 repos = small
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         mock_subprocess.assert_called_once()
         prompt = mock_subprocess.call_args[1]["input"]
@@ -2238,7 +2475,9 @@ class TestIteration13LargeDomainDetection:
             "participating_repos": ["repo1", "repo2", "repo3", "repo4", "repo5"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
@@ -2250,15 +2489,17 @@ class TestIteration13LargeDomainDetection:
         bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
         # Large domain should use earlier thresholds: (7, 17)
-        assert "[ \"$C\" -gt 17 ]" in bash_script
-        assert "[ \"$C\" -gt 7 ]" in bash_script
+        assert '[ "$C" -gt 17 ]' in bash_script
+        assert '[ "$C" -gt 7 ]' in bash_script
 
 
 class TestIteration13LargeDomainRetry:
     """Test large domain max-turns retry uses write-only mode (Iteration 13)."""
 
     @patch("subprocess.run")
-    def test_large_domain_max_turns_retry_uses_write_only(self, mock_subprocess, tmp_path):
+    def test_large_domain_max_turns_retry_uses_write_only(
+        self, mock_subprocess, tmp_path
+    ):
         """Verify max-turns exhaustion for large domain retries with max_turns=8 and no MCP tools."""
         call_count = [0]
 
@@ -2269,7 +2510,9 @@ class TestIteration13LargeDomainRetry:
                 return MagicMock(returncode=0, stdout="Error: Reached max turns (50)")
             else:
                 # Retry: succeeds
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nContent. " + "X" * 1000)
+                return MagicMock(
+                    returncode=0, stdout="# Domain Analysis\n\nContent. " + "X" * 1000
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -2285,10 +2528,17 @@ class TestIteration13LargeDomainRetry:
         domain = {
             "name": "test-domain",
             "description": "Test domain",
-            "participating_repos": ["repo1", "repo2", "repo3", "repo4"],  # 4 repos = large
+            "participating_repos": [
+                "repo1",
+                "repo2",
+                "repo3",
+                "repo4",
+            ],  # 4 repos = large
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Should be called twice
         assert mock_subprocess.call_count == 2
@@ -2306,7 +2556,9 @@ class TestIteration13LargeDomainRetry:
         assert retry_call_args[allowed_tools_idx + 1] == ""
 
     @patch("subprocess.run")
-    def test_small_domain_max_turns_retry_uses_budget_search(self, mock_subprocess, tmp_path):
+    def test_small_domain_max_turns_retry_uses_budget_search(
+        self, mock_subprocess, tmp_path
+    ):
         """Verify max-turns exhaustion for small domain uses max_turns=15 with search tools (existing behavior)."""
         call_count = [0]
 
@@ -2315,7 +2567,9 @@ class TestIteration13LargeDomainRetry:
             if call_count[0] == 1:
                 return MagicMock(returncode=0, stdout="Error: Reached max turns (50)")
             else:
-                return MagicMock(returncode=0, stdout="# Domain Analysis\n\nContent. " + "X" * 1000)
+                return MagicMock(
+                    returncode=0, stdout="# Domain Analysis\n\nContent. " + "X" * 1000
+                )
 
         mock_subprocess.side_effect = side_effect
 
@@ -2334,7 +2588,9 @@ class TestIteration13LargeDomainRetry:
             "participating_repos": ["repo1", "repo2"],  # 2 repos = small
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         assert mock_subprocess.call_count == 2
 
@@ -2374,7 +2630,9 @@ class TestIteration13OutputFirstPrompt:
             {"alias": "repo2", "clone_path": "/path/to/repo2"},
         ]
 
-        prompt = analyzer._build_output_first_prompt(domain, domain_list, repo_list, None)
+        prompt = analyzer._build_output_first_prompt(
+            domain, domain_list, repo_list, None
+        )
 
         # Verify template sections present
         assert "## Overview" in prompt
@@ -2447,7 +2705,9 @@ class TestIteration13OutputFirstPrompt:
         assert "Previous Analysis" not in prompt
         assert "Short low quality content" not in prompt
 
-    def test_output_first_prompt_includes_high_quality_previous_with_improvement_mandate(self, tmp_path):
+    def test_output_first_prompt_includes_high_quality_previous_with_improvement_mandate(
+        self, tmp_path
+    ):
         """Verify high-quality previous analysis includes EXTEND/IMPROVE/CORRECT instructions."""
         analyzer = DependencyMapAnalyzer(
             golden_repos_root=tmp_path,
@@ -2465,7 +2725,9 @@ class TestIteration13OutputFirstPrompt:
         previous_dir = tmp_path / "previous"
         previous_dir.mkdir()
         previous_file = previous_dir / "test-domain.md"
-        previous_file.write_text("# Previous Analysis\n\nGood quality content here. " + "Y" * 1000)
+        previous_file.write_text(
+            "# Previous Analysis\n\nGood quality content here. " + "Y" * 1000
+        )
 
         prompt = analyzer._build_output_first_prompt(domain, [domain], [], previous_dir)
 
@@ -2505,7 +2767,9 @@ class TestIteration14PurposeDrivenHooks:
             mock_invoke.return_value = "# Domain Analysis\n\nContent. " + "X" * 1000
 
             try:
-                analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+                analyzer.run_pass_2_per_domain(
+                    staging_dir, domain, [domain], repo_list=[], max_turns=50
+                )
             except Exception:
                 pass  # We just want to capture the call
 
@@ -2515,7 +2779,10 @@ class TestIteration14PurposeDrivenHooks:
             hook_reminder = call_kwargs.get("post_tool_hook", "")
 
             # Verify purpose-driven language
-            assert "inter-repository navigation" in hook_reminder or "inter-repo" in hook_reminder
+            assert (
+                "inter-repository navigation" in hook_reminder
+                or "inter-repo" in hook_reminder
+            )
             assert "concise" in hook_reminder.lower()
             assert "# Domain Analysis" in hook_reminder
 
@@ -2530,16 +2797,18 @@ class TestIteration14PurposeDrivenHooks:
         # Test _invoke_claude_cli with hook_thresholds to check generated messages
         with patch("subprocess.run") as mock_subprocess:
             # Mock sufficient output to avoid "very short stdout" warning
-            mock_subprocess.return_value = MagicMock(returncode=0, stdout="# Test\n\nOutput. " + "X" * 1000)
+            mock_subprocess.return_value = MagicMock(
+                returncode=0, stdout="# Test\n\nOutput. " + "X" * 1000
+            )
 
             # Call with hook thresholds (simulating large domain)
-            result = analyzer._invoke_claude_cli(
+            _result = analyzer._invoke_claude_cli(
                 prompt="test",
                 timeout=300,
                 max_turns=50,
                 allowed_tools="mcp__cidx-local__search_code",
                 post_tool_hook="TEST HOOK",
-                hook_thresholds=(3, 8)
+                hook_thresholds=(3, 8),
             )
 
             # Extract the --settings JSON from subprocess call
@@ -2586,7 +2855,9 @@ class TestIteration14PurposeDrivenHooks:
             mock_invoke.return_value = "# Domain Analysis\n\nContent. " + "X" * 1000
 
             try:
-                analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+                analyzer.run_pass_2_per_domain(
+                    staging_dir, domain, [domain], repo_list=[], max_turns=50
+                )
             except Exception:
                 pass
 
@@ -2599,7 +2870,10 @@ class TestIteration14PurposeDrivenHooks:
             assert "## Content Guidelines" in prompt
             assert "CONCISE" in prompt or "concise" in prompt
             assert "inter-repository navigation" in prompt or "inter-repo" in prompt
-            assert "no code snippets" in prompt.lower() or "not full code snippets" in prompt.lower()
+            assert (
+                "no code snippets" in prompt.lower()
+                or "not full code snippets" in prompt.lower()
+            )
             assert "3-8 sentences" in prompt or "shorter is better" in prompt.lower()
 
     @patch("subprocess.run")
@@ -2624,10 +2898,14 @@ class TestIteration14PurposeDrivenHooks:
         # Second call (retry) should be write-only
         mock_subprocess.side_effect = [
             MagicMock(returncode=0, stdout="Short output without headings"),
-            MagicMock(returncode=0, stdout="# Domain Analysis\n\nRetry content. " + "Y" * 1000)
+            MagicMock(
+                returncode=0, stdout="# Domain Analysis\n\nRetry content. " + "Y" * 1000
+            ),
         ]
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Should have been called twice (primary + retry)
         assert mock_subprocess.call_count == 2
@@ -2639,12 +2917,17 @@ class TestIteration14PurposeDrivenHooks:
         # Verify allowed_tools="" (write-only mode)
         if "--allowedTools" in retry_cmd:
             tools_idx = retry_cmd.index("--allowedTools")
-            assert retry_cmd[tools_idx + 1] == "", "Retry should use allowed_tools='' (write-only)"
+            assert (
+                retry_cmd[tools_idx + 1] == ""
+            ), "Retry should use allowed_tools='' (write-only)"
 
         # Verify retry prompt includes write-focused language
         retry_prompt = retry_call[1]["input"]
         assert "Write your dependency analysis NOW" in retry_prompt
-        assert "NO searching" in retry_prompt or "without searching" in retry_prompt.lower()
+        assert (
+            "NO searching" in retry_prompt
+            or "without searching" in retry_prompt.lower()
+        )
 
 
 class TestIteration15InsideOutAndConciseness:
@@ -2655,14 +2938,16 @@ class TestIteration15InsideOutAndConciseness:
         """Test that Pass 1 prompt includes file_count and MB size for each repo."""
         mock_subprocess.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps([
-                {
-                    "name": "test-domain",
-                    "description": "Test",
-                    "participating_repos": ["repo1"],
-                    "repo_paths": {"repo1": "/path/to/repo1"},
-                }
-            ]),
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "test-domain",
+                        "description": "Test",
+                        "participating_repos": ["repo1"],
+                        "repo_paths": {"repo1": "/path/to/repo1"},
+                    }
+                ]
+            ),
         )
 
         analyzer = DependencyMapAnalyzer(
@@ -2684,7 +2969,9 @@ class TestIteration15InsideOutAndConciseness:
             },
         ]
 
-        analyzer.run_pass_1_synthesis(staging_dir, {}, repo_list=repo_list, max_turns=50)
+        analyzer.run_pass_1_synthesis(
+            staging_dir, {}, repo_list=repo_list, max_turns=50
+        )
 
         # Extract prompt from subprocess call
         mock_subprocess.assert_called_once()
@@ -2722,7 +3009,9 @@ class TestIteration15InsideOutAndConciseness:
             {"alias": "repo2", "clone_path": "/path/to/repo2", "total_bytes": 5000000},
         ]
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=repo_list, max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=repo_list, max_turns=50
+        )
 
         # Extract prompt
         mock_subprocess.assert_called_once()
@@ -2756,12 +3045,26 @@ class TestIteration15InsideOutAndConciseness:
         }
 
         repo_list = [
-            {"alias": "small-repo", "clone_path": "/path/small", "total_bytes": 1000000},
-            {"alias": "large-repo", "clone_path": "/path/large", "total_bytes": 10000000},
-            {"alias": "medium-repo", "clone_path": "/path/medium", "total_bytes": 5000000},
+            {
+                "alias": "small-repo",
+                "clone_path": "/path/small",
+                "total_bytes": 1000000,
+            },
+            {
+                "alias": "large-repo",
+                "clone_path": "/path/large",
+                "total_bytes": 10000000,
+            },
+            {
+                "alias": "medium-repo",
+                "clone_path": "/path/medium",
+                "total_bytes": 5000000,
+            },
         ]
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=repo_list, max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=repo_list, max_turns=50
+        )
 
         # Extract prompt
         mock_subprocess.assert_called_once()
@@ -2769,7 +3072,9 @@ class TestIteration15InsideOutAndConciseness:
 
         # Extract the "Repository Filesystem Locations" section where repos should be sorted
         repo_section_start = prompt.find("## Repository Filesystem Locations")
-        assert repo_section_start >= 0, "Repository Filesystem Locations section not found"
+        assert (
+            repo_section_start >= 0
+        ), "Repository Filesystem Locations section not found"
         next_section_start = prompt.find("##", repo_section_start + 10)
         if next_section_start >= 0:
             repo_section = prompt[repo_section_start:next_section_start]
@@ -2782,9 +3087,9 @@ class TestIteration15InsideOutAndConciseness:
         small_idx = repo_section.find("small-repo")
 
         # Verify repos appear in size-descending order in the Repository Filesystem Locations section
-        assert large_idx < medium_idx < small_idx, (
-            f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
-        )
+        assert (
+            large_idx < medium_idx < small_idx
+        ), f"Repos not sorted by size in Repository Filesystem Locations section: large@{large_idx}, medium@{medium_idx}, small@{small_idx}"
 
     @patch("subprocess.run")
     def test_standard_prompt_has_output_template(self, mock_subprocess, tmp_path):
@@ -2810,7 +3115,9 @@ class TestIteration15InsideOutAndConciseness:
             "participating_repos": ["repo1", "repo2", "repo3"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Extract prompt
         mock_subprocess.assert_called_once()
@@ -2846,7 +3153,9 @@ class TestIteration15InsideOutAndConciseness:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Extract prompt
         mock_subprocess.assert_called_once()
@@ -2880,7 +3189,9 @@ class TestIteration15InsideOutAndConciseness:
             "participating_repos": ["repo1"],
         }
 
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Extract prompt
         mock_subprocess.assert_called_once()
@@ -2914,7 +3225,9 @@ class TestIteration15InsideOutAndConciseness:
         }
 
         # We need to capture the hook reminder from the settings JSON
-        analyzer.run_pass_2_per_domain(staging_dir, domain, [domain], repo_list=[], max_turns=50)
+        analyzer.run_pass_2_per_domain(
+            staging_dir, domain, [domain], repo_list=[], max_turns=50
+        )
 
         # Extract settings from subprocess call
         mock_subprocess.assert_called_once()
@@ -2930,7 +3243,12 @@ class TestIteration15InsideOutAndConciseness:
             bash_script = settings["hooks"]["PostToolUse"][0]["command"]
 
             # Verify character budget mentioned in hook messages
-            assert "3,000" in bash_script or "3000" in bash_script or "10,000" in bash_script or "10000" in bash_script
+            assert (
+                "3,000" in bash_script
+                or "3000" in bash_script
+                or "10,000" in bash_script
+                or "10000" in bash_script
+            )
 
 
 class TestIteration16CrossDomainGraph:
@@ -3033,10 +3351,15 @@ Should not be included."""
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one"]},
-            {"name": "domain-b", "participating_repos": ["repo-b-alpha", "repo-b-beta"]},
+            {
+                "name": "domain-b",
+                "participating_repos": ["repo-b-alpha", "repo-b-beta"],
+            },
         ]
 
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         assert "## Cross-Domain Dependency Graph" in graph_section
         assert "domain-a" in graph_section
@@ -3065,7 +3388,9 @@ No external connections.
             {"name": "domain-a", "participating_repos": ["repo-a-one", "repo-a-two"]},
         ]
 
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Should return empty string (no cross-domain edges)
         assert graph_section == ""
@@ -3102,7 +3427,9 @@ Another standalone domain.
             {"name": "domain-b", "participating_repos": ["repo-b"]},
         ]
 
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # No edges, should return empty string
         assert graph_section == ""
@@ -3129,7 +3456,9 @@ We use adobe for graphics processing.
             {"name": "domain-b", "participating_repos": ["db"]},
         ]
 
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # "db" should NOT match "adobe", so no edges
         assert graph_section == ""
@@ -3166,15 +3495,23 @@ We use adobe for graphics processing.
             {"name": "domain-b", "participating_repos": ["repo-b"]},
         ]
 
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Should have both edges
         assert "domain-a" in graph_section
         assert "domain-b" in graph_section
         # Should have table with both directions
         lines = graph_section.split("\n")
-        table_rows = [l for l in lines if l.startswith("| ") and "Source Domain" not in l and "---|" not in l]
-        assert len(table_rows) == 2, f"Expected 2 table rows for bidirectional edges, got {len(table_rows)}"
+        table_rows = [
+            row
+            for row in lines
+            if row.startswith("| ") and "Source Domain" not in row and "---|" not in row
+        ]
+        assert (
+            len(table_rows) == 2
+        ), f"Expected 2 table rows for bidirectional edges, got {len(table_rows)}"
 
     def test_build_cross_domain_graph_summary(self, tmp_path):
         """Test that summary shows correct edge count and standalone list."""
@@ -3221,7 +3558,9 @@ We use adobe for graphics processing.
             {"name": "domain-d", "participating_repos": ["repo-d"]},
         ]
 
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Should have summary at the end
         assert "**Summary**" in graph_section or "Summary:" in graph_section
@@ -3254,7 +3593,9 @@ Uses **repo-b** from domain-b.
         ]
 
         # Should not raise exception
-        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        graph_section = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # May have partial edge from domain-a, or empty if logic requires both files
         # At minimum, should not crash
@@ -3373,13 +3714,16 @@ Standalone domain.
 
         # Create domain files using structured tables
         (staging_dir / "domain-c.md").write_text(
-            "# Domain Analysis: domain-c\n\n" + _outgoing_table("repo-c", "repo-a", "domain-a")
+            "# Domain Analysis: domain-c\n\n"
+            + _outgoing_table("repo-c", "repo-a", "domain-a")
         )
         (staging_dir / "domain-a.md").write_text(
-            "# Domain Analysis: domain-a\n\n" + _outgoing_table("repo-a", "repo-b", "domain-b")
+            "# Domain Analysis: domain-a\n\n"
+            + _outgoing_table("repo-a", "repo-b", "domain-b")
         )
         (staging_dir / "domain-b.md").write_text(
-            "# Domain Analysis: domain-b\n\n" + _outgoing_table("repo-b", "repo-c", "domain-c")
+            "# Domain Analysis: domain-b\n\n"
+            + _outgoing_table("repo-b", "repo-c", "domain-c")
         )
 
         # Domain list in arbitrary order
@@ -3390,15 +3734,23 @@ Standalone domain.
         ]
 
         # Build graph twice
-        result1 = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
-        result2 = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result1 = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
+        result2 = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Should be identical
         assert result1 == result2
 
         # Extract table rows and verify alphabetical order
         lines = result1.split("\n")
-        table_rows = [l for l in lines if l.startswith("| ") and "Source Domain" not in l and "---|" not in l]
+        table_rows = [
+            row
+            for row in lines
+            if row.startswith("| ") and "Source Domain" not in row and "---|" not in row
+        ]
 
         # Should have 3 edges (a→b, b→c, c→a)
         assert len(table_rows) == 3
@@ -3411,7 +3763,9 @@ Standalone domain.
                 sources.append(parts[0])
 
         # Verify alphabetical order
-        assert sources == sorted(sources), f"Sources not alphabetically sorted: {sources}"
+        assert sources == sorted(
+            sources
+        ), f"Sources not alphabetically sorted: {sources}"
 
     def test_build_cross_domain_graph_negation_filter(self, tmp_path):
         """Test that structured table edges are detected; prose negation does not suppress them."""
@@ -3444,14 +3798,16 @@ Standalone domain.
             "## Cross-Domain Connections\n\nNo verified cross-domain dependencies.\n"
         )
 
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
 
         # Should detect edge to domain-b (from structured table)
         assert "domain-b" in result
         assert "repo1" in result
 
         # domain-c should NOT appear (not in any outgoing table)
-        lines = [line for line in result.split('\n') if line.startswith('| domain-a')]
+        lines = [line for line in result.split("\n") if line.startswith("| domain-a")]
         assert len(lines) == 1  # Only one edge from domain-a
         assert "domain-c" not in lines[0]
 
@@ -3470,9 +3826,13 @@ Standalone domain.
             "**None verified.** FTS search for repo1 across repo2 returned zero results. "
             "No functional dependency.\n"
         )
-        (staging_dir / "domain-b.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+        (staging_dir / "domain-b.md").write_text(
+            "## Cross-Domain Connections\n\nNone.\n"
+        )
 
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
         assert result == ""  # No edges
 
     def test_build_cross_domain_graph_negation_unrelated(self, tmp_path):
@@ -3490,7 +3850,11 @@ Standalone domain.
             "Semantic search returned coincidentally similar but functionally unrelated "
             "code from repo2. This is not a dependency.\n"
         )
-        (staging_dir / "domain-b.md").write_text("## Cross-Domain Connections\n\nNone.\n")
+        (staging_dir / "domain-b.md").write_text(
+            "## Cross-Domain Connections\n\nNone.\n"
+        )
 
-        result = DependencyMapAnalyzer._build_cross_domain_graph(staging_dir, domain_list)
+        result = DependencyMapAnalyzer._build_cross_domain_graph(
+            staging_dir, domain_list
+        )
         assert result == ""

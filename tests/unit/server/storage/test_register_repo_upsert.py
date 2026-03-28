@@ -12,9 +12,7 @@ Acceptance Criteria:
 Uses real SQLite databases — no mocking.
 """
 
-import sqlite3
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from code_indexer.server.storage.database_manager import DatabaseSchema
@@ -96,13 +94,13 @@ class TestRegisterRepoUpsert:
         # next_refresh MUST be preserved — Bug #299 fix
         after = backend.get_repo("existing-repo-global")
         assert after is not None, "Repo must still exist after re-registration"
-        assert after["next_refresh"] is not None, (
-            "next_refresh was wiped by re-registration (Bug #299)"
-        )
+        assert (
+            after["next_refresh"] is not None
+        ), "next_refresh was wiped by re-registration (Bug #299)"
         stored_after = float(after["next_refresh"])
-        assert abs(stored_after - future_time) < 0.001, (
-            f"next_refresh changed: expected {future_time}, got {stored_after}"
-        )
+        assert (
+            abs(stored_after - future_time) < 0.001
+        ), f"next_refresh changed: expected {future_time}, got {stored_after}"
 
     def test_re_registration_preserves_created_at(self, tmp_path):
         """AC3: Re-registering an existing repo does NOT reset created_at."""
@@ -177,25 +175,25 @@ class TestRegisterRepoUpsert:
         second = backend.get_repo("mutable-repo-global")
         assert second is not None
 
-        assert second["repo_name"] == "mutable-repo-renamed", (
-            "repo_name must be updated on re-registration"
-        )
-        assert second["repo_url"] == "https://github.com/org/mutable-new.git", (
-            "repo_url must be updated on re-registration"
-        )
-        assert second["index_path"] == "/golden-repos/mutable-repo-v2", (
-            "index_path must be updated on re-registration"
-        )
-        assert second["enable_temporal"] is True, (
-            "enable_temporal must be updated on re-registration"
-        )
-        assert second["temporal_options"] == {"branches": ["main", "dev"]}, (
-            "temporal_options must be updated on re-registration"
-        )
-        assert second["enable_scip"] is True, (
-            "enable_scip must be updated on re-registration"
-        )
+        assert (
+            second["repo_name"] == "mutable-repo-renamed"
+        ), "repo_name must be updated on re-registration"
+        assert (
+            second["repo_url"] == "https://github.com/org/mutable-new.git"
+        ), "repo_url must be updated on re-registration"
+        assert (
+            second["index_path"] == "/golden-repos/mutable-repo-v2"
+        ), "index_path must be updated on re-registration"
+        assert (
+            second["enable_temporal"] is True
+        ), "enable_temporal must be updated on re-registration"
+        assert second["temporal_options"] == {
+            "branches": ["main", "dev"]
+        }, "temporal_options must be updated on re-registration"
+        assert (
+            second["enable_scip"] is True
+        ), "enable_scip must be updated on re-registration"
         # last_refresh should also be updated (it's a mutable field)
-        assert second["last_refresh"] != first_last_refresh, (
-            "last_refresh must be updated on re-registration"
-        )
+        assert (
+            second["last_refresh"] != first_last_refresh
+        ), "last_refresh must be updated on re-registration"

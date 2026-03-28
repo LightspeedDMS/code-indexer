@@ -11,8 +11,6 @@ All tests use real in-memory SQLite databases with zero mocking.
 import sqlite3
 from pathlib import Path
 
-import pytest
-
 
 def _setup_db_with_users_and_credentials(db_path: Path) -> None:
     """
@@ -117,9 +115,7 @@ class TestGetMcpCredentialByClientId:
         backend = UsersSqliteBackend(str(db_path))
         result = backend.get_mcp_credential_by_client_id("client_zzz_nonexistent")
 
-        assert result is None, (
-            f"Expected None for unknown client_id, got: {result}"
-        )
+        assert result is None, f"Expected None for unknown client_id, got: {result}"
 
         backend.close()
 

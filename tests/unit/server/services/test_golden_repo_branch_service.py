@@ -12,7 +12,7 @@ Tests cover:
 5. Branch type classification (existing helper function)
 """
 
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 
 import pytest
 
@@ -261,9 +261,7 @@ class TestClassifyBranchType:
         )
 
         for name in ["experiment", "wip-something", "random-branch"]:
-            assert (
-                classify_branch_type(name) == "other"
-            ), f"Expected 'other' for {name}"
+            assert classify_branch_type(name) == "other", f"Expected 'other' for {name}"
 
     def test_empty_or_whitespace_branch_name(self):
         """Empty or whitespace branch names are classified as 'other'."""

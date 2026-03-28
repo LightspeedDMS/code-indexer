@@ -29,8 +29,8 @@ README_NAMES = [
 ]
 
 # Module-level tracking backend (initialized by set_tracking_backend)
-_tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type: ignore
-_scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore
+_tracking_backend: Optional["DescriptionRefreshTrackingBackend"] = None  # type: ignore[name-defined]  # noqa: F821
+_scheduler: Optional["DescriptionRefreshScheduler"] = None  # type: ignore[name-defined]  # noqa: F821
 _refresh_scheduler: Optional[Any] = None  # type: ignore
 _debouncer: Optional["CidxMetaRefreshDebouncer"] = None
 
@@ -53,7 +53,11 @@ class CidxMetaRefreshDebouncer:
         debouncer.shutdown()       # Called on server shutdown
     """
 
-    def __init__(self, refresh_scheduler: Any, debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS) -> None:
+    def __init__(
+        self,
+        refresh_scheduler: Any,
+        debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS,
+    ) -> None:
         self._refresh_scheduler = refresh_scheduler
         self._debounce_seconds = debounce_seconds
         self._dirty: bool = False
@@ -75,9 +79,13 @@ class CidxMetaRefreshDebouncer:
                 self._timer.cancel()
                 self._timer = None
             if self._shutdown:
-                logger.debug("cidx-meta debouncer: shutdown in progress, ignoring signal_dirty")
+                logger.debug(
+                    "cidx-meta debouncer: shutdown in progress, ignoring signal_dirty"
+                )
                 return
-            self._timer = threading.Timer(self._debounce_seconds, self._on_timer_expired)
+            self._timer = threading.Timer(
+                self._debounce_seconds, self._on_timer_expired
+            )
             self._timer.daemon = True
             self._timer.start()
         logger.debug(
@@ -247,14 +255,18 @@ def on_repo_added(
                 created_at=now_iso,
                 updated_at=now_iso,
             )
-            logger.info(f"Created tracking record for {repo_name} (next_run: {next_run})")
+            logger.info(
+                f"Created tracking record for {repo_name} (next_run: {next_run})"
+            )
         except Exception as e:
             # Don't block repo add if tracking fails
             logger.warning(
                 f"Failed to create tracking record for {repo_name}: {e}", exc_info=True
             )
     else:
-        logger.debug(f"Tracking backend not available, skipping tracking record for {repo_name}")
+        logger.debug(
+            f"Tracking backend not available, skipping tracking record for {repo_name}"
+        )
 
     cidx_meta_path = Path(golden_repos_dir) / "cidx-meta"
 
@@ -302,7 +314,9 @@ def on_repo_added(
             _refresh_scheduler.trigger_refresh_for_repo("cidx-meta-global")
             logger.info(f"Triggered cidx-meta refresh after adding {repo_name}")
         except Exception as e:
-            from code_indexer.server.repositories.background_jobs import DuplicateJobError
+            from code_indexer.server.repositories.background_jobs import (
+                DuplicateJobError,
+            )
 
             if isinstance(e, DuplicateJobError):
                 if _debouncer is not None:
@@ -391,7 +405,9 @@ def on_repo_removed(repo_name: str, golden_repos_dir: str) -> None:
                 f"Failed to delete tracking record for {repo_name}: {e}", exc_info=True
             )
     else:
-        logger.debug(f"Tracking backend not available, skipping tracking record deletion for {repo_name}")
+        logger.debug(
+            f"Tracking backend not available, skipping tracking record deletion for {repo_name}"
+        )
 
 
 def _find_readme(repo_path: Path) -> Optional[Path]:
@@ -517,5 +533,3 @@ last_analyzed: {now}
             body += f"- {uc}\n"
 
     return frontmatter + body
-
-

@@ -16,7 +16,6 @@ from code_indexer.server.services.diagnostics_service import (
     DiagnosticsService,
     DiagnosticStatus,
     DiagnosticCategory,
-    API_TIMEOUT_SECONDS,
 )
 
 
@@ -151,7 +150,9 @@ class TestCheckGitLabToken:
                 result = await service.check_gitlab_token()
 
         assert result.status == DiagnosticStatus.ERROR
-        assert "timeout" in result.message.lower() or "timed out" in result.message.lower()
+        assert (
+            "timeout" in result.message.lower() or "timed out" in result.message.lower()
+        )
 
 
 class TestCheckClaudeDelegationCredentials:
@@ -236,9 +237,7 @@ class TestCheckClaudeDelegationCredentials:
                 mock_client = mock_client_class.return_value.__aenter__.return_value
                 mock_response_obj = Response(
                     status_code=401,
-                    request=Request(
-                        "POST", "https://claude.example.com/auth/login"
-                    ),
+                    request=Request("POST", "https://claude.example.com/auth/login"),
                 )
                 mock_client.post = AsyncMock(
                     side_effect=HTTPStatusError(
@@ -251,7 +250,9 @@ class TestCheckClaudeDelegationCredentials:
                 result = await service.check_claude_delegation_credentials()
 
         assert result.status == DiagnosticStatus.ERROR
-        assert "401" in result.message or "authentication failed" in result.message.lower()
+        assert (
+            "401" in result.message or "authentication failed" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
     async def test_claude_delegation_timeout(self):
@@ -279,7 +280,9 @@ class TestCheckClaudeDelegationCredentials:
                 result = await service.check_claude_delegation_credentials()
 
         assert result.status == DiagnosticStatus.ERROR
-        assert "timeout" in result.message.lower() or "timed out" in result.message.lower()
+        assert (
+            "timeout" in result.message.lower() or "timed out" in result.message.lower()
+        )
 
 
 class TestRunCredentialDiagnostics:
@@ -392,7 +395,7 @@ class TestRunCategoryCredentials:
         import os
 
         # Use temporary database to avoid cache from DB
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
             tmp_db_path = tmp_db.name
 
         try:
@@ -407,12 +410,15 @@ class TestRunCategoryCredentials:
                 MagicMock(name="GitHub Token", status=DiagnosticStatus.WORKING),
                 MagicMock(name="GitLab Token", status=DiagnosticStatus.NOT_CONFIGURED),
                 MagicMock(
-                    name="Claude Delegation Credentials", status=DiagnosticStatus.WORKING
+                    name="Claude Delegation Credentials",
+                    status=DiagnosticStatus.WORKING,
                 ),
             ]
 
             with patch.object(
-                service, "run_credential_diagnostics", new=AsyncMock(return_value=mock_results)
+                service,
+                "run_credential_diagnostics",
+                new=AsyncMock(return_value=mock_results),
             ) as mock_run_creds:
                 await service.run_category(DiagnosticCategory.CREDENTIALS)
 
@@ -436,7 +442,7 @@ class TestTokenManagerSQLiteBackend:
         """Test check_github_api() creates CITokenManager with SQLite backend."""
         import tempfile
 
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
             tmp_db_path = tmp_db.name
 
         try:
@@ -458,6 +464,7 @@ class TestTokenManagerSQLiteBackend:
                 assert call_kwargs.get("db_path") == tmp_db_path
         finally:
             import os
+
             if os.path.exists(tmp_db_path):
                 os.unlink(tmp_db_path)
 
@@ -466,7 +473,7 @@ class TestTokenManagerSQLiteBackend:
         """Test check_gitlab_api() creates CITokenManager with SQLite backend."""
         import tempfile
 
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
             tmp_db_path = tmp_db.name
 
         try:
@@ -488,6 +495,7 @@ class TestTokenManagerSQLiteBackend:
                 assert call_kwargs.get("db_path") == tmp_db_path
         finally:
             import os
+
             if os.path.exists(tmp_db_path):
                 os.unlink(tmp_db_path)
 
@@ -496,7 +504,7 @@ class TestTokenManagerSQLiteBackend:
         """Test check_github_token() creates CITokenManager with SQLite backend."""
         import tempfile
 
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
             tmp_db_path = tmp_db.name
 
         try:
@@ -518,6 +526,7 @@ class TestTokenManagerSQLiteBackend:
                 assert call_kwargs.get("db_path") == tmp_db_path
         finally:
             import os
+
             if os.path.exists(tmp_db_path):
                 os.unlink(tmp_db_path)
 
@@ -526,7 +535,7 @@ class TestTokenManagerSQLiteBackend:
         """Test check_gitlab_token() creates CITokenManager with SQLite backend."""
         import tempfile
 
-        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp_db:
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
             tmp_db_path = tmp_db.name
 
         try:
@@ -548,5 +557,6 @@ class TestTokenManagerSQLiteBackend:
                 assert call_kwargs.get("db_path") == tmp_db_path
         finally:
             import os
+
             if os.path.exists(tmp_db_path):
                 os.unlink(tmp_db_path)

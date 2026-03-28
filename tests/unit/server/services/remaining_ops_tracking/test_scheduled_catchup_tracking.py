@@ -15,10 +15,11 @@ Tests:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
-from code_indexer.server.services.scheduled_catchup_service import ScheduledCatchupService
+from code_indexer.server.services.scheduled_catchup_service import (
+    ScheduledCatchupService,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +138,9 @@ class TestScheduledCatchupJobRegistration:
         ):
             service._process_catchup()
 
-        jobs = job_tracker.query_jobs(operation_type="scheduled_catchup", status="completed")
+        jobs = job_tracker.query_jobs(
+            operation_type="scheduled_catchup", status="completed"
+        )
         assert len(jobs) >= 1
 
     def test_scheduled_catchup_job_fails_when_exception_raised(self, job_tracker):
@@ -151,7 +154,9 @@ class TestScheduledCatchupJobRegistration:
         service = _make_service(job_tracker=job_tracker)
 
         mock_manager = MagicMock()
-        mock_manager.process_all_fallbacks.side_effect = RuntimeError("Claude unavailable")
+        mock_manager.process_all_fallbacks.side_effect = RuntimeError(
+            "Claude unavailable"
+        )
 
         with patch(
             "code_indexer.server.services.scheduled_catchup_service.get_claude_cli_manager",

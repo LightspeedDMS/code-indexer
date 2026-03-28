@@ -17,15 +17,21 @@ import asyncio
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
+from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from code_indexer.server.auth.dependencies import (
-    get_current_admin_user,
     get_current_admin_user_hybrid,
 )
 from code_indexer.server.auth.user_manager import User
@@ -222,7 +228,8 @@ async def run_category_diagnostics(
     except Exception as e:
         logger.error(f"Error running category diagnostics for {category}: {e}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to start diagnostics for category: {category}"
+            status_code=500,
+            detail=f"Failed to start diagnostics for category: {category}",
         )
 
 
@@ -291,7 +298,9 @@ class GenerateMissingDescriptionsResponse(BaseModel):
 _generate_descriptions_lock = threading.Lock()
 
 
-def _generate_descriptions_sync(app_state: Any) -> "GenerateMissingDescriptionsResponse":
+def _generate_descriptions_sync(
+    app_state: Any,
+) -> "GenerateMissingDescriptionsResponse":
     """
     Synchronous helper that performs all blocking work for generate_missing_descriptions.
 
@@ -320,7 +329,9 @@ def _generate_descriptions_sync(app_state: Any) -> "GenerateMissingDescriptionsR
         )
 
     try:
-        from code_indexer.global_repos.meta_description_hook import _generate_repo_description
+        from code_indexer.global_repos.meta_description_hook import (
+            _generate_repo_description,
+        )
 
         golden_repos_dir = getattr(app_state, "golden_repos_dir", None)
         golden_repo_manager = getattr(app_state, "golden_repo_manager", None)
@@ -474,7 +485,9 @@ def _queue_repo_description(
         )
         return False
 
-    callback = _make_description_callback(alias, md_file, repo_url, clone_path, generate_fn)
+    callback = _make_description_callback(
+        alias, md_file, repo_url, clone_path, generate_fn
+    )
     cli_manager.submit_work(repo_path=Path(clone_path), callback=callback)
     return True
 

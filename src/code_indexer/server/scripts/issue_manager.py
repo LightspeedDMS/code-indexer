@@ -41,13 +41,14 @@ import subprocess
 import re
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 from dataclasses import dataclass, asdict
 
 
 @dataclass
 class IssueData:
     """Normalized issue data across platforms"""
+
     number: int
     title: str
     body: str
@@ -63,8 +64,8 @@ class GitHubAPI:
     def __init__(self, repo: str):
         self.repo = repo
         self.platform = "github"
-        self._ensured_labels = set()
-        self._project_cache = {}  # Cache project lookups
+        self._ensured_labels: set[str] = set()
+        self._project_cache: dict[str, str] = {}  # Cache project lookups
 
     def ensure_labels_exist(self, labels: List[str]):
         """Ensure labels exist in repository (create if needed)"""
@@ -75,14 +76,27 @@ class GitHubAPI:
             # Check if label exists
             check_cmd = ["gh", "label", "list", "--repo", self.repo, "--json", "name"]
             try:
-                result = subprocess.run(check_cmd, capture_output=True, text=True, check=True)
+                result = subprocess.run(
+                    check_cmd, capture_output=True, text=True, check=True
+                )
                 existing_labels = [item["name"] for item in json.loads(result.stdout)]
 
                 if label not in existing_labels:
                     # Create label with default color
-                    create_cmd = ["gh", "label", "create", label, "--repo", self.repo, "--color", "0366d6"]
+                    create_cmd = [
+                        "gh",
+                        "label",
+                        "create",
+                        label,
+                        "--repo",
+                        self.repo,
+                        "--color",
+                        "0366d6",
+                    ]
                     try:
-                        subprocess.run(create_cmd, capture_output=True, text=True, check=True)
+                        subprocess.run(
+                            create_cmd, capture_output=True, text=True, check=True
+                        )
                         print(f"  Created label: {label}", file=sys.stderr)
                     except subprocess.CalledProcessError:
                         # Label might have been created by concurrent process, ignore
@@ -90,7 +104,10 @@ class GitHubAPI:
 
                 self._ensured_labels.add(label)
             except subprocess.CalledProcessError as e:
-                print(f"  Warning: Could not check/create label {label}: {e}", file=sys.stderr)
+                print(
+                    f"  Warning: Could not check/create label {label}: {e}",
+                    file=sys.stderr,
+                )
 
     def create_issue(self, title: str, body: str, labels: List[str]) -> IssueData:
         """Create issue and return data"""
@@ -99,17 +116,22 @@ class GitHubAPI:
             self.ensure_labels_exist(labels)
 
         # Write body to temp file (body may be too long for command line)
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             f.write(body)
             temp_file = f.name
 
         try:
             # Build command
             cmd = [
-                "gh", "issue", "create",
-                "--repo", self.repo,
-                "--title", title,
-                "--body-file", temp_file
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                self.repo,
+                "--title",
+                title,
+                "--body-file",
+                temp_file,
             ]
 
             if labels:
@@ -117,25 +139,32 @@ class GitHubAPI:
 
             # Disable prompts and pager
             env = os.environ.copy()
-            env['GH_PROMPT_DISABLED'] = '1'
-            env['GH_NO_UPDATE_NOTIFIER'] = '1'
-            env['GH_PAGER'] = ''
+            env["GH_PROMPT_DISABLED"] = "1"
+            env["GH_NO_UPDATE_NOTIFIER"] = "1"
+            env["GH_PAGER"] = ""
 
             result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
             if result.returncode != 0:
                 # Check for rate limiting
-                if "rate limit" in result.stderr.lower() or "temporarily blocked" in result.stderr.lower():
-                    raise RuntimeError(f"GitHub rate limit exceeded. Wait a few minutes and retry. Error: {result.stderr}")
+                if (
+                    "rate limit" in result.stderr.lower()
+                    or "temporarily blocked" in result.stderr.lower()
+                ):
+                    raise RuntimeError(
+                        f"GitHub rate limit exceeded. Wait a few minutes and retry. Error: {result.stderr}"
+                    )
                 raise RuntimeError(f"gh issue create failed: {result.stderr}")
 
             issue_url = result.stdout.strip()
 
             if not issue_url:
-                raise ValueError(f"gh issue create returned empty output. stderr: {result.stderr}")
+                raise ValueError(
+                    f"gh issue create returned empty output. stderr: {result.stderr}"
+                )
 
             # Extract issue number from URL
-            match = re.search(r'/issues/(\d+)$', issue_url)
+            match = re.search(r"/issues/(\d+)$", issue_url)
             if not match:
                 raise ValueError(f"Could not parse issue number from URL: {issue_url}")
 
@@ -149,7 +178,16 @@ class GitHubAPI:
 
     def get_issue(self, issue_num: int) -> IssueData:
         """Get issue details"""
-        cmd = ["gh", "issue", "view", str(issue_num), "--repo", self.repo, "--json", "number,title,body,labels,state,url"]
+        cmd = [
+            "gh",
+            "issue",
+            "view",
+            str(issue_num),
+            "--repo",
+            self.repo,
+            "--json",
+            "number,title,body,labels,state,url",
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
 
@@ -160,11 +198,17 @@ class GitHubAPI:
             labels=[label["name"] for label in data.get("labels", [])],
             state=data["state"].lower(),
             url=data["url"],
-            platform="github"
+            platform="github",
         )
 
-    def update_issue(self, issue_num: int, title: Optional[str] = None, body: Optional[str] = None,
-                    labels: Optional[List[str]] = None, state: Optional[str] = None) -> IssueData:
+    def update_issue(
+        self,
+        issue_num: int,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        state: Optional[str] = None,
+    ) -> IssueData:
         """Update issue fields"""
         # Handle title and body together in one command
         if title or body is not None:
@@ -175,7 +219,9 @@ class GitHubAPI:
 
             if body is not None:
                 # Use temp file for body
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".md", delete=False
+                ) as f:
                     f.write(body)
                     temp_file = f.name
                 try:
@@ -199,7 +245,14 @@ class GitHubAPI:
 
             # Remove current labels first (if any)
             if current_labels:
-                remove_cmd = ["gh", "issue", "edit", str(issue_num), "--repo", self.repo]
+                remove_cmd = [
+                    "gh",
+                    "issue",
+                    "edit",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 for label in current_labels:
                     remove_cmd.extend(["--remove-label", label])
                 subprocess.run(remove_cmd, check=True)
@@ -213,10 +266,24 @@ class GitHubAPI:
         # Handle state change separately
         if state:
             if state.lower() == "closed":
-                close_cmd = ["gh", "issue", "close", str(issue_num), "--repo", self.repo]
+                close_cmd = [
+                    "gh",
+                    "issue",
+                    "close",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 subprocess.run(close_cmd, check=True)
             elif state.lower() == "open":
-                reopen_cmd = ["gh", "issue", "reopen", str(issue_num), "--repo", self.repo]
+                reopen_cmd = [
+                    "gh",
+                    "issue",
+                    "reopen",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 subprocess.run(reopen_cmd, check=True)
 
         # Return updated issue data
@@ -226,7 +293,10 @@ class GitHubAPI:
         """Delete issue (close by default, hard delete if specified)"""
         if hard_delete:
             # GitHub doesn't support hard delete via CLI, must use API
-            print("Warning: GitHub doesn't support hard delete via CLI. Closing issue instead.", file=sys.stderr)
+            print(
+                "Warning: GitHub doesn't support hard delete via CLI. Closing issue instead.",
+                file=sys.stderr,
+            )
 
         cmd = ["gh", "issue", "close", str(issue_num), "--repo", self.repo]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -237,7 +307,7 @@ class GitHubAPI:
         project_title = f"Epic: {epic_title}"
 
         # Determine owner (org if repo is org-owned, otherwise user)
-        owner = self.repo.split('/')[0] if '/' in self.repo else "@me"
+        owner = self.repo.split("/")[0] if "/" in self.repo else "@me"
 
         # Create project
         cmd = ["gh", "project", "create", "--owner", owner, "--title", project_title]
@@ -246,16 +316,37 @@ class GitHubAPI:
         if result.returncode != 0:
             # Check if auth scopes are missing
             if "missing required scopes" in result.stderr:
-                print(f"  ⚠️  GitHub Project creation requires additional scopes. Run: gh auth refresh -s project", file=sys.stderr)
-                print(f"  Skipping project creation for epic '{epic_title}'", file=sys.stderr)
+                print(
+                    "  ⚠️  GitHub Project creation requires additional scopes. Run: gh auth refresh -s project",
+                    file=sys.stderr,
+                )
+                print(
+                    f"  Skipping project creation for epic '{epic_title}'",
+                    file=sys.stderr,
+                )
                 return None
             else:
-                print(f"  Warning: Could not create GitHub Project: {result.stderr}", file=sys.stderr)
+                print(
+                    f"  Warning: Could not create GitHub Project: {result.stderr}",
+                    file=sys.stderr,
+                )
                 return None
 
         # gh project create doesn't output ID, must query for it
-        list_cmd = ["gh", "project", "list", "--owner", owner, "--format", "json", "--limit", "50"]
-        list_result = subprocess.run(list_cmd, capture_output=True, text=True, check=True)
+        list_cmd = [
+            "gh",
+            "project",
+            "list",
+            "--owner",
+            owner,
+            "--format",
+            "json",
+            "--limit",
+            "50",
+        ]
+        list_result = subprocess.run(
+            list_cmd, capture_output=True, text=True, check=True
+        )
         projects = json.loads(list_result.stdout)
 
         # Find project by title (just created, should be in recent list)
@@ -266,26 +357,46 @@ class GitHubAPI:
                 break
 
         if not project_number:
-            print(f"  Warning: Project created but could not find ID", file=sys.stderr)
+            print("  Warning: Project created but could not find ID", file=sys.stderr)
             return None
 
-        print(f"  Created GitHub Project: {project_title} (number: {project_number}, owner: {owner})", file=sys.stderr)
+        print(
+            f"  Created GitHub Project: {project_title} (number: {project_number}, owner: {owner})",
+            file=sys.stderr,
+        )
         return str(project_number)
 
-    def add_issue_to_project(self, project_number: str, issue_num: int, owner: Optional[str] = None):
+    def add_issue_to_project(
+        self, project_number: str, issue_num: int, owner: Optional[str] = None
+    ):
         """Add issue to GitHub Project"""
         issue_url = f"https://github.com/{self.repo}/issues/{issue_num}"
 
         # Use provided owner or extract from repo
         if not owner:
-            owner = self.repo.split('/')[0] if '/' in self.repo else "@me"
+            owner = self.repo.split("/")[0] if "/" in self.repo else "@me"
 
-        cmd = ["gh", "project", "item-add", project_number, "--owner", owner, "--url", issue_url]
+        cmd = [
+            "gh",
+            "project",
+            "item-add",
+            project_number,
+            "--owner",
+            owner,
+            "--url",
+            issue_url,
+        ]
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True)
-            print(f"  Added issue #{issue_num} to project #{project_number} (owner: {owner})", file=sys.stderr)
+            print(
+                f"  Added issue #{issue_num} to project #{project_number} (owner: {owner})",
+                file=sys.stderr,
+            )
         except subprocess.CalledProcessError as e:
-            print(f"  Warning: Could not add issue to project: {e.stderr}", file=sys.stderr)
+            print(
+                f"  Warning: Could not add issue to project: {e.stderr}",
+                file=sys.stderr,
+            )
 
 
 class GitLabAPI:
@@ -294,7 +405,7 @@ class GitLabAPI:
     def __init__(self, repo: str):
         self.repo = repo
         self.platform = "gitlab"
-        self._ensured_labels = set()
+        self._ensured_labels: set[str] = set()
 
     def ensure_labels_exist(self, labels: List[str]):
         """Ensure labels exist in repository (create if needed)"""
@@ -305,14 +416,29 @@ class GitLabAPI:
             # Check if label exists
             check_cmd = ["glab", "label", "list", "--repo", self.repo]
             try:
-                result = subprocess.run(check_cmd, capture_output=True, text=True, check=True)
-                existing_labels = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+                result = subprocess.run(
+                    check_cmd, capture_output=True, text=True, check=True
+                )
+                existing_labels = [
+                    line.strip() for line in result.stdout.split("\n") if line.strip()
+                ]
 
                 if label not in existing_labels:
                     # Create label
-                    create_cmd = ["glab", "label", "create", label, "--repo", self.repo, "--color", "#0366d6"]
+                    create_cmd = [
+                        "glab",
+                        "label",
+                        "create",
+                        label,
+                        "--repo",
+                        self.repo,
+                        "--color",
+                        "#0366d6",
+                    ]
                     try:
-                        subprocess.run(create_cmd, capture_output=True, text=True, check=True)
+                        subprocess.run(
+                            create_cmd, capture_output=True, text=True, check=True
+                        )
                         print(f"  Created label: {label}", file=sys.stderr)
                     except subprocess.CalledProcessError:
                         # Label might have been created by concurrent process, ignore
@@ -320,7 +446,10 @@ class GitLabAPI:
 
                 self._ensured_labels.add(label)
             except subprocess.CalledProcessError as e:
-                print(f"  Warning: Could not check/create label {label}: {e}", file=sys.stderr)
+                print(
+                    f"  Warning: Could not check/create label {label}: {e}",
+                    file=sys.stderr,
+                )
 
     def create_issue(self, title: str, body: str, labels: List[str]) -> IssueData:
         """Create issue and return data"""
@@ -330,10 +459,15 @@ class GitLabAPI:
 
         # Build command
         cmd = [
-            "glab", "issue", "create",
-            "--repo", self.repo,
-            "--title", title,
-            "--description", body
+            "glab",
+            "issue",
+            "create",
+            "--repo",
+            self.repo,
+            "--title",
+            title,
+            "--description",
+            body,
         ]
 
         if labels:
@@ -343,9 +477,9 @@ class GitLabAPI:
 
         # Parse issue number from output
         # Can be either "#123" format or URL format "/-/issues/123"
-        match = re.search(r'#(\d+)', result.stdout)
+        match = re.search(r"#(\d+)", result.stdout)
         if not match:
-            match = re.search(r'/-/issues/(\d+)', result.stdout)
+            match = re.search(r"/-/issues/(\d+)", result.stdout)
         if not match:
             raise ValueError(f"Could not parse issue number from: {result.stdout}")
 
@@ -356,7 +490,16 @@ class GitLabAPI:
 
     def get_issue(self, issue_num: int) -> IssueData:
         """Get issue details"""
-        cmd = ["glab", "issue", "view", str(issue_num), "--repo", self.repo, "--output", "json"]
+        cmd = [
+            "glab",
+            "issue",
+            "view",
+            str(issue_num),
+            "--repo",
+            self.repo,
+            "--output",
+            "json",
+        ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
 
@@ -367,11 +510,17 @@ class GitLabAPI:
             labels=data.get("labels", []),
             state=data.get("state", "").lower(),
             url=data.get("web_url", ""),
-            platform="gitlab"
+            platform="gitlab",
         )
 
-    def update_issue(self, issue_num: int, title: Optional[str] = None, body: Optional[str] = None,
-                    labels: Optional[List[str]] = None, state: Optional[str] = None) -> IssueData:
+    def update_issue(
+        self,
+        issue_num: int,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        state: Optional[str] = None,
+    ) -> IssueData:
         """Update issue fields"""
         # Handle title and body together
         if title or body is not None:
@@ -397,24 +546,52 @@ class GitLabAPI:
 
             # Remove current labels first
             if current_labels:
-                unlabel_cmd = ["glab", "issue", "update", str(issue_num), "--repo", self.repo]
+                unlabel_cmd = [
+                    "glab",
+                    "issue",
+                    "update",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 for label in current_labels:
                     unlabel_cmd.extend(["--unlabel", label])
                 subprocess.run(unlabel_cmd, check=True)
 
             # Add new labels
             if labels:
-                label_cmd = ["glab", "issue", "update", str(issue_num), "--repo", self.repo]
+                label_cmd = [
+                    "glab",
+                    "issue",
+                    "update",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 label_cmd.extend(["--label", ",".join(labels)])
                 subprocess.run(label_cmd, check=True)
 
         # Handle state change
         if state:
             if state.lower() == "closed":
-                close_cmd = ["glab", "issue", "close", str(issue_num), "--repo", self.repo]
+                close_cmd = [
+                    "glab",
+                    "issue",
+                    "close",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 subprocess.run(close_cmd, check=True)
             elif state.lower() == "opened" or state.lower() == "open":
-                reopen_cmd = ["glab", "issue", "reopen", str(issue_num), "--repo", self.repo]
+                reopen_cmd = [
+                    "glab",
+                    "issue",
+                    "reopen",
+                    str(issue_num),
+                    "--repo",
+                    self.repo,
+                ]
                 subprocess.run(reopen_cmd, check=True)
 
         # Return updated issue data
@@ -423,32 +600,47 @@ class GitLabAPI:
     def delete_issue(self, issue_num: int, hard_delete: bool = False) -> bool:
         """Delete issue (close by default, hard delete if specified)"""
         if hard_delete:
-            cmd = ["glab", "issue", "delete", str(issue_num), "--repo", self.repo, "--yes"]
+            cmd = [
+                "glab",
+                "issue",
+                "delete",
+                str(issue_num),
+                "--repo",
+                self.repo,
+                "--yes",
+            ]
         else:
             cmd = ["glab", "issue", "close", str(issue_num), "--repo", self.repo]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         return result.returncode == 0
 
-    def create_epic_milestone(self, epic_title: str) -> str:
+    def create_epic_milestone(self, epic_title: str) -> Optional[str]:
         """Create GitLab Milestone for epic organization"""
         milestone_title = f"Epic: {epic_title}"
 
         # Create milestone via API (glab milestone create doesn't support --repo flag)
         # Need to extract project ID from repo path
-        project_path = self.repo.replace('/', '%2F')  # URL encode slashes
+        project_path = self.repo.replace("/", "%2F")  # URL encode slashes
 
         cmd = [
-            "glab", "api", f"projects/{project_path}/milestones",
-            "-X", "POST",
-            "-f", f"title={milestone_title}"
+            "glab",
+            "api",
+            f"projects/{project_path}/milestones",
+            "-X",
+            "POST",
+            "-f",
+            f"title={milestone_title}",
         ]
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             data = json.loads(result.stdout)
-            milestone_id = data['id']
-            print(f"  Created GitLab Milestone: {milestone_title} (ID: {milestone_id})", file=sys.stderr)
+            milestone_id = data["id"]
+            print(
+                f"  Created GitLab Milestone: {milestone_title} (ID: {milestone_id})",
+                file=sys.stderr,
+            )
             return milestone_title  # Return title, not ID (used in issue assignment)
         except subprocess.CalledProcessError as e:
             print(f"  Warning: Could not create milestone: {e.stderr}", file=sys.stderr)
@@ -459,12 +651,26 @@ class GitLabAPI:
         if not milestone_title:
             return
 
-        cmd = ["glab", "issue", "update", str(issue_num), "--repo", self.repo, "--milestone", milestone_title]
+        cmd = [
+            "glab",
+            "issue",
+            "update",
+            str(issue_num),
+            "--repo",
+            self.repo,
+            "--milestone",
+            milestone_title,
+        ]
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True)
-            print(f"  Assigned issue #{issue_num} to milestone '{milestone_title}'", file=sys.stderr)
+            print(
+                f"  Assigned issue #{issue_num} to milestone '{milestone_title}'",
+                file=sys.stderr,
+            )
         except subprocess.CalledProcessError as e:
-            print(f"  Warning: Could not assign to milestone: {e.stderr}", file=sys.stderr)
+            print(
+                f"  Warning: Could not assign to milestone: {e.stderr}", file=sys.stderr
+            )
 
 
 class FileBasedAPI:
@@ -488,19 +694,19 @@ class FileBasedAPI:
     def _load_metadata(self):
         """Load issue metadata (issue numbers, epic mapping, etc.)"""
         if self.metadata_file.exists():
-            with open(self.metadata_file, 'r') as f:
+            with open(self.metadata_file, "r") as f:
                 self.metadata = json.load(f)
         else:
             self.metadata = {
                 "next_issue_num": 1,
                 "issues": {},  # issue_num -> file_path mapping
-                "epic_stories": {}  # epic_num -> [story_nums]
+                "epic_stories": {},  # epic_num -> [story_nums]
             }
             self._save_metadata()
 
     def _save_metadata(self):
         """Save issue metadata"""
-        with open(self.metadata_file, 'w') as f:
+        with open(self.metadata_file, "w") as f:
             json.dump(self.metadata, f, indent=2)
 
     def _get_next_issue_num(self) -> int:
@@ -508,22 +714,30 @@ class FileBasedAPI:
         num = self.metadata["next_issue_num"]
         self.metadata["next_issue_num"] = num + 1
         self._save_metadata()
-        return num
+        return int(num)
 
     def _parse_metadata_from_content(self, content: str, issue_type: str) -> Dict:
         """Extract metadata from markdown content"""
         # Extract title
-        title_match = re.search(r'^#\s+(?:Epic|Story|Bug Report):\s*(.+)$', content, re.MULTILINE)
+        title_match = re.search(
+            r"^#\s+(?:Epic|Story|Bug Report):\s*(.+)$", content, re.MULTILINE
+        )
         title = title_match.group(1).strip() if title_match else "Untitled"
 
         # Extract labels from content
         labels = [issue_type.lower()]
 
         # Status
-        if re.search(r'Status:\s*completed|Status:\s*done|Status:\s*closed', content, re.IGNORECASE):
+        if re.search(
+            r"Status:\s*completed|Status:\s*done|Status:\s*closed",
+            content,
+            re.IGNORECASE,
+        ):
             labels.append("completed")
             state = "closed"
-        elif re.search(r'Status:\s*active|Status:\s*in[- ]progress', content, re.IGNORECASE):
+        elif re.search(
+            r"Status:\s*active|Status:\s*in[- ]progress", content, re.IGNORECASE
+        ):
             labels.append("active")
             state = "open"
         else:
@@ -536,17 +750,23 @@ class FileBasedAPI:
 
         return {"title": title, "labels": labels, "state": state}
 
-    def _get_file_path(self, issue_num: int, issue_type: str, epic_num: Optional[int] = None,
-                      feature: Optional[str] = None, title: str = "") -> Path:
+    def _get_file_path(
+        self,
+        issue_num: int,
+        issue_type: str,
+        epic_num: Optional[int] = None,
+        feature: Optional[str] = None,
+        title: str = "",
+    ) -> Path:
         """Generate file path for issue"""
         if issue_type == "bug":
             # bugs go to reports/bugs/
-            safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_')[:50]
+            safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")[:50]
             filename = f"bug_{issue_num}_{safe_title}.md"
             return self.bugs_dir / filename
         elif issue_type == "epic":
             # epics go to plans/backlog/Epic_<name>/
-            safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_')
+            safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")
             epic_dir = self.plans_dir / f"Epic_{safe_title}"
             epic_dir.mkdir(parents=True, exist_ok=True)
             return epic_dir / f"Epic_{safe_title}.md"
@@ -567,12 +787,14 @@ class FileBasedAPI:
             epic_dir = Path(epic_path).parent
 
             # Create feature directory
-            safe_feature = re.sub(r'[^\w\s-]', '', feature or "General").strip().replace(' ', '_')
+            safe_feature = (
+                re.sub(r"[^\w\s-]", "", feature or "General").strip().replace(" ", "_")
+            )
             feature_dir = epic_dir / f"Feat_{safe_feature}"
             feature_dir.mkdir(parents=True, exist_ok=True)
 
             # Story filename
-            safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_')[:50]
+            safe_title = re.sub(r"[^\w\s-]", "", title).strip().replace(" ", "_")[:50]
             return feature_dir / f"{issue_num}_Story_{safe_title}.md"
         else:
             raise ValueError(f"Unknown issue type: {issue_type}")
@@ -605,7 +827,7 @@ class FileBasedAPI:
             "title": title,
             "labels": labels,
             "state": state,
-            "path": None  # Will be set when file is written
+            "path": None,  # Will be set when file is written
         }
         self._save_metadata()
 
@@ -618,7 +840,7 @@ class FileBasedAPI:
             labels=labels,
             state=state,
             url=f"file://{self.base_dir}/[pending]",
-            platform="files"
+            platform="files",
         )
 
     def _write_issue_file(self, issue_num: int, file_path: Path, content: str):
@@ -646,11 +868,17 @@ class FileBasedAPI:
             labels=issue_meta["labels"],
             state=issue_meta["state"],
             url=f"file://{file_path}",
-            platform="files"
+            platform="files",
         )
 
-    def update_issue(self, issue_num: int, title: Optional[str] = None, body: Optional[str] = None,
-                    labels: Optional[List[str]] = None, state: Optional[str] = None) -> IssueData:
+    def update_issue(
+        self,
+        issue_num: int,
+        title: Optional[str] = None,
+        body: Optional[str] = None,
+        labels: Optional[List[str]] = None,
+        state: Optional[str] = None,
+    ) -> IssueData:
         """Update file-based issue"""
         issue_meta = self.metadata["issues"].get(str(issue_num))
         if not issue_meta:
@@ -690,7 +918,11 @@ class FileBasedAPI:
             # Soft delete - just mark as closed
             issue_meta["state"] = "closed"
             if "completed" not in issue_meta["labels"]:
-                issue_meta["labels"] = [l for l in issue_meta["labels"] if l not in ["backlog", "active"]]
+                issue_meta["labels"] = [
+                    label
+                    for label in issue_meta["labels"]
+                    if label not in ["backlog", "active"]
+                ]
                 issue_meta["labels"].append("completed")
 
         self._save_metadata()
@@ -703,23 +935,29 @@ def detect_platform() -> Tuple[str, str, object]:
     Returns file-based backend as fallback if no git remote found.
     """
     try:
-        result = subprocess.run(["git", "remote", "-v"], capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            ["git", "remote", "-v"], capture_output=True, text=True, check=True
+        )
         remotes = result.stdout
 
         # Check for GitHub (owner/repo format)
-        github_match = re.search(r'github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?(?:\s|$)', remotes)
+        github_match = re.search(
+            r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?(?:\s|$)", remotes
+        )
         if github_match:
             repo = github_match.group(1)
             return ("github", repo, GitHubAPI(repo))
 
         # Check for GitLab (supports nested paths like group/subgroup/project)
-        gitlab_match = re.search(r'gitlab\.com[:/]([^\s]+?)(?:\.git)?(?:\s|$)', remotes)
+        gitlab_match = re.search(r"gitlab\.com[:/]([^\s]+?)(?:\.git)?(?:\s|$)", remotes)
         if gitlab_match:
             repo = gitlab_match.group(1)
             return ("gitlab", repo, GitLabAPI(repo))
 
         # Git repo but no GitHub/GitLab remote - use file-based
-        print("No GitHub/GitLab remote found - using file-based backend", file=sys.stderr)
+        print(
+            "No GitHub/GitLab remote found - using file-based backend", file=sys.stderr
+        )
         return ("files", os.getcwd(), FileBasedAPI(os.getcwd()))
 
     except subprocess.CalledProcessError:
@@ -732,11 +970,11 @@ def extract_priority(content: str) -> str:
     """Extract priority from content"""
     content_lower = content.lower()
 
-    if re.search(r'critical|priority.*1|blocking|severe', content_lower):
+    if re.search(r"critical|priority.*1|blocking|severe", content_lower):
         return "priority-1"
-    elif re.search(r'high|priority.*2|important', content_lower):
+    elif re.search(r"high|priority.*2|important", content_lower):
         return "priority-2"
-    elif re.search(r'low|priority.*4|minor', content_lower):
+    elif re.search(r"low|priority.*4|minor", content_lower):
         return "priority-4"
     else:
         return "priority-3"
@@ -746,11 +984,11 @@ def infer_status_from_content(content: str) -> str:
     """Infer status label from content"""
     content_lower = content.lower()
 
-    if re.search(r'status:\s*completed|status:\s*done|status:\s*closed', content_lower):
+    if re.search(r"status:\s*completed|status:\s*done|status:\s*closed", content_lower):
         return "completed"
-    elif re.search(r'status:\s*active|status:\s*in[- ]progress', content_lower):
+    elif re.search(r"status:\s*active|status:\s*in[- ]progress", content_lower):
         return "active"
-    elif re.search(r'status:\s*backlog|status:\s*todo', content_lower):
+    elif re.search(r"status:\s*backlog|status:\s*todo", content_lower):
         return "backlog"
     else:
         return "backlog"  # Default
@@ -762,27 +1000,36 @@ def load_or_create_metadata(base_dir: str = ".") -> Dict:
     metadata_file.parent.mkdir(parents=True, exist_ok=True)
 
     if metadata_file.exists():
-        with open(metadata_file, 'r') as f:
-            return json.load(f)
+        with open(metadata_file, "r") as f:
+            return cast(Dict, json.load(f))
     else:
         return {
             "next_issue_num": 1,
             "issues": {},
-            "epic_containers": {}  # epic_num -> {project_id/milestone}
+            "epic_containers": {},  # epic_num -> {project_id/milestone}
         }
+
 
 def save_metadata(metadata: Dict, base_dir: str = "."):
     """Save issue metadata file"""
     metadata_file = Path(base_dir) / ".tmp" / "issue_metadata.json"
-    with open(metadata_file, 'w') as f:
+    with open(metadata_file, "w") as f:
         json.dump(metadata, f, indent=2)
 
 
-def cmd_create(api, issue_type: str, content_file: str, title: str, epic_num: Optional[int] = None,
-               feature: Optional[str] = None, priority: Optional[str] = None, status: Optional[str] = None) -> int:
+def cmd_create(
+    api,
+    issue_type: str,
+    content_file: str,
+    title: str,
+    epic_num: Optional[int] = None,
+    feature: Optional[str] = None,
+    priority: Optional[str] = None,
+    status: Optional[str] = None,
+) -> int:
     """Create issue command"""
     # Read content from file
-    with open(content_file, 'r') as f:
+    with open(content_file, "r") as f:
         content = f.read()
 
     # Auto-detect priority if not provided
@@ -807,7 +1054,7 @@ def cmd_create(api, issue_type: str, content_file: str, title: str, epic_num: Op
 
     # Add prefix to title (if not already present)
     prefix_map = {"epic": "[EPIC]", "story": "[STORY]", "bug": "[BUG]"}
-    prefix = prefix_map.get(issue_type.lower(), '')
+    prefix = prefix_map.get(issue_type.lower(), "")
     if not title.startswith(prefix):
         prefixed_title = f"{prefix} {title}".strip()
     else:
@@ -818,7 +1065,9 @@ def cmd_create(api, issue_type: str, content_file: str, title: str, epic_num: Op
 
     # For file-based mode, write the actual file
     if api.platform == "files":
-        file_path = api._get_file_path(issue_data.number, issue_type, epic_num, feature, title)
+        file_path = api._get_file_path(
+            issue_data.number, issue_type, epic_num, feature, title
+        )
         api._write_issue_file(issue_data.number, file_path, content)
         # Update URL in return data
         issue_data.url = f"file://{file_path}"
@@ -843,13 +1092,15 @@ def cmd_create(api, issue_type: str, content_file: str, title: str, epic_num: Op
             owner_info = {}
             if api.platform == "github":
                 # Store owner (org or user) for GitHub projects
-                owner_info["owner"] = api.repo.split('/')[0] if '/' in api.repo else "@me"
+                owner_info["owner"] = (
+                    api.repo.split("/")[0] if "/" in api.repo else "@me"
+                )
 
             metadata["epic_containers"][str(issue_data.number)] = {
                 "platform": api.platform,
                 "container_id": container_id,
                 "epic_title": title,
-                **owner_info
+                **owner_info,
             }
             save_metadata(metadata)
 
@@ -860,9 +1111,13 @@ def cmd_create(api, issue_type: str, content_file: str, title: str, epic_num: Op
         if epic_container and api.platform == epic_container["platform"]:
             if api.platform == "github":
                 owner = epic_container.get("owner")
-                api.add_issue_to_project(epic_container["container_id"], issue_data.number, owner=owner)
+                api.add_issue_to_project(
+                    epic_container["container_id"], issue_data.number, owner=owner
+                )
             elif api.platform == "gitlab":
-                api.assign_to_milestone(issue_data.number, epic_container["container_id"])
+                api.assign_to_milestone(
+                    issue_data.number, epic_container["container_id"]
+                )
 
     # Output as JSON for easy parsing
     print(json.dumps(asdict(issue_data), indent=2))
@@ -877,22 +1132,30 @@ def cmd_read(api, issue_num: int) -> int:
     return 0
 
 
-def cmd_update(api, issue_num: int, title: Optional[str] = None, body_file: Optional[str] = None,
-               labels: Optional[str] = None, state: Optional[str] = None) -> int:
+def cmd_update(
+    api,
+    issue_num: int,
+    title: Optional[str] = None,
+    body_file: Optional[str] = None,
+    labels: Optional[str] = None,
+    state: Optional[str] = None,
+) -> int:
     """Update issue command"""
     # Read body from file if provided
     body = None
     if body_file:
-        with open(body_file, 'r') as f:
+        with open(body_file, "r") as f:
             body = f.read()
 
     # Parse labels
     label_list = None
     if labels is not None:
-        label_list = [l.strip() for l in labels.split(',')] if labels else []
+        label_list = [lbl.strip() for lbl in labels.split(",")] if labels else []
 
     # Update issue
-    issue_data = api.update_issue(issue_num, title=title, body=body, labels=label_list, state=state)
+    issue_data = api.update_issue(
+        issue_num, title=title, body=body, labels=label_list, state=state
+    )
 
     # Output as JSON
     print(json.dumps(asdict(issue_data), indent=2))
@@ -909,11 +1172,18 @@ def cmd_delete(api, issue_num: int, hard_delete: bool = False) -> int:
         print(json.dumps({"success": True, "message": f"Issue #{issue_num} {action}"}))
         return 0
     else:
-        print(json.dumps({"success": False, "message": f"Failed to delete issue #{issue_num}"}), file=sys.stderr)
+        print(
+            json.dumps(
+                {"success": False, "message": f"Failed to delete issue #{issue_num}"}
+            ),
+            file=sys.stderr,
+        )
         return 1
 
 
-def cmd_list(api, epic_num: Optional[int] = None, issue_type: Optional[str] = None) -> int:
+def cmd_list(
+    api, epic_num: Optional[int] = None, issue_type: Optional[str] = None
+) -> int:
     """List issues filtered by epic and/or type"""
     metadata = load_or_create_metadata()
 
@@ -922,14 +1192,26 @@ def cmd_list(api, epic_num: Optional[int] = None, issue_type: Optional[str] = No
         epic_container = metadata.get("epic_containers", {}).get(str(epic_num))
 
         if not epic_container:
-            print(f"No container found for epic #{epic_num}. Stories may still exist with feat: labels.", file=sys.stderr)
+            print(
+                f"No container found for epic #{epic_num}. Stories may still exist with feat: labels.",
+                file=sys.stderr,
+            )
             print(json.dumps([]))
             return 0
 
         if api.platform == "github":
             # List GitHub Project items
             project_id = epic_container["container_id"]
-            cmd = ["gh", "project", "item-list", project_id, "--owner", "@me", "--format", "json"]
+            cmd = [
+                "gh",
+                "project",
+                "item-list",
+                project_id,
+                "--owner",
+                "@me",
+                "--format",
+                "json",
+            ]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
@@ -953,15 +1235,25 @@ def cmd_list(api, epic_num: Optional[int] = None, issue_type: Optional[str] = No
         elif api.platform == "gitlab":
             # List GitLab Milestone issues
             milestone = epic_container["container_id"]
-            cmd = ["glab", "issue", "list", "--milestone", milestone, "--repo", api.repo]
+            cmd = [
+                "glab",
+                "issue",
+                "list",
+                "--milestone",
+                milestone,
+                "--repo",
+                api.repo,
+            ]
             result = subprocess.run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
-                print(f"Error listing milestone issues: {result.stderr}", file=sys.stderr)
+                print(
+                    f"Error listing milestone issues: {result.stderr}", file=sys.stderr
+                )
                 return 1
 
             # Parse issue numbers from output
-            issue_nums = re.findall(r'#(\d+)', result.stdout)
+            issue_nums = re.findall(r"#(\d+)", result.stdout)
             issues = []
             for num in issue_nums:
                 issue_data = api.get_issue(int(num))
@@ -993,7 +1285,14 @@ def cmd_list(api, epic_num: Optional[int] = None, issue_type: Optional[str] = No
             print(json.dumps(issues, indent=2))
 
     else:
-        print(json.dumps({"error": "No filtering implemented for all issues yet. Use --epic flag."}), file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "error": "No filtering implemented for all issues yet. Use --epic flag."
+                }
+            ),
+            file=sys.stderr,
+        )
         return 1
 
     return 0
@@ -1003,42 +1302,66 @@ def main():
     """Main entry point"""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Manage GitHub/GitLab issues (epics/stories/bugs)')
-    subparsers = parser.add_subparsers(dest='command', help='Command to execute')
+    parser = argparse.ArgumentParser(
+        description="Manage GitHub/GitLab issues (epics/stories/bugs)"
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
     # Create command
-    create_parser = subparsers.add_parser('create', help='Create new issue')
-    create_parser.add_argument('type', choices=['epic', 'story', 'bug'], help='Issue type')
-    create_parser.add_argument('content_file', help='File containing issue content (markdown)')
-    create_parser.add_argument('--title', required=True, help='Issue title')
-    create_parser.add_argument('--epic', type=int, help='Parent epic issue number (for stories)')
-    create_parser.add_argument('--feature', help='Feature name (for stories)')
-    create_parser.add_argument('--priority', choices=['priority-1', 'priority-2', 'priority-3', 'priority-4'],
-                             help='Priority level (auto-detected if not provided)')
-    create_parser.add_argument('--status', choices=['backlog', 'active', 'completed'],
-                             help='Status (auto-detected if not provided)')
+    create_parser = subparsers.add_parser("create", help="Create new issue")
+    create_parser.add_argument(
+        "type", choices=["epic", "story", "bug"], help="Issue type"
+    )
+    create_parser.add_argument(
+        "content_file", help="File containing issue content (markdown)"
+    )
+    create_parser.add_argument("--title", required=True, help="Issue title")
+    create_parser.add_argument(
+        "--epic", type=int, help="Parent epic issue number (for stories)"
+    )
+    create_parser.add_argument("--feature", help="Feature name (for stories)")
+    create_parser.add_argument(
+        "--priority",
+        choices=["priority-1", "priority-2", "priority-3", "priority-4"],
+        help="Priority level (auto-detected if not provided)",
+    )
+    create_parser.add_argument(
+        "--status",
+        choices=["backlog", "active", "completed"],
+        help="Status (auto-detected if not provided)",
+    )
 
     # Read command
-    read_parser = subparsers.add_parser('read', help='Read issue details')
-    read_parser.add_argument('issue_num', type=int, help='Issue number')
+    read_parser = subparsers.add_parser("read", help="Read issue details")
+    read_parser.add_argument("issue_num", type=int, help="Issue number")
 
     # Update command
-    update_parser = subparsers.add_parser('update', help='Update issue')
-    update_parser.add_argument('issue_num', type=int, help='Issue number')
-    update_parser.add_argument('--title', help='New title')
-    update_parser.add_argument('--body-file', help='File containing new body content')
-    update_parser.add_argument('--labels', help='Comma-separated labels (replaces all)')
-    update_parser.add_argument('--state', choices=['open', 'closed'], help='Issue state')
+    update_parser = subparsers.add_parser("update", help="Update issue")
+    update_parser.add_argument("issue_num", type=int, help="Issue number")
+    update_parser.add_argument("--title", help="New title")
+    update_parser.add_argument("--body-file", help="File containing new body content")
+    update_parser.add_argument("--labels", help="Comma-separated labels (replaces all)")
+    update_parser.add_argument(
+        "--state", choices=["open", "closed"], help="Issue state"
+    )
 
     # Delete command
-    delete_parser = subparsers.add_parser('delete', help='Delete (close) issue')
-    delete_parser.add_argument('issue_num', type=int, help='Issue number')
-    delete_parser.add_argument('--hard', action='store_true', help='Hard delete (GitLab only, GitHub will close)')
+    delete_parser = subparsers.add_parser("delete", help="Delete (close) issue")
+    delete_parser.add_argument("issue_num", type=int, help="Issue number")
+    delete_parser.add_argument(
+        "--hard",
+        action="store_true",
+        help="Hard delete (GitLab only, GitHub will close)",
+    )
 
     # List command
-    list_parser = subparsers.add_parser('list', help='List issues by epic')
-    list_parser.add_argument('--epic', type=int, required=True, help='Epic issue number')
-    list_parser.add_argument('--type', choices=['story', 'bug'], help='Filter by issue type')
+    list_parser = subparsers.add_parser("list", help="List issues by epic")
+    list_parser.add_argument(
+        "--epic", type=int, required=True, help="Epic issue number"
+    )
+    list_parser.add_argument(
+        "--type", choices=["story", "bug"], help="Filter by issue type"
+    )
 
     args = parser.parse_args()
 
@@ -1056,22 +1379,36 @@ def main():
 
     # Execute command
     try:
-        if args.command == 'create':
-            return cmd_create(api, args.type, args.content_file, args.title,
-                            epic_num=args.epic, feature=args.feature,
-                            priority=args.priority, status=args.status)
-        elif args.command == 'read':
+        if args.command == "create":
+            return cmd_create(
+                api,
+                args.type,
+                args.content_file,
+                args.title,
+                epic_num=args.epic,
+                feature=args.feature,
+                priority=args.priority,
+                status=args.status,
+            )
+        elif args.command == "read":
             return cmd_read(api, args.issue_num)
-        elif args.command == 'update':
-            return cmd_update(api, args.issue_num, title=args.title,
-                            body_file=args.body_file, labels=args.labels, state=args.state)
-        elif args.command == 'delete':
+        elif args.command == "update":
+            return cmd_update(
+                api,
+                args.issue_num,
+                title=args.title,
+                body_file=args.body_file,
+                labels=args.labels,
+                state=args.state,
+            )
+        elif args.command == "delete":
             return cmd_delete(api, args.issue_num, hard_delete=args.hard)
-        elif args.command == 'list':
+        elif args.command == "list":
             return cmd_list(api, epic_num=args.epic, issue_type=args.type)
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
 

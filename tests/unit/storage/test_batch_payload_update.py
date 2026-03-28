@@ -8,7 +8,6 @@ These tests are written FIRST (TDD red phase). Implementation follows.
 """
 
 import json
-import pytest
 from pathlib import Path
 from unittest.mock import patch
 from typing import List
@@ -26,14 +25,18 @@ class TestBatchUpdatePayloadOnly:
     - Returns True on success
     """
 
-    def _write_vector_file(self, collection_path: Path, point_id: str, data: dict) -> Path:
+    def _write_vector_file(
+        self, collection_path: Path, point_id: str, data: dict
+    ) -> Path:
         """Write a vector JSON file directly to a flat location for test setup."""
         vector_file = collection_path / f"vector_{point_id}.json"
         with open(vector_file, "w") as f:
             json.dump(data, f)
         return vector_file
 
-    def _seed_id_index(self, store, collection_name: str, point_id: str, vector_file: Path):
+    def _seed_id_index(
+        self, store, collection_name: str, point_id: str, vector_file: Path
+    ):
         """Inject an entry into the store's id_index directly."""
         with store._id_index_lock:
             if collection_name not in store._id_index:
@@ -68,7 +71,9 @@ class TestBatchUpdatePayloadOnly:
             },
         }
 
-        vector_file = self._write_vector_file(collection_path, "point_001", original_data)
+        vector_file = self._write_vector_file(
+            collection_path, "point_001", original_data
+        )
         self._seed_id_index(store, "test_coll", "point_001", vector_file)
 
         points = [{"id": "point_001", "payload": {"hidden_branches": []}}]
@@ -114,7 +119,9 @@ class TestBatchUpdatePayloadOnly:
             },
         }
 
-        vector_file = self._write_vector_file(collection_path, "point_002", original_data)
+        vector_file = self._write_vector_file(
+            collection_path, "point_002", original_data
+        )
         self._seed_id_index(store, "test_coll", "point_002", vector_file)
 
         # Patch upsert_points to verify it is NOT called
@@ -202,8 +209,7 @@ class TestBatchUpdatePayloadOnly:
             vector_files.append((pid, vf))
 
         points = [
-            {"id": pid, "payload": {"hidden_branches": []}}
-            for pid, _ in vector_files
+            {"id": pid, "payload": {"hidden_branches": []}} for pid, _ in vector_files
         ]
         result = store._batch_update_payload_only(points, "test_coll")
 
@@ -247,7 +253,11 @@ class TestScrollPointsFilterHoisting:
     """
 
     def _create_vector_files(
-        self, collection_path: Path, count: int, type_value: str = "content", prefix: str = "point"
+        self,
+        collection_path: Path,
+        count: int,
+        type_value: str = "content",
+        prefix: str = "point",
     ) -> List[Path]:
         """Create multiple vector JSON files for testing."""
         files = []
@@ -320,8 +330,12 @@ class TestScrollPointsFilterHoisting:
         store.create_collection("test_coll", vector_size=1536)
 
         collection_path = tmp_path / "test_coll"
-        self._create_vector_files(collection_path, 20, type_value="content", prefix="content")
-        self._create_vector_files(collection_path, 10, type_value="metadata", prefix="meta")
+        self._create_vector_files(
+            collection_path, 20, type_value="content", prefix="content"
+        )
+        self._create_vector_files(
+            collection_path, 10, type_value="metadata", prefix="meta"
+        )
 
         filter_conditions = {"must": [{"key": "type", "match": {"value": "content"}}]}
         points, _ = store.scroll_points(

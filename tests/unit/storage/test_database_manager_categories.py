@@ -9,7 +9,6 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.storage.database_manager import DatabaseSchema
 
@@ -46,7 +45,9 @@ class TestRepoCategoriesSchema:
                 assert "updated_at" in columns
 
                 # Verify unique constraint on name
-                cursor = conn.execute("SELECT sql FROM sqlite_master WHERE name='repo_categories'")
+                cursor = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name='repo_categories'"
+                )
                 sql = cursor.fetchone()[0]
                 assert "UNIQUE" in sql or "PRIMARY KEY" in sql
 
@@ -64,15 +65,21 @@ class TestRepoCategoriesSchema:
             conn = sqlite3.connect(str(db_path))
             try:
                 cursor = conn.execute("PRAGMA table_info(repo_categories)")
-                columns = [(row[1], row[2], row[3]) for row in cursor.fetchall()]  # name, type, notnull
+                columns = [
+                    (row[1], row[2], row[3]) for row in cursor.fetchall()
+                ]  # name, type, notnull
 
                 # Convert to dict for easier checking
-                col_dict = {col[0]: {"type": col[1], "notnull": col[2]} for col in columns}
+                col_dict = {
+                    col[0]: {"type": col[1], "notnull": col[2]} for col in columns
+                }
 
                 # Verify column constraints
                 assert col_dict["name"]["notnull"] == 1, "name should be NOT NULL"
                 assert col_dict["pattern"]["notnull"] == 1, "pattern should be NOT NULL"
-                assert col_dict["priority"]["notnull"] == 1, "priority should be NOT NULL"
+                assert (
+                    col_dict["priority"]["notnull"] == 1
+                ), "priority should be NOT NULL"
 
             finally:
                 conn.close()
@@ -111,7 +118,9 @@ class TestGoldenReposMetadataMigration:
             try:
                 cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
                 columns = {row[1] for row in cursor.fetchall()}
-                assert "category_id" in columns, "category_id column should be added by migration"
+                assert (
+                    "category_id" in columns
+                ), "category_id column should be added by migration"
             finally:
                 conn.close()
 
@@ -145,7 +154,9 @@ class TestGoldenReposMetadataMigration:
             try:
                 cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
                 columns = {row[1] for row in cursor.fetchall()}
-                assert "category_auto_assigned" in columns, "category_auto_assigned should be added"
+                assert (
+                    "category_auto_assigned" in columns
+                ), "category_auto_assigned should be added"
             finally:
                 conn.close()
 
@@ -166,7 +177,13 @@ class TestGoldenReposMetadataMigration:
                     """INSERT INTO golden_repos_metadata
                        (alias, repo_url, default_branch, clone_path, created_at)
                        VALUES (?, ?, ?, ?, ?)""",
-                    ("test-repo", "https://github.com/test/repo", "main", "/tmp/test", "2024-01-01T00:00:00Z")
+                    (
+                        "test-repo",
+                        "https://github.com/test/repo",
+                        "main",
+                        "/tmp/test",
+                        "2024-01-01T00:00:00Z",
+                    ),
                 )
                 conn.commit()
             finally:
@@ -179,7 +196,10 @@ class TestGoldenReposMetadataMigration:
             # Verify data is still there
             conn = sqlite3.connect(str(db_path))
             try:
-                cursor = conn.execute("SELECT alias FROM golden_repos_metadata WHERE alias = ?", ("test-repo",))
+                cursor = conn.execute(
+                    "SELECT alias FROM golden_repos_metadata WHERE alias = ?",
+                    ("test-repo",),
+                )
                 result = cursor.fetchone()
                 assert result is not None, "Data should survive re-running migration"
             finally:
@@ -209,8 +229,12 @@ class TestGoldenReposMetadataMigration:
                         category_fk = fk
                         break
 
-                assert category_fk is not None, "category_id should have foreign key constraint"
-                assert category_fk[2] == "repo_categories", "FK should reference repo_categories"
+                assert (
+                    category_fk is not None
+                ), "category_id should have foreign key constraint"
+                assert (
+                    category_fk[2] == "repo_categories"
+                ), "FK should reference repo_categories"
                 assert category_fk[6] == "SET NULL", "ON DELETE should be SET NULL"
 
             finally:

@@ -10,8 +10,7 @@ Fix 3: Cooperative shutdown checks in _do_sync_all_projects() loop.
 """
 
 import threading
-import time
-from unittest.mock import MagicMock, Mock, patch, call
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -110,7 +109,11 @@ class TestStopFailsTrackedJobOnTimeout:
 
         mock_job_tracker.fail_job.assert_called_once()
         call_args = mock_job_tracker.fail_job.call_args
-        assert call_args[0][0] == "langfuse-sync-abc12345" or call_args[1].get("job_id") == "langfuse-sync-abc12345" or "langfuse-sync-abc12345" in str(call_args)
+        assert (
+            call_args[0][0] == "langfuse-sync-abc12345"
+            or call_args[1].get("job_id") == "langfuse-sync-abc12345"
+            or "langfuse-sync-abc12345" in str(call_args)
+        )
 
     def test_stop_does_not_fail_job_when_thread_finishes_normally(
         self, service, mock_job_tracker

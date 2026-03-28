@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from code_indexer.global_repos.repo_analyzer import RepoAnalyzer, RepoInfo
+from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 
 
 class TestRepoAnalyzer:
@@ -286,5 +286,3 @@ Authentication service for microservices architecture.
 
         assert info.purpose is not None
         assert len(info.purpose) > 0
-
-

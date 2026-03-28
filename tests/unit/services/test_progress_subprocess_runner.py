@@ -14,14 +14,11 @@ Tests cover:
 - gather_repo_metrics: returns (0, 0) gracefully for non-git directories
 - gather_repo_metrics: returns positive counts for real git repos
 """
-import json
+
 import subprocess
 import sys
 import tempfile
-import os
 from pathlib import Path
-from typing import List, Optional, Tuple
-from unittest.mock import patch
 
 import pytest
 
@@ -37,7 +34,9 @@ class TestRunWithPopenProgress:
         from code_indexer.services.progress_subprocess_runner import (
             run_with_popen_progress,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         allocator.calculate_weights(
@@ -93,7 +92,9 @@ class TestRunWithPopenProgress:
         from code_indexer.services.progress_subprocess_runner import (
             run_with_popen_progress,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         allocator.calculate_weights(
@@ -147,7 +148,9 @@ class TestRunWithPopenProgress:
             run_with_popen_progress,
             IndexingSubprocessError,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         allocator.calculate_weights(
@@ -189,7 +192,6 @@ class TestRunWithPopenProgress:
         the same pytest session will have already loaded golden_repo_manager
         from other tests, making sys.modules manipulation unreliable.
         """
-        import subprocess
         import sys
         from pathlib import Path
 
@@ -225,7 +227,9 @@ class TestRunWithPopenProgress:
         from code_indexer.services.progress_subprocess_runner import (
             run_with_popen_progress,
         )
-        from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+        from code_indexer.services.progress_phase_allocator import (
+            ProgressPhaseAllocator,
+        )
 
         allocator = ProgressPhaseAllocator()
         allocator.calculate_weights(

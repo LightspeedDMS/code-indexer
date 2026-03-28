@@ -17,13 +17,14 @@ import datetime
 import json
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 
 @pytest.fixture(autouse=True)
 def reset_restart_state():
     """Reset module-level restart state between tests."""
     import code_indexer.server.web.routes as routes_module
+
     routes_module._restart_in_progress = False
     yield
     routes_module._restart_in_progress = False
@@ -41,7 +42,6 @@ class TestSystemdModeWritesSignalFile:
         Then a signal file is created at the configured signal path
         """
         from code_indexer.server.web.routes import _delayed_restart
-        from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
 
         signal_file = tmp_path / "restart.signal"
 
@@ -191,7 +191,8 @@ class TestSystemdModeWritesSignalFile:
                 mock_env.return_value = "some-invocation-id"  # Systemd mode
                 with patch("subprocess.run") as mock_subprocess:
                     with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH", signal_file
+                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+                        signal_file,
                     ):
                         _delayed_restart(delay=2)
 
@@ -238,7 +239,8 @@ class TestSystemdModeWritesSignalFile:
                 mock_env.return_value = "some-invocation-id"  # Systemd mode
                 with patch("code_indexer.server.web.routes.logger") as mock_logger:
                     with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH", signal_file
+                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+                        signal_file,
                     ):
                         _delayed_restart(delay=2)
 
@@ -247,8 +249,7 @@ class TestSystemdModeWritesSignalFile:
         # At least one message should mention signal or restart
         log_calls = [str(call) for call in mock_logger.info.call_args_list]
         assert any(
-            "signal" in msg.lower() or "restart" in msg.lower()
-            for msg in log_calls
+            "signal" in msg.lower() or "restart" in msg.lower() for msg in log_calls
         )
 
     def test_systemd_mode_http_response_can_complete_before_signal(self, tmp_path):
@@ -321,7 +322,8 @@ class TestDevModeRestartUnchanged:
                 mock_env.return_value = None  # Not systemd (dev mode)
                 with patch("os.execv"):
                     with patch(
-                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH", signal_file
+                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+                        signal_file,
                     ):
                         _delayed_restart(delay=2)
 
@@ -370,7 +372,10 @@ class TestSignalFileConstantImport:
         """
         RESTART_SIGNAL_PATH constant must be importable from deployment_executor.
         """
-        from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
+        from code_indexer.server.auto_update.deployment_executor import (
+            RESTART_SIGNAL_PATH,
+        )
+
         assert RESTART_SIGNAL_PATH is not None
         assert isinstance(RESTART_SIGNAL_PATH, Path)
 
@@ -378,14 +383,20 @@ class TestSignalFileConstantImport:
         """
         RESTART_SIGNAL_PATH must be in ~/.cidx-server/ directory.
         """
-        from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
+        from code_indexer.server.auto_update.deployment_executor import (
+            RESTART_SIGNAL_PATH,
+        )
+
         assert RESTART_SIGNAL_PATH.parent == Path.home() / ".cidx-server"
 
     def test_restart_signal_path_filename_is_restart_signal(self):
         """
         RESTART_SIGNAL_PATH filename must be 'restart.signal'.
         """
-        from code_indexer.server.auto_update.deployment_executor import RESTART_SIGNAL_PATH
+        from code_indexer.server.auto_update.deployment_executor import (
+            RESTART_SIGNAL_PATH,
+        )
+
         assert RESTART_SIGNAL_PATH.name == "restart.signal"
 
     def test_routes_imports_restart_signal_path(self):
@@ -393,6 +404,7 @@ class TestSignalFileConstantImport:
         routes.py must import RESTART_SIGNAL_PATH from deployment_executor.
         """
         import code_indexer.server.web.routes as routes_module
+
         assert hasattr(routes_module, "RESTART_SIGNAL_PATH"), (
             "routes.py must have RESTART_SIGNAL_PATH attribute "
             "(imported from deployment_executor)"

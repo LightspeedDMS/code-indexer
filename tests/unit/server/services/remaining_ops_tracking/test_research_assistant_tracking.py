@@ -13,10 +13,11 @@ Tests:
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from code_indexer.server.services.job_tracker import JobTracker
-from code_indexer.server.services.research_assistant_service import ResearchAssistantService
+from code_indexer.server.services.research_assistant_service import (
+    ResearchAssistantService,
+)
 from code_indexer.server.storage.database_manager import DatabaseSchema
 
 

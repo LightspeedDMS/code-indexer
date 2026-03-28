@@ -15,11 +15,11 @@ Confirmed bug pattern (via direct script):
   Fixed sequence: [0, 10, 0, 50, 100, 100]
   (25 must not appear before the function's first emission)
 """
+
 import time
 import tempfile
 from pathlib import Path
 
-import pytest
 
 from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
@@ -37,6 +37,7 @@ class TestBug483ProgressRegression:
             self.manager.shutdown()
         import shutil
         import os
+
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 

@@ -4,9 +4,8 @@ Unit tests for LangfuseApiClient (Story #165 Code Review Fixes).
 Tests retry logic (Finding 4) and observation pagination (Finding 3).
 """
 
-import time
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 import requests
@@ -37,7 +36,9 @@ class TestDiscoverProject:
             "data": [{"name": "test-project", "id": "proj-123"}]
         }
 
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response):
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ):
             result = api_client.discover_project()
 
         assert result == {"name": "test-project", "id": "proj-123"}
@@ -47,7 +48,9 @@ class TestDiscoverProject:
         mock_response = Mock()
         mock_response.json.return_value = {"data": []}
 
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response):
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ):
             result = api_client.discover_project()
 
         assert result == {"name": "unknown"}
@@ -57,7 +60,9 @@ class TestDiscoverProject:
         mock_response = Mock()
         mock_response.json.return_value = {"data": [{"name": "test"}]}
 
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response) as mock_request:
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ) as mock_request:
             api_client.discover_project()
 
         mock_request.assert_called_once_with(
@@ -79,7 +84,9 @@ class TestFetchTracesPage:
         }
 
         from_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response):
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ):
             result = api_client.fetch_traces_page(1, from_time)
 
         assert len(result) == 2
@@ -92,7 +99,9 @@ class TestFetchTracesPage:
         mock_response.json.return_value = {"data": []}
 
         from_time = datetime(2024, 1, 1, 12, 30, 45, tzinfo=timezone.utc)
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response) as mock_request:
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ) as mock_request:
             api_client.fetch_traces_page(3, from_time)
 
         mock_request.assert_called_once_with(
@@ -112,7 +121,9 @@ class TestFetchTracesPage:
         mock_response.json.return_value = {"data": []}
 
         from_time = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response):
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ):
             result = api_client.fetch_traces_page(1, from_time)
 
         assert result == []
@@ -131,7 +142,9 @@ class TestFetchObservations:
             ]
         }
 
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response) as mock_request:
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ) as mock_request:
             result = api_client.fetch_observations("trace123")
 
         assert len(result) == 2
@@ -152,7 +165,9 @@ class TestFetchObservations:
             Mock(json=lambda: {"data": page2_data}),
         ]
 
-        with patch.object(api_client, "_request_with_retry", side_effect=responses) as mock_request:
+        with patch.object(
+            api_client, "_request_with_retry", side_effect=responses
+        ) as mock_request:
             result = api_client.fetch_observations("trace123")
 
         # Should get all 150 observations
@@ -170,7 +185,9 @@ class TestFetchObservations:
         mock_response = Mock()
         mock_response.json.return_value = {"data": []}
 
-        with patch.object(api_client, "_request_with_retry", return_value=mock_response) as mock_request:
+        with patch.object(
+            api_client, "_request_with_retry", return_value=mock_response
+        ) as mock_request:
             result = api_client.fetch_observations("trace123")
 
         assert result == []
@@ -185,7 +202,9 @@ class TestFetchObservations:
             Mock(json=lambda: {"data": [{"id": f"obs{i}"} for i in range(200, 250)]}),
         ]
 
-        with patch.object(api_client, "_request_with_retry", side_effect=responses) as mock_request:
+        with patch.object(
+            api_client, "_request_with_retry", side_effect=responses
+        ) as mock_request:
             result = api_client.fetch_observations("trace123")
 
         assert len(result) == 250
@@ -247,12 +266,16 @@ class TestRequestWithRetry:
         """Test that 429 errors make exactly max_retries requests (not max_retries + 1)."""
         # All attempts return 429
         error_response = Mock(status_code=429)
-        error_response.raise_for_status.side_effect = requests.HTTPError("Too Many Requests")
+        error_response.raise_for_status.side_effect = requests.HTTPError(
+            "Too Many Requests"
+        )
 
         with patch("requests.request", return_value=error_response) as mock_request:
             with patch("time.sleep") as mock_sleep:
                 with pytest.raises(requests.HTTPError):
-                    api_client._request_with_retry("GET", "https://test.com/api", max_retries=3)
+                    api_client._request_with_retry(
+                        "GET", "https://test.com/api", max_retries=3
+                    )
 
         # Should make exactly 3 requests (not 4)
         assert mock_request.call_count == 3
@@ -295,7 +318,9 @@ class TestRequestWithRetry:
         """Test exponential backoff timing."""
         # All attempts fail with 429, including final attempt
         error_response = Mock(status_code=429)
-        error_response.raise_for_status.side_effect = requests.HTTPError("Too Many Requests")
+        error_response.raise_for_status.side_effect = requests.HTTPError(
+            "Too Many Requests"
+        )
 
         with patch("requests.request", return_value=error_response):
             with patch("time.sleep") as mock_sleep:
@@ -311,12 +336,16 @@ class TestRequestWithRetry:
         """Test backoff capped at 30 seconds."""
         # All attempts fail with 429, including final attempt
         error_response = Mock(status_code=429)
-        error_response.raise_for_status.side_effect = requests.HTTPError("Too Many Requests")
+        error_response.raise_for_status.side_effect = requests.HTTPError(
+            "Too Many Requests"
+        )
 
         with patch("requests.request", return_value=error_response):
             with patch("time.sleep") as mock_sleep:
                 with pytest.raises(requests.HTTPError):
-                    api_client._request_with_retry("GET", "https://test.com/api", max_retries=8)
+                    api_client._request_with_retry(
+                        "GET", "https://test.com/api", max_retries=8
+                    )
 
         # Check that no sleep is > 30 seconds
         calls = [call[0][0] for call in mock_sleep.call_args_list]
@@ -326,6 +355,7 @@ class TestRequestWithRetry:
 
     def test_retry_on_connection_error(self, api_client):
         """Test retry on connection error."""
+
         # First attempt: ConnectionError, second attempt: success
         def side_effect(*args, **kwargs):
             if side_effect.call_count == 0:

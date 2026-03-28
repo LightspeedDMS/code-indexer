@@ -8,9 +8,6 @@ Covers AC3: get_job, get_active_jobs, get_recent_jobs, query_jobs
 
 import time
 
-import pytest
-
-
 
 class TestJobTrackerGetJob:
     """Tests for get_job (AC3)."""
@@ -152,11 +149,7 @@ class TestJobTrackerGetRecentJobs:
         tracker.complete_job("job-sort-completed-002")
 
         jobs = tracker.get_recent_jobs(limit=10, time_filter="all")
-        ids = [
-            j["job_id"]
-            for j in jobs
-            if j["job_id"].startswith("job-sort-")
-        ]
+        ids = [j["job_id"] for j in jobs if j["job_id"].startswith("job-sort-")]
         assert ids[0] == "job-sort-running-001"
         assert ids[1] == "job-sort-completed-002"
 

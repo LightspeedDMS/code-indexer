@@ -56,9 +56,9 @@ class TestRemoveStaleReposFromDomainsJson:
     def test_method_exists_on_service(self, tmp_path):
         """Bug #396: DependencyMapService must expose _remove_stale_repos_from_domains_json."""
         svc = _make_service(tmp_path)
-        assert hasattr(svc, "_remove_stale_repos_from_domains_json"), (
-            "DependencyMapService must have _remove_stale_repos_from_domains_json method"
-        )
+        assert hasattr(
+            svc, "_remove_stale_repos_from_domains_json"
+        ), "DependencyMapService must have _remove_stale_repos_from_domains_json method"
 
     def test_stale_repos_removed_from_domains_json(self, tmp_path):
         """Bug #396: Removed repo alias is stripped from participating_repos in _domains.json."""
@@ -71,7 +71,7 @@ class TestRemoveStaleReposFromDomainsJson:
                 "participating_repos": ["repo-a", "repo-b", "repo-c"],
             }
         ]
-        read_dir = _setup_versioned_domains(tmp_path, domains)
+        _read_dir = _setup_versioned_domains(tmp_path, domains)
 
         # WRITE path: live dependency-map dir
         live_dir = tmp_path / "cidx-meta-live" / "dependency-map"
@@ -86,9 +86,9 @@ class TestRemoveStaleReposFromDomainsJson:
         written = json.loads((live_dir / "_domains.json").read_text())
         backend = next((d for d in written if d["name"] == "backend"), None)
         assert backend is not None
-        assert "repo-b" not in backend["participating_repos"], (
-            "repo-b must be removed from participating_repos"
-        )
+        assert (
+            "repo-b" not in backend["participating_repos"]
+        ), "repo-b must be removed from participating_repos"
         assert "repo-a" in backend["participating_repos"], "repo-a must remain"
         assert "repo-c" in backend["participating_repos"], "repo-c must remain"
 
@@ -137,7 +137,11 @@ class TestRemoveStaleReposFromDomainsJson:
         svc = _make_service(tmp_path)
 
         domains = [
-            {"name": "backend", "description": "Backend", "participating_repos": ["repo-a"]}
+            {
+                "name": "backend",
+                "description": "Backend",
+                "participating_repos": ["repo-a"],
+            }
         ]
         _setup_versioned_domains(tmp_path, domains)
 
@@ -151,9 +155,9 @@ class TestRemoveStaleReposFromDomainsJson:
 
         assert result is True
         # No file should be written for an empty removal list
-        assert not (live_dir / "_domains.json").exists(), (
-            "_domains.json must NOT be written when removed_repos is empty"
-        )
+        assert not (
+            live_dir / "_domains.json"
+        ).exists(), "_domains.json must NOT be written when removed_repos is empty"
 
     def test_no_modification_when_repo_not_in_any_domain(self, tmp_path):
         """Bug #396: Repo alias not present in any domain causes no content change."""
@@ -178,9 +182,9 @@ class TestRemoveStaleReposFromDomainsJson:
 
         assert result is True
         # No file should be written because nothing changed
-        assert not (live_dir / "_domains.json").exists(), (
-            "_domains.json must NOT be written when the repo alias is not found in any domain"
-        )
+        assert not (
+            live_dir / "_domains.json"
+        ).exists(), "_domains.json must NOT be written when the repo alias is not found in any domain"
 
     def test_domains_json_not_found_returns_true(self, tmp_path):
         """Bug #396: Missing _domains.json is not an error — returns True (nothing to clean)."""
@@ -221,8 +225,12 @@ class TestRemoveStaleReposFromDomainsJson:
         assert result is True
         written = json.loads((live_dir / "_domains.json").read_text())
         solo = next((d for d in written if d["name"] == "solo-domain"), None)
-        assert solo is not None, "Domain with zero repos must NOT be pruned from _domains.json"
-        assert solo["participating_repos"] == [], "participating_repos must be empty list"
+        assert (
+            solo is not None
+        ), "Domain with zero repos must NOT be pruned from _domains.json"
+        assert (
+            solo["participating_repos"] == []
+        ), "participating_repos must be empty list"
 
 
 class TestRunDeltaAnalysisStaleRepoCleanup:
@@ -252,22 +260,24 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
             )
         )
 
-        removed_repo = {"alias": "deleted-repo", "clone_path": str(tmp_path / "deleted-repo")}
+        removed_repo = {
+            "alias": "deleted-repo",
+            "clone_path": str(tmp_path / "deleted-repo"),
+        }
         changed_repo = {"alias": "live-repo", "clone_path": str(tmp_path / "live-repo")}
 
-        with patch.object(
-            svc, "detect_changes", return_value=([changed_repo], [], [removed_repo])
-        ), patch.object(
-            svc, "identify_affected_domains", return_value={"backend"}
-        ), patch.object(
-            svc, "_update_affected_domains", return_value=[]
-        ), patch.object(
-            svc, "_finalize_delta_tracking"
-        ), patch.object(
-            svc, "_get_activated_repos", return_value=[changed_repo]
-        ), patch.object(
-            svc, "_remove_stale_repos_from_domains_json", return_value=True
-        ) as mock_cleanup:
+        with (
+            patch.object(
+                svc, "detect_changes", return_value=([changed_repo], [], [removed_repo])
+            ),
+            patch.object(svc, "identify_affected_domains", return_value={"backend"}),
+            patch.object(svc, "_update_affected_domains", return_value=[]),
+            patch.object(svc, "_finalize_delta_tracking"),
+            patch.object(svc, "_get_activated_repos", return_value=[changed_repo]),
+            patch.object(
+                svc, "_remove_stale_repos_from_domains_json", return_value=True
+            ) as mock_cleanup,
+        ):
             svc._analyzer.generate_claude_md.return_value = None
             svc.run_delta_analysis()
 
@@ -312,20 +322,25 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
             )
         )
 
-        removed_repo = {"alias": "deleted-repo", "clone_path": str(tmp_path / "deleted-repo")}
+        removed_repo = {
+            "alias": "deleted-repo",
+            "clone_path": str(tmp_path / "deleted-repo"),
+        }
 
-        with patch.object(
-            svc, "detect_changes", return_value=([], [], [removed_repo])
-        ), patch.object(
-            # Simulate stale _index.md: no domain found for deleted-repo → empty set
-            svc, "identify_affected_domains", return_value=set()
-        ), patch.object(
-            svc, "_finalize_delta_tracking"
-        ), patch.object(
-            svc, "_get_activated_repos", return_value=[]
-        ), patch.object(
-            svc, "_remove_stale_repos_from_domains_json", return_value=True
-        ) as mock_cleanup:
+        with (
+            patch.object(svc, "detect_changes", return_value=([], [], [removed_repo])),
+            patch.object(
+                # Simulate stale _index.md: no domain found for deleted-repo → empty set
+                svc,
+                "identify_affected_domains",
+                return_value=set(),
+            ),
+            patch.object(svc, "_finalize_delta_tracking"),
+            patch.object(svc, "_get_activated_repos", return_value=[]),
+            patch.object(
+                svc, "_remove_stale_repos_from_domains_json", return_value=True
+            ) as mock_cleanup,
+        ):
             result = svc.run_delta_analysis()
 
         assert result == {"status": "completed", "affected_domains": 0}
@@ -351,25 +366,28 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
         )
         (depmap_dir / "_domains.json").write_text(
             json.dumps(
-                [{"name": "backend", "description": "Backend", "participating_repos": ["live-repo"]}]
+                [
+                    {
+                        "name": "backend",
+                        "description": "Backend",
+                        "participating_repos": ["live-repo"],
+                    }
+                ]
             )
         )
 
         changed_repo = {"alias": "live-repo", "clone_path": str(tmp_path / "live-repo")}
 
-        with patch.object(
-            svc, "detect_changes", return_value=([changed_repo], [], [])
-        ), patch.object(
-            svc, "identify_affected_domains", return_value={"backend"}
-        ), patch.object(
-            svc, "_update_affected_domains", return_value=[]
-        ), patch.object(
-            svc, "_finalize_delta_tracking"
-        ), patch.object(
-            svc, "_get_activated_repos", return_value=[changed_repo]
-        ), patch.object(
-            svc, "_remove_stale_repos_from_domains_json", return_value=True
-        ) as mock_cleanup:
+        with (
+            patch.object(svc, "detect_changes", return_value=([changed_repo], [], [])),
+            patch.object(svc, "identify_affected_domains", return_value={"backend"}),
+            patch.object(svc, "_update_affected_domains", return_value=[]),
+            patch.object(svc, "_finalize_delta_tracking"),
+            patch.object(svc, "_get_activated_repos", return_value=[changed_repo]),
+            patch.object(
+                svc, "_remove_stale_repos_from_domains_json", return_value=True
+            ) as mock_cleanup,
+        ):
             svc._analyzer.generate_claude_md.return_value = None
             svc.run_delta_analysis()
 

@@ -12,10 +12,8 @@ TDD: These tests are written FIRST, before implementation.
 
 import pytest
 import tempfile
-import threading
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 
@@ -23,6 +21,7 @@ from fastapi.testclient import TestClient
 def reset_restart_state():
     """Reset module-level restart state between tests."""
     import code_indexer.server.web.routes as routes_module
+
     routes_module._restart_in_progress = False
     yield
     routes_module._restart_in_progress = False
@@ -78,7 +77,9 @@ class TestRestartEndpointAuthorization:
 
         assert response.status_code == 403
         data = response.json()
-        assert "admin" in data["detail"].lower() or "forbidden" in data["detail"].lower()
+        assert (
+            "admin" in data["detail"].lower() or "forbidden" in data["detail"].lower()
+        )
 
     def test_admin_user_can_access_restart_endpoint(self, test_client):
         """
@@ -89,11 +90,12 @@ class TestRestartEndpointAuthorization:
         Then I do NOT receive a 403 Forbidden response
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "test-csrf-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "test-csrf-token"}
                 )
 
         # Should NOT be 403 (may be 202 or other, but not forbidden)
@@ -112,11 +114,12 @@ class TestRestartEndpointResponse:
         Then I receive a 202 Accepted response
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "test-csrf-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "test-csrf-token"}
                 )
 
         assert response.status_code == 202
@@ -130,11 +133,12 @@ class TestRestartEndpointResponse:
         Then the response body contains a message about server restarting
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "test-csrf-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "test-csrf-token"}
                 )
 
         assert response.status_code == 202
@@ -152,11 +156,12 @@ class TestRestartEndpointResponse:
         Then the response content-type is application/json
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "test-csrf-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "test-csrf-token"}
                 )
 
         assert response.status_code == 202
@@ -193,8 +198,7 @@ class TestCSRFValidation:
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
             response = test_client.post(
-                "/admin/restart",
-                headers={"X-CSRF-Token": "invalid-token-12345"}
+                "/admin/restart", headers={"X-CSRF-Token": "invalid-token-12345"}
             )
 
         assert response.status_code == 403
@@ -211,13 +215,14 @@ class TestCSRFValidation:
         Then I receive a 403 Forbidden response
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 # Mock validation to return False (mismatch)
                 mock_validate.return_value = False
 
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "token-from-header"}
+                    "/admin/restart", headers={"X-CSRF-Token": "token-from-header"}
                 )
 
         assert response.status_code == 403
@@ -233,14 +238,17 @@ class TestCSRFValidation:
         Then I receive a 202 Accepted response
         And the restart is scheduled
         """
-        with patch("code_indexer.server.web.routes._schedule_delayed_restart") as mock_schedule:
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+        with patch(
+            "code_indexer.server.web.routes._schedule_delayed_restart"
+        ) as mock_schedule:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 # Mock validation to return True (valid)
                 mock_validate.return_value = True
 
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "valid-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "valid-token"}
                 )
 
         assert response.status_code == 202
@@ -259,12 +267,13 @@ class TestRestartLogging:
         Then a log entry is created with "Server restart requested by admin_user"
         """
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
                 with patch("code_indexer.server.web.routes.logger") as mock_logger:
                     response = test_client.post(
-                        "/admin/restart",
-                        headers={"X-CSRF-Token": "valid-token"}
+                        "/admin/restart", headers={"X-CSRF-Token": "valid-token"}
                     )
 
         assert response.status_code == 202
@@ -293,22 +302,26 @@ class TestRateLimiting:
         import code_indexer.server.web.routes as routes_module
 
         with patch("code_indexer.server.web.routes._schedule_delayed_restart"):
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
 
                 # Simulate restart in progress by setting the module flag
-                original_value = getattr(routes_module, '_restart_in_progress', False)
+                original_value = getattr(routes_module, "_restart_in_progress", False)
                 try:
                     routes_module._restart_in_progress = True
 
                     response = test_client.post(
-                        "/admin/restart",
-                        headers={"X-CSRF-Token": "valid-token"}
+                        "/admin/restart", headers={"X-CSRF-Token": "valid-token"}
                     )
 
                     assert response.status_code == 409
                     data = response.json()
-                    assert "already in progress" in data["message"].lower() or "restart" in data["message"].lower()
+                    assert (
+                        "already in progress" in data["message"].lower()
+                        or "restart" in data["message"].lower()
+                    )
                 finally:
                     # Restore original value
                     routes_module._restart_in_progress = original_value
@@ -325,16 +338,20 @@ class TestRateLimiting:
         """
         # Import the module to explicitly reset the flag (demonstrating the test's purpose)
         import code_indexer.server.web.routes as routes_module
+
         routes_module._restart_in_progress = False
 
-        with patch("code_indexer.server.web.routes._schedule_delayed_restart") as mock_schedule:
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+        with patch(
+            "code_indexer.server.web.routes._schedule_delayed_restart"
+        ) as mock_schedule:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
 
                 # Normal case - no restart in progress
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "valid-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "valid-token"}
                 )
 
         assert response.status_code == 202
@@ -353,13 +370,16 @@ class TestDelayedRestartScheduling:
         Then _schedule_delayed_restart is called
         And the HTTP response is returned immediately (not blocked)
         """
-        with patch("code_indexer.server.web.routes._schedule_delayed_restart") as mock_schedule:
-            with patch("code_indexer.server.web.routes.validate_login_csrf_token") as mock_validate:
+        with patch(
+            "code_indexer.server.web.routes._schedule_delayed_restart"
+        ) as mock_schedule:
+            with patch(
+                "code_indexer.server.web.routes.validate_login_csrf_token"
+            ) as mock_validate:
                 mock_validate.return_value = True
 
                 response = test_client.post(
-                    "/admin/restart",
-                    headers={"X-CSRF-Token": "valid-token"}
+                    "/admin/restart", headers={"X-CSRF-Token": "valid-token"}
                 )
 
         assert response.status_code == 202
@@ -404,7 +424,9 @@ class TestDelayedRestartScheduling:
             mock_thread_instance = MagicMock()
             mock_thread_class.return_value = mock_thread_instance
 
-            with patch("code_indexer.server.web.routes._delayed_restart") as mock_delayed:
+            with patch(
+                "code_indexer.server.web.routes._delayed_restart"
+            ) as _mock_delayed:
                 _schedule_delayed_restart()
 
             # Verify Thread was created with correct target and args
@@ -450,7 +472,7 @@ class TestDelayedRestartMechanism:
         with patch("time.sleep"):
             with patch("os.environ.get") as mock_env:
                 mock_env.return_value = "some-invocation-id"  # Systemd
-                with patch("subprocess.run") as mock_subprocess:
+                with patch("subprocess.run") as _mock_subprocess:
                     _delayed_restart(delay=2)
 
         # Should check for INVOCATION_ID
@@ -467,7 +489,6 @@ class TestDelayedRestartMechanism:
         Then it writes a JSON signal file to RESTART_SIGNAL_PATH
         """
         from code_indexer.server.web.routes import _delayed_restart
-        import tempfile
         import json
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -475,7 +496,10 @@ class TestDelayedRestartMechanism:
             with patch("time.sleep"):
                 with patch("os.environ.get") as mock_env:
                     mock_env.return_value = "some-invocation-id"  # Systemd
-                    with patch("code_indexer.server.web.routes.RESTART_SIGNAL_PATH", mock_signal_path):
+                    with patch(
+                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+                        mock_signal_path,
+                    ):
                         _delayed_restart(delay=2)
 
             # Signal file should have been written (assert while tmpdir still exists)
@@ -556,7 +580,10 @@ class TestErrorHandling:
                 mock_signal_path.parent = MagicMock()
                 mock_signal_path.parent.mkdir.side_effect = OSError("Permission denied")
 
-                with patch("code_indexer.server.web.routes.RESTART_SIGNAL_PATH", mock_signal_path):
+                with patch(
+                    "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+                    mock_signal_path,
+                ):
                     with patch("code_indexer.server.web.routes.logger") as mock_logger:
                         # Should not raise exception
                         _delayed_restart(delay=2)
@@ -564,7 +591,10 @@ class TestErrorHandling:
                         # Verify error was logged
                         assert mock_logger.error.called
                         error_log = mock_logger.error.call_args[0][0]
-                        assert "signal" in error_log.lower() or "failed" in error_log.lower()
+                        assert (
+                            "signal" in error_log.lower()
+                            or "failed" in error_log.lower()
+                        )
 
     def test_signal_file_contains_valid_json(self):
         """
@@ -576,7 +606,6 @@ class TestErrorHandling:
         Then its content is valid JSON with 'timestamp' and 'reason' fields
         """
         from code_indexer.server.web.routes import _delayed_restart
-        import tempfile
         import json
 
         with patch("time.sleep"):
@@ -585,7 +614,10 @@ class TestErrorHandling:
 
                 with tempfile.TemporaryDirectory() as tmpdir:
                     mock_signal_path = Path(tmpdir) / "restart.signal"
-                    with patch("code_indexer.server.web.routes.RESTART_SIGNAL_PATH", mock_signal_path):
+                    with patch(
+                        "code_indexer.server.web.routes.RESTART_SIGNAL_PATH",
+                        mock_signal_path,
+                    ):
                         _delayed_restart(delay=2)
 
                     # Signal file should contain valid JSON
@@ -623,7 +655,10 @@ class TestErrorHandling:
                         # Verify error was logged
                         assert mock_logger.error.called
                         error_log = mock_logger.error.call_args[0][0]
-                        assert "execv" in error_log.lower() or "failed" in error_log.lower()
+                        assert (
+                            "execv" in error_log.lower()
+                            or "failed" in error_log.lower()
+                        )
 
     def test_os_execv_wrapped_in_try_except(self):
         """

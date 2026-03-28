@@ -1,15 +1,15 @@
 """Langfuse service facade - provides unified access to tracing components."""
 
 import logging
-from typing import Optional
 import threading
+from typing import Optional
 
-logger = logging.getLogger(__name__)
-
+from .auto_span_logger import AutoSpanLogger
 from .langfuse_client import LangfuseClient
 from .trace_state_manager import TraceStateManager
-from .auto_span_logger import AutoSpanLogger
 from ..utils.config_manager import ServerConfigManager
+
+logger = logging.getLogger(__name__)
 
 _service_instance: Optional["LangfuseService"] = None
 _service_lock = threading.Lock()
@@ -23,7 +23,9 @@ class LangfuseService:
         self._client: Optional[LangfuseClient] = None
         self._trace_manager: Optional[TraceStateManager] = None
         self._span_logger: Optional[AutoSpanLogger] = None
-        self._lock = threading.RLock()  # RLock allows nested acquisition (trace_manager -> client)
+        self._lock = (
+            threading.RLock()
+        )  # RLock allows nested acquisition (trace_manager -> client)
 
     def is_enabled(self) -> bool:
         """Check if Langfuse is enabled in config."""

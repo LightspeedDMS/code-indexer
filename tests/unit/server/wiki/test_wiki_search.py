@@ -7,16 +7,20 @@ AC4: First Match Auto-Loads — navigate to highest-scoring result
 AC5: Clear Button Resets TOC — restore full TOC state
 AC6: Debounced Input — 300ms debounce, min 2 chars, cancel pending requests
 """
+
 import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from code_indexer.server.wiki.routes import wiki_router, get_wiki_user_hybrid, get_current_user_hybrid
+from code_indexer.server.wiki.routes import (
+    wiki_router,
+    get_wiki_user_hybrid,
+    get_current_user_hybrid,
+)
 from tests.unit.server.wiki.wiki_test_helpers import make_aliases_dir
 
 
@@ -35,6 +39,7 @@ def _make_search_app(
 ):
     """Build a test FastAPI app with wiki router and optional SemanticQueryManager."""
     from code_indexer.server.wiki.routes import _reset_wiki_cache
+
     _reset_wiki_cache()
 
     app = FastAPI()
@@ -137,12 +142,13 @@ class TestSearchEndpointBasic:
             assert call_kwargs is not None
             # search_mode should be "fts"
             passed_mode = (
-                call_kwargs.kwargs.get("search_mode")
-                or call_kwargs.args[4]
+                call_kwargs.kwargs.get("search_mode") or call_kwargs.args[4]
                 if len(call_kwargs.args) > 4
                 else None
             )
-            assert passed_mode == "fts" or call_kwargs.kwargs.get("search_mode") == "fts"
+            assert (
+                passed_mode == "fts" or call_kwargs.kwargs.get("search_mode") == "fts"
+            )
 
     def test_search_endpoint_returns_empty_for_short_query(self):
         """Query shorter than 2 characters returns empty array without calling manager."""
@@ -244,13 +250,15 @@ class TestSearchEndpointResultMapping:
     def test_search_endpoint_strips_md_extension_from_path(self):
         """Result paths have .md extension stripped to match wiki URL paths."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            mock_qm = _make_mock_query_manager(results=[
-                {
-                    "file_path": "guides/getting-started.md",
-                    "similarity_score": 0.9,
-                    "code_snippet": "snippet",
-                }
-            ])
+            mock_qm = _make_mock_query_manager(
+                results=[
+                    {
+                        "file_path": "guides/getting-started.md",
+                        "similarity_score": 0.9,
+                        "code_snippet": "snippet",
+                    }
+                ]
+            )
             app = _make_search_app(
                 _make_user("alice"), tmpdir, semantic_query_manager=mock_qm
             )
@@ -266,13 +274,15 @@ class TestSearchEndpointResultMapping:
     def test_search_response_format(self):
         """Each result has exactly the required keys: path, score, title."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            mock_qm = _make_mock_query_manager(results=[
-                {
-                    "file_path": "reference/api-overview.md",
-                    "similarity_score": 0.85,
-                    "code_snippet": "API endpoints",
-                }
-            ])
+            mock_qm = _make_mock_query_manager(
+                results=[
+                    {
+                        "file_path": "reference/api-overview.md",
+                        "similarity_score": 0.85,
+                        "code_snippet": "API endpoints",
+                    }
+                ]
+            )
             app = _make_search_app(
                 _make_user("alice"), tmpdir, semantic_query_manager=mock_qm
             )
@@ -293,7 +303,9 @@ class TestSearchEndpointResultMapping:
         """When query manager raises, endpoint returns graceful error (200, not 500)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mock_qm = MagicMock()
-            mock_qm.query_user_repositories.side_effect = RuntimeError("Search backend down")
+            mock_qm.query_user_repositories.side_effect = RuntimeError(
+                "Search backend down"
+            )
             app = _make_search_app(
                 _make_user("alice"), tmpdir, semantic_query_manager=mock_qm
             )
@@ -357,9 +369,9 @@ class TestArticleTemplateSearchBox:
             toc_pos = html.find('class="sidebar-group"')
             assert search_pos != -1, "wiki-search-box not found in HTML"
             assert toc_pos != -1, "sidebar-group not found in HTML"
-            assert search_pos < toc_pos, (
-                "Search box must appear before the first sidebar-group"
-            )
+            assert (
+                search_pos < toc_pos
+            ), "Search box must appear before the first sidebar-group"
 
     def test_sidebar_items_have_data_path(self):
         """All sidebar-item links have data-path attribute."""
@@ -371,15 +383,16 @@ class TestArticleTemplateSearchBox:
             html = self._get_article_html(tmpdir)
             # Find all sidebar-item anchor tags
             import re
+
             # All sidebar-item anchors should have data-path
             sidebar_items = re.findall(
                 r'<a[^>]+class="[^"]*sidebar-item[^"]*"[^>]*>', html
             )
             assert len(sidebar_items) > 0, "No sidebar items found in HTML"
             for item_tag in sidebar_items:
-                assert 'data-path="' in item_tag, (
-                    f"sidebar-item missing data-path attribute: {item_tag}"
-                )
+                assert (
+                    'data-path="' in item_tag
+                ), f"sidebar-item missing data-path attribute: {item_tag}"
 
 
 # ---------------------------------------------------------------------------
