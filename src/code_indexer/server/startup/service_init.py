@@ -6,16 +6,48 @@ Contains the initialize_services() function that creates and wires all
 server services, returning them as a dict for use by create_app().
 """
 
+import atexit
 import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# Bug #567: Module-level reference to PostgreSQL connection pool for atexit cleanup.
+# When pytest crashes or is killed, atexit handlers run and close the pool,
+# preventing idle connection accumulation that exhausts max_connections.
+_postgres_pool_for_cleanup: Optional[Any] = None
+
+
+def _cleanup_postgres_pool() -> None:
+    """Close the PostgreSQL connection pool on process exit (Bug #567).
+
+    Registered via atexit to ensure connections are released even when
+    the process is killed or pytest crashes mid-run.
+    """
+    global _postgres_pool_for_cleanup
+    if _postgres_pool_for_cleanup is not None:
+        try:
+            _postgres_pool_for_cleanup.close()
+        except Exception:
+            pass  # Best-effort cleanup on exit
+        _postgres_pool_for_cleanup = None
+
+
+def register_postgres_pool_atexit_cleanup(pool: Any) -> None:
+    """Register a PostgreSQL connection pool for atexit cleanup (Bug #567).
+
+    Args:
+        pool: ConnectionPool instance to close on process exit.
+    """
+    global _postgres_pool_for_cleanup
+    _postgres_pool_for_cleanup = pool
+    atexit.register(_cleanup_postgres_pool)
 
 
 def initialize_services() -> Dict[str, Any]:
@@ -173,6 +205,13 @@ def initialize_services() -> Dict[str, Any]:
                 config=_raw_config,
                 data_dir=data_dir,
             )
+
+            # Bug #567: Register atexit handler to close PostgreSQL connection pool
+            # on process exit. Prevents connection leaks when pytest crashes or is
+            # killed mid-run.
+            if _backend_registry.connection_pool is not None:
+                register_postgres_pool_atexit_cleanup(_backend_registry.connection_pool)
+
             logger.info(
                 "Storage mode: PostgreSQL (cluster)",
                 extra={"correlation_id": get_correlation_id()},
