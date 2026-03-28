@@ -68,6 +68,8 @@ class LeaderElectionService:
         self._stop_event = threading.Event()
         self._on_become_leader: Optional[Callable[[], None]] = None
         self._on_lose_leadership: Optional[Callable[[], None]] = None
+        # Story #539: Protect leadership state mutations from concurrent access
+        self._state_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Public API
@@ -77,6 +79,41 @@ class LeaderElectionService:
     def is_leader(self) -> bool:
         """Whether this node currently holds leadership."""
         return self._is_leader_event.is_set()
+
+    def verify_leadership(self) -> bool:
+        """Verify this node still holds leadership by checking the lock connection.
+
+        Story #539: Leader-only services should call this before each action
+        to reduce the split-brain window. If the lock connection is dead,
+        leadership is immediately relinquished instead of waiting up to
+        check_interval seconds for the monitor loop to detect it.
+
+        Returns:
+            True if this node is confirmed leader, False otherwise.
+        """
+        if not self._is_leader_event.is_set():
+            return False
+
+        with self._state_lock:
+            if not self._connection_alive():
+                logger.warning(
+                    "LeaderElectionService [%s]: verify_leadership detected dead "
+                    "connection; relinquishing leadership immediately",
+                    self._node_id,
+                )
+                self._lock_conn = None
+                self._is_leader_event.clear()
+                if self._on_lose_leadership is not None:
+                    try:
+                        self._on_lose_leadership()
+                    except Exception:
+                        logger.exception(
+                            "LeaderElectionService [%s]: on_lose_leadership raised",
+                            self._node_id,
+                        )
+                return False
+
+        return True
 
     def register_leader_callbacks(
         self,
