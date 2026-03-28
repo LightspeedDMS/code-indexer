@@ -78,13 +78,16 @@ else
     exit 1
 fi
 
-# 3. Check server code formatting with black
-print_step "Checking server code formatting with black"
-if black --check src/code_indexer/server/ tests/unit/server/; then
-    print_success "Server black formatting check passed"
+# 3. Check server code formatting with ruff format
+# NOTE: Using ruff format instead of black because pre-commit hooks use ruff-format
+# and ruff/black have incompatible formatting rules on ~243 files. Using the same
+# formatter in both pre-commit and automation ensures consistency.
+print_step "Checking server code formatting with ruff format"
+if ruff format --check src/code_indexer/server/ tests/unit/server/; then
+    print_success "Server ruff formatting check passed"
 else
-    print_error "Server black formatting check failed"
-    print_warning "Run 'black src/code_indexer/server/ tests/unit/server/' to fix formatting"
+    print_error "Server ruff formatting check failed"
+    print_warning "Run 'ruff format src/code_indexer/server/ tests/unit/server/' to fix formatting"
     exit 1
 fi
 
