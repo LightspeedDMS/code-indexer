@@ -1428,9 +1428,13 @@ def make_lifespan(
                     pass
 
                 if _pg_dsn:
-                    # Reuse the factory pool (stored in BackendRegistry.connection_pool)
-                    # instead of creating a second pool for cluster services.
-                    _cluster_pool = backend_registry.connection_pool
+                    # Bug #545: Use the critical pool for heartbeat/reconciliation
+                    # so they can't be starved by general HTTP/job traffic.
+                    # Falls back to general pool if critical pool unavailable.
+                    _cluster_pool = (
+                        backend_registry.critical_connection_pool
+                        or backend_registry.connection_pool
+                    )
                     _node_id = (
                         _configured_node_id
                         if _configured_node_id

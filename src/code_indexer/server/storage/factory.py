@@ -101,6 +101,9 @@ class BackendRegistry:
     # None in SQLite mode. Exposed here so lifespan.py cluster services can
     # reuse the factory pool instead of creating a second one.
     connection_pool: Optional[Any] = field(default=None)
+    # Bug #545: Dedicated critical pool for heartbeat/leader/reconciliation.
+    # Separated from general pool to prevent starvation under load.
+    critical_connection_pool: Optional[Any] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +333,20 @@ class StorageFactory:
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
-        pool = ConnectionPool(dsn, max_size=pool_max_size)
+        pool = ConnectionPool(dsn, max_size=pool_max_size, name="general")
+
+        # Bug #545: Dedicated critical pool for heartbeat/leader/reconciliation.
+        # Separated from general pool to prevent starvation under HTTP load.
+        critical_min = config.get("critical_pool_min_size", 2)
+        critical_max = config.get("critical_pool_max_size", 5)
+        critical_timeout = config.get("critical_pool_timeout", 10.0)
+        critical_pool = ConnectionPool(
+            dsn,
+            min_size=critical_min,
+            max_size=critical_max,
+            timeout=critical_timeout,
+            name="critical",
+        )
 
         return BackendRegistry(
             global_repos=GlobalReposPostgresBackend(pool),
@@ -362,4 +378,5 @@ class StorageFactory:
             diagnostics=DiagnosticsPostgresBackend(pool),
             maintenance=MaintenancePostgresBackend(pool),
             connection_pool=pool,
+            critical_connection_pool=critical_pool,
         )

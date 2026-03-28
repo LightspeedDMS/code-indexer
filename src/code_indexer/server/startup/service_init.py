@@ -206,11 +206,15 @@ def initialize_services() -> Dict[str, Any]:
                 data_dir=data_dir,
             )
 
-            # Bug #567: Register atexit handler to close PostgreSQL connection pool
+            # Bug #567: Register atexit handler to close PostgreSQL connection pools
             # on process exit. Prevents connection leaks when pytest crashes or is
             # killed mid-run.
             if _backend_registry.connection_pool is not None:
                 register_postgres_pool_atexit_cleanup(_backend_registry.connection_pool)
+            # Bug #545: Also close the critical pool on exit.
+            if _backend_registry.critical_connection_pool is not None:
+                _critical = _backend_registry.critical_connection_pool
+                atexit.register(lambda: _critical.close())
 
             logger.info(
                 "Storage mode: PostgreSQL (cluster)",
