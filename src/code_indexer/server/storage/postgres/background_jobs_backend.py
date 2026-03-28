@@ -233,8 +233,18 @@ class BackgroundJobsPostgresBackend:
             return None
         return self._row_to_dict(row)
 
-    def update_job(self, job_id: str, **kwargs: Any) -> None:
-        """Update arbitrary columns on a background job row."""
+    def update_job(
+        self, job_id: str, executing_node: Optional[str] = None, **kwargs: Any
+    ) -> None:
+        """Update arbitrary columns on a background job row.
+
+        Args:
+            job_id: The job to update.
+            executing_node: If provided, adds ``AND executing_node = %s``
+                to the WHERE clause so only the owning node can update
+                ownership-sensitive fields (Bug #542).
+            **kwargs: Column=value pairs to update.
+        """
         _JSON_FIELDS = {
             "result",
             "claude_actions",
@@ -259,7 +269,14 @@ class BackgroundJobsPostgresBackend:
             return
 
         params.append(job_id)
-        sql = f"UPDATE background_jobs SET {', '.join(updates)} WHERE job_id = %s"
+        # Bug #542: Ownership guard — when executing_node is provided,
+        # only allow update if the row belongs to this node.
+        where = "WHERE job_id = %s"
+        if executing_node is not None:
+            where += " AND executing_node = %s"
+            params.append(executing_node)
+
+        sql = f"UPDATE background_jobs SET {', '.join(updates)} {where}"
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
