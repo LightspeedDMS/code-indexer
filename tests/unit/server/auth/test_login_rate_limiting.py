@@ -19,6 +19,7 @@ def _make_app():
     mock_jwt = MagicMock()
     mock_jwt.create_access_token.return_value = "test-token"
     mock_user_mgr = MagicMock()
+    mock_user_mgr.is_password_expired.return_value = False
     mock_refresh_mgr = MagicMock()
     mock_refresh_mgr.create_token_family.return_value = "family-1"
     mock_refresh_mgr.create_initial_refresh_token.return_value = {
