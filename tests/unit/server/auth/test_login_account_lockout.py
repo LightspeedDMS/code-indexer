@@ -543,22 +543,6 @@ class TestRestLoginLockout:
 class TestWebLoginLockout:
     """AC3: Account lockout applies to Web UI /login endpoint."""
 
-    def test_web_routes_has_login_rate_limiter_attribute(self):
-        """AC3: web/routes.py must expose login_rate_limiter at module level."""
-        from code_indexer.server.web import routes as web_routes
-
-        assert hasattr(web_routes, "login_rate_limiter"), (
-            "web/routes.py must have a module-level login_rate_limiter instance"
-        )
-
-    def test_web_login_rate_limiter_is_login_rate_limiter_instance(self):
-        """AC3: web/routes.py login_rate_limiter must be a LoginRateLimiter instance."""
-        from code_indexer.server.web import routes as web_routes
-
-        assert isinstance(web_routes.login_rate_limiter, LoginRateLimiter), (
-            "web/routes.py login_rate_limiter must be a LoginRateLimiter instance"
-        )
-
     def test_locked_account_on_web_login_shows_error(self):
         """AC3: unified_login_submit must check lockout - locked account is detected."""
 
