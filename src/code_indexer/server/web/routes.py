@@ -777,12 +777,17 @@ def _get_users_list():
 
 
 def _get_user_mfa_status(username: str) -> bool:
-    """Check if a user has MFA enabled (Story #559)."""
-    try:
-        from .mfa_routes import _totp_service
+    """Check if a user has MFA enabled (Story #559).
 
-        if _totp_service is not None:
-            return bool(_totp_service.is_mfa_enabled(username))
+    Uses module attribute access (not from-import) to get the runtime
+    value of _totp_service, which is set after server startup.
+    """
+    try:
+        from . import mfa_routes
+
+        svc = mfa_routes._totp_service
+        if svc is not None:
+            return bool(svc.is_mfa_enabled(username))
     except ImportError:
         pass
     return False
