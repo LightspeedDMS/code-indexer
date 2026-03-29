@@ -1513,6 +1513,27 @@ def make_lifespan(
                         _cluster_pool
                     )
 
+                    # Epic #556: Wire cluster pools for MFA/security services
+                    from code_indexer.server.web.mfa_routes import get_totp_service
+                    from code_indexer.server.auth.mfa_challenge import (
+                        mfa_challenge_manager,
+                    )
+                    from code_indexer.server.auth.login_rate_limiter import (
+                        login_rate_limiter as _login_rate_limiter_singleton,
+                    )
+
+                    _totp_svc = get_totp_service()
+                    if _totp_svc is not None:
+                        _totp_svc.set_connection_pool(_cluster_pool)
+                        logger.info("TOTPService: cluster pool wired")
+                    else:
+                        logger.warning(
+                            "TOTPService not initialized — skipping cluster pool wiring"
+                        )
+
+                    mfa_challenge_manager.set_connection_pool(_cluster_pool)
+                    _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
