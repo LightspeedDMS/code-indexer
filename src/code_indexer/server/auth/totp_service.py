@@ -15,7 +15,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import pyotp
 import qrcode
@@ -71,12 +71,72 @@ class TOTPService:
                     key_file,
                 )
 
+        # Cluster mode: PostgreSQL connection pool (set via set_connection_pool)
+        self._pool: Optional[Any] = None
+
         self._ensure_tables()
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Set PostgreSQL connection pool for cluster mode.
+
+        When set, all database operations use PostgreSQL instead of SQLite,
+        and the MFA encryption key is stored in the cluster_secrets table
+        so all cluster nodes share the same key.
+        """
+        self._pool = pool
+        self._load_or_create_cluster_key()
+        logger.info("TOTPService: using PostgreSQL connection pool (cluster mode)")
+
+    def _load_or_create_cluster_key(self) -> None:
+        """Load or create MFA encryption key in cluster_secrets table.
+
+        Race-condition safe: uses INSERT ... ON CONFLICT DO NOTHING,
+        then re-reads to get the winning value.
+        """
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            # Try to read existing key
+            row = conn.execute(
+                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+                ("mfa_encryption_key",),
+            ).fetchone()
+            if row:
+                key = row["key_value"] if isinstance(row, dict) else row[0]
+                self._fernet = Fernet(key.encode())
+                self._key_id = 1
+                logger.info(
+                    "TOTPService: loaded MFA encryption key from cluster_secrets"
+                )
+                return
+
+            # Generate new key and insert (race-safe)
+            new_key = Fernet.generate_key().decode()
+            conn.execute(
+                """
+                INSERT INTO cluster_secrets (key_name, key_value)
+                VALUES (%s, %s)
+                ON CONFLICT (key_name) DO NOTHING
+                """,
+                ("mfa_encryption_key", new_key),
+            )
+            conn.commit()
+
+            # Re-read the winner
+            row = conn.execute(
+                "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
+                ("mfa_encryption_key",),
+            ).fetchone()
+            key = row["key_value"] if isinstance(row, dict) else row[0]
+            self._fernet = Fernet(key.encode())
+            self._key_id = 1
+            logger.info(
+                "TOTPService: generated and stored MFA encryption key in cluster_secrets"
+            )
 
     def _ensure_tables(self) -> None:
         """Create MFA tables if they don't exist."""
@@ -125,46 +185,79 @@ class TOTPService:
         secret = pyotp.random_base32()
         encrypted = self._fernet.encrypt(secret.encode()).decode()
 
-        conn = self._get_conn()
-        try:
-            conn.execute(
-                """
-                INSERT INTO user_mfa (user_id, encrypted_secret, key_id, mfa_enabled)
-                VALUES (?, ?, ?, 0)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    encrypted_secret = excluded.encrypted_secret,
-                    key_id = excluded.key_id,
-                    mfa_enabled = 0,
-                    last_used_counter = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                (username, encrypted, self._key_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_mfa (user_id, encrypted_secret, key_id, mfa_enabled)
+                    VALUES (%s, %s, %s, 0)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        encrypted_secret = excluded.encrypted_secret,
+                        key_id = excluded.key_id,
+                        mfa_enabled = 0,
+                        last_used_counter = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (username, encrypted, self._key_id),
+                )
+                conn.commit()
+        else:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO user_mfa (user_id, encrypted_secret, key_id, mfa_enabled)
+                    VALUES (?, ?, ?, 0)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        encrypted_secret = excluded.encrypted_secret,
+                        key_id = excluded.key_id,
+                        mfa_enabled = 0,
+                        last_used_counter = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (username, encrypted, self._key_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
         return str(secret)
 
     def _get_secret(self, username: str) -> Optional[str]:
         """Retrieve and decrypt the TOTP secret for a user."""
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT encrypted_secret FROM user_mfa WHERE user_id = ?",
-                (username,),
-            ).fetchone()
-            if row is None:
-                return None
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT encrypted_secret FROM user_mfa WHERE user_id = %s",
+                    (username,),
+                ).fetchone()
+                if row is None:
+                    return None
+                try:
+                    return str(
+                        self._fernet.decrypt(row["encrypted_secret"].encode()).decode()
+                    )
+                except InvalidToken:
+                    logger.error("Failed to decrypt TOTP secret for %s", username)
+                    return None
+        else:
+            conn = self._get_conn()
             try:
-                return str(
-                    self._fernet.decrypt(row["encrypted_secret"].encode()).decode()
-                )
-            except InvalidToken:
-                logger.error("Failed to decrypt TOTP secret for %s", username)
-                return None
-        finally:
-            conn.close()
+                row = conn.execute(
+                    "SELECT encrypted_secret FROM user_mfa WHERE user_id = ?",
+                    (username,),
+                ).fetchone()
+                if row is None:
+                    return None
+                try:
+                    return str(
+                        self._fernet.decrypt(row["encrypted_secret"].encode()).decode()
+                    )
+                except InvalidToken:
+                    logger.error("Failed to decrypt TOTP secret for %s", username)
+                    return None
+            finally:
+                conn.close()
 
     # ------------------------------------------------------------------
     # Provisioning URI & QR Code
@@ -207,7 +300,46 @@ class TOTPService:
         # Get current time step
         current_counter = int(time.time()) // _TOTP_PERIOD
 
-        # Check replay: get last used counter
+        # Check replay: get last used counter and verify
+        if self._pool is not None:
+            return self._verify_code_with_conn_pg(username, code, totp, current_counter)
+        return self._verify_code_with_conn_sqlite(username, code, totp, current_counter)
+
+    def _verify_code_with_conn_pg(
+        self, username: str, code: str, totp: "pyotp.TOTP", current_counter: int
+    ) -> bool:
+        """Verify TOTP code using PostgreSQL connection."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT last_used_counter FROM user_mfa WHERE user_id = %s",
+                (username,),
+            ).fetchone()
+            last_counter = (
+                row["last_used_counter"] if row and row["last_used_counter"] else 0
+            )
+
+            if not totp.verify(code, valid_window=self._window_tolerance):
+                return False
+
+            for offset in range(-self._window_tolerance, self._window_tolerance + 1):
+                test_counter = current_counter + offset
+                if totp.at(test_counter * _TOTP_PERIOD) == code:
+                    if test_counter <= last_counter:
+                        return False
+                    conn.execute(
+                        "UPDATE user_mfa SET last_used_counter = %s, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                        (test_counter, username),
+                    )
+                    conn.commit()
+                    return True
+
+            return False
+
+    def _verify_code_with_conn_sqlite(
+        self, username: str, code: str, totp: "pyotp.TOTP", current_counter: int
+    ) -> bool:
+        """Verify TOTP code using SQLite connection."""
         conn = self._get_conn()
         try:
             row = conn.execute(
@@ -218,18 +350,14 @@ class TOTPService:
                 row["last_used_counter"] if row and row["last_used_counter"] else 0
             )
 
-            # Verify with window tolerance
             if not totp.verify(code, valid_window=self._window_tolerance):
                 return False
 
-            # Check replay: the code's time step must be > last_used_counter
-            # Find which counter step matches this code
             for offset in range(-self._window_tolerance, self._window_tolerance + 1):
                 test_counter = current_counter + offset
                 if totp.at(test_counter * _TOTP_PERIOD) == code:
                     if test_counter <= last_counter:
-                        return False  # Replay detected
-                    # Update last_used_counter
+                        return False
                     conn.execute(
                         "UPDATE user_mfa SET last_used_counter = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
                         (test_counter, username),
@@ -258,20 +386,33 @@ class TOTPService:
             codes.append(code)
 
         # Hash and store
-        conn = self._get_conn()
-        try:
-            conn.execute(
-                "DELETE FROM user_recovery_codes WHERE user_id = ?", (username,)
-            )
-            for code in codes:
-                code_hash = self._hash_recovery_code(code)
+        if self._pool is not None:
+            with self._pool.connection() as conn:
                 conn.execute(
-                    "INSERT INTO user_recovery_codes (user_id, code_hash) VALUES (?, ?)",
-                    (username, code_hash),
+                    "DELETE FROM user_recovery_codes WHERE user_id = %s", (username,)
                 )
-            conn.commit()
-        finally:
-            conn.close()
+                for code in codes:
+                    code_hash = self._hash_recovery_code(code)
+                    conn.execute(
+                        "INSERT INTO user_recovery_codes (user_id, code_hash) VALUES (%s, %s)",
+                        (username, code_hash),
+                    )
+                conn.commit()
+        else:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "DELETE FROM user_recovery_codes WHERE user_id = ?", (username,)
+                )
+                for code in codes:
+                    code_hash = self._hash_recovery_code(code)
+                    conn.execute(
+                        "INSERT INTO user_recovery_codes (user_id, code_hash) VALUES (?, ?)",
+                        (username, code_hash),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
 
         return codes
 
@@ -284,30 +425,55 @@ class TOTPService:
         so it can't be reused.
         """
         code_hash = self._hash_recovery_code(code)
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT id FROM user_recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
-                (username, code_hash),
-            ).fetchone()
-            if row is None:
-                return False
-            conn.execute(
-                "UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP, used_ip = ? WHERE id = ?",
-                (ip_address, row["id"]),
-            )
-            conn.commit()
-            # Count remaining
-            remaining = conn.execute(
-                "SELECT COUNT(*) as cnt FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
-                (username,),
-            ).fetchone()["cnt"]
-            logger.info(
-                "Recovery code used for %s. %d codes remaining.", username, remaining
-            )
-            return True
-        finally:
-            conn.close()
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT id FROM user_recovery_codes WHERE user_id = %s AND code_hash = %s AND used_at IS NULL",
+                    (username, code_hash),
+                ).fetchone()
+                if row is None:
+                    return False
+                conn.execute(
+                    "UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP, used_ip = %s WHERE id = %s",
+                    (ip_address, row["id"]),
+                )
+                conn.commit()
+                remaining = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM user_recovery_codes WHERE user_id = %s AND used_at IS NULL",
+                    (username,),
+                ).fetchone()["cnt"]
+                logger.info(
+                    "Recovery code used for %s. %d codes remaining.",
+                    username,
+                    remaining,
+                )
+                return True
+        else:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT id FROM user_recovery_codes WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
+                    (username, code_hash),
+                ).fetchone()
+                if row is None:
+                    return False
+                conn.execute(
+                    "UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP, used_ip = ? WHERE id = ?",
+                    (ip_address, row["id"]),
+                )
+                conn.commit()
+                remaining = conn.execute(
+                    "SELECT COUNT(*) as cnt FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL",
+                    (username,),
+                ).fetchone()["cnt"]
+                logger.info(
+                    "Recovery code used for %s. %d codes remaining.",
+                    username,
+                    remaining,
+                )
+                return True
+            finally:
+                conn.close()
 
     def regenerate_recovery_codes(self, username: str) -> List[str]:
         """Delete all existing recovery codes and generate new set.
@@ -333,44 +499,68 @@ class TOTPService:
         if not self.verify_code(username, verification_code):
             return False
 
-        conn = self._get_conn()
-        try:
-            conn.execute(
-                "UPDATE user_mfa SET mfa_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
-                (username,),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE user_mfa SET mfa_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    (username,),
+                )
+                conn.commit()
+        else:
+            conn = self._get_conn()
+            try:
+                conn.execute(
+                    "UPDATE user_mfa SET mfa_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+                    (username,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
         logger.info("MFA activated for user %s", username)
         return True
 
     def disable_mfa(self, username: str) -> None:
         """Disable MFA and remove all MFA data for a user."""
-        conn = self._get_conn()
-        try:
-            conn.execute("DELETE FROM user_mfa WHERE user_id = ?", (username,))
-            conn.execute(
-                "DELETE FROM user_recovery_codes WHERE user_id = ?", (username,)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute("DELETE FROM user_mfa WHERE user_id = %s", (username,))
+                conn.execute(
+                    "DELETE FROM user_recovery_codes WHERE user_id = %s", (username,)
+                )
+                conn.commit()
+        else:
+            conn = self._get_conn()
+            try:
+                conn.execute("DELETE FROM user_mfa WHERE user_id = ?", (username,))
+                conn.execute(
+                    "DELETE FROM user_recovery_codes WHERE user_id = ?", (username,)
+                )
+                conn.commit()
+            finally:
+                conn.close()
 
         logger.info("MFA disabled for user %s", username)
 
     def is_mfa_enabled(self, username: str) -> bool:
         """Check if MFA is enabled for a user."""
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
-                "SELECT mfa_enabled FROM user_mfa WHERE user_id = ?",
-                (username,),
-            ).fetchone()
-            return bool(row and row["mfa_enabled"])
-        finally:
-            conn.close()
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT mfa_enabled FROM user_mfa WHERE user_id = %s",
+                    (username,),
+                ).fetchone()
+                return bool(row and row["mfa_enabled"])
+        else:
+            conn = self._get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT mfa_enabled FROM user_mfa WHERE user_id = ?",
+                    (username,),
+                ).fetchone()
+                return bool(row and row["mfa_enabled"])
+            finally:
+                conn.close()
 
     def get_manual_entry_key(self, username: str) -> Optional[str]:
         """Return the base32 secret formatted for manual entry."""
