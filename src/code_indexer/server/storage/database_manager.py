@@ -537,6 +537,8 @@ class DatabaseSchema:
             self._migrate_user_git_credentials(conn)
             # Story #492: Cluster-Aware Dashboard - Node Metrics (migration for existing DBs)
             self._migrate_node_metrics_table(conn)
+            # Story #565: Password expiry - add password_changed_at column
+            self._migrate_users_password_changed_at(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -596,6 +598,21 @@ class DatabaseSchema:
         conn.execute(self.CREATE_IDX_NODE_METRICS_TIMESTAMP)
         conn.commit()
         logger.debug("Ensured node_metrics table and indexes exist")
+
+    def _migrate_users_password_changed_at(self, conn: sqlite3.Connection) -> None:
+        """
+        Add password_changed_at column to users table (Story #565).
+
+        Tracks when the user last changed their password for expiry enforcement.
+        Idempotent: checks for existing column before adding.
+        """
+        cursor = conn.execute("PRAGMA table_info(users)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "password_changed_at" not in existing_columns:
+            conn.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
+            conn.commit()
+            logger.info("Migrated users schema: added password_changed_at column")
 
     def _migrate_background_jobs_job_tracker(self, conn: sqlite3.Connection) -> None:
         """

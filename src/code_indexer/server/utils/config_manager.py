@@ -28,6 +28,18 @@ class PasswordSecurityConfig:
 
 
 @dataclass
+class PasswordExpiryConfig:
+    """Password expiry configuration (Story #565).
+
+    Non-SSO accounts must change their password every max_age_days days.
+    Disabled by default for backward compatibility.
+    """
+
+    enabled: bool = False
+    max_age_days: int = 90
+
+
+@dataclass
 class CacheConfig:
     """Cache configuration for HNSW and FTS indexes."""
 
@@ -913,6 +925,7 @@ class ServerConfig:
     data_retention_config: Optional[DataRetentionConfig] = None
     login_security_config: Optional[LoginSecurityConfig] = None  # Story #557
     mfa_config: Optional[MfaConfig] = None  # Story #558
+    password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
 
     # Epic #408 - Cluster mode configuration
     storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
@@ -997,6 +1010,9 @@ class ServerConfig:
             self.login_security_config = LoginSecurityConfig()
         if self.mfa_config is None:
             self.mfa_config = MfaConfig()
+        # Story #565 - Initialize password expiry config
+        if self.password_expiry_config is None:
+            self.password_expiry_config = PasswordExpiryConfig()
 
 
 class ServerConfigManager:
@@ -1455,6 +1471,14 @@ class ServerConfigManager:
             # Epic #408: Convert cluster dict to ClusterConfig
             if "cluster" in config_dict and isinstance(config_dict["cluster"], dict):
                 config_dict["cluster"] = ClusterConfig(**config_dict["cluster"])
+
+            # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig
+            if "password_expiry_config" in config_dict and isinstance(
+                config_dict["password_expiry_config"], dict
+            ):
+                config_dict["password_expiry_config"] = PasswordExpiryConfig(
+                    **config_dict["password_expiry_config"]
+                )
 
             # Remove obsolete reindexing_config field (deleted in previous commit)
             config_dict.pop("reindexing_config", None)

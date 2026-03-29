@@ -170,6 +170,22 @@ def register_auth_routes(
         # Story #557: Clear lockout failure history on successful login (AC1)
         _lockout_limiter.record_success(login_data.username)
 
+        # Story #565: Password expiry check -- before JWT token creation.
+        # Lazy import to avoid circular imports (same pattern as MFA below).
+        from ..services.config_service import get_config_service
+
+        config_svc = get_config_service()
+        server_config = config_svc.get_config()
+        expiry_config = server_config.password_expiry_config
+        if expiry_config and user_manager.is_password_expired(
+            user.username, expiry_config
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="password_expired: Your password has expired. "
+                "Please change your password.",
+            )
+
         # Story #561: MFA enforcement — check before creating JWT tokens
         from ..web.mfa_routes import get_totp_service
         from ..auth.mfa_challenge import mfa_challenge_manager

@@ -8661,6 +8661,29 @@ def unified_login_submit(
         set_csrf_cookie(error_response, new_csrf_token, path="/")
         return error_response
 
+    # Story #565: Password expiry check -- before session creation
+    config_svc = get_config_service()
+    server_config = config_svc.get_config()
+    expiry_config = server_config.password_expiry_config
+    if expiry_config and user_manager.is_password_expired(user.username, expiry_config):
+        # Redirect to change-password page with expiry message
+        redirect_url = (
+            "/admin/change-password?info=password_expired"
+            if user.role.value == "admin"
+            else "/user/change-password?info=password_expired"
+        )
+        session_manager = get_session_manager()
+        expiry_response = RedirectResponse(
+            url=redirect_url,
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+        session_manager.create_session(
+            expiry_response,
+            username=user.username,
+            role=user.role.value,
+        )
+        return expiry_response
+
     # Validate redirect_to URL (prevent open redirect)
     safe_redirect = None
     if redirect_to:

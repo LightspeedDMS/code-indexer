@@ -61,10 +61,11 @@ class UsersPostgresBackend:
         with self._pool.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO users (username, password_hash, role, email, created_at)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO users
+                (username, password_hash, role, email, created_at, password_changed_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (username, password_hash, role, email, now),
+                (username, password_hash, role, email, now, now),
             )
             conn.commit()
 
@@ -75,7 +76,8 @@ class UsersPostgresBackend:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                SELECT username, password_hash, role, email, created_at, oidc_identity
+                SELECT username, password_hash, role, email, created_at,
+                       oidc_identity, password_changed_at
                 FROM users
                 WHERE username = %s
                 """,
@@ -96,6 +98,7 @@ class UsersPostgresBackend:
                 "email": row[3],
                 "created_at": row[4],
                 "oidc_identity": self._parse_json(row[5]),
+                "password_changed_at": row[6],
                 "api_keys": api_keys,
                 "mcp_credentials": mcp_credentials,
             }
@@ -106,7 +109,8 @@ class UsersPostgresBackend:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT username, password_hash, role, email, created_at, oidc_identity
+                SELECT username, password_hash, role, email, created_at,
+                       oidc_identity, password_changed_at
                 FROM users
                 """
             ).fetchall()
@@ -122,6 +126,7 @@ class UsersPostgresBackend:
                         "email": row[3],
                         "created_at": row[4],
                         "oidc_identity": self._parse_json(row[5]),
+                        "password_changed_at": row[6],
                         "api_keys": self._get_api_keys(conn, uname),
                         "mcp_credentials": self._get_mcp_credentials(conn, uname),
                     }
@@ -197,17 +202,30 @@ class UsersPostgresBackend:
         return updated
 
     def update_password_hash(self, username: str, password_hash: str) -> bool:
-        """Update user's password hash."""
+        """Update user's password hash and password_changed_at timestamp."""
+        now = datetime.now(timezone.utc).isoformat()
         with self._pool.connection() as conn:
             cur = conn.execute(
-                "UPDATE users SET password_hash = %s WHERE username = %s",
-                (password_hash, username),
+                "UPDATE users SET password_hash = %s, password_changed_at = %s "
+                "WHERE username = %s",
+                (password_hash, now, username),
             )
             updated = bool(cur.rowcount > 0)
             conn.commit()
 
         if updated:
             logger.info("Updated password for user: %s", username)
+        return updated
+
+    def set_password_changed_at(self, username: str, timestamp: Optional[str]) -> bool:
+        """Set password_changed_at for a user (Story #565)."""
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE users SET password_changed_at = %s WHERE username = %s",
+                (timestamp, username),
+            )
+            updated = bool(cur.rowcount > 0)
+            conn.commit()
         return updated
 
     # ------------------------------------------------------------------
@@ -416,7 +434,8 @@ class UsersPostgresBackend:
         with self._pool.connection() as conn:
             row = conn.execute(
                 """
-                SELECT username, password_hash, role, email, created_at, oidc_identity
+                SELECT username, password_hash, role, email, created_at,
+                       oidc_identity, password_changed_at
                 FROM users
                 WHERE LOWER(email) = LOWER(%s)
                 """,
@@ -438,6 +457,7 @@ class UsersPostgresBackend:
                 "email": row[3],
                 "created_at": row[4],
                 "oidc_identity": self._parse_json(row[5]),
+                "password_changed_at": row[6],
                 "api_keys": api_keys,
                 "mcp_credentials": mcp_credentials,
             }

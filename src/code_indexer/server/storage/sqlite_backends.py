@@ -316,9 +316,10 @@ class UsersSqliteBackend:
 
         def operation(conn):
             conn.execute(
-                """INSERT INTO users (username, password_hash, role, email, created_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (username, password_hash, role, email, now),
+                """INSERT INTO users
+                   (username, password_hash, role, email, created_at, password_changed_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (username, password_hash, role, email, now, now),
             )
             return None
 
@@ -330,7 +331,8 @@ class UsersSqliteBackend:
         conn = self._conn_manager.get_connection()
 
         cursor = conn.execute(
-            """SELECT username, password_hash, role, email, created_at, oidc_identity
+            """SELECT username, password_hash, role, email, created_at,
+                      oidc_identity, password_changed_at
                FROM users WHERE username = ?""",
             (username,),
         )
@@ -345,6 +347,7 @@ class UsersSqliteBackend:
             "email": row[3],
             "created_at": row[4],
             "oidc_identity": json.loads(row[5]) if row[5] else None,
+            "password_changed_at": row[6],
             "api_keys": self._get_api_keys(conn, username),
             "mcp_credentials": self._get_mcp_credentials(conn, username),
         }
@@ -446,7 +449,8 @@ class UsersSqliteBackend:
         """List all users with their related data."""
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
-            """SELECT username, password_hash, role, email, created_at, oidc_identity
+            """SELECT username, password_hash, role, email, created_at,
+                      oidc_identity, password_changed_at
                FROM users"""
         )
         results = []
@@ -460,6 +464,7 @@ class UsersSqliteBackend:
                     "email": row[3],
                     "created_at": row[4],
                     "oidc_identity": json.loads(row[5]) if row[5] else None,
+                    "password_changed_at": row[6],
                     "api_keys": self._get_api_keys(conn, username),
                     "mcp_credentials": self._get_mcp_credentials(conn, username),
                 }
@@ -544,12 +549,14 @@ class UsersSqliteBackend:
         return updated
 
     def update_password_hash(self, username: str, password_hash: str) -> bool:
-        """Update user's password hash."""
+        """Update user's password hash and password_changed_at timestamp."""
+        now = datetime.now(timezone.utc).isoformat()
 
         def operation(conn):
             cursor = conn.execute(
-                "UPDATE users SET password_hash = ? WHERE username = ?",
-                (password_hash, username),
+                "UPDATE users SET password_hash = ?, password_changed_at = ? "
+                "WHERE username = ?",
+                (password_hash, now, username),
             )
             return cursor.rowcount > 0
 
@@ -557,6 +564,19 @@ class UsersSqliteBackend:
         if updated:
             logger.info(f"Updated password for user: {username}")
         return updated
+
+    def set_password_changed_at(self, username: str, timestamp: Optional[str]) -> bool:
+        """Set password_changed_at for a user (Story #565)."""
+
+        def operation(conn):
+            cursor = conn.execute(
+                "UPDATE users SET password_changed_at = ? WHERE username = ?",
+                (timestamp, username),
+            )
+            return cursor.rowcount > 0
+
+        result: bool = self._conn_manager.execute_atomic(operation)
+        return result
 
     def delete_api_key(self, username: str, key_id: str) -> bool:
         """Delete an API key for a user."""
@@ -586,7 +606,8 @@ class UsersSqliteBackend:
         """
         conn = self._conn_manager.get_connection()
         cursor = conn.execute(
-            """SELECT username, password_hash, role, email, created_at, oidc_identity
+            """SELECT username, password_hash, role, email, created_at,
+                      oidc_identity, password_changed_at
                FROM users WHERE LOWER(email) = LOWER(?)""",
             (email.strip(),),
         )
@@ -602,6 +623,7 @@ class UsersSqliteBackend:
             "email": row[3],
             "created_at": row[4],
             "oidc_identity": json.loads(row[5]) if row[5] else None,
+            "password_changed_at": row[6],
             "api_keys": self._get_api_keys(conn, username),
             "mcp_credentials": self._get_mcp_credentials(conn, username),
         }

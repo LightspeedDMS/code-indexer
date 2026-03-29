@@ -565,6 +565,43 @@ class UserManager:
             self._save_users(users_data)
             return True
 
+    def is_password_expired(self, username: str, config) -> bool:
+        """Check if a user's password has expired (Story #565).
+
+        Args:
+            username: Username to check
+            config: PasswordExpiryConfig with enabled and max_age_days
+
+        Returns:
+            True if password is expired and must be changed, False otherwise.
+            Returns False for SSO users, non-existent users, or when disabled.
+        """
+        if not config.enabled:
+            return False
+
+        # SSO users are exempt from password expiry
+        if self.is_sso_user(username):
+            return False
+
+        # Get user data to check password_changed_at
+        if self._use_sqlite and self._sqlite_backend is not None:
+            user_data = self._sqlite_backend.get_user(username)
+        else:
+            users_data = self._load_users()
+            user_data = users_data.get(username)
+
+        if user_data is None:
+            return False
+
+        password_changed_at = user_data.get("password_changed_at")
+        if password_changed_at is None:
+            # Legacy data without timestamp -- treat as expired
+            return True
+
+        changed_dt = DateTimeParser.parse_user_datetime(password_changed_at)
+        age = datetime.now(timezone.utc) - changed_dt
+        return bool(age.days > config.max_age_days)
+
     def validate_password_strength(
         self, password: str, username: Optional[str] = None, email: Optional[str] = None
     ) -> Dict[str, Any]:
