@@ -264,7 +264,15 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
     return HTMLResponse(_render_recovery_codes(codes))
 
 
-def _render_qr_error(username: str, error_msg: str, show_mode: bool) -> HTMLResponse:
+def _render_qr_error(
+    username: str,
+    error_msg: str,
+    show_mode: bool,
+    verify_route: str = "/admin/mfa/verify",
+    back_link: str = "/admin/users",
+    recovery_link_prefix: str = "/admin/mfa",
+    re_setup_link: str = "",
+) -> HTMLResponse:
     """Re-render QR page with error message after failed verification."""
     assert _totp_service is not None
     uri = _totp_service.get_provisioning_uri(username)
@@ -279,7 +287,16 @@ def _render_qr_error(username: str, error_msg: str, show_mode: bool) -> HTMLResp
     qr_b64 = base64.b64encode(qr_bytes).decode()
     return HTMLResponse(
         _render_setup(
-            qr_b64, manual_key, "", username, error=error_msg, show_mode=show_mode
+            qr_b64,
+            manual_key,
+            "",
+            username,
+            error=error_msg,
+            show_mode=show_mode,
+            verify_route=verify_route,
+            back_link=back_link,
+            recovery_link_prefix=recovery_link_prefix,
+            re_setup_link=re_setup_link,
         )
     )
 
@@ -442,7 +459,15 @@ def user_mfa_verify(
                 "/user/mfa/setup?mode=show&verified=1",
                 status_code=303,
             )
-        return _render_qr_error(username, "Invalid code.", show_mode=True)
+        return _render_qr_error(
+            username,
+            "Invalid code.",
+            show_mode=True,
+            verify_route=_USER_MFA_VERIFY_ROUTE,
+            back_link=_USER_BACK_LINK,
+            recovery_link_prefix=_USER_RECOVERY_PREFIX,
+            re_setup_link="/user/mfa/setup?mode=new",
+        )
 
     if _totp_service.activate_mfa(username, totp_code):
         codes = _totp_service.generate_recovery_codes(username)
@@ -452,7 +477,12 @@ def user_mfa_verify(
         return HTMLResponse(_render_recovery_codes(codes, done_link=_USER_BACK_LINK))
 
     return _render_qr_error(
-        username, "Invalid verification code. Please try again.", show_mode=False
+        username,
+        "Invalid verification code. Please try again.",
+        show_mode=False,
+        verify_route=_USER_MFA_VERIFY_ROUTE,
+        back_link=_USER_BACK_LINK,
+        recovery_link_prefix=_USER_RECOVERY_PREFIX,
     )
 
 
