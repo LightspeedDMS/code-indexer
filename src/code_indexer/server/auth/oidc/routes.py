@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from ...web.auth import get_session_manager
+from ...web.routes import _get_user_mfa_status
 
 if TYPE_CHECKING:
     from .oidc_manager import OIDCManager
@@ -108,6 +109,20 @@ async def sso_callback(code: str, state: str, request: Request):
         else:
             # Non-admin user - go to user interface
             redirect_url = "/user/api-keys"
+
+        # MFA enforcement for SSO users (same pattern as password login)
+        if _get_user_mfa_status(user.username):
+            from ..mfa_challenge import mfa_challenge_manager
+            from ...web.mfa_routes import render_mfa_challenge_page
+
+            client_ip = request.client.host if request.client else "unknown"
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+                redirect_url=redirect_url,
+            )
+            return render_mfa_challenge_page(challenge_token)
 
         redirect_response = RedirectResponse(url=redirect_url, status_code=302)
 
