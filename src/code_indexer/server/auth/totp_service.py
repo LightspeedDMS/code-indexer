@@ -190,11 +190,11 @@ class TOTPService:
                 conn.execute(
                     """
                     INSERT INTO user_mfa (user_id, encrypted_secret, key_id, mfa_enabled)
-                    VALUES (%s, %s, %s, 0)
+                    VALUES (%s, %s, %s, FALSE)
                     ON CONFLICT(user_id) DO UPDATE SET
                         encrypted_secret = excluded.encrypted_secret,
                         key_id = excluded.key_id,
-                        mfa_enabled = 0,
+                        mfa_enabled = FALSE,
                         last_used_counter = NULL,
                         updated_at = CURRENT_TIMESTAMP
                     """,
@@ -502,7 +502,7 @@ class TOTPService:
         if self._pool is not None:
             with self._pool.connection() as conn:
                 conn.execute(
-                    "UPDATE user_mfa SET mfa_enabled = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+                    "UPDATE user_mfa SET mfa_enabled = TRUE, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
                     (username,),
                 )
                 conn.commit()
