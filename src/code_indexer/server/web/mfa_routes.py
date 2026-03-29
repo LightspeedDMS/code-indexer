@@ -84,6 +84,7 @@ def _render_setup(
     verify_route: str = "/admin/mfa/verify",
     back_link: str = "/admin/users",
     recovery_link_prefix: str = "/admin/mfa",
+    re_setup_link: str = "",
 ) -> str:
     """Render MFA setup or show-QR HTML inline.
 
@@ -109,6 +110,15 @@ def _render_setup(
     if show_mode:
         title = "Two-Factor Authentication (Active)"
         success_msg = "<div style='color:#44ff44;background:#0a2a0a;padding:10px;border-radius:6px;margin:10px 0'>MFA is enabled. Scan this QR code to add to another authenticator device.</div>"
+        re_setup_html = ""
+        if re_setup_link:
+            re_setup_html = (
+                "<div style='margin-top:20px;padding-top:15px;border-top:1px solid #333'>"
+                "<p class='info' style='color:#ff9900'>Lost your authenticator? Generate a new key:</p>"
+                f"<a href='{re_setup_link}' "
+                "style='display:block;text-align:center;padding:10px;background:#6b2222;color:#fff;"
+                "border-radius:6px;text-decoration:none;font-size:0.9em'>Re-setup MFA (New Key)</a></div>"
+            )
         form_section = (
             "<p>Test your authenticator (optional):</p>"
             f"<form method='POST' action='{verify_route}'>"
@@ -118,6 +128,7 @@ def _render_setup(
             "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code'>"
             "<button type='submit' style='background:#333;color:#fff'>Test Code</button></form>"
             f"<a href='{recovery_link_prefix}/recovery-codes?user={target_user}' style='display:block;text-align:center;padding:12px;margin-top:10px;background:#444;color:#fff;border-radius:6px;text-decoration:none'>View Recovery Codes</a>"
+            f"{re_setup_html}"
         )
     else:
         title = "Set Up Two-Factor Authentication"
@@ -364,17 +375,23 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    if mode == "show":
+    mfa_enabled = _totp_service.is_mfa_enabled(username)
+
+    if mfa_enabled and mode != "new":
+        # MFA already active -- show existing QR with test option
         uri = _totp_service.get_provisioning_uri(username)
         if uri is None:
             return HTMLResponse(f"No MFA configured for {username}", status_code=404)
+        is_show = True
     else:
+        # New setup or explicit re-setup
         secret = _totp_service.generate_secret(username)
         if secret is None:
             return HTMLResponse("Failed to generate secret", status_code=500)
         uri = _totp_service.get_provisioning_uri(username)
         if uri is None:
             return HTMLResponse("Failed to generate URI", status_code=500)
+        is_show = False
 
     qr_bytes = _totp_service.generate_qr_code(uri)
     if qr_bytes is None:
@@ -383,7 +400,6 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
     if manual_key is None:
         return HTMLResponse("Failed to get manual entry key", status_code=500)
 
-    is_show = mode == "show"
     verified = request.query_params.get("verified") == "1"
     qr_b64 = base64.b64encode(qr_bytes).decode()
     csrf = request.cookies.get("csrf_token", "")
@@ -398,6 +414,7 @@ def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
             verify_route=_USER_MFA_VERIFY_ROUTE,
             back_link=_USER_BACK_LINK,
             recovery_link_prefix=_USER_RECOVERY_PREFIX,
+            re_setup_link="/user/mfa/setup?mode=new" if is_show else "",
         )
     )
 

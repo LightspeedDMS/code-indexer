@@ -143,6 +143,60 @@ def test_user_mfa_setup_form_action_points_to_user_verify(client):
     assert "/admin/mfa/verify" not in resp.text
 
 
+def test_user_mfa_setup_autodetects_show_mode_when_mfa_enabled(client, totp_service):
+    """GET /user/mfa/setup auto-detects show mode when MFA is already enabled."""
+    username = "regularuser"
+    cookie_val = _create_user_session_cookie(username, "user")
+    totp_service.generate_secret(username)
+    secret = totp_service._get_secret(username)
+    code = pyotp.TOTP(secret).now()
+    totp_service.activate_mfa(username, code)
+    assert totp_service.is_mfa_enabled(username) is True
+
+    resp = client.get("/user/mfa/setup", cookies={"session": cookie_val})
+    assert resp.status_code == 200
+    # Should show active mode, not setup mode
+    assert "Two-Factor Authentication (Active)" in resp.text
+    assert "Test Code" in resp.text
+    assert "Verify and Activate MFA" not in resp.text
+
+
+def test_user_mfa_setup_mode_new_regenerates_secret(client, totp_service):
+    """GET /user/mfa/setup?mode=new forces fresh secret even when MFA is enabled."""
+    username = "regularuser"
+    cookie_val = _create_user_session_cookie(username, "user")
+    totp_service.generate_secret(username)
+    old_secret = totp_service._get_secret(username)
+    code = pyotp.TOTP(old_secret).now()
+    totp_service.activate_mfa(username, code)
+
+    resp = client.get(
+        "/user/mfa/setup", params={"mode": "new"}, cookies={"session": cookie_val}
+    )
+    assert resp.status_code == 200
+    # Should show setup mode (not show mode)
+    assert "Set Up Two-Factor Authentication" in resp.text
+    assert "Verify and Activate MFA" in resp.text
+    # Secret should have been regenerated
+    new_secret = totp_service._get_secret(username)
+    assert new_secret != old_secret
+
+
+def test_user_mfa_setup_show_mode_has_re_setup_link(client, totp_service):
+    """Show mode for user MFA setup includes a re-setup link with mode=new."""
+    username = "regularuser"
+    cookie_val = _create_user_session_cookie(username, "user")
+    totp_service.generate_secret(username)
+    secret = totp_service._get_secret(username)
+    code = pyotp.TOTP(secret).now()
+    totp_service.activate_mfa(username, code)
+
+    resp = client.get("/user/mfa/setup", cookies={"session": cookie_val})
+    assert resp.status_code == 200
+    assert "Re-setup MFA (New Key)" in resp.text
+    assert "mode=new" in resp.text
+
+
 def test_user_mfa_verify_activates_for_session_user(client, totp_service):
     """POST /user/mfa/verify with valid code activates MFA and shows recovery codes."""
     username = "regularuser"
