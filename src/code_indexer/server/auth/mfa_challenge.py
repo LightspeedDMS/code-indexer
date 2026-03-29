@@ -24,6 +24,7 @@ class MfaChallenge:
     """A pending MFA challenge bound to a password-verified user."""
 
     username: str
+    role: str
     client_ip: str
     created_at: float
     attempt_count: int = 0
@@ -34,7 +35,7 @@ class MfaChallengeManager:
     """Manages MFA challenge tokens with TTL and attempt limits.
 
     Thread-safe. Tokens are stored in-memory (lost on restart, which
-    is acceptable — user simply re-enters password).
+    is acceptable -- user simply re-enters password).
     """
 
     def __init__(
@@ -48,7 +49,11 @@ class MfaChallengeManager:
         self._max_attempts = max_attempts
 
     def create_challenge(
-        self, username: str, client_ip: str, redirect_url: str = "/admin/"
+        self,
+        username: str,
+        role: str,
+        client_ip: str,
+        redirect_url: str = "/admin/",
     ) -> str:
         """Create a new challenge token for a password-verified user.
 
@@ -57,6 +62,7 @@ class MfaChallengeManager:
         token = secrets.token_urlsafe(32)
         challenge = MfaChallenge(
             username=username,
+            role=role,
             client_ip=client_ip,
             created_at=time.time(),
             redirect_url=redirect_url,
@@ -67,10 +73,17 @@ class MfaChallengeManager:
         logger.debug("MFA challenge created for %s", username)
         return token
 
-    def get_challenge(self, token: str) -> Optional[MfaChallenge]:
+    def get_challenge(
+        self, token: str, client_ip: Optional[str] = None
+    ) -> Optional[MfaChallenge]:
         """Retrieve a valid (non-expired, not exhausted) challenge.
 
-        Returns None if token is invalid, expired, or attempts exhausted.
+        Args:
+            token: The challenge token.
+            client_ip: If provided, validates that the request IP matches
+                the IP from challenge creation. Rejects on mismatch.
+
+        Returns None if token is invalid, expired, exhausted, or IP mismatched.
         """
         with self._lock:
             challenge = self._challenges.get(token)
@@ -86,6 +99,14 @@ class MfaChallengeManager:
                     challenge.username,
                 )
                 return None
+            if client_ip and challenge.client_ip != client_ip:
+                logger.warning(
+                    "MFA challenge IP mismatch for %s: expected %s got %s",
+                    challenge.username,
+                    challenge.client_ip,
+                    client_ip,
+                )
+                return None
             return challenge
 
     def record_attempt(self, token: str) -> None:
@@ -99,9 +120,16 @@ class MfaChallengeManager:
         """Consume a challenge token (successful verification).
 
         Returns the challenge data and removes the token.
+        Returns None if token is invalid or expired (TTL enforced).
         """
         with self._lock:
-            return self._challenges.pop(token, None)
+            challenge = self._challenges.get(token)
+            if challenge is None:
+                return None
+            if time.time() - challenge.created_at > self._ttl:
+                del self._challenges[token]
+                return None
+            return self._challenges.pop(token)
 
     def _cleanup_expired(self) -> None:
         """Remove expired challenges. Called under lock."""
@@ -113,5 +141,8 @@ class MfaChallengeManager:
             del self._challenges[t]
 
 
-# Module-level singleton
+# NOTE: In-memory store. This is intentionally process-local.
+# The CIDX server runs with --workers 1 (enforced by
+# DeploymentExecutor._ensure_workers_config). If that changes,
+# this must move to a shared backend (Redis, SQLite).
 mfa_challenge_manager = MfaChallengeManager()

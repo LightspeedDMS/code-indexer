@@ -8682,6 +8682,7 @@ def unified_login_submit(
         client_ip = request.client.host if request.client else "unknown"
         challenge_token = mfa_challenge_manager.create_challenge(
             username=user.username,
+            role=user.role.value,
             client_ip=client_ip,
             redirect_url=redirect_url,
         )

@@ -12,6 +12,7 @@ All service return values explicitly null-checked with error responses.
 """
 
 import base64
+import html as html_module
 import logging
 from typing import List, Optional
 
@@ -329,9 +330,11 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
 
     Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
     """
+    safe_error = html_module.escape(error) if error else ""
+    safe_token = html_module.escape(token)
     err = (
-        f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{error}</div>'
-        if error
+        f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{safe_error}</div>'
+        if safe_error
         else ""
     )
     html = (
@@ -365,7 +368,7 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
         f"{err}"
         f"<div id='totp-section'>"
         f"<form method='POST' action='/admin/mfa/challenge/verify'>"
-        f"<input type='hidden' name='challenge_token' value='{token}'>"
+        f"<input type='hidden' name='challenge_token' value='{safe_token}'>"
         "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' "
         "placeholder='000000' autocomplete='one-time-code' autofocus required>"
         "<button type='submit'>Verify</button>"
@@ -374,7 +377,7 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
         "</div>"
         f"<div id='recovery-section' class='hidden'>"
         f"<form method='POST' action='/admin/mfa/challenge/verify'>"
-        f"<input type='hidden' name='challenge_token' value='{token}'>"
+        f"<input type='hidden' name='challenge_token' value='{safe_token}'>"
         "<p class='info'>Enter one of your recovery codes</p>"
         "<input type='text' name='recovery_code' placeholder='XXXX-XXXX-XXXX-XXXX' "
         "style='letter-spacing:2px;font-size:1em' required>"
@@ -400,60 +403,62 @@ def mfa_challenge_verify(
 ):
     """Verify TOTP or recovery code against a pending MFA challenge.
 
-    On success: consume challenge, create session, redirect to dashboard.
-    On failure: record attempt, re-render challenge with error.
-    On expired/exhausted token: redirect to login page.
+    Uses consume-first pattern to prevent TOCTOU race conditions:
+    the token is atomically consumed before verification. On failure,
+    the user must re-enter their password (token is gone).
     """
     from ..auth.mfa_challenge import mfa_challenge_manager
 
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    challenge = mfa_challenge_manager.get_challenge(challenge_token)
-    if challenge is None:
+    # Consume-first: atomically remove token before verifying.
+    # This prevents duplicate session creation from concurrent requests.
+    challenge_data = mfa_challenge_manager.consume(challenge_token)
+    if challenge_data is None:
+        return RedirectResponse("/login?info=mfa_expired", status_code=303)
+
+    # Validate client IP matches the one from password verification
+    client_ip = request.client.host if request.client else "unknown"
+    if challenge_data.client_ip != client_ip:
+        logger.warning(
+            "MFA challenge IP mismatch for %s: expected %s got %s",
+            challenge_data.username,
+            challenge_data.client_ip,
+            client_ip,
+        )
         return RedirectResponse("/login?info=mfa_expired", status_code=303)
 
     # Verify TOTP or recovery code
     verified = False
+    method = "totp"
     if recovery_code:
-        client_ip = request.client.host if request.client else "unknown"
+        method = "recovery"
         verified = _totp_service.verify_recovery_code(
-            challenge.username, recovery_code, ip_address=client_ip
+            challenge_data.username, recovery_code, ip_address=client_ip
         )
-        error_msg = "Invalid recovery code"
     elif totp_code:
-        verified = _totp_service.verify_code(challenge.username, totp_code)
-        error_msg = "Invalid verification code"
-    else:
-        error_msg = "No code provided"
+        verified = _totp_service.verify_code(challenge_data.username, totp_code)
 
     if verified:
-        # Success: consume token, create session, redirect
-        challenge_data = mfa_challenge_manager.consume(challenge_token)
-        redirect_url = challenge_data.redirect_url if challenge_data else _ADMIN_ROUTE
-
         from ..web.auth import get_session_manager
 
         session_mgr = get_session_manager()
-        redirect_response = RedirectResponse(url=redirect_url, status_code=303)
+        redirect_response = RedirectResponse(
+            url=challenge_data.redirect_url, status_code=303
+        )
         session_mgr.create_session(
             redirect_response,
-            username=challenge.username,
-            role="admin",
+            username=challenge_data.username,
+            role=challenge_data.role,
         )
         logger.info(
-            "MFA login verified for %s (method=%s)",
-            challenge.username,
-            "recovery" if recovery_code else "totp",
+            "MFA login verified for %s (method=%s)", challenge_data.username, method
         )
         return redirect_response
 
-    # Failure: record attempt, re-render
-    mfa_challenge_manager.record_attempt(challenge_token)
-    remaining = mfa_challenge_manager.get_challenge(challenge_token)
-    if remaining is None:
-        # Attempts exhausted
-        logger.warning("MFA challenge exhausted for %s", challenge.username)
-        return RedirectResponse("/login?info=mfa_exhausted", status_code=303)
-
-    return render_mfa_challenge_page(challenge_token, error=error_msg)
+    # Verification failed — token is consumed, user must restart login
+    logger.warning(
+        "MFA verification failed for %s (method=%s)", challenge_data.username, method
+    )
+    return RedirectResponse("/login?info=mfa_failed", status_code=303)
