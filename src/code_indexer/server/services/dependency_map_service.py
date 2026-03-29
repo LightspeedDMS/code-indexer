@@ -1904,13 +1904,24 @@ class DependencyMapService:
             )
             return False
 
-    def _finalize_delta_tracking(self, config, all_repos: List[Dict[str, Any]]) -> None:
+    def _finalize_delta_tracking(
+        self,
+        config,
+        all_repos: List[Dict[str, Any]],
+        output_dir: Optional[Path] = None,
+        affected_domains: Optional[Set[str]] = None,
+    ) -> None:
         """
         Finalize delta analysis tracking updates (Story #193, AC8).
+
+        Bug #572: Now also records run metrics so delta runs appear in the
+        Recent Run Metrics dashboard table.
 
         Args:
             config: Claude integration config
             all_repos: List of all current repos
+            output_dir: Dependency map output directory (for metric computation)
+            affected_domains: Set of domain names updated in this delta run
         """
         commit_hashes = self._get_commit_hashes(all_repos) if all_repos else {}
         next_run = (
@@ -1924,6 +1935,12 @@ class DependencyMapService:
             next_run=next_run,
             error_message=None,
         )
+
+        # Bug #572: Record run metrics for delta analysis so they appear
+        # in the Recent Run Metrics dashboard table.
+        if output_dir is not None and affected_domains is not None:
+            domain_list = [{"name": d} for d in affected_domains]
+            self._record_run_metrics(output_dir, domain_list, all_repos, 0.0, 0.0)
 
     def run_delta_analysis(
         self, job_id: Optional[str] = None
@@ -2199,7 +2216,12 @@ class DependencyMapService:
                     f"Discovery write failed: excluding {len(new_repos)} new repo(s) "
                     "from tracking so they are re-detected on next delta run"
                 )
-            self._finalize_delta_tracking(config, repos_to_finalize)
+            self._finalize_delta_tracking(
+                config,
+                repos_to_finalize,
+                output_dir=dependency_map_dir,
+                affected_domains=affected_domains,
+            )
 
             logger.info(
                 f"Delta analysis completed: {len(affected_domains)} domains updated"
