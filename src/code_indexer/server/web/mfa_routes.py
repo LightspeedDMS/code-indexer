@@ -317,3 +317,143 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
 
     logger.info("MFA disabled for user %s", username)
     return RedirectResponse(_ADMIN_ROUTE, status_code=303)
+
+
+# ==============================================================================
+# MFA Login Challenge (Story #560)
+# ==============================================================================
+
+
+def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
+    """Render the TOTP challenge page shown after password verification.
+
+    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    """
+    err = (
+        f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{error}</div>'
+        if error
+        else ""
+    )
+    html = (
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        "<title>Two-Factor Authentication - CIDX</title>"
+        "<style>body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}"
+        ".c{max-width:400px;margin:60px auto;background:#16213e;border-radius:12px;padding:30px}"
+        "h1{color:#00d4ff;font-size:1.3em;text-align:center}"
+        ".info{color:#999;font-size:0.9em;margin:15px 0;text-align:center}"
+        "input[type=text]{width:100%;padding:14px;font-size:1.4em;text-align:center;letter-spacing:10px;"
+        "border:2px solid #333;border-radius:6px;background:#0a0a23;color:#fff;box-sizing:border-box}"
+        "button{width:100%;padding:12px;margin-top:15px;background:#00d4ff;color:#000;border:none;"
+        "border-radius:6px;font-size:1em;cursor:pointer;font-weight:bold}"
+        "button:hover{background:#00b8d4}"
+        ".toggle{color:#00d4ff;text-decoration:none;display:block;text-align:center;margin-top:15px;"
+        "font-size:0.9em;cursor:pointer}"
+        ".hidden{display:none}"
+        "a.back{color:#666;text-decoration:none;display:block;margin-top:20px;text-align:center;"
+        "font-size:0.85em}"
+        "</style>"
+        "<script>"
+        "function toggleRecovery(){"
+        "var t=document.getElementById('totp-section');"
+        "var r=document.getElementById('recovery-section');"
+        "if(r.classList.contains('hidden')){r.classList.remove('hidden');t.classList.add('hidden');}"
+        "else{t.classList.remove('hidden');r.classList.add('hidden');}}"
+        "</script>"
+        "</head><body><div class='c'>"
+        "<h1>Two-Factor Authentication</h1>"
+        "<p class='info'>Enter the code from your authenticator app</p>"
+        f"{err}"
+        f"<div id='totp-section'>"
+        f"<form method='POST' action='/admin/mfa/challenge/verify'>"
+        f"<input type='hidden' name='challenge_token' value='{token}'>"
+        "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' "
+        "placeholder='000000' autocomplete='one-time-code' autofocus required>"
+        "<button type='submit'>Verify</button>"
+        "</form>"
+        "<span class='toggle' onclick='toggleRecovery()'>Use recovery code instead</span>"
+        "</div>"
+        f"<div id='recovery-section' class='hidden'>"
+        f"<form method='POST' action='/admin/mfa/challenge/verify'>"
+        f"<input type='hidden' name='challenge_token' value='{token}'>"
+        "<p class='info'>Enter one of your recovery codes</p>"
+        "<input type='text' name='recovery_code' placeholder='XXXX-XXXX-XXXX-XXXX' "
+        "style='letter-spacing:2px;font-size:1em' required>"
+        "<button type='submit'>Verify Recovery Code</button>"
+        "</form>"
+        "<span class='toggle' onclick='toggleRecovery()'>Use authenticator code instead</span>"
+        "</div>"
+        "<a href='/login' class='back'>Cancel and return to login</a>"
+        "</div></body></html>"
+    )
+    response = HTMLResponse(html)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response
+
+
+@mfa_router.post("/challenge/verify", response_class=HTMLResponse)
+def mfa_challenge_verify(
+    request: Request,
+    challenge_token: str = Form(...),
+    totp_code: Optional[str] = Form(None),
+    recovery_code: Optional[str] = Form(None),
+):
+    """Verify TOTP or recovery code against a pending MFA challenge.
+
+    On success: consume challenge, create session, redirect to dashboard.
+    On failure: record attempt, re-render challenge with error.
+    On expired/exhausted token: redirect to login page.
+    """
+    from ..auth.mfa_challenge import mfa_challenge_manager
+
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    challenge = mfa_challenge_manager.get_challenge(challenge_token)
+    if challenge is None:
+        return RedirectResponse("/login?info=mfa_expired", status_code=303)
+
+    # Verify TOTP or recovery code
+    verified = False
+    if recovery_code:
+        client_ip = request.client.host if request.client else "unknown"
+        verified = _totp_service.verify_recovery_code(
+            challenge.username, recovery_code, ip_address=client_ip
+        )
+        error_msg = "Invalid recovery code"
+    elif totp_code:
+        verified = _totp_service.verify_code(challenge.username, totp_code)
+        error_msg = "Invalid verification code"
+    else:
+        error_msg = "No code provided"
+
+    if verified:
+        # Success: consume token, create session, redirect
+        challenge_data = mfa_challenge_manager.consume(challenge_token)
+        redirect_url = challenge_data.redirect_url if challenge_data else _ADMIN_ROUTE
+
+        from ..web.auth import get_session_manager
+
+        session_mgr = get_session_manager()
+        redirect_response = RedirectResponse(url=redirect_url, status_code=303)
+        session_mgr.create_session(
+            redirect_response,
+            username=challenge.username,
+            role="admin",
+        )
+        logger.info(
+            "MFA login verified for %s (method=%s)",
+            challenge.username,
+            "recovery" if recovery_code else "totp",
+        )
+        return redirect_response
+
+    # Failure: record attempt, re-render
+    mfa_challenge_manager.record_attempt(challenge_token)
+    remaining = mfa_challenge_manager.get_challenge(challenge_token)
+    if remaining is None:
+        # Attempts exhausted
+        logger.warning("MFA challenge exhausted for %s", challenge.username)
+        return RedirectResponse("/login?info=mfa_exhausted", status_code=303)
+
+    return render_mfa_challenge_page(challenge_token, error=error_msg)

@@ -8674,6 +8674,19 @@ def unified_login_submit(
         # Non-admin users go to user interface
         redirect_url = "/user/api-keys"
 
+    # Story #560: MFA enforcement — check before creating session
+    if _get_user_mfa_status(user.username):
+        from ..auth.mfa_challenge import mfa_challenge_manager
+        from .mfa_routes import render_mfa_challenge_page
+
+        client_ip = request.client.host if request.client else "unknown"
+        challenge_token = mfa_challenge_manager.create_challenge(
+            username=user.username,
+            client_ip=client_ip,
+            redirect_url=redirect_url,
+        )
+        return render_mfa_challenge_page(challenge_token)
+
     # Create session for authenticated user
     session_manager = get_session_manager()
     redirect_response = RedirectResponse(
