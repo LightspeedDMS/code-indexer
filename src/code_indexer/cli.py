@@ -9951,6 +9951,12 @@ def server_group(ctx):
     pass
 
 
+# Register MFA auth subcommands under server group (Story #571)
+from .server.cli.mfa_commands import create_mfa_auth_group as _create_mfa_auth_group  # noqa: E402
+
+server_group.add_command(_create_mfa_auth_group())
+
+
 @server_group.command("start")
 @click.option(
     "--server-dir",
