@@ -627,6 +627,127 @@ class ClaudeServerClient:
                 f"Failed to register callback: HTTP {response.status_code}"
             )
 
+    async def create_orchestrated_job(
+        self, steps: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Create an orchestrated (collaborative) job with DAG-based steps.
+
+        Story #462: Collaborative delegation mode.
+
+        Args:
+            steps: List of step dicts with step_id, engine, prompt,
+                   and optional depends_on, repository, repositories,
+                   timeout_seconds, options.
+
+        Returns:
+            Dictionary with job info including jobId.
+
+        Raises:
+            ClaudeServerError: On job creation failure.
+        """
+        steps_dto: List[Dict[str, Any]] = []
+        for step in steps:
+            step_dto: Dict[str, Any] = {
+                "stepId": step["step_id"],
+                "engine": step["engine"],
+                "prompt": step["prompt"],
+                "dependsOn": step.get("depends_on", []),
+            }
+            if step.get("repository"):
+                step_dto["repository"] = step["repository"]
+            if step.get("repositories"):
+                step_dto["repositories"] = step["repositories"]
+            if step.get("timeout_seconds") and step["timeout_seconds"] > 0:
+                step_dto["timeoutSeconds"] = step["timeout_seconds"]
+            if step.get("options"):
+                step_dto["options"] = step["options"]
+            steps_dto.append(step_dto)
+
+        json_data: Dict[str, Any] = {"Steps": steps_dto}
+        response = await self._make_authenticated_request(
+            "POST", "/jobs/orchestrated", json_data
+        )
+
+        if response.status_code in (200, 201):
+            return response.json()  # type: ignore[no-any-return]
+        elif response.status_code >= 500:
+            raise ClaudeServerError(f"Claude Server error: HTTP {response.status_code}")
+        else:
+            raise ClaudeServerError(
+                f"Orchestrated job creation failed: HTTP {response.status_code}"
+            )
+
+    async def create_competitive_job(
+        self,
+        prompt: str,
+        repositories: List[str],
+        engines: List[str],
+        distribution_strategy: Optional[str] = None,
+        min_success_threshold: Optional[int] = None,
+        approach_count: Optional[int] = None,
+        approach_timeout_seconds: Optional[int] = None,
+        decomposer: Optional[Dict[str, Any]] = None,
+        judge: Optional[Dict[str, Any]] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a competitive job with parallel competing agents.
+
+        Story #462: Competitive delegation mode.
+
+        Args:
+            prompt: Task description for competing agents.
+            repositories: List of repository aliases.
+            engines: List of engine names for competitors.
+            distribution_strategy: "round-robin" or "decomposer-decides".
+            min_success_threshold: Minimum successful approaches needed.
+            approach_count: Number of parallel approaches (2-10).
+            approach_timeout_seconds: Timeout per approach in seconds.
+            decomposer: Dict with engine config for decomposer step.
+            judge: Dict with engine config for judge step.
+            options: Additional options dict.
+
+        Returns:
+            Dictionary with job info including jobId.
+
+        Raises:
+            ClaudeServerError: On job creation failure.
+        """
+        json_data: Dict[str, Any] = {
+            "Prompt": prompt,
+            "Repositories": repositories,
+            "Engines": engines,
+        }
+
+        if distribution_strategy is not None:
+            json_data["DistributionStrategy"] = distribution_strategy
+        if min_success_threshold is not None:
+            json_data["MinSuccessThreshold"] = min_success_threshold
+        if approach_count is not None:
+            json_data["ApproachCount"] = approach_count
+        if approach_timeout_seconds is not None:
+            json_data["ApproachTimeoutSeconds"] = approach_timeout_seconds
+        if decomposer is not None:
+            json_data["Decomposer"] = decomposer
+        if judge is not None:
+            json_data["Judge"] = judge
+        if options is not None:
+            json_data["Options"] = options
+
+        response = await self._make_authenticated_request(
+            "POST", "/jobs/competitive", json_data
+        )
+
+        if response.status_code in (200, 201):
+            return response.json()  # type: ignore[no-any-return]
+        elif response.status_code >= 500:
+            raise ClaudeServerError(f"Claude Server error: HTTP {response.status_code}")
+        else:
+            raise ClaudeServerError(
+                f"Competitive job creation failed: HTTP {response.status_code}"
+            )
+
     # Story #732: Connection pool lifecycle management
 
     async def close(self) -> None:

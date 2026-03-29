@@ -480,8 +480,10 @@ class TestParameterValidation:
     @pytest.mark.asyncio
     async def test_valid_modes_are_recognized(self, power_user, mock_delegation_config):
         """
-        collaborative and competitive modes are recognized (not "invalid mode") even
-        though they return "not yet supported" error.
+        collaborative and competitive modes are recognized (not "invalid mode")
+        and return mode-specific validation errors when required params missing.
+
+        Story #462: modes now supported with proper validation.
         """
         from code_indexer.server.mcp.handlers import handle_execute_open_delegation
 
@@ -503,12 +505,13 @@ class TestParameterValidation:
 
             data = json.loads(response["content"][0]["text"])
             assert data["success"] is False
-            # Should say "not yet supported", not "invalid mode"
-            assert (
-                "not yet supported" in data["error"].lower()
-                or "supported" in data["error"].lower()
-            )
+            # Should return mode-specific validation error, not "invalid mode"
             assert "invalid" not in data["error"].lower()
+            # collaborative needs steps, competitive needs engines
+            if mode == "collaborative":
+                assert "steps" in data["error"].lower()
+            else:
+                assert "engines" in data["error"].lower()
 
 
 class TestModeRouting:
@@ -575,16 +578,17 @@ class TestModeRouting:
         assert data["job_id"] == "job-single-456"
 
     @pytest.mark.asyncio
-    async def test_collaborative_mode_returns_not_supported_error(
+    async def test_collaborative_mode_requires_steps(
         self, power_user, mock_delegation_config
     ):
         """
-        Collaborative mode returns "not yet supported" error without creating a job.
+        Collaborative mode without steps returns validation error.
 
-        Given mode="collaborative"
+        Story #462: collaborative mode now supported, requires steps parameter.
+
+        Given mode="collaborative" without steps
         When execute_open_delegation is called
-        Then it returns error "Mode not yet supported by Claude Server"
-        And no job is created
+        Then it returns validation error about missing steps
         """
         from code_indexer.server.mcp.handlers import handle_execute_open_delegation
 
@@ -605,22 +609,20 @@ class TestModeRouting:
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is False
-        assert (
-            "not yet supported" in data["error"].lower()
-            or "supported" in data["error"].lower()
-        )
+        assert "steps" in data["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_competitive_mode_returns_not_supported_error(
+    async def test_competitive_mode_requires_engines(
         self, power_user, mock_delegation_config
     ):
         """
-        Competitive mode returns "not yet supported" error without creating a job.
+        Competitive mode without engines returns validation error.
 
-        Given mode="competitive"
+        Story #462: competitive mode now supported, requires engines parameter.
+
+        Given mode="competitive" without engines
         When execute_open_delegation is called
-        Then it returns error without creating a job
-        And no fallback to single mode occurs
+        Then it returns validation error about missing engines
         """
         from code_indexer.server.mcp.handlers import handle_execute_open_delegation
 
@@ -641,10 +643,129 @@ class TestModeRouting:
 
         data = json.loads(response["content"][0]["text"])
         assert data["success"] is False
-        assert (
-            "not yet supported" in data["error"].lower()
-            or "supported" in data["error"].lower()
+        assert "engines" in data["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_collaborative_mode_creates_orchestrated_job(
+        self, power_user, mock_delegation_config, httpx_mock: HTTPXMock
+    ):
+        """
+        Collaborative mode with valid steps creates orchestrated job.
+
+        Story #462: collaborative mode dispatches to POST /jobs/orchestrated.
+        """
+        from code_indexer.server.mcp.handlers import handle_execute_open_delegation
+
+        httpx_mock.add_response(
+            method="POST",
+            url="https://claude-server.example.com/auth/login",
+            json={"access_token": "token", "token_type": "bearer"},
         )
+        httpx_mock.add_response(
+            method="POST",
+            url="https://claude-server.example.com/jobs/orchestrated",
+            json={"jobId": "orch-job-789", "status": "created"},
+            status_code=201,
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url="https://claude-server.example.com/jobs/orch-job-789/start",
+            json={"jobId": "orch-job-789", "status": "running"},
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "code_indexer.server.mcp.handlers._get_delegation_config",
+                lambda: mock_delegation_config,
+            )
+            mp.setattr(
+                "code_indexer.server.mcp.handlers._get_cidx_callback_base_url",
+                lambda: None,
+            )
+
+            response = await handle_execute_open_delegation(
+                {
+                    "prompt": "Build feature",
+                    "repositories": ["main-app"],
+                    "mode": "collaborative",
+                    "steps": [
+                        {
+                            "step_id": "analyze",
+                            "engine": "claude-code",
+                            "prompt": "Analyze code",
+                        },
+                        {
+                            "step_id": "implement",
+                            "engine": "codex",
+                            "prompt": "Implement changes",
+                            "depends_on": ["analyze"],
+                        },
+                    ],
+                },
+                power_user,
+            )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is True
+        assert data["job_id"] == "orch-job-789"
+
+    @pytest.mark.asyncio
+    async def test_competitive_mode_creates_competitive_job(
+        self, power_user, mock_delegation_config, httpx_mock: HTTPXMock
+    ):
+        """
+        Competitive mode with valid params creates competitive job.
+
+        Story #462: competitive mode dispatches to POST /jobs/competitive.
+        """
+        from code_indexer.server.mcp.handlers import handle_execute_open_delegation
+
+        httpx_mock.add_response(
+            method="POST",
+            url="https://claude-server.example.com/auth/login",
+            json={"access_token": "token", "token_type": "bearer"},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url="https://claude-server.example.com/repositories/main-app",
+            json={"name": "main-app", "cloneStatus": "completed"},
+            status_code=200,
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url="https://claude-server.example.com/jobs/competitive",
+            json={"jobId": "comp-job-789", "status": "created"},
+            status_code=201,
+        )
+        httpx_mock.add_response(
+            method="POST",
+            url="https://claude-server.example.com/jobs/comp-job-789/start",
+            json={"jobId": "comp-job-789", "status": "running"},
+        )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "code_indexer.server.mcp.handlers._get_delegation_config",
+                lambda: mock_delegation_config,
+            )
+            mp.setattr(
+                "code_indexer.server.mcp.handlers._get_cidx_callback_base_url",
+                lambda: None,
+            )
+
+            response = await handle_execute_open_delegation(
+                {
+                    "prompt": "Fix the bug",
+                    "repositories": ["main-app"],
+                    "mode": "competitive",
+                    "engines": ["claude-code", "codex"],
+                },
+                power_user,
+            )
+
+        data = json.loads(response["content"][0]["text"])
+        assert data["success"] is True
+        assert data["job_id"] == "comp-job-789"
 
 
 class TestDefaultValues:

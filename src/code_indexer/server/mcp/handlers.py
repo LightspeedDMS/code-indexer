@@ -13516,6 +13516,241 @@ def _get_repo_ready_timeout() -> float:
     return 300.0
 
 
+def _validate_collaborative_params(
+    args: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate collaborative mode parameters (DAG-based steps).
+
+    Story #462: Collaborative delegation mode validation.
+
+    Returns:
+        Error MCP response dict if validation fails, None if valid.
+    """
+    steps = args.get("steps")
+    if not steps or not isinstance(steps, list):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Collaborative mode requires non-empty 'steps' list",
+            }
+        )
+
+    if len(steps) > 10:
+        return _mcp_response(
+            {"success": False, "error": "Collaborative mode supports at most 10 steps"}
+        )
+
+    step_ids: List[str] = []
+    for i, step in enumerate(steps):
+        step_id = step.get("step_id")
+        if not step_id:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Step {i}: missing required field 'step_id'",
+                }
+            )
+        engine = step.get("engine")
+        if not engine:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Step '{step_id}': missing required field 'engine'",
+                }
+            )
+        if engine not in _VALID_DELEGATION_ENGINES:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Step '{step_id}': invalid engine '{engine}'. "
+                        f"Supported: {', '.join(sorted(_VALID_DELEGATION_ENGINES))}"
+                    ),
+                }
+            )
+        if not step.get("prompt"):
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": f"Step '{step_id}': missing required field 'prompt'",
+                }
+            )
+        if step_id in step_ids:
+            return _mcp_response(
+                {"success": False, "error": f"Duplicate step_id '{step_id}'"}
+            )
+        step_ids.append(step_id)
+
+    step_id_set = set(step_ids)
+    depended_on: set = set()
+    for step in steps:
+        deps = step.get("depends_on", [])
+        for dep in deps:
+            if dep == step["step_id"]:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": f"Step '{step['step_id']}' depends on itself",
+                    }
+                )
+            if dep not in step_id_set:
+                return _mcp_response(
+                    {
+                        "success": False,
+                        "error": f"Step '{step['step_id']}' depends on '{dep}' which does not exist",
+                    }
+                )
+            depended_on.add(dep)
+
+    terminal_steps = [sid for sid in step_ids if sid not in depended_on]
+    if len(terminal_steps) != 1:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Collaborative DAG must have exactly 1 terminal step, "
+                    f"found {len(terminal_steps)}: {', '.join(terminal_steps)}"
+                ),
+            }
+        )
+
+    # Cycle detection via DFS
+    step_deps = {s["step_id"]: s.get("depends_on", []) for s in steps}
+    visited: set = set()
+    in_stack: set = set()
+
+    def _has_cycle(node_id: str) -> bool:
+        visited.add(node_id)
+        in_stack.add(node_id)
+        for dep in step_deps.get(node_id, []):
+            if dep in in_stack:
+                return True
+            if dep not in visited and _has_cycle(dep):
+                return True
+        in_stack.discard(node_id)
+        return False
+
+    for sid in step_ids:
+        if sid not in visited:
+            if _has_cycle(sid):
+                return _mcp_response(
+                    {"success": False, "error": "collaborative DAG contains a cycle"}
+                )
+
+    return None
+
+
+_VALID_DISTRIBUTION_STRATEGIES = {"round-robin", "decomposer-decides"}
+_DEFAULT_APPROACH_COUNT = 3
+
+
+def _validate_competitive_params(
+    args: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Validate competitive mode parameters.
+
+    Story #462: Competitive delegation mode validation.
+
+    Returns:
+        Error MCP response dict if validation fails, None if valid.
+    """
+    engines = args.get("engines")
+    if not engines or not isinstance(engines, list) or len(engines) == 0:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Competitive mode requires non-empty 'engines' list",
+            }
+        )
+
+    for eng in engines:
+        if eng not in _VALID_DELEGATION_ENGINES:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Invalid engine '{eng}' in engines list. "
+                        f"Supported: {', '.join(sorted(_VALID_DELEGATION_ENGINES))}"
+                    ),
+                }
+            )
+
+    dist_strategy = args.get("distribution_strategy")
+    if (
+        dist_strategy is not None
+        and dist_strategy not in _VALID_DISTRIBUTION_STRATEGIES
+    ):
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Invalid distribution_strategy '{dist_strategy}'. "
+                    f"Supported: {', '.join(sorted(_VALID_DISTRIBUTION_STRATEGIES))}"
+                ),
+            }
+        )
+
+    approach_count = args.get("approach_count")
+    effective_approach_count = (
+        approach_count if approach_count is not None else _DEFAULT_APPROACH_COUNT
+    )
+    if approach_count is not None and (approach_count < 2 or approach_count > 10):
+        return _mcp_response(
+            {"success": False, "error": "approach_count must be between 2 and 10"}
+        )
+
+    min_threshold = args.get("min_success_threshold")
+    if min_threshold is not None:
+        if min_threshold < 1 or min_threshold > effective_approach_count:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"min_success_threshold must be between 1 and "
+                        f"{effective_approach_count} (approach_count)"
+                    ),
+                }
+            )
+
+    timeout_secs = args.get("approach_timeout_seconds")
+    if timeout_secs is not None and timeout_secs < 1:
+        return _mcp_response(
+            {"success": False, "error": "approach_timeout_seconds must be >= 1"}
+        )
+
+    decomposer = args.get("decomposer")
+    if decomposer is not None:
+        dec_engine = decomposer.get("engine", "")
+        if dec_engine not in _VALID_DELEGATION_ENGINES:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Invalid decomposer engine '{dec_engine}'. "
+                        f"Supported: {', '.join(sorted(_VALID_DELEGATION_ENGINES))}"
+                    ),
+                }
+            )
+
+    judge = args.get("judge")
+    if judge is not None:
+        judge_engine = judge.get("engine", "")
+        if judge_engine not in _VALID_DELEGATION_ENGINES:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Invalid judge engine '{judge_engine}'. "
+                        f"Supported: {', '.join(sorted(_VALID_DELEGATION_ENGINES))}"
+                    ),
+                }
+            )
+
+    return None
+
+
 def _validate_open_delegation_params(
     args: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
@@ -13525,6 +13760,24 @@ def _validate_open_delegation_params(
     Returns:
         Error MCP response dict if validation fails, None if all params are valid.
     """
+    # Check mode first — different modes have different required fields
+    mode = args.get("mode", _DEFAULT_DELEGATION_MODE)
+    if mode not in _VALID_DELEGATION_MODES:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": (
+                    f"Invalid mode '{mode}'. "
+                    f"Supported: {', '.join(sorted(_VALID_DELEGATION_MODES))}"
+                ),
+            }
+        )
+
+    # Mode-specific validation — collaborative has per-step fields, not top-level
+    if mode == "collaborative":
+        return _validate_collaborative_params(args)
+
+    # Top-level prompt/repositories/engine required for single and competitive modes
     prompt = args.get("prompt", "")
     if not prompt:
         return _mcp_response(
@@ -13551,29 +13804,10 @@ def _validate_open_delegation_params(
                 ),
             }
         )
+    elif mode == "competitive":
+        return _validate_competitive_params(args)
 
-    mode = args.get("mode", _DEFAULT_DELEGATION_MODE)
-    if mode not in _VALID_DELEGATION_MODES:
-        return _mcp_response(
-            {
-                "success": False,
-                "error": (
-                    f"Invalid mode '{mode}'. "
-                    f"Supported: {', '.join(sorted(_VALID_DELEGATION_MODES))}"
-                ),
-            }
-        )
-
-    # Mode routing: only single is currently supported
-    if mode in ("collaborative", "competitive"):
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Mode '{mode}' not yet supported by Claude Server",
-            }
-        )
-
-    return None  # All params valid
+    return None  # All params valid (single mode)
 
 
 async def _register_open_delegation_callback(client: Any, job_id: str) -> None:
@@ -13669,6 +13903,175 @@ async def _submit_open_delegation_job(
     return _mcp_response({"success": True, "job_id": job_id})
 
 
+async def _submit_collaborative_delegation_job(
+    client: Any,
+    steps: List[Dict[str, Any]],
+    guardrails_text: str,
+    guardrails_repo: Optional[str],
+    repo_ready_timeout: float,
+) -> Dict[str, Any]:
+    """
+    Check repo readiness, apply guardrails, create orchestrated job, start it.
+
+    Story #462: Collaborative delegation mode.
+
+    Returns:
+        MCP response dict (success with job_id, or error).
+    """
+    # Collect unique repos from all steps
+    all_repos: List[str] = []
+    for step in steps:
+        if step.get("repository") and step["repository"] not in all_repos:
+            all_repos.append(step["repository"])
+        for r in step.get("repositories", []):
+            if r not in all_repos:
+                all_repos.append(r)
+
+    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    for alias in all_repos:
+        git_url: Optional[str] = None
+        branch = "main"
+        if golden_repo_manager:
+            try:
+                golden_repo = golden_repo_manager.get_golden_repo(alias)
+                if golden_repo:
+                    git_url = golden_repo.repo_url or None
+                    branch = golden_repo.default_branch or "main"
+            except Exception as e:
+                logger.debug(f"Could not retrieve golden repo info for '{alias}': {e}")
+        ready = await client.wait_for_repo_ready(
+            alias=alias,
+            timeout=repo_ready_timeout,
+            git_url=git_url,
+            branch=branch,
+            poll_interval=_REPO_READY_POLL_INTERVAL,
+        )
+        if not ready:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Repository '{alias}' failed to become ready "
+                        f"within timeout ({int(repo_ready_timeout)}s)"
+                    ),
+                }
+            )
+
+    # Apply guardrails to each step prompt
+    prepared_steps = []
+    for step in steps:
+        prepared = dict(step)
+        if guardrails_text:
+            prepared["prompt"] = guardrails_text + step["prompt"]
+        prepared_steps.append(prepared)
+
+    # Append guardrails repo to each step's repositories list
+    if guardrails_repo:
+        for step in prepared_steps:
+            repos = step.get("repositories", [])
+            if guardrails_repo not in repos:
+                repos.append(guardrails_repo)
+                step["repositories"] = repos
+
+    job_result = await client.create_orchestrated_job(prepared_steps)
+    job_id = job_result.get("jobId") or job_result.get("job_id")
+    if not job_id:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Orchestrated job created but no job_id returned",
+            }
+        )
+
+    await _register_open_delegation_callback(client, job_id)
+
+    from ..services.delegation_job_tracker import DelegationJobTracker
+
+    tracker = DelegationJobTracker.get_instance()
+    await tracker.register_job(job_id)
+    await client.start_job(job_id)
+
+    return _mcp_response({"success": True, "job_id": job_id})
+
+
+async def _submit_competitive_delegation_job(
+    client: Any,
+    prompt: str,
+    repositories: List[str],
+    args: Dict[str, Any],
+    repo_ready_timeout: float,
+) -> Dict[str, Any]:
+    """
+    Check repo readiness, create competitive job, start it.
+
+    Story #462: Competitive delegation mode.
+    Caller applies guardrails to prompt before passing it here.
+
+    Returns:
+        MCP response dict (success with job_id, or error).
+    """
+    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    for alias in repositories:
+        git_url: Optional[str] = None
+        branch = "main"
+        if golden_repo_manager:
+            try:
+                golden_repo = golden_repo_manager.get_golden_repo(alias)
+                if golden_repo:
+                    git_url = golden_repo.repo_url or None
+                    branch = golden_repo.default_branch or "main"
+            except Exception as e:
+                logger.debug(f"Could not retrieve golden repo info for '{alias}': {e}")
+        ready = await client.wait_for_repo_ready(
+            alias=alias,
+            timeout=repo_ready_timeout,
+            git_url=git_url,
+            branch=branch,
+            poll_interval=_REPO_READY_POLL_INTERVAL,
+        )
+        if not ready:
+            return _mcp_response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Repository '{alias}' failed to become ready "
+                        f"within timeout ({int(repo_ready_timeout)}s)"
+                    ),
+                }
+            )
+
+    job_result = await client.create_competitive_job(
+        prompt=prompt,
+        repositories=repositories,
+        engines=args.get("engines", []),
+        distribution_strategy=args.get("distribution_strategy"),
+        min_success_threshold=args.get("min_success_threshold"),
+        approach_count=args.get("approach_count"),
+        approach_timeout_seconds=args.get("approach_timeout_seconds"),
+        decomposer=args.get("decomposer"),
+        judge=args.get("judge"),
+        options=args.get("options"),
+    )
+    job_id = job_result.get("jobId") or job_result.get("job_id")
+    if not job_id:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "Competitive job created but no job_id returned",
+            }
+        )
+
+    await _register_open_delegation_callback(client, job_id)
+
+    from ..services.delegation_job_tracker import DelegationJobTracker
+
+    tracker = DelegationJobTracker.get_instance()
+    await tracker.register_job(job_id)
+    await client.start_job(job_id)
+
+    return _mcp_response({"success": True, "job_id": job_id})
+
+
 async def handle_execute_open_delegation(
     args: Dict[str, Any], user: User, *, session_state=None
 ) -> Dict[str, Any]:
@@ -13746,15 +14149,33 @@ async def handle_execute_open_delegation(
             password=delegation_config.claude_server_credential,
             skip_ssl_verify=delegation_config.skip_ssl_verify,
         ) as client:
-            result = await _submit_open_delegation_job(
-                client=client,
-                prompt=effective_prompt,
-                repositories=repositories,
-                engine=engine,
-                model=args.get("model"),
-                job_timeout=args.get("timeout"),
-                repo_ready_timeout=_get_repo_ready_timeout(),
-            )
+            repo_ready_timeout = _get_repo_ready_timeout()
+            if mode == "collaborative":
+                result = await _submit_collaborative_delegation_job(
+                    client=client,
+                    steps=args.get("steps", []),
+                    guardrails_text=guardrails_text,
+                    guardrails_repo=guardrails_repo_alias,
+                    repo_ready_timeout=repo_ready_timeout,
+                )
+            elif mode == "competitive":
+                result = await _submit_competitive_delegation_job(
+                    client=client,
+                    prompt=effective_prompt,
+                    repositories=repositories,
+                    args=args,
+                    repo_ready_timeout=repo_ready_timeout,
+                )
+            else:
+                result = await _submit_open_delegation_job(
+                    client=client,
+                    prompt=effective_prompt,
+                    repositories=repositories,
+                    engine=engine,
+                    model=args.get("model"),
+                    job_timeout=args.get("timeout"),
+                    repo_ready_timeout=repo_ready_timeout,
+                )
 
         # Story #458: Audit trail — log after successful job creation
         try:
