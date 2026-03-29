@@ -26,6 +26,7 @@ _ADMIN_ROUTE = "/admin/"
 _VERIFY_ROUTE = "/admin/mfa/verify"
 
 mfa_router = APIRouter(prefix="/admin/mfa", tags=["mfa"])
+user_mfa_router = APIRouter(tags=["user-mfa"])
 _totp_service = None
 
 
@@ -58,6 +59,20 @@ def _get_session_username(request: Request) -> Optional[str]:
     return str(session.username)
 
 
+def _get_any_session_username(request: Request) -> Optional[str]:
+    """Extract username from any authenticated session (not just admin)."""
+    from ..web.auth import get_session_manager
+
+    try:
+        session_mgr = get_session_manager()
+    except RuntimeError:
+        return None
+    session = session_mgr.get_session(request)
+    if session is None:
+        return None
+    return str(session.username)
+
+
 def _render_setup(
     qr_b64: str,
     manual_key: str,
@@ -66,6 +81,9 @@ def _render_setup(
     error: str = "",
     success: str = "",
     show_mode: bool = False,
+    verify_route: str = "/admin/mfa/verify",
+    back_link: str = "/admin/users",
+    recovery_link_prefix: str = "/admin/mfa",
 ) -> str:
     """Render MFA setup or show-QR HTML inline.
 
@@ -93,20 +111,20 @@ def _render_setup(
         success_msg = "<div style='color:#44ff44;background:#0a2a0a;padding:10px;border-radius:6px;margin:10px 0'>MFA is enabled. Scan this QR code to add to another authenticator device.</div>"
         form_section = (
             "<p>Test your authenticator (optional):</p>"
-            f"<form method='POST' action='{_VERIFY_ROUTE}'>"
+            f"<form method='POST' action='{verify_route}'>"
             f"<input type='hidden' name='csrf_token' value='{csrf}'>"
             f"<input type='hidden' name='target_user' value='{target_user}'>"
             "<input type='hidden' name='test_only' value='1'>"
             "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code'>"
             "<button type='submit' style='background:#333;color:#fff'>Test Code</button></form>"
-            f"<a href='/admin/mfa/recovery-codes?user={target_user}' style='display:block;text-align:center;padding:12px;margin-top:10px;background:#444;color:#fff;border-radius:6px;text-decoration:none'>View Recovery Codes</a>"
+            f"<a href='{recovery_link_prefix}/recovery-codes?user={target_user}' style='display:block;text-align:center;padding:12px;margin-top:10px;background:#444;color:#fff;border-radius:6px;text-decoration:none'>View Recovery Codes</a>"
         )
     else:
         title = "Set Up Two-Factor Authentication"
         success_msg = ""
         form_section = (
             "<p>Enter the 6-digit code from your app to verify:</p>"
-            f"<form method='POST' action='{_VERIFY_ROUTE}'>"
+            f"<form method='POST' action='{verify_route}'>"
             f"<input type='hidden' name='csrf_token' value='{csrf}'>"
             f"<input type='hidden' name='target_user' value='{target_user}'>"
             "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' autofocus required>"
@@ -136,12 +154,12 @@ def _render_setup(
         "<p class='info'>Or enter this key manually:</p>"
         f"<div class='mk'>{manual_key}</div>"
         f"{form_section}"
-        f"<a href='{_ADMIN_ROUTE}users' class='back'>Back to Users</a>"
+        f"<a href='{back_link}' class='back'>Back</a>"
         "</div></body></html>"
     )
 
 
-def _render_recovery_codes(codes: List[str]) -> str:
+def _render_recovery_codes(codes: List[str], done_link: str = "/admin/") -> str:
     """Render recovery codes HTML inline."""
     codes_html = "".join(f"<div style='color:#00d4ff'>{c}</div>" for c in codes)
     return (
@@ -156,7 +174,7 @@ def _render_recovery_codes(codes: List[str]) -> str:
         "<h1>MFA Activated Successfully</h1>"
         "<div class='warn'>Save these recovery codes in a secure location. Each code can only be used once.</div>"
         f"<div class='codes'>{codes_html}</div>"
-        f"<a href='{_ADMIN_ROUTE}' class='done'>I Have Saved These Codes</a>"
+        f"<a href='{done_link}' class='done'>I Have Saved These Codes</a>"
         "</div></body></html>"
     )
 
@@ -326,6 +344,151 @@ def mfa_disable(request: Request, totp_code: str = Form(...)):
 
     logger.info("MFA disabled for user %s", username)
     return RedirectResponse(_ADMIN_ROUTE, status_code=303)
+
+
+# ==============================================================================
+# User (non-admin) MFA Routes
+# ==============================================================================
+
+_USER_MFA_VERIFY_ROUTE = "/user/mfa/verify"
+_USER_BACK_LINK = "/user/api-keys"
+_USER_RECOVERY_PREFIX = "/user/mfa"
+
+
+@user_mfa_router.get("/setup", response_class=HTMLResponse)
+def user_mfa_setup_page(request: Request, mode: Optional[str] = None):
+    """Show MFA setup page for the authenticated user (self-only)."""
+    username = _get_any_session_username(request)
+    if not username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    if mode == "show":
+        uri = _totp_service.get_provisioning_uri(username)
+        if uri is None:
+            return HTMLResponse(f"No MFA configured for {username}", status_code=404)
+    else:
+        secret = _totp_service.generate_secret(username)
+        if secret is None:
+            return HTMLResponse("Failed to generate secret", status_code=500)
+        uri = _totp_service.get_provisioning_uri(username)
+        if uri is None:
+            return HTMLResponse("Failed to generate URI", status_code=500)
+
+    qr_bytes = _totp_service.generate_qr_code(uri)
+    if qr_bytes is None:
+        return HTMLResponse("Failed to generate QR code", status_code=500)
+    manual_key = _totp_service.get_manual_entry_key(username)
+    if manual_key is None:
+        return HTMLResponse("Failed to get manual entry key", status_code=500)
+
+    is_show = mode == "show"
+    verified = request.query_params.get("verified") == "1"
+    qr_b64 = base64.b64encode(qr_bytes).decode()
+    csrf = request.cookies.get("csrf_token", "")
+    return HTMLResponse(
+        _render_setup(
+            qr_b64,
+            manual_key,
+            csrf,
+            username,
+            show_mode=is_show,
+            success="Code verified successfully!" if verified else "",
+            verify_route=_USER_MFA_VERIFY_ROUTE,
+            back_link=_USER_BACK_LINK,
+            recovery_link_prefix=_USER_RECOVERY_PREFIX,
+        )
+    )
+
+
+@user_mfa_router.post("/verify", response_class=HTMLResponse)
+def user_mfa_verify(
+    request: Request,
+    totp_code: str = Form(...),
+    test_only: Optional[str] = Form(None),
+):
+    """Verify TOTP code for session user (self-only, no target_user).
+
+    test_only mode: verifies code without activating, redirects to show mode.
+    Activation mode: activates MFA, shows recovery codes with done link.
+    """
+    username = _get_any_session_username(request)
+    if not username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    if test_only:
+        if _totp_service.verify_code(username, totp_code):
+            return RedirectResponse(
+                "/user/mfa/setup?mode=show&verified=1",
+                status_code=303,
+            )
+        return _render_qr_error(username, "Invalid code.", show_mode=True)
+
+    if _totp_service.activate_mfa(username, totp_code):
+        codes = _totp_service.generate_recovery_codes(username)
+        if codes is None:
+            return HTMLResponse("Failed to generate recovery codes", status_code=500)
+        logger.info("MFA activated for user %s (self-service)", username)
+        return HTMLResponse(_render_recovery_codes(codes, done_link=_USER_BACK_LINK))
+
+    return _render_qr_error(
+        username, "Invalid verification code. Please try again.", show_mode=False
+    )
+
+
+@user_mfa_router.get("/recovery-codes", response_class=HTMLResponse)
+def user_mfa_recovery_codes_page(request: Request):
+    """Regenerate and display recovery codes for session user (self-only)."""
+    username = _get_any_session_username(request)
+    if not username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    codes = _totp_service.generate_recovery_codes(username)
+    if codes is None:
+        return HTMLResponse("Failed to generate recovery codes", status_code=500)
+    logger.info("Recovery codes regenerated for %s (self-service)", username)
+    return HTMLResponse(_render_recovery_codes(codes, done_link=_USER_BACK_LINK))
+
+
+@user_mfa_router.post("/disable", response_class=HTMLResponse)
+def user_mfa_disable(request: Request, totp_code: str = Form(...)):
+    """Disable MFA for session user (self-only). Requires valid TOTP or recovery code."""
+    username = _get_any_session_username(request)
+    if not username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    valid = _totp_service.verify_code(
+        username, totp_code
+    ) or _totp_service.verify_recovery_code(username, totp_code)
+    if not valid:
+        return HTMLResponse("Invalid code. MFA was NOT disabled.", status_code=400)
+
+    try:
+        _totp_service.disable_mfa(username)
+    except Exception as e:
+        logger.error("Failed to disable MFA for %s: %s", username, e)
+        return HTMLResponse("Failed to disable MFA", status_code=500)
+
+    logger.info("MFA disabled for user %s (self-service)", username)
+    return RedirectResponse(_USER_BACK_LINK, status_code=303)
+
+
+@user_mfa_router.get("/status")
+def user_mfa_status(request: Request):
+    """Check MFA status for current user (JSON, self-only)."""
+    username = _get_any_session_username(request)
+    if not username:
+        return {"error": "not_authenticated"}
+    if _totp_service is None:
+        return {"error": "mfa_service_unavailable"}
+    return {"username": username, "mfa_enabled": _totp_service.is_mfa_enabled(username)}
 
 
 # ==============================================================================
