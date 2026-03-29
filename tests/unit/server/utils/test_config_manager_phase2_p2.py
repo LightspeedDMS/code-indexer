@@ -333,6 +333,8 @@ class TestWebSecurityConfig:
         assert data == {
             "csrf_max_age_seconds": 600,
             "web_session_timeout_seconds": 28800,
+            "admin_session_timeout_seconds": 3600,
+            "restrict_non_sso_to_web_ui": False,
         }
 
     def test_validation_csrf_max_age_range(self):

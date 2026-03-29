@@ -373,6 +373,9 @@ class WebSecurityConfig:
     web_session_timeout_seconds: int = 28800
     # Story #564: Admin session timeout in seconds (default 3600s/1hr, range 300-86400s)
     admin_session_timeout_seconds: int = 3600
+    # Story #563: When True, non-SSO accounts are denied REST/MCP API access (403).
+    # They can only use the Web UI. SSO accounts are unaffected. Default OFF.
+    restrict_non_sso_to_web_ui: bool = False
 
 
 @dataclass

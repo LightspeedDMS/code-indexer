@@ -19,6 +19,7 @@ from code_indexer.server.logging_utils import format_error_log
 if TYPE_CHECKING:
     from .oauth.oauth_manager import OAuthManager
     from .mcp_credential_manager import MCPCredentialManager
+    from code_indexer.server.utils.config_manager import ServerConfig
 
 
 # Global instances (will be initialized by app)
@@ -28,6 +29,8 @@ oauth_manager: Optional["OAuthManager"] = (
     None  # Forward reference to avoid circular dependency
 )
 mcp_credential_manager: Optional["MCPCredentialManager"] = None
+# Story #563: Server config reference for non-SSO API restriction check
+server_config: Optional["ServerConfig"] = None
 
 # Security scheme for bearer token authentication
 # auto_error=False allows us to handle missing credentials manually and return 401 per MCP spec
@@ -54,6 +57,35 @@ def _build_www_authenticate_header() -> str:
     else:
         # Fallback to basic Bearer with realm if oauth_manager not initialized
         return 'Bearer realm="mcp"'
+
+
+def _check_non_sso_api_restriction(user: User) -> None:
+    """Check if non-SSO user is restricted from REST/MCP API access.
+
+    Story #563: When restrict_non_sso_to_web_ui is enabled, non-SSO accounts
+    are denied access to REST API and MCP endpoints (HTTP 403).
+    SSO accounts are unaffected. Web UI routes are not affected because
+    they use session-based auth via _hybrid_auth_impl(), not get_current_user().
+
+    Args:
+        user: Authenticated user to check
+
+    Raises:
+        HTTPException: 403 if user is non-SSO and restriction is enabled
+    """
+    if server_config is None:
+        return
+    web_sec = server_config.web_security_config
+    if web_sec is None:
+        return
+    if not web_sec.restrict_non_sso_to_web_ui:
+        return
+    # Check if user is non-SSO (no OIDC identity)
+    if user_manager and not user_manager.is_sso_user(user.username):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Non-SSO accounts are restricted to Web UI access only",
+        )
 
 
 def _validate_jwt_and_get_user(token: str) -> User:
@@ -198,7 +230,9 @@ def get_current_user(
         token = request.cookies.get("cidx_session")
         if token:
             # Validate cookie JWT using same logic as Bearer
-            return _validate_jwt_and_get_user(token)
+            user = _validate_jwt_and_get_user(token)
+            _check_non_sso_api_restriction(user)
+            return user
         # No auth method available
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -215,17 +249,20 @@ def get_current_user(
             # Valid OAuth token - get user
             username = oauth_result.get("user_id")
             if username:
-                user = user_manager.get_user(username)
+                user = user_manager.get_user(username)  # type: ignore[assignment]
                 if user is None:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="User not found",
                         headers={"WWW-Authenticate": _build_www_authenticate_header()},
                     )
+                _check_non_sso_api_restriction(user)
                 return user
 
     # Fallback to JWT validation
-    return _validate_jwt_and_get_user(token)
+    user = _validate_jwt_and_get_user(token)
+    _check_non_sso_api_restriction(user)
+    return user
 
 
 def require_permission(permission: str):
@@ -451,8 +488,11 @@ def get_current_user_web_or_api(
     # Priority 2: Fall back to JWT/Bearer authentication
     try:
         return get_current_user(request, credentials)
-    except HTTPException:
-        # Re-raise with proper WWW-Authenticate header
+    except HTTPException as exc:
+        # Story #563: Let 403 (non-SSO restriction) pass through unchanged
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            raise
+        # Re-raise auth failures with proper WWW-Authenticate header
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
@@ -493,8 +533,11 @@ async def get_current_user_for_mcp(request: Request) -> User:
 
     try:
         return get_current_user(request, credentials)
-    except HTTPException:
-        # Re-raise with proper WWW-Authenticate header
+    except HTTPException as exc:
+        # Story #563: Let 403 (non-SSO restriction) pass through unchanged
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            raise
+        # Re-raise auth failures with proper WWW-Authenticate header
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
