@@ -439,6 +439,26 @@ async def authorize_endpoint(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
         )
 
+    # Story #562: MFA enforcement -- check before generating auth code
+    from code_indexer.server.web.mfa_routes import get_totp_service
+
+    totp_svc = get_totp_service()
+    if totp_svc and totp_svc.is_mfa_enabled(user.username):
+        from code_indexer.server.auth.mfa_challenge import mfa_challenge_manager
+        from code_indexer.server.web.mfa_routes import render_oauth_mfa_challenge_page
+
+        challenge_token = mfa_challenge_manager.create_challenge(
+            username=user.username,
+            role=user.role.value,
+            client_ip=ip_address,
+            redirect_url="/oauth/authorize",
+            oauth_client_id=client_id,
+            oauth_redirect_uri=redirect_uri,
+            oauth_code_challenge=code_challenge,
+            oauth_state=state,
+        )
+        return render_oauth_mfa_challenge_page(challenge_token)
+
     try:
         # Generate authorization code
         code = manager.generate_authorization_code(
@@ -465,6 +485,97 @@ async def authorize_endpoint(
         else:
             # Programmatic flow: return JSON response
             return {"code": code, "state": state}
+
+    except OAuthError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/mfa/verify")
+def oauth_mfa_verify(
+    http_request: Request,
+    challenge_token: str = Form(...),
+    totp_code: Optional[str] = Form(None),
+    recovery_code: Optional[str] = Form(None),
+    manager: OAuthManager = Depends(get_oauth_manager),
+):
+    """Verify TOTP/recovery code and complete OAuth authorization (Story #562).
+
+    Consumes the MFA challenge token, verifies the code, then generates
+    an OAuth authorization code and redirects to the client callback.
+    Uses consume-first pattern to prevent TOCTOU race conditions.
+    """
+    from code_indexer.server.auth.mfa_challenge import mfa_challenge_manager
+    from code_indexer.server.web.mfa_routes import get_totp_service
+
+    totp_svc = get_totp_service()
+    if totp_svc is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MFA service not available",
+        )
+
+    # Consume-first: atomically remove token before verifying
+    challenge = mfa_challenge_manager.consume(challenge_token)
+    if challenge is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA challenge expired or invalid. Please re-authenticate.",
+        )
+
+    # Validate client IP matches
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    if challenge.client_ip != client_ip:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="MFA challenge expired or invalid. Please re-authenticate.",
+        )
+
+    # Verify that this is an OAuth challenge (has OAuth context)
+    if not challenge.oauth_client_id or not challenge.oauth_state:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid challenge type for OAuth flow.",
+        )
+
+    # Verify TOTP or recovery code
+    verified = False
+    if recovery_code:
+        verified = totp_svc.verify_recovery_code(
+            challenge.username, recovery_code, ip_address=client_ip
+        )
+    elif totp_code:
+        verified = totp_svc.verify_code(challenge.username, totp_code)
+
+    if not verified:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid verification code. Please re-authenticate.",
+        )
+
+    # Generate OAuth authorization code using stored context
+    try:
+        code = manager.generate_authorization_code(
+            client_id=challenge.oauth_client_id,
+            user_id=challenge.username,
+            code_challenge=challenge.oauth_code_challenge,
+            redirect_uri=challenge.oauth_redirect_uri,
+            state=challenge.oauth_state,
+        )
+
+        # Audit log
+        ip_address = http_request.client.host if http_request.client else "unknown"
+        user_agent = http_request.headers.get("user-agent")
+        password_audit_logger.log_oauth_authorization(
+            username=challenge.username,
+            client_id=challenge.oauth_client_id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+
+        redirect_url = (
+            f"{challenge.oauth_redirect_uri}?code={code}&state={challenge.oauth_state}"
+        )
+        return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

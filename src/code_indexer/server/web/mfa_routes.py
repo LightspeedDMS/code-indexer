@@ -402,6 +402,77 @@ def render_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
     return response
 
 
+def render_oauth_mfa_challenge_page(token: str, error: str = "") -> HTMLResponse:
+    """Render the TOTP challenge page for the OAuth authorization flow (Story #562).
+
+    Posts to /oauth/mfa/verify instead of /admin/mfa/challenge/verify so
+    the OAuth authorization completes after TOTP verification.
+    Returns HTMLResponse with X-Frame-Options: DENY to prevent clickjacking.
+    """
+    safe_error = html_module.escape(error) if error else ""
+    safe_token = html_module.escape(token)
+    err = (
+        f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{safe_error}</div>'
+        if safe_error
+        else ""
+    )
+    html = (
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        "<title>Two-Factor Authentication - CIDX</title>"
+        "<style>body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}"
+        ".c{max-width:400px;margin:60px auto;background:#16213e;border-radius:12px;padding:30px}"
+        "h1{color:#00d4ff;font-size:1.3em;text-align:center}"
+        ".info{color:#999;font-size:0.9em;margin:15px 0;text-align:center}"
+        "input[type=text]{width:100%;padding:14px;font-size:1.4em;text-align:center;letter-spacing:10px;"
+        "border:2px solid #333;border-radius:6px;background:#0a0a23;color:#fff;box-sizing:border-box}"
+        "button{width:100%;padding:12px;margin-top:15px;background:#00d4ff;color:#000;border:none;"
+        "border-radius:6px;font-size:1em;cursor:pointer;font-weight:bold}"
+        "button:hover{background:#00b8d4}"
+        ".toggle{color:#00d4ff;text-decoration:none;display:block;text-align:center;margin-top:15px;"
+        "font-size:0.9em;cursor:pointer}"
+        ".hidden{display:none}"
+        "a.back{color:#666;text-decoration:none;display:block;margin-top:20px;text-align:center;"
+        "font-size:0.85em}"
+        "</style>"
+        "<script>"
+        "function toggleRecovery(){"
+        "var t=document.getElementById('totp-section');"
+        "var r=document.getElementById('recovery-section');"
+        "if(r.classList.contains('hidden')){r.classList.remove('hidden');t.classList.add('hidden');}"
+        "else{t.classList.remove('hidden');r.classList.add('hidden');}}"
+        "</script>"
+        "</head><body><div class='c'>"
+        "<h1>Two-Factor Authentication</h1>"
+        "<p class='info'>Enter the code from your authenticator app</p>"
+        f"{err}"
+        f"<div id='totp-section'>"
+        f"<form method='POST' action='/oauth/mfa/verify'>"
+        f"<input type='hidden' name='challenge_token' value='{safe_token}'>"
+        "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' "
+        "placeholder='000000' autocomplete='one-time-code' autofocus required>"
+        "<button type='submit'>Verify</button>"
+        "</form>"
+        "<span class='toggle' onclick='toggleRecovery()'>Use recovery code instead</span>"
+        "</div>"
+        f"<div id='recovery-section' class='hidden'>"
+        f"<form method='POST' action='/oauth/mfa/verify'>"
+        f"<input type='hidden' name='challenge_token' value='{safe_token}'>"
+        "<p class='info'>Enter one of your recovery codes</p>"
+        "<input type='text' name='recovery_code' placeholder='XXXX-XXXX-XXXX-XXXX' "
+        "style='letter-spacing:2px;font-size:1em' required>"
+        "<button type='submit'>Verify Recovery Code</button>"
+        "</form>"
+        "<span class='toggle' onclick='toggleRecovery()'>Use authenticator code instead</span>"
+        "</div>"
+        "<a href='/login' class='back'>Cancel and return to login</a>"
+        "</div></body></html>"
+    )
+    response = HTMLResponse(html)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    return response
+
+
 @mfa_router.post("/challenge/verify", response_class=HTMLResponse)
 def mfa_challenge_verify(
     request: Request,

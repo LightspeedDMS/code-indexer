@@ -29,6 +29,13 @@ class MfaChallenge:
     created_at: float
     attempt_count: int = 0
     redirect_url: str = "/admin/"
+    # OAuth context fields (Story #562): stored when MFA is triggered
+    # during the OAuth authorization flow so the auth code can be
+    # generated after TOTP verification.
+    oauth_client_id: Optional[str] = None
+    oauth_redirect_uri: Optional[str] = None
+    oauth_code_challenge: Optional[str] = None
+    oauth_state: Optional[str] = None
 
 
 class MfaChallengeManager:
@@ -54,10 +61,16 @@ class MfaChallengeManager:
         role: str,
         client_ip: str,
         redirect_url: str = "/admin/",
+        oauth_client_id: Optional[str] = None,
+        oauth_redirect_uri: Optional[str] = None,
+        oauth_code_challenge: Optional[str] = None,
+        oauth_state: Optional[str] = None,
     ) -> str:
         """Create a new challenge token for a password-verified user.
 
         Returns the opaque token string to embed in the challenge form.
+        OAuth parameters are stored when the challenge originates from
+        an OAuth authorization flow (Story #562).
         """
         token = secrets.token_urlsafe(32)
         challenge = MfaChallenge(
@@ -66,6 +79,10 @@ class MfaChallengeManager:
             client_ip=client_ip,
             created_at=time.time(),
             redirect_url=redirect_url,
+            oauth_client_id=oauth_client_id,
+            oauth_redirect_uri=oauth_redirect_uri,
+            oauth_code_challenge=oauth_code_challenge,
+            oauth_state=oauth_state,
         )
         with self._lock:
             self._cleanup_expired()
