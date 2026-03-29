@@ -35,6 +35,14 @@ def set_totp_service(service) -> None:  # type: ignore[no-untyped-def]
     _totp_service = service
 
 
+def get_totp_service():  # type: ignore[no-untyped-def]
+    """Public accessor for the TOTPService instance.
+
+    Returns None if the service hasn't been initialized yet.
+    """
+    return _totp_service
+
+
 def _get_session_username(request: Request) -> Optional[str]:
     """Extract username from admin session."""
     from ..web.auth import get_session_manager

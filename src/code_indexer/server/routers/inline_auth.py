@@ -29,6 +29,8 @@ from fastapi import (
 from ..models.auth import (
     LoginRequest,
     LoginResponse,
+    MfaChallengeResponse,
+    MfaVerifyRequest,
     RefreshTokenRequest,
     RefreshTokenResponse,
     MessageResponse,
@@ -82,7 +84,7 @@ def register_auth_routes(
         else _default_login_rate_limiter
     )
 
-    @app.post("/auth/login", response_model=LoginResponse)
+    @app.post("/auth/login")
     def login(login_data: LoginRequest, request: Request):
         """
         Authenticate user and return JWT token with standardized security error responses.
@@ -168,6 +170,22 @@ def register_auth_routes(
         # Story #557: Clear lockout failure history on successful login (AC1)
         _lockout_limiter.record_success(login_data.username)
 
+        # Story #561: MFA enforcement — check before creating JWT tokens
+        from ..web.mfa_routes import get_totp_service
+        from ..auth.mfa_challenge import mfa_challenge_manager
+
+        totp_svc = get_totp_service()
+        if totp_svc is not None and totp_svc.is_mfa_enabled(user.username):
+            challenge_token = mfa_challenge_manager.create_challenge(
+                username=user.username,
+                role=user.role.value,
+                client_ip=client_ip,
+            )
+            return MfaChallengeResponse(
+                mfa_required=True,
+                mfa_token=challenge_token,
+            )
+
         # Create JWT token and refresh token
         user_data = {
             "username": user.username,
@@ -185,6 +203,92 @@ def register_auth_routes(
             access_token=token_data["access_token"],
             token_type="bearer",
             user=user.to_dict(),
+            refresh_token=token_data["refresh_token"],
+            refresh_token_expires_in=token_data["refresh_token_expires_in"],
+        )
+
+    # Story #561: MFA challenge manager instance for the verify endpoint.
+    # Shared with login() above which imports the same singleton.
+    from ..auth.mfa_challenge import (
+        mfa_challenge_manager as _mfa_challenge_mgr,
+    )
+
+    @app.post("/auth/mfa/verify", response_model=LoginResponse)
+    def mfa_verify(verify_data: MfaVerifyRequest, request: Request):
+        """Verify MFA code and return JWT tokens (Story #561).
+
+        Uses consume-first pattern: the challenge token is atomically
+        removed before verification to prevent TOCTOU races.
+
+        Args:
+            verify_data: MFA token + TOTP code or recovery code.
+            request: HTTP request for client IP extraction.
+
+        Returns:
+            LoginResponse with JWT tokens on success.
+
+        Raises:
+            HTTPException: 401 for invalid token/code/IP, 503 if TOTP unavailable.
+        """
+        from ..web.mfa_routes import get_totp_service
+
+        totp_svc = get_totp_service()
+        if totp_svc is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="MFA service not available",
+            )
+
+        # Consume-first: atomically remove token before verifying
+        challenge = _mfa_challenge_mgr.consume(verify_data.mfa_token)
+        if challenge is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired MFA token",
+            )
+
+        # Validate client IP matches challenge creation IP
+        client_ip = request.client.host if request.client else "unknown"
+        if challenge.client_ip != client_ip:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired MFA token",
+            )
+
+        # Verify TOTP or recovery code
+        verified = False
+        if verify_data.recovery_code:
+            verified = totp_svc.verify_recovery_code(
+                challenge.username,
+                verify_data.recovery_code,
+                ip_address=client_ip,
+            )
+        elif verify_data.totp_code:
+            verified = totp_svc.verify_code(challenge.username, verify_data.totp_code)
+
+        if not verified:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid MFA code",
+            )
+
+        # Build JWT tokens for the verified user
+        user_data = {
+            "username": challenge.username,
+            "role": challenge.role,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        family_id = refresh_token_manager.create_token_family(challenge.username)
+        token_data = refresh_token_manager.create_initial_refresh_token(
+            family_id=family_id,
+            username=challenge.username,
+            user_data=user_data,
+        )
+
+        return LoginResponse(
+            access_token=token_data["access_token"],
+            token_type="bearer",
+            user=user_data,
             refresh_token=token_data["refresh_token"],
             refresh_token_expires_in=token_data["refresh_token_expires_in"],
         )

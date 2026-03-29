@@ -317,3 +317,37 @@ class MCPCredentialListResponse(BaseModel):
     credentials: List[Dict[str, Any]] = Field(
         ..., description="List of MCP credential metadata"
     )
+
+
+class MfaChallengeResponse(BaseModel):
+    """Response when login requires MFA verification (Story #561)."""
+
+    mfa_required: bool = Field(
+        default=True, description="Always True for MFA challenge"
+    )
+    mfa_token: str = Field(
+        ..., description="Opaque token to submit with TOTP/recovery code"
+    )
+
+
+class MfaVerifyRequest(BaseModel):
+    """Request to verify MFA code after login challenge (Story #561)."""
+
+    mfa_token: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Challenge token from login response",
+    )
+    totp_code: Optional[str] = Field(
+        default=None,
+        min_length=6,
+        max_length=6,
+        description="6-digit TOTP code from authenticator app",
+    )
+    recovery_code: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=50,
+        description="One-time recovery code",
+    )
