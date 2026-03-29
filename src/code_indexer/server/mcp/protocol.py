@@ -6,7 +6,7 @@ and execution. Phase 1 implementation with stub handlers for tools/list and tool
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from typing import Dict, Any, List, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Set, Tuple, Union
 from code_indexer.server.auth.dependencies import (
     get_current_user,
     get_current_user_for_mcp,
@@ -195,11 +195,59 @@ async def _invoke_handler(
             return await loop.run_in_executor(None, bound)
 
 
+def _validate_acting_users(value: Any) -> None:
+    """Validate that acting_users is a list of strings.
+
+    Raises ValueError if the value is not a list or contains non-string elements.
+    """
+    if not isinstance(value, list) or not all(isinstance(e, str) for e in value):
+        raise ValueError("acting_users must be a list of email strings")
+
+
+def _resolve_acting_users_scope(
+    emails: List[str],
+    user_manager: Any,
+    access_service: Any,
+    admin_username: str,
+) -> Set[str]:
+    """Resolve acting users' emails to an intersection-scoped repo set.
+
+    Story #568: MCP Acting Users - Scoped Repository Access.
+
+    Unions all acting users' accessible repos, then intersects with the
+    admin's own repos to ensure acting_users can only narrow access,
+    never elevate it.
+
+    Args:
+        emails: List of acting user email addresses
+        user_manager: UserManager instance for email-to-user resolution
+        access_service: AccessFilteringService for repo access lookups
+        admin_username: The admin user's username for intersection
+
+    Returns:
+        Set of repository aliases the acting users can collectively access,
+        intersected with the admin's own repos. Empty set if no valid
+        acting users found.
+    """
+    union_repos: Set[str] = set()
+    for email in emails:
+        user = user_manager.get_user_by_email(email)
+        if user is None:
+            continue  # Unknown email contributes zero repos (AC4)
+        user_repos = access_service.get_accessible_repos(user.username)
+        union_repos |= user_repos
+
+    # Intersect with admin's own repos (AC2: never elevate)
+    admin_repos = access_service.get_accessible_repos(admin_username)
+    return set(admin_repos & union_repos)
+
+
 def _check_repository_access(
     arguments: Dict[str, Any],
     effective_user: User,
     tool_name: str,
     access_service: Any,
+    scoped_repos: Optional[Set[str]] = None,
 ) -> None:
     """Check if user has access to the repository specified in tool arguments.
 
@@ -210,8 +258,12 @@ def _check_repository_access(
     Strips the '-global' suffix from aliases before checking, since accessible
     repos are stored without it.
 
-    Raises ValueError if access is denied. Does nothing if user is admin or if
-    no repo parameter is present.
+    Story #568: When scoped_repos is provided (acting_users flow), the repo
+    is checked against that set instead of the user's normal access. This
+    takes precedence over admin bypass to enforce acting_users scoping.
+
+    Raises ValueError if access is denied. Does nothing if user is admin
+    (and scoped_repos is None) or if no repo parameter is present.
 
     Args:
         arguments: Tool arguments dict from the MCP tool call
@@ -219,6 +271,8 @@ def _check_repository_access(
             during impersonation)
         tool_name: Name of the tool being called (used in error messages)
         access_service: AccessFilteringService instance for access checks
+        scoped_repos: Optional set of repos from acting_users resolution.
+            When provided, overrides normal access checks (Story #568).
     """
     # Extract the repo identifier using the three known parameter names
     raw_alias: Optional[str] = None
@@ -234,14 +288,24 @@ def _check_repository_access(
     if not raw_alias:
         return
 
-    # Admin users bypass the check entirely
-    if access_service.is_admin_user(effective_user.username):
-        return
-
     # Strip -global suffix to match stored repo names
     normalized = raw_alias
     if normalized.endswith("-global"):
         normalized = normalized[: -len("-global")]
+
+    # Story #568: When scoped_repos is provided (acting_users flow),
+    # check against the scoped set. This overrides admin bypass.
+    if scoped_repos is not None:
+        if normalized not in scoped_repos:
+            raise ValueError(
+                f"Access denied: repository '{raw_alias}' is not accessible"
+                f" to the specified acting users"
+            )
+        return
+
+    # Admin users bypass the check entirely (original behavior)
+    if access_service.is_admin_user(effective_user.username):
+        return
 
     # Check access
     accessible = access_service.get_accessible_repos(effective_user.username)
@@ -305,6 +369,12 @@ async def handle_tools_call(
             f"Permission denied: {required_permission} required for tool {tool_name}"
         )
 
+    # Story #568: Pop acting_users from arguments before handler dispatch.
+    # Handlers should never see this parameter.
+    acting_users_emails = arguments.pop("acting_users", None)
+    if acting_users_emails is not None:
+        _validate_acting_users(acting_users_emails)
+
     # Story #319: Centralized repository access guard.
     # Check repo access BEFORE invoking handler, using effective_user.
     # Lazy import to avoid circular dependency (handlers imports from protocol).
@@ -312,11 +382,26 @@ async def handle_tools_call(
         from code_indexer.server.mcp import handlers as _handlers_module
 
         _access_service = _handlers_module.app_module.app.state.access_filtering_service
+
+        # Story #568: Resolve acting_users to scoped repo set for admin users.
+        # Non-admin users: acting_users silently ignored (AC3).
+        _scoped_repos = None
+        if acting_users_emails is not None:
+            if _access_service.is_admin_user(effective_user.username):
+                _user_manager = _handlers_module.app_module.app.state.user_manager
+                _scoped_repos = _resolve_acting_users_scope(
+                    emails=acting_users_emails,
+                    user_manager=_user_manager,
+                    access_service=_access_service,
+                    admin_username=effective_user.username,
+                )
+
         _check_repository_access(
             arguments=arguments,
             effective_user=effective_user,
             tool_name=tool_name,
             access_service=_access_service,
+            scoped_repos=_scoped_repos,
         )
     except ValueError:
         # Re-raise access denied errors from the guard (fail-closed)
