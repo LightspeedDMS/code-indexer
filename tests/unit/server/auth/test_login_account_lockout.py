@@ -16,13 +16,103 @@ ANTI-MOCK: LoginRateLimiter is tested directly with real in-memory state.
 Endpoint integration tests mock only infrastructure (user_manager, jwt_manager).
 """
 
+import sqlite3
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from code_indexer.server.auth.login_rate_limiter import LoginRateLimiter
+
+
+# ---------------------------------------------------------------------------
+# Cluster/PostgreSQL mode test infrastructure (H1)
+# ---------------------------------------------------------------------------
+
+
+class _PgStyleSqliteConn:
+    """SQLite connection presenting psycopg-style interface.
+
+    Translates %s placeholders to ? for SQLite compatibility.
+    """
+
+    def __init__(self, sqlite_conn):
+        self._conn = sqlite_conn
+        self._conn.row_factory = sqlite3.Row
+
+    @staticmethod
+    def _translate_query(query):
+        """Replace %s placeholders with ? for SQLite."""
+        return query.replace("%s", "?")
+
+    def execute(self, query, params=None):
+        translated = self._translate_query(query)
+        if params:
+            return self._conn.execute(translated, params)
+        return self._conn.execute(translated)
+
+    def commit(self):
+        self._conn.commit()
+
+    def close(self):
+        pass
+
+
+class _PgStyleSqlitePoolCtx:
+    """Context manager for pool.connection()."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return _PgStyleSqliteConn(self._conn)
+
+    def __exit__(self, *args):
+        pass
+
+
+class _PgStyleSqlitePool:
+    """SQLite-backed pool presenting psycopg v3 ConnectionPool interface.
+
+    Creates login_failures and login_lockouts tables matching migration 009.
+    """
+
+    def __init__(self):
+        self._conn = sqlite3.connect(":memory:")
+        self._conn.row_factory = sqlite3.Row
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS login_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                failed_at DOUBLE PRECISION NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_login_failures_user_time
+            ON login_failures(username, failed_at);
+
+            CREATE TABLE IF NOT EXISTS login_lockouts (
+                username TEXT PRIMARY KEY,
+                locked_until DOUBLE PRECISION NOT NULL
+            );
+            """
+        )
+        self._conn.commit()
+
+    def connection(self):
+        return _PgStyleSqlitePoolCtx(self._conn)
+
+    def close(self):
+        self._conn.close()
+
+
+@pytest.fixture
+def pg_pool():
+    """Create a PG-style SQLite pool for cluster mode tests."""
+    pool = _PgStyleSqlitePool()
+    yield pool
+    pool.close()
 
 
 # ---------------------------------------------------------------------------
@@ -538,3 +628,100 @@ class TestLoginSecurityConfig:
         assert config.login_security_config.login_rate_limiting_enabled is True
         assert config.login_security_config.max_failed_login_attempts == 5
         assert config.login_security_config.login_lockout_duration_minutes == 15
+
+
+# ---------------------------------------------------------------------------
+# Cluster mode tests (H1): LoginRateLimiter with PostgreSQL connection pool
+# ---------------------------------------------------------------------------
+
+
+class TestLoginRateLimiterClusterMode:
+    """H1: LoginRateLimiter stores failure/lockout state in PostgreSQL when pool is set."""
+
+    def test_set_connection_pool_method_exists(self):
+        """LoginRateLimiter must expose set_connection_pool()."""
+        limiter = LoginRateLimiter()
+        assert hasattr(limiter, "set_connection_pool")
+
+    def test_failure_tracked_via_pool(self, pg_pool):
+        """Failures are persisted to login_failures table when pool is set."""
+        limiter = LoginRateLimiter()
+        limiter.set_connection_pool(pg_pool)
+        limiter.check_and_record_failure("alice")
+
+        # Verify row exists in the database
+        with pg_pool.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM login_failures WHERE username = %s",
+                ("alice",),
+            ).fetchone()
+            count = row[0]
+        assert count == 1
+
+    def test_lockout_enforced_via_pool(self, pg_pool):
+        """Account locks out after max_attempts failures via pool."""
+        limiter = LoginRateLimiter(max_attempts=3)
+        limiter.set_connection_pool(pg_pool)
+
+        is_locked = False
+        for _ in range(3):
+            is_locked, remaining = limiter.check_and_record_failure("bob")
+        assert is_locked is True
+        assert remaining > 0
+
+        # Verify lockout row exists in database
+        with pg_pool.connection() as conn:
+            row = conn.execute(
+                "SELECT locked_until FROM login_lockouts WHERE username = %s",
+                ("bob",),
+            ).fetchone()
+        assert row is not None
+        assert row[0] > time.time()
+
+    def test_success_clears_via_pool(self, pg_pool):
+        """record_success deletes failures and lockouts from database."""
+        limiter = LoginRateLimiter(max_attempts=3)
+        limiter.set_connection_pool(pg_pool)
+
+        for _ in range(3):
+            limiter.check_and_record_failure("carol")
+        locked, _ = limiter.is_locked("carol")
+        assert locked is True
+
+        limiter.record_success("carol")
+        locked, _ = limiter.is_locked("carol")
+        assert locked is False
+
+        # Verify database is clean
+        with pg_pool.connection() as conn:
+            failures = conn.execute(
+                "SELECT COUNT(*) FROM login_failures WHERE username = %s",
+                ("carol",),
+            ).fetchone()[0]
+            lockouts = conn.execute(
+                "SELECT COUNT(*) FROM login_lockouts WHERE username = %s",
+                ("carol",),
+            ).fetchone()[0]
+        assert failures == 0
+        assert lockouts == 0
+
+    def test_cross_node_lockout(self, pg_pool):
+        """Two limiter instances sharing same pool see each other's state."""
+        limiter_node1 = LoginRateLimiter(max_attempts=3)
+        limiter_node1.set_connection_pool(pg_pool)
+
+        limiter_node2 = LoginRateLimiter(max_attempts=3)
+        limiter_node2.set_connection_pool(pg_pool)
+
+        # Node 1 records 2 failures
+        limiter_node1.check_and_record_failure("dave")
+        limiter_node1.check_and_record_failure("dave")
+
+        # Node 2 records the 3rd failure - should trigger lockout
+        is_locked, remaining = limiter_node2.check_and_record_failure("dave")
+        assert is_locked is True
+        assert remaining > 0
+
+        # Node 1 should also see the lockout
+        locked, _ = limiter_node1.is_locked("dave")
+        assert locked is True

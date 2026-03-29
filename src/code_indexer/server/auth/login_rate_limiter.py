@@ -10,9 +10,12 @@ Thread-safe with threading.Lock. Zero fallbacks - fails fast on bad state.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class LoginRateLimiter:
@@ -52,10 +55,21 @@ class LoginRateLimiter:
         self._enabled = enabled
         self._audit_logger = audit_logger
         self._lock = threading.Lock()
-        # Per-username list of failure timestamps (monotonic seconds)
+        # Per-username list of failure timestamps (wall-clock seconds)
         self._failures: Dict[str, List[float]] = {}
-        # Per-username lockout expiry timestamp (monotonic seconds), None if not locked
+        # Per-username lockout expiry timestamp (wall-clock seconds), None if not locked
         self._lockout_until: Dict[str, float] = {}
+        # Cluster mode: PostgreSQL connection pool (set via set_connection_pool)
+        self._pool: Optional[Any] = None
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Set PostgreSQL connection pool for cluster mode.
+
+        When set, all failure/lockout operations use PostgreSQL tables
+        instead of in-memory dicts, enabling cross-node lockout.
+        """
+        self._pool = pool
+        logger.info("LoginRateLimiter: using PostgreSQL connection pool (cluster mode)")
 
     def is_locked(self, username: str) -> Tuple[bool, float]:
         """
@@ -90,13 +104,21 @@ class LoginRateLimiter:
             return False, 0
 
         with self._lock:
-            now = time.monotonic()
-
             # If currently locked, report locked state without adding another failure
             locked, remaining = self._check_locked(username)
             if locked:
                 self._emit_failure_audit(username)
                 return True, remaining
+
+            # Cluster mode: delegate to PostgreSQL
+            if self._pool is not None:
+                self._emit_failure_audit(username)
+                is_locked, remaining = self._pg_record_failure(username)
+                if is_locked:
+                    self._emit_lockout_audit(username, self._max_attempts)
+                return is_locked, remaining
+
+            now = time.time()
 
             # Prune failures outside the sliding window
             self._prune_old_failures(username, now)
@@ -134,6 +156,9 @@ class LoginRateLimiter:
             return
 
         with self._lock:
+            if self._pool is not None:
+                self._pg_record_success(username)
+                return
             self._failures.pop(username, None)
             self._lockout_until.pop(username, None)
 
@@ -141,17 +166,74 @@ class LoginRateLimiter:
     # Internal helpers (called under lock)
     # ------------------------------------------------------------------
 
+    def _pg_record_success(self, username: str) -> None:
+        """Clear failures and lockouts from PostgreSQL. Called under self._lock."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM login_failures WHERE username = %s", (username,))
+            conn.execute("DELETE FROM login_lockouts WHERE username = %s", (username,))
+            conn.commit()
+
     def _check_locked(self, username: str) -> Tuple[bool, float]:
         """Return (is_locked, remaining_seconds). Must be called under self._lock."""
+        if self._pool is not None:
+            return self._pg_check_locked(username)
         lockout_until = self._lockout_until.get(username)
         if lockout_until is None:
             return False, 0
-        now = time.monotonic()
+        now = time.time()
         if now < lockout_until:
             return True, lockout_until - now
         # Lockout expired - clean up
         del self._lockout_until[username]
         self._failures.pop(username, None)
+        return False, 0
+
+    def _pg_check_locked(self, username: str) -> Tuple[bool, float]:
+        """Check lockout state from PostgreSQL. Must be called under self._lock."""
+        assert self._pool is not None
+        now = time.time()
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT locked_until FROM login_lockouts "
+                "WHERE username = %s AND locked_until > %s",
+                (username, now),
+            ).fetchone()
+        if row is None:
+            return False, 0
+        locked_until = row[0]
+        return True, locked_until - now
+
+    def _pg_record_failure(self, username: str) -> Tuple[bool, float]:
+        """Record failure in PostgreSQL and check for lockout. Called under self._lock."""
+        assert self._pool is not None
+        now = time.time()
+        with self._pool.connection() as conn:
+            # Insert failure record
+            conn.execute(
+                "INSERT INTO login_failures (username, failed_at) VALUES (%s, %s)",
+                (username, now),
+            )
+            # Count failures in sliding window
+            cutoff = now - self._window_seconds
+            row = conn.execute(
+                "SELECT COUNT(*) FROM login_failures "
+                "WHERE username = %s AND failed_at > %s",
+                (username, cutoff),
+            ).fetchone()
+            failure_count = row[0]
+            # Check if lockout threshold reached
+            if failure_count >= self._max_attempts:
+                locked_until = now + self._lockout_duration_seconds
+                conn.execute(
+                    "INSERT INTO login_lockouts (username, locked_until) "
+                    "VALUES (%s, %s) "
+                    "ON CONFLICT (username) DO UPDATE SET locked_until = %s",
+                    (username, locked_until, locked_until),
+                )
+                conn.commit()
+                return True, self._lockout_duration_seconds
+            conn.commit()
         return False, 0
 
     def _prune_old_failures(self, username: str, now: float) -> None:
