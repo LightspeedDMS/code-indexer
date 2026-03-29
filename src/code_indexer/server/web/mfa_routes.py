@@ -50,21 +50,62 @@ def _get_session_username(request: Request) -> Optional[str]:
 
 
 def _render_setup(
-    qr_b64: str, manual_key: str, csrf: str, target_user: str, error: str = ""
+    qr_b64: str,
+    manual_key: str,
+    csrf: str,
+    target_user: str,
+    error: str = "",
+    success: str = "",
+    show_mode: bool = False,
 ) -> str:
-    """Render MFA setup HTML inline."""
+    """Render MFA setup or show-QR HTML inline.
+
+    show_mode=False: Setup flow with "Verify and Activate MFA" button.
+    show_mode=True:  Show existing QR with "Test Code" and "View Recovery Codes".
+    """
     err = (
         f'<div style="color:#ff4444;background:#2a0a0a;padding:10px;border-radius:6px;margin:10px 0">{error}</div>'
         if error
         else ""
     )
+    ok = (
+        f'<div style="color:#44ff44;background:#0a2a0a;padding:10px;border-radius:6px;margin:10px 0">{success}</div>'
+        if success
+        else ""
+    )
     user_label = (
-        f"<p class='info' style='color:#00d4ff'>Setting up MFA for: <strong>{target_user}</strong></p>"
+        f"<p class='info' style='color:#00d4ff'>MFA for: <strong>{target_user}</strong></p>"
         if target_user
         else ""
     )
+
+    if show_mode:
+        title = "Two-Factor Authentication (Active)"
+        success_msg = "<div style='color:#44ff44;background:#0a2a0a;padding:10px;border-radius:6px;margin:10px 0'>MFA is enabled. Scan this QR code to add to another authenticator device.</div>"
+        form_section = (
+            "<p>Test your authenticator (optional):</p>"
+            f"<form method='POST' action='{_VERIFY_ROUTE}'>"
+            f"<input type='hidden' name='csrf_token' value='{csrf}'>"
+            f"<input type='hidden' name='target_user' value='{target_user}'>"
+            "<input type='hidden' name='test_only' value='1'>"
+            "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code'>"
+            "<button type='submit' style='background:#333;color:#fff'>Test Code</button></form>"
+            f"<a href='/admin/mfa/recovery-codes?user={target_user}' style='display:block;text-align:center;padding:12px;margin-top:10px;background:#444;color:#fff;border-radius:6px;text-decoration:none'>View Recovery Codes</a>"
+        )
+    else:
+        title = "Set Up Two-Factor Authentication"
+        success_msg = ""
+        form_section = (
+            "<p>Enter the 6-digit code from your app to verify:</p>"
+            f"<form method='POST' action='{_VERIFY_ROUTE}'>"
+            f"<input type='hidden' name='csrf_token' value='{csrf}'>"
+            f"<input type='hidden' name='target_user' value='{target_user}'>"
+            "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' autofocus required>"
+            "<button type='submit'>Verify and Activate MFA</button></form>"
+        )
+
     return (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Set Up MFA - CIDX</title>'
+        f'<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{title} - CIDX</title>'
         "<style>body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}"
         ".c{max-width:500px;margin:40px auto;background:#16213e;border-radius:12px;padding:30px}"
         "h1{color:#00d4ff;font-size:1.4em}"
@@ -75,20 +116,17 @@ def _render_setup(
         "input[type=text]{width:100%;padding:12px;font-size:1.2em;text-align:center;letter-spacing:8px;border:2px solid #333;border-radius:6px;background:#0a0a23;color:#fff;box-sizing:border-box}"
         "button{width:100%;padding:12px;margin-top:15px;background:#00d4ff;color:#000;border:none;border-radius:6px;font-size:1em;cursor:pointer;font-weight:bold}"
         "a.back{color:#00d4ff;text-decoration:none;display:block;margin-top:20px;text-align:center}"
-        "</style></head><body><div class='c'>"
-        "<h1>Set Up Two-Factor Authentication</h1>"
+        f"</style></head><body><div class='c'>"
+        f"<h1>{title}</h1>"
         f"{user_label}"
+        f"{success_msg}"
         f"{err}"
+        f"{ok}"
         "<p class='info'>Scan this QR code with your authenticator app</p>"
         f"<div style='text-align:center'><div class='qr'><img src='data:image/png;base64,{qr_b64}' alt='QR'></div></div>"
         "<p class='info'>Or enter this key manually:</p>"
         f"<div class='mk'>{manual_key}</div>"
-        "<p>Enter the 6-digit code from your app to verify:</p>"
-        f"<form method='POST' action='{_VERIFY_ROUTE}'>"
-        f"<input type='hidden' name='csrf_token' value='{csrf}'>"
-        f"<input type='hidden' name='target_user' value='{target_user}'>"
-        "<input type='text' name='totp_code' maxlength='6' pattern='[0-9]{6}' placeholder='000000' autocomplete='one-time-code' autofocus required>"
-        "<button type='submit'>Verify and Activate MFA</button></form>"
+        f"{form_section}"
         f"<a href='{_ADMIN_ROUTE}users' class='back'>Back to Users</a>"
         "</div></body></html>"
     )
@@ -155,45 +193,8 @@ def mfa_setup_page(
     if manual_key is None:
         return HTMLResponse("Failed to get manual entry key", status_code=500)
 
-    qr_b64 = base64.b64encode(qr_bytes).decode()
-    csrf = request.cookies.get("csrf_token", "")
-    return HTMLResponse(_render_setup(qr_b64, manual_key, csrf, target_user))
-
-
-@mfa_router.post("/verify", response_class=HTMLResponse)
-def mfa_verify(
-    request: Request,
-    totp_code: str = Form(...),
-    target_user: Optional[str] = Form(None),
-):
-    """Verify TOTP code and activate MFA. Shows recovery codes on success."""
-    admin_username = _get_session_username(request)
-    if not admin_username:
-        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
-    if _totp_service is None:
-        return HTMLResponse("MFA service not available", status_code=503)
-
-    # Use target_user if admin is setting up for another user
-    username = target_user if target_user else admin_username
-
-    if _totp_service.activate_mfa(username, totp_code):
-        codes = _totp_service.generate_recovery_codes(username)
-        if codes is None:
-            return HTMLResponse("Failed to generate recovery codes", status_code=500)
-        logger.info("MFA activated for user %s (by %s)", username, admin_username)
-        return HTMLResponse(_render_recovery_codes(codes))
-
-    # Invalid code — re-display setup with error
-    uri = _totp_service.get_provisioning_uri(username)
-    if uri is None:
-        return HTMLResponse("MFA setup expired. Please start over.", status_code=400)
-    qr_bytes = _totp_service.generate_qr_code(uri)
-    if qr_bytes is None:
-        return HTMLResponse("QR generation failed", status_code=500)
-    manual_key = _totp_service.get_manual_entry_key(username)
-    if manual_key is None:
-        return HTMLResponse("Failed to get manual entry key", status_code=500)
-
+    is_show = mode == "show"
+    verified = request.query_params.get("verified") == "1"
     qr_b64 = base64.b64encode(qr_bytes).decode()
     csrf = request.cookies.get("csrf_token", "")
     return HTMLResponse(
@@ -201,9 +202,84 @@ def mfa_verify(
             qr_b64,
             manual_key,
             csrf,
-            username,
-            "Invalid verification code. Please try again.",
+            target_user,
+            show_mode=is_show,
+            success="Code verified successfully!" if verified else "",
         )
+    )
+
+
+@mfa_router.get("/recovery-codes", response_class=HTMLResponse)
+def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
+    """Regenerate and display recovery codes for a user."""
+    admin_username = _get_session_username(request)
+    if not admin_username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    target = user if user else admin_username
+    codes = _totp_service.generate_recovery_codes(target)
+    if codes is None:
+        return HTMLResponse("Failed to generate recovery codes", status_code=500)
+    logger.info("Recovery codes regenerated for %s (by %s)", target, admin_username)
+    return HTMLResponse(_render_recovery_codes(codes))
+
+
+def _render_qr_error(username: str, error_msg: str, show_mode: bool) -> HTMLResponse:
+    """Re-render QR page with error message after failed verification."""
+    assert _totp_service is not None
+    uri = _totp_service.get_provisioning_uri(username)
+    if uri is None:
+        return HTMLResponse("MFA not configured. Please start over.", status_code=400)
+    qr_bytes = _totp_service.generate_qr_code(uri)
+    if qr_bytes is None:
+        return HTMLResponse("QR generation failed", status_code=500)
+    manual_key = _totp_service.get_manual_entry_key(username)
+    if manual_key is None:
+        return HTMLResponse("Failed to get key", status_code=500)
+    qr_b64 = base64.b64encode(qr_bytes).decode()
+    return HTMLResponse(
+        _render_setup(
+            qr_b64, manual_key, "", username, error=error_msg, show_mode=show_mode
+        )
+    )
+
+
+@mfa_router.post("/verify", response_class=HTMLResponse)
+def mfa_verify(
+    request: Request,
+    totp_code: str = Form(...),
+    target_user: Optional[str] = Form(None),
+    test_only: Optional[str] = Form(None),
+):
+    """Verify TOTP code. Activates MFA on setup flow, or tests code on show flow."""
+    admin_username = _get_session_username(request)
+    if not admin_username:
+        return RedirectResponse(_LOGIN_ROUTE, status_code=303)
+    if _totp_service is None:
+        return HTMLResponse("MFA service not available", status_code=503)
+
+    username = target_user if target_user else admin_username
+
+    if test_only:
+        if _totp_service.verify_code(username, totp_code):
+            return RedirectResponse(
+                f"/admin/mfa/setup?user={username}&mode=show&verified=1",
+                status_code=303,
+            )
+        return _render_qr_error(username, "Invalid code.", show_mode=True)
+
+    # Setup mode: activate MFA
+    if _totp_service.activate_mfa(username, totp_code):
+        codes = _totp_service.generate_recovery_codes(username)
+        if codes is None:
+            return HTMLResponse("Failed to generate recovery codes", status_code=500)
+        logger.info("MFA activated for user %s (by %s)", username, admin_username)
+        return HTMLResponse(_render_recovery_codes(codes))
+
+    return _render_qr_error(
+        username, "Invalid verification code. Please try again.", show_mode=False
     )
 
 
