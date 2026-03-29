@@ -22,6 +22,11 @@ import qrcode
 
 from cryptography.fernet import Fernet, InvalidToken
 
+try:
+    from psycopg.rows import dict_row
+except ImportError:  # psycopg3 not installed (standalone mode)
+    dict_row = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 # TOTP parameters (fixed per RFC 6238 for authenticator app compatibility)
@@ -100,6 +105,7 @@ class TOTPService:
         """
         assert self._pool is not None
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             # Try to read existing key
             row = conn.execute(
                 "SELECT key_value FROM cluster_secrets WHERE key_name = %s",
@@ -227,6 +233,7 @@ class TOTPService:
         """Retrieve and decrypt the TOTP secret for a user."""
         if self._pool is not None:
             with self._pool.connection() as conn:
+                conn.row_factory = dict_row
                 row = conn.execute(
                     "SELECT encrypted_secret FROM user_mfa WHERE user_id = %s",
                     (username,),
@@ -311,6 +318,7 @@ class TOTPService:
         """Verify TOTP code using PostgreSQL connection."""
         assert self._pool is not None
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             row = conn.execute(
                 "SELECT last_used_counter FROM user_mfa WHERE user_id = %s",
                 (username,),
@@ -427,6 +435,7 @@ class TOTPService:
         code_hash = self._hash_recovery_code(code)
         if self._pool is not None:
             with self._pool.connection() as conn:
+                conn.row_factory = dict_row
                 row = conn.execute(
                     "SELECT id FROM user_recovery_codes WHERE user_id = %s AND code_hash = %s AND used_at IS NULL",
                     (username, code_hash),
@@ -546,6 +555,7 @@ class TOTPService:
         """Check if MFA is enabled for a user."""
         if self._pool is not None:
             with self._pool.connection() as conn:
+                conn.row_factory = dict_row
                 row = conn.execute(
                     "SELECT mfa_enabled FROM user_mfa WHERE user_id = %s",
                     (username,),

@@ -15,6 +15,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+try:
+    from psycopg.rows import dict_row
+except ImportError:  # psycopg3 not installed (standalone mode)
+    dict_row = None  # type: ignore[assignment,misc]
+
 logger = logging.getLogger(__name__)
 
 _CHALLENGE_TTL_SECONDS = 300  # 5 minutes
@@ -179,6 +184,7 @@ class MfaChallengeManager:
         assert self._pool is not None
         cutoff = time.time() - self._ttl
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             row = conn.execute(
                 "SELECT * FROM mfa_challenges WHERE token = %s AND created_at > %s",
                 (token, cutoff),
@@ -274,6 +280,7 @@ class MfaChallengeManager:
         assert self._pool is not None
         cutoff = time.time() - self._ttl
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             row = conn.execute(
                 "SELECT * FROM mfa_challenges WHERE token = %s AND created_at > %s",
                 (token, cutoff),
