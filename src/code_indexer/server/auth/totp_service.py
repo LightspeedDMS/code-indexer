@@ -10,9 +10,11 @@ import hashlib
 import hmac
 import io
 import logging
+import os
 import secrets
 import sqlite3
 import time
+from pathlib import Path
 from typing import List, Optional
 
 import pyotp
@@ -46,15 +48,28 @@ class TOTPService:
         self._window_tolerance = window_tolerance
         self._recovery_code_count = recovery_code_count
 
-        # Initialize or load encryption key
+        # Initialize or load encryption key.
+        # Priority: explicit param > key file > auto-generate + persist
         if mfa_encryption_key:
             self._fernet = Fernet(mfa_encryption_key.encode())
             self._key_id = 1
         else:
-            key = Fernet.generate_key()
-            self._fernet = Fernet(key)
-            self._key_id = 1
-            logger.info("TOTPService: auto-generated MFA encryption key")
+            key_file = Path(db_path).parent / "mfa_key.dat"
+            if key_file.exists():
+                stored_key = key_file.read_text().strip()
+                self._fernet = Fernet(stored_key.encode())
+                self._key_id = 1
+                logger.info("TOTPService: loaded MFA encryption key from %s", key_file)
+            else:
+                key = Fernet.generate_key()
+                self._fernet = Fernet(key)
+                self._key_id = 1
+                key_file.write_text(key.decode())
+                os.chmod(str(key_file), 0o600)
+                logger.info(
+                    "TOTPService: generated and persisted MFA encryption key to %s",
+                    key_file,
+                )
 
         self._ensure_tables()
 
