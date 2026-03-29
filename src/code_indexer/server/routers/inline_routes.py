@@ -268,7 +268,7 @@ def register_inline_routes(
     from pathlib import Path as PathLib
 
     # Initialize session manager for web UI
-    init_session_manager(secret_key, server_config)
+    init_session_manager(secret_key, server_config, server_config.web_security_config)
 
     # Mount static files for web UI
     # NOTE: __file__ is in routers/, so use .parent.parent to reach server/ root

@@ -50,17 +50,27 @@ class SessionManager:
     - httpOnly cookies
     """
 
-    def __init__(self, secret_key: str, config):
+    def __init__(self, secret_key: str, config, web_security_config=None):
         """
         Initialize session manager.
 
         Args:
             secret_key: Secret key for signing cookies
             config: Server configuration for cookie security settings
+            web_security_config: Web security config with session timeouts
         """
         self._serializer = URLSafeTimedSerializer(secret_key)
         self._salt = "web-session"
         self._config = config
+        self._web_security_config = web_security_config
+
+    def _get_timeout_for_role(self, role: str) -> int:
+        """Return session timeout in seconds based on user role."""
+        if self._web_security_config is not None:
+            if role == "admin":
+                return int(self._web_security_config.admin_session_timeout_seconds)
+            return int(self._web_security_config.web_session_timeout_seconds)
+        return SESSION_TIMEOUT_SECONDS
 
     def create_session(
         self,
@@ -82,11 +92,15 @@ class SessionManager:
         csrf_token = secrets.token_urlsafe(32)
         created_at = time.time()
 
+        # Story #564: Use admin timeout for admin role, default for others
+        session_timeout = self._get_timeout_for_role(role)
+
         session_data = {
             "username": username,
             "role": role,
             "csrf_token": csrf_token,
             "created_at": created_at,
+            "session_timeout": session_timeout,
         }
 
         # Sign the session data
@@ -99,7 +113,7 @@ class SessionManager:
             httponly=True,
             secure=should_use_secure_cookies(self._config),
             samesite="lax",
-            max_age=SESSION_TIMEOUT_SECONDS,
+            max_age=session_timeout,
         )
 
         return csrf_token
@@ -119,11 +133,20 @@ class SessionManager:
             return None
 
         try:
-            # Verify signature and check expiration
+            # Load without max_age to read stored session_timeout
             data = self._serializer.loads(
                 session_cookie,
                 salt=self._salt,
-                max_age=SESSION_TIMEOUT_SECONDS,
+            )
+
+            # Story #564: Use stored timeout, fall back to default for old sessions
+            max_age = data.get("session_timeout", SESSION_TIMEOUT_SECONDS)
+
+            # Re-validate with the correct timeout
+            data = self._serializer.loads(
+                session_cookie,
+                salt=self._salt,
+                max_age=max_age,
             )
 
             return SessionData(
@@ -158,10 +181,18 @@ class SessionManager:
             return False
 
         try:
+            # Load without max_age to read stored session_timeout
+            data = self._serializer.loads(
+                session_cookie,
+                salt=self._salt,
+            )
+            max_age = data.get("session_timeout", SESSION_TIMEOUT_SECONDS)
+
+            # Re-validate with the correct timeout
             self._serializer.loads(
                 session_cookie,
                 salt=self._salt,
-                max_age=SESSION_TIMEOUT_SECONDS,
+                max_age=max_age,
             )
             return False  # Not expired
         except SignatureExpired:
@@ -225,19 +256,22 @@ def get_session_manager() -> SessionManager:
     return _session_manager
 
 
-def init_session_manager(secret_key: str, config) -> SessionManager:
+def init_session_manager(
+    secret_key: str, config, web_security_config=None
+) -> SessionManager:
     """
     Initialize the global session manager.
 
     Args:
         secret_key: Secret key for signing cookies
         config: Server configuration
+        web_security_config: Web security config with session timeouts
 
     Returns:
         Initialized SessionManager
     """
     global _session_manager
-    _session_manager = SessionManager(secret_key, config)
+    _session_manager = SessionManager(secret_key, config, web_security_config)
     return _session_manager
 
 

@@ -359,6 +359,8 @@ class WebSecurityConfig:
     csrf_max_age_seconds: int = 600
     # AC25-AC26: Web session timeout in seconds (default 28800s/8hr, range 1800-86400s)
     web_session_timeout_seconds: int = 28800
+    # Story #564: Admin session timeout in seconds (default 3600s/1hr, range 300-86400s)
+    admin_session_timeout_seconds: int = 3600
 
 
 @dataclass
