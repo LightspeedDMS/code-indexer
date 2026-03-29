@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.6.3
+
+### Fixes (Epic #556 -- Admin Account Security Hardening, Cluster Compatibility)
+- fix: TOTPService cluster compatibility -- shared MFA encryption key via cluster_secrets table, dual-mode PG/SQLite for all MFA data operations
+- fix: MfaChallengeManager cluster compatibility -- challenge tokens stored in PostgreSQL mfa_challenges table for cross-node verification
+- fix: LoginRateLimiter cluster compatibility -- failure tracking and lockouts in PostgreSQL login_failures/login_lockouts tables
+- fix: Wire cluster connection pools for all MFA/security services in lifespan.py
+- fix: Remove duplicate LoginRateLimiter instance in web routes (was bypassing cluster pool wiring)
+- fix: PostgreSQL boolean type mismatch in TOTP MFA queries (FALSE/TRUE instead of 0/1)
+- fix: psycopg3 dict_row for MFA PG queries (tuple vs dict row access)
+- fix: Mock is_password_expired in login lockout/rate-limit tests (Story #565 regression)
+
+### Migrations
+- 006_mfa_tables.sql -- user_mfa, user_recovery_codes tables
+- 008_mfa_challenges.sql -- mfa_challenges table
+- 009_login_rate_limiting.sql -- login_failures, login_lockouts tables
+
 ## v9.5.37
 
 ### Features (Epic #408 -- CIDX Server Clusterization, Junction 1)
