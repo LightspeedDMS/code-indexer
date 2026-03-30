@@ -268,6 +268,7 @@ class ConfigService:
                 "git_clone_timeout": config.resource_config.git_clone_timeout,
                 "git_pull_timeout": config.resource_config.git_pull_timeout,
                 "git_refresh_timeout": config.resource_config.git_refresh_timeout,
+                "hnsw_max_elements": config.resource_config.hnsw_max_elements,
             },
             # Password security
             "password_security": {
@@ -713,6 +714,8 @@ class ConfigService:
             timeouts.git_pull_timeout = int(value)
         elif key == "git_refresh_timeout":
             timeouts.git_refresh_timeout = int(value)
+        elif key == "hnsw_max_elements":
+            timeouts.hnsw_max_elements = int(value)
         else:
             raise ValueError(f"Unknown timeout setting: {key}")
 

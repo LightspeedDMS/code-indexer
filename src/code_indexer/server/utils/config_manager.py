@@ -90,6 +90,9 @@ class ServerResourceConfig:
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
     cidx_scip_generate_timeout: int = 1800  # 30 minutes for cidx scip generate (AC4)
 
+    # HNSW index configuration (Story #588)
+    hnsw_max_elements: int = 1000000  # Maximum HNSW index elements
+
     # NOTE: Artificial resource limits (max_golden_repos, max_repo_size_bytes, max_jobs_per_user)
     # have been REMOVED from the codebase. They were nonsensical limitations that served no purpose.
 

@@ -54,7 +54,9 @@ API_CACHE_TTL = timedelta(minutes=5)  # External API validations (AC8)
 FEEDBACK_CACHE_TTL = timedelta(hours=1)  # Claude feedback cache (Story S7 AC6)
 
 # HNSW index validation constants (Bug #147)
-DEFAULT_HNSW_MAX_ELEMENTS = 500000  # Maximum elements for index validation loading
+DEFAULT_HNSW_MAX_ELEMENTS = (
+    1000000  # Must match ServerResourceConfig.hnsw_max_elements default
+)
 
 # CLI Tool configurations
 CLI_TOOLS = [

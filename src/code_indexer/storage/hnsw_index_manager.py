@@ -135,7 +135,7 @@ class HNSWIndexManager:
         )
 
     def load_index(
-        self, collection_path: Path, max_elements: int = 500000
+        self, collection_path: Path, max_elements: int = 1000000
     ) -> Optional[Any]:
         """Load HNSW index from disk.
 
@@ -695,7 +695,7 @@ class HNSWIndexManager:
             return None, {}, {}, 0
 
         # Load HNSW index
-        index = self.load_index(collection_path, max_elements=500000)
+        index = self.load_index(collection_path, max_elements=1000000)
 
         # Load ID mappings from metadata
         label_to_id = self._load_id_mapping(collection_path)
