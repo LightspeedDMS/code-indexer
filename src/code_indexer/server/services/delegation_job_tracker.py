@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.cache.payload_cache import PayloadCache
@@ -67,6 +67,31 @@ class DelegationJobTracker:
         self._pending_jobs: Dict[str, asyncio.Future] = {}
         self._lock = asyncio.Lock()
         self._payload_cache: Optional["PayloadCache"] = None
+        self._pool: Any = None
+        self._sqlite_db_path: Optional[str] = None
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """
+        Set PostgreSQL connection pool for cluster mode.
+
+        Bug #577: DB is the cross-node source of truth.
+
+        Args:
+            pool: psycopg connection pool instance
+        """
+        self._pool = pool
+        logger.info("DelegationJobTracker: using PostgreSQL (cluster mode)")
+
+    def set_sqlite_path(self, db_path: str) -> None:
+        """
+        Set SQLite database path for standalone mode.
+
+        Bug #577: DB persistence for delegation job results.
+
+        Args:
+            db_path: Path to SQLite database file
+        """
+        self._sqlite_db_path = db_path
 
     def set_payload_cache(self, cache: "PayloadCache") -> None:
         """
@@ -78,6 +103,119 @@ class DelegationJobTracker:
             cache: PayloadCache instance for caching delegation results
         """
         self._payload_cache = cache
+
+    def _db_register_job(self, job_id: str) -> None:
+        """Write pending job to DB. Bug #577."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "INSERT INTO delegation_job_results (job_id, status) "
+                    "VALUES (%s, 'pending') ON CONFLICT (job_id) DO NOTHING",
+                    (job_id,),
+                )
+                conn.commit()
+        elif self._sqlite_db_path:
+            import sqlite3
+
+            conn = sqlite3.connect(self._sqlite_db_path)
+            conn.execute(
+                "INSERT OR IGNORE INTO delegation_job_results "
+                "(job_id, status) VALUES (?, 'pending')",
+                (job_id,),
+            )
+            conn.commit()
+            conn.close()
+
+    def _db_complete_job(self, result: "JobResult") -> None:
+        """Write completed job result to DB. Bug #577."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE delegation_job_results SET status = %s, output = %s, "
+                    "exit_code = %s, error = %s, completed_at = CURRENT_TIMESTAMP "
+                    "WHERE job_id = %s",
+                    (
+                        result.status,
+                        result.output,
+                        result.exit_code,
+                        result.error,
+                        result.job_id,
+                    ),
+                )
+                conn.commit()
+        elif self._sqlite_db_path:
+            import sqlite3
+
+            conn = sqlite3.connect(self._sqlite_db_path)
+            conn.execute(
+                "UPDATE delegation_job_results SET status = ?, output = ?, "
+                "exit_code = ?, error = ?, completed_at = datetime('now') "
+                "WHERE job_id = ?",
+                (
+                    result.status,
+                    result.output,
+                    result.exit_code,
+                    result.error,
+                    result.job_id,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+    def _db_get_result(self, job_id: str) -> Optional["JobResult"]:
+        """Read completed job result from DB. Returns None if pending or missing."""
+        row = None
+        if self._pool is not None:
+            from psycopg.rows import dict_row
+
+            with self._pool.connection() as conn:
+                conn.row_factory = dict_row
+                row = conn.execute(
+                    "SELECT * FROM delegation_job_results "
+                    "WHERE job_id = %s AND status != 'pending'",
+                    (job_id,),
+                ).fetchone()
+        elif self._sqlite_db_path:
+            import sqlite3
+
+            conn = sqlite3.connect(self._sqlite_db_path)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM delegation_job_results "
+                "WHERE job_id = ? AND status != 'pending'",
+                (job_id,),
+            ).fetchone()
+            conn.close()
+        if row is None:
+            return None
+        return JobResult(
+            job_id=row["job_id"],
+            status=row["status"],
+            output=row["output"] or "",
+            exit_code=row["exit_code"],
+            error=row["error"],
+        )
+
+    def _db_has_pending(self, job_id: str) -> bool:
+        """Check if job exists in DB (any status). Bug #577."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM delegation_job_results WHERE job_id = %s",
+                    (job_id,),
+                ).fetchone()
+            return row is not None
+        elif self._sqlite_db_path:
+            import sqlite3
+
+            conn = sqlite3.connect(self._sqlite_db_path)
+            row = conn.execute(
+                "SELECT 1 FROM delegation_job_results WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            conn.close()
+            return row is not None
+        return False
 
     async def register_job(self, job_id: str) -> None:
         """
@@ -94,6 +232,8 @@ class DelegationJobTracker:
                 loop = asyncio.get_event_loop()
                 self._pending_jobs[job_id] = loop.create_future()
                 logger.debug(f"Registered pending job: {job_id}")
+        # Bug #577: Also register in DB for cross-node visibility
+        self._db_register_job(job_id)
 
     async def has_job(self, job_id: str) -> bool:
         """
@@ -116,6 +256,9 @@ class DelegationJobTracker:
                 return bool(self._payload_cache.has_key(cache_key))
             except Exception as e:
                 logger.debug(f"has_job: cache lookup failed for job {job_id}: {e}")
+        # Bug #577: Check DB for cross-node visibility
+        if self._db_get_result(job_id) is not None or self._db_has_pending(job_id):
+            return True
         return False
 
     async def get_result(self, job_id: str) -> Optional[JobResult]:
@@ -134,7 +277,12 @@ class DelegationJobTracker:
         Returns:
             JobResult if the job is done (via cache or completed future), None if not ready
         """
-        # Check cache first (result persisted from complete_job callback)
+        # Bug #577: Check DB first (cross-node source of truth)
+        db_result = self._db_get_result(job_id)
+        if db_result is not None:
+            return db_result
+
+        # Check cache (result persisted from complete_job callback)
         if self._payload_cache is not None:
             try:
                 cache_key = f"delegation:{job_id}"
@@ -219,6 +367,9 @@ class DelegationJobTracker:
                     )
                 )
 
+        # Bug #577: Persist to DB for cross-node visibility
+        self._db_complete_job(result)
+
         return True
 
     async def wait_for_job(
@@ -259,6 +410,13 @@ class DelegationJobTracker:
             except Exception as e:
                 # Log but continue to wait on Future if cache fails
                 logger.debug(f"Cache lookup failed for job {job_id}: {e}")
+
+        # Bug #577: Check DB for cross-node completion
+        db_result = self._db_get_result(job_id)
+        if db_result is not None:
+            async with self._lock:
+                self._pending_jobs.pop(job_id, None)
+            return db_result
 
         async with self._lock:
             future = self._pending_jobs.get(job_id)

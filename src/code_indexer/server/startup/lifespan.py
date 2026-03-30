@@ -1609,6 +1609,15 @@ def make_lifespan(
 
                     get_token_blacklist().set_connection_pool(_cluster_pool)
 
+                    # Bug #577: Wire DelegationJobTracker for cluster
+                    from code_indexer.server.services.delegation_job_tracker import (
+                        DelegationJobTracker,
+                    )
+
+                    DelegationJobTracker.get_instance().set_connection_pool(
+                        _cluster_pool
+                    )
+
                     # Bug #581: Sync SSH keys from PG to local ~/.ssh/
                     try:
                         from code_indexer.server.services.ssh_key_sync_service import (

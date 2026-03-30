@@ -159,6 +159,13 @@ def initialize_services() -> Dict[str, Any]:
 
     get_token_blacklist().set_sqlite_path(str(db_path))
 
+    # Bug #577: Wire DelegationJobTracker with SQLite path for standalone mode
+    from code_indexer.server.services.delegation_job_tracker import (
+        DelegationJobTracker,
+    )
+
+    DelegationJobTracker.get_instance().set_sqlite_path(str(db_path))
+
     # Story #578: Initialize SQLite-backed runtime config (unified model).
     # Must happen after schema init (server_config table) and before PG pool.
     config_service.initialize_runtime_db(str(db_path))

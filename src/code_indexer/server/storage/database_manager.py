@@ -507,6 +507,19 @@ class DatabaseSchema:
         )
     """
 
+    # Bug #577: Delegation job results for cross-node visibility
+    CREATE_DELEGATION_JOB_RESULTS_TABLE = """
+        CREATE TABLE IF NOT EXISTS delegation_job_results (
+            job_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            output TEXT,
+            exit_code INTEGER,
+            error TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            completed_at TEXT
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -611,6 +624,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_OIDC_STATE_TOKENS_TABLE)
             # Bug #583: Token blacklist for cluster-wide JWT revocation
             conn.execute(self.CREATE_TOKEN_BLACKLIST_TABLE)
+            # Bug #577: Delegation job results for cross-node visibility
+            conn.execute(self.CREATE_DELEGATION_JOB_RESULTS_TABLE)
 
             conn.commit()
 
