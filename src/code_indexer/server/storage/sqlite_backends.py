@@ -2366,7 +2366,7 @@ class BackgroundJobsSqliteBackend:
 
         def operation(conn):
             conn.execute(
-                """INSERT INTO background_jobs
+                """INSERT OR IGNORE INTO background_jobs
                    (job_id, operation_type, status, created_at, started_at, completed_at,
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
