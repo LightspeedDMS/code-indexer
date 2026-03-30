@@ -20,7 +20,6 @@ from code_indexer.server.repositories.background_jobs import (
     JobStatus,
 )
 from code_indexer.server.services.git_state_manager import GitStateManager
-from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
@@ -932,7 +931,9 @@ Status values:
                 return
 
             # Load server config and create GitStateManager
-            config = ServerConfigManager().load_config()
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
             git_manager = GitStateManager(config=config)
 
             # Build PR description

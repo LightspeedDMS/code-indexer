@@ -1190,10 +1190,11 @@ class ResearchAssistantService:
             timeout_seconds = 1200
             analysis_model = "opus"
             try:
-                from code_indexer.server.utils.config_manager import ServerConfigManager
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
 
-                config_manager = ServerConfigManager()
-                config = config_manager.load_config()
+                config = get_config_service().get_config()
                 if config and config.claude_integration_config:
                     timeout_seconds = config.claude_integration_config.research_assistant_timeout_seconds
                 if config and config.golden_repos_config:

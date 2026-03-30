@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING, Dict, List, Any, Optional, Tuple
 
 import httpx
 
-from code_indexer.server.utils.config_manager import ServerConfigManager
 from code_indexer.server.services.ci_token_manager import (
     CITokenManager,
     GITHUB_TOKEN_PATTERN,
@@ -813,8 +812,9 @@ class DiagnosticsService:
         """
         try:
             # Get storage path from config
-            config_manager = ServerConfigManager()
-            config = config_manager.load_config()
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
             storage_path = Path(config.server_dir) / "data"
             golden_repos_path = storage_path / "golden-repos"
 
@@ -1500,8 +1500,9 @@ class DiagnosticsService:
         """
         try:
             # Get OIDC config
-            config_manager = ServerConfigManager()
-            config = config_manager.load_config()
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
 
             if not config.oidc_provider_config.enabled:
                 return DiagnosticResult(
@@ -1557,8 +1558,9 @@ class DiagnosticsService:
         """
         try:
             # Get telemetry config
-            config_manager = ServerConfigManager()
-            config = config_manager.load_config()
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
 
             if not config.telemetry_config.enabled:
                 return DiagnosticResult(
@@ -2030,8 +2032,9 @@ class DiagnosticsService:
         """
         try:
             # Get database path from config
-            config_manager = ServerConfigManager()
-            config = config_manager.load_config()
+            from code_indexer.server.services.config_service import get_config_service
+
+            config = get_config_service().get_config()
             db_path = Path(config.server_dir) / "data" / "cidx_server.db"
 
             # Check if database file exists

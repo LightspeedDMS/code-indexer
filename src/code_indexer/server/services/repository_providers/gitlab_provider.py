@@ -61,9 +61,9 @@ class GitLabProvider(RepositoryProviderBase):
         self._url_normalizer = GitUrlNormalizer()
 
         # Bug #83 Phase 1: Load timeout from config
-        from code_indexer.server.utils.config_manager import ServerConfigManager
+        from code_indexer.server.services.config_service import get_config_service
 
-        config = ServerConfigManager().load_config()
+        config = get_config_service().get_config()
         self._api_timeout = config.git_timeouts_config.gitlab_api_timeout
 
     @property
@@ -197,7 +197,7 @@ class GitLabProvider(RepositoryProviderBase):
 
         payload = {"query": query}
         if variables:
-            payload["variables"] = variables
+            payload["variables"] = variables  # type: ignore[assignment]
 
         response = httpx.post(
             url,
@@ -293,7 +293,7 @@ class GitLabProvider(RepositoryProviderBase):
                         committed_date = last_commit.get("committedDate")
                         if committed_date:
                             try:
-                                commit_info["commit_date"] = datetime.fromisoformat(
+                                commit_info["commit_date"] = datetime.fromisoformat(  # type: ignore[assignment]
                                     committed_date.replace("Z", "+00:00")
                                 )
                             except (ValueError, TypeError) as e:

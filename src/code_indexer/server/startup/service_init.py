@@ -316,17 +316,7 @@ def initialize_services() -> Dict[str, Any]:
     )
 
     # Load server configuration for resource limits and timeouts
-    from code_indexer.server.utils.config_manager import ServerConfigManager
-
-    config_manager = ServerConfigManager(server_dir_path=server_data_dir)
-    server_config = config_manager.load_config()
-    if server_config is None:
-        # Create default config if none exists
-        server_config = config_manager.create_default_config()
-        config_manager.save_config(server_config)
-
-    # Apply environment variable overrides
-    server_config = config_manager.apply_env_overrides(server_config)
+    server_config = config_service.get_config()
 
     # Initialize managers with resource configuration
     # (data_dir and db_path_str already computed above for storage mode detection)

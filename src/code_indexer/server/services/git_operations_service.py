@@ -107,12 +107,14 @@ class GitOperationsService:
         )
         self._tokens_lock = threading.RLock()
 
-        # Create ServerConfigManager internally if not provided (for REST router compatibility)
+        # Use config service for runtime config (for REST router compatibility)
         if config_manager is None:
-            config_manager = ServerConfigManager()
+            from code_indexer.server.services.config_service import get_config_service
+
+            config_manager = get_config_service()
 
         self.config_manager = config_manager
-        config = config_manager.load_config()
+        config = config_manager.get_config()
 
         # Bug #83 Phase 1: Load timeout configuration from config_manager
         # Handle case where no config file exists (e.g., CI/CD parity tests)
@@ -2778,7 +2780,7 @@ def _get_git_operations_service():
     """Get or create the global GitOperationsService instance."""
     global _git_operations_service_instance
     if _git_operations_service_instance is None:
-        _git_operations_service_instance = GitOperationsService(ServerConfigManager())
+        _git_operations_service_instance = GitOperationsService()
     return _git_operations_service_instance
 
 

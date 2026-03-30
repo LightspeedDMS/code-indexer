@@ -32,7 +32,6 @@ from ...utils.git_runner import (
     get_current_commit,
 )
 from ..services.git_state_manager import GitStateManager
-from ..utils.config_manager import ServerConfigManager
 from code_indexer.server.logging_utils import format_error_log
 
 
@@ -183,7 +182,11 @@ class GitSyncExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
             try:
-                config = ServerConfigManager().load_config()
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                config = get_config_service().get_config()
                 git_manager = GitStateManager(config=config)
                 git_manager.clear_repo_before_refresh(repo_path=self.repository_path)
                 logger.info(

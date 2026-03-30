@@ -60,9 +60,9 @@ class GitHubProvider(RepositoryProviderBase):
         self._url_normalizer = GitUrlNormalizer()
 
         # Bug #83 Phase 1: Load timeout from config
-        from code_indexer.server.utils.config_manager import ServerConfigManager
+        from code_indexer.server.services.config_service import get_config_service
 
-        config = ServerConfigManager().load_config()
+        config = get_config_service().get_config()
         self._api_timeout = config.git_timeouts_config.github_api_timeout
 
     @property

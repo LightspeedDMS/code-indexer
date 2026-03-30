@@ -16063,7 +16063,7 @@ def handle_trigger_dependency_analysis(
     import threading
     import uuid
     from datetime import datetime, timezone
-    from code_indexer.server.utils.config_manager import ServerConfigManager
+    from code_indexer.server.services.config_service import get_config_service
 
     try:
         # AC4: Default mode is delta
@@ -16080,8 +16080,7 @@ def handle_trigger_dependency_analysis(
             )
 
         # AC6: Check if feature is enabled
-        _scm = ServerConfigManager()
-        _server_config = _scm.load_config()
+        _server_config = get_config_service().get_config()
         _ci_config = (
             _server_config.claude_integration_config if _server_config else None
         )

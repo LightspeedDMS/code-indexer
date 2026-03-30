@@ -7,7 +7,6 @@ from typing import Optional
 from .auto_span_logger import AutoSpanLogger
 from .langfuse_client import LangfuseClient
 from .trace_state_manager import TraceStateManager
-from ..utils.config_manager import ServerConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +17,8 @@ _service_lock = threading.Lock()
 class LangfuseService:
     """Facade providing access to all Langfuse tracing components."""
 
-    def __init__(self, config_manager: ServerConfigManager):
-        self._config_manager = config_manager
+    def __init__(self, config_service):
+        self._config_service = config_service
         self._client: Optional[LangfuseClient] = None
         self._trace_manager: Optional[TraceStateManager] = None
         self._span_logger: Optional[AutoSpanLogger] = None
@@ -29,9 +28,9 @@ class LangfuseService:
 
     def is_enabled(self) -> bool:
         """Check if Langfuse is enabled in config."""
-        config = self._config_manager.load_config()
+        config = self._config_service.get_config()
         if config and config.langfuse_config:
-            return config.langfuse_config.enabled
+            return bool(config.langfuse_config.enabled)
         return False
 
     @property
@@ -40,7 +39,7 @@ class LangfuseService:
         if self._client is None:
             with self._lock:
                 if self._client is None:
-                    config = self._config_manager.load_config()
+                    config = self._config_service.get_config()
                     langfuse_config = config.langfuse_config if config else None
                     self._client = LangfuseClient(langfuse_config)
         return self._client
@@ -61,7 +60,7 @@ class LangfuseService:
             with self._lock:
                 if self._span_logger is None:
                     # Story #136 follow-up: Pass config for auto-trace functionality
-                    config = self._config_manager.load_config()
+                    config = self._config_service.get_config()
                     langfuse_config = config.langfuse_config if config else None
                     self._span_logger = AutoSpanLogger(
                         self.trace_manager, self.client, langfuse_config
@@ -103,8 +102,11 @@ def get_langfuse_service() -> LangfuseService:
     if _service_instance is None:
         with _service_lock:
             if _service_instance is None:
-                # Instantiate ServerConfigManager directly (standard pattern in codebase)
-                _service_instance = LangfuseService(ServerConfigManager())
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _service_instance = LangfuseService(get_config_service())
     return _service_instance
 
 

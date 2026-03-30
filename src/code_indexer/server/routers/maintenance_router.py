@@ -14,16 +14,10 @@ from fastapi import APIRouter, Depends
 from code_indexer.server.auth.dependencies import get_current_admin_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.maintenance_service import get_maintenance_state
-from code_indexer.server.utils.config_manager import ServerConfigManager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin/maintenance", tags=["maintenance"])
-
-
-def get_config_manager() -> ServerConfigManager:
-    """Get ServerConfigManager instance (dependency injection point for testing)."""
-    return ServerConfigManager()
 
 
 @router.post("/enter")
@@ -41,7 +35,7 @@ def enter_maintenance_mode(
     state = get_maintenance_state()
     result = state.enter_maintenance_mode()
     logger.info(f"Maintenance mode entered: {result}")
-    return result
+    return dict(result)
 
 
 @router.post("/exit")
@@ -58,7 +52,7 @@ def exit_maintenance_mode(
     state = get_maintenance_state()
     result = state.exit_maintenance_mode()
     logger.info(f"Maintenance mode exited: {result}")
-    return result
+    return dict(result)
 
 
 @router.get("/status")
@@ -71,7 +65,7 @@ def get_maintenance_status(
         Dict with maintenance_mode, drained, running_jobs, queued_jobs, entered_at
     """
     state = get_maintenance_state()
-    return state.get_status()
+    return dict(state.get_status())
 
 
 @router.get("/drain-status")
@@ -87,13 +81,12 @@ def get_drain_status(
         Dict with drained, running_jobs, queued_jobs, estimated_drain_seconds, jobs
     """
     state = get_maintenance_state()
-    return state.get_drain_status()
+    return dict(state.get_drain_status())
 
 
 @router.get("/drain-timeout")
 def get_drain_timeout(
     current_user: User = Depends(get_current_admin_user),
-    config_manager: ServerConfigManager = Depends(get_config_manager),
 ) -> Dict[str, Any]:
     """Get recommended drain timeout based on server configuration (Bug #135).
 
@@ -105,10 +98,9 @@ def get_drain_timeout(
         Dict with max_job_timeout_seconds and recommended_drain_timeout_seconds
     """
     # Load current configuration
-    config = config_manager.load_config()
-    if config is None:
-        # Fallback to default config if none exists
-        config = config_manager.create_default_config()
+    from code_indexer.server.services.config_service import get_config_service
+
+    config = get_config_service().get_config()
 
     # Calculate timeouts from config
     state = get_maintenance_state()
