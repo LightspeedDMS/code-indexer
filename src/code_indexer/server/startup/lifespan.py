@@ -1026,17 +1026,26 @@ def make_lifespan(
                         github_token=github_token,
                         server_name=server_name,
                     )
-                    self_monitoring_service.start()
+                    # Bug #580: Only auto-start in standalone mode.
+                    # In cluster mode (postgres), leader election callbacks
+                    # handle start/stop so only the leader node runs this.
+                    if storage_mode != "postgres":
+                        self_monitoring_service.start()
+                        logger.info(
+                            f"Self-monitoring service started (cadence: {sm_config.cadence_minutes} minutes)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    else:
+                        logger.info(
+                            "Self-monitoring service initialized (awaiting leader election)",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
                     app.state.self_monitoring_service = self_monitoring_service
                     # Store repo_root and github_repo for manual trigger route access (Bug #87)
                     app.state.self_monitoring_repo_root = (
                         str(repo_root) if repo_root else None
                     )
                     app.state.self_monitoring_github_repo = github_repo
-                    logger.info(
-                        f"Self-monitoring service started (cadence: {sm_config.cadence_minutes} minutes)",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
             else:
                 logger.info(
                     "Self-monitoring service disabled in configuration",
@@ -1502,7 +1511,8 @@ def make_lifespan(
                     _reconciliation = JobReconciliationService(
                         pool=_cluster_pool, heartbeat_service=_heartbeat
                     )
-                    _reconciliation.start()
+                    # Bug #580: Don't start immediately -- leader election
+                    # callbacks handle start/stop so only the leader runs this.
                     _cluster_services.append(("reconciliation", _reconciliation))
 
                     # Story #538: Enable PG advisory locks for password changes
@@ -1634,6 +1644,47 @@ def make_lifespan(
                         storage_mode="postgres",
                         postgres_dsn=_pg_dsn,
                     )
+
+                    # Bug #580: Gate housekeeping services behind leader election.
+                    # Only the leader node should run JobReconciliationService
+                    # and SelfMonitoringService to avoid redundant work and conflicts.
+                    def _on_become_leader():
+                        logger.info(
+                            "Bug #580: Node became leader -- starting housekeeping services",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        _reconciliation.start()
+                        if self_monitoring_service is not None:
+                            self_monitoring_service.start()
+
+                    def _on_lose_leadership():
+                        logger.info(
+                            "Bug #580: Node lost leadership -- stopping housekeeping services",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                        try:
+                            _reconciliation.stop()
+                        except Exception as e:
+                            logger.warning(
+                                f"Bug #580: Failed to stop reconciliation service: {e}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        if self_monitoring_service is not None:
+                            try:
+                                self_monitoring_service.stop()
+                            except Exception as e:
+                                logger.warning(
+                                    f"Bug #580: Failed to stop self-monitoring service: {e}",
+                                    extra={"correlation_id": get_correlation_id()},
+                                )
+
+                    _leader_election._on_become_leader = _on_become_leader
+                    _leader_election._on_lose_leadership = _on_lose_leadership
+
+                    # If already leader (won election during start_monitoring),
+                    # start the housekeeping services now.
+                    if _leader_election.is_leader:
+                        _on_become_leader()
 
                     logger.info(
                         f"Cluster services started: node_id={_node_id}, "
