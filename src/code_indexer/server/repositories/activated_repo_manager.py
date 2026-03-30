@@ -97,6 +97,9 @@ class ActivatedRepoManager:
         # Ensure directory structure exists
         os.makedirs(self.activated_repos_dir, exist_ok=True)
 
+        # Cluster mode: PostgreSQL connection pool (Bug #587)
+        self._pool: Any = None
+
         # Set up class-level logger
         self.logger = logging.getLogger(__name__)
 
@@ -105,6 +108,254 @@ class ActivatedRepoManager:
             self.data_dir
         )
         self.background_job_manager = background_job_manager or BackgroundJobManager()
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Set PostgreSQL connection pool for cluster mode.
+
+        When set, metadata operations use PostgreSQL tables
+        instead of JSON files, enabling cross-node visibility.
+        """
+        self._pool = pool
+        self.logger.info(
+            "ActivatedRepoManager: using PostgreSQL connection pool (cluster mode)"
+        )
+
+    def set_shared_repos_dir(self, shared_dir: str) -> None:
+        """Set NFS shared directory for activated repo clones in cluster mode."""
+        shared_activated = Path(shared_dir) / "activated-repos"
+        shared_activated.mkdir(parents=True, exist_ok=True)
+        self.activated_repos_dir = str(shared_activated)
+        self.logger.info(
+            "ActivatedRepoManager: using shared storage at %s",
+            self.activated_repos_dir,
+        )
+
+    # ------------------------------------------------------------------
+    # Dual-mode metadata helpers (Bug #587)
+    # ------------------------------------------------------------------
+
+    def _save_metadata(self, username: str, user_alias: str, metadata: dict) -> None:
+        """Save activated repo metadata (PG or JSON file)."""
+        if self._pool is not None:
+            self._save_metadata_pg(username, user_alias, metadata)
+        else:
+            self._save_metadata_file(username, user_alias, metadata)
+
+    def _save_metadata_pg(self, username: str, user_alias: str, metadata: dict) -> None:
+        """Save metadata to PostgreSQL (cluster mode)."""
+        assert self._pool is not None
+        extra = {
+            k: v
+            for k, v in metadata.items()
+            if k
+            not in (
+                "username",
+                "user_alias",
+                "golden_repo_alias",
+                "path",
+                "current_branch",
+                "activated_at",
+                "last_accessed",
+                "git_committer_email",
+                "ssh_key_used",
+                "is_composite",
+                "wiki_enabled",
+            )
+        }
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO activated_repos "
+                "(username, user_alias, golden_repo_alias, repo_path, current_branch, "
+                "activated_at, last_accessed, git_committer_email, ssh_key_used, "
+                "is_composite, wiki_enabled, metadata_json) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (username, user_alias) DO UPDATE SET "
+                "golden_repo_alias = EXCLUDED.golden_repo_alias, "
+                "repo_path = EXCLUDED.repo_path, "
+                "current_branch = EXCLUDED.current_branch, "
+                "last_accessed = EXCLUDED.last_accessed, "
+                "git_committer_email = EXCLUDED.git_committer_email, "
+                "ssh_key_used = EXCLUDED.ssh_key_used, "
+                "is_composite = EXCLUDED.is_composite, "
+                "wiki_enabled = EXCLUDED.wiki_enabled, "
+                "metadata_json = EXCLUDED.metadata_json",
+                (
+                    username,
+                    user_alias,
+                    metadata.get("golden_repo_alias"),
+                    metadata.get("path", ""),
+                    metadata.get("current_branch", "main"),
+                    metadata.get("activated_at"),
+                    metadata.get("last_accessed"),
+                    metadata.get("git_committer_email"),
+                    metadata.get("ssh_key_used", False),
+                    metadata.get("is_composite", False),
+                    metadata.get("wiki_enabled", False),
+                    json.dumps(extra) if extra else None,
+                ),
+            )
+            conn.commit()
+
+    def _load_metadata(self, username: str, user_alias: str) -> Optional[dict]:
+        """Load activated repo metadata (PG or JSON file)."""
+        if self._pool is not None:
+            return self._load_metadata_pg(username, user_alias)
+        return self._load_metadata_file(username, user_alias)
+
+    def _save_metadata_file(
+        self,
+        username: str,
+        user_alias: str,
+        metadata: dict,
+    ) -> None:
+        """Save metadata to JSON file (standalone mode)."""
+        user_dir = os.path.join(self.activated_repos_dir, username)
+        os.makedirs(user_dir, exist_ok=True)
+        metadata_path = os.path.join(user_dir, f"{user_alias}_metadata.json")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2, default=str)
+
+    def _load_metadata_file(self, username: str, user_alias: str) -> Optional[dict]:
+        """Load metadata from JSON file (standalone mode)."""
+        metadata_path = os.path.join(
+            self.activated_repos_dir, username, f"{user_alias}_metadata.json"
+        )
+        if not os.path.exists(metadata_path):
+            return None
+        with open(metadata_path) as f:
+            result: dict = json.load(f)
+            return result
+
+    def _load_metadata_pg(self, username: str, user_alias: str) -> Optional[dict]:
+        """Load metadata from PostgreSQL (cluster mode)."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM activated_repos WHERE username = %s AND user_alias = %s",
+                (username, user_alias),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._pg_row_to_metadata(row)
+
+    def _pg_row_to_metadata(self, row: dict) -> dict:
+        """Convert PG row dict to metadata dict format."""
+        result = {
+            "user_alias": row["user_alias"],
+            "username": row["username"],
+            "golden_repo_alias": row["golden_repo_alias"],
+            "path": row["repo_path"],
+            "current_branch": row["current_branch"],
+            "activated_at": (str(row["activated_at"]) if row["activated_at"] else None),
+            "last_accessed": (
+                str(row["last_accessed"]) if row["last_accessed"] else None
+            ),
+            "git_committer_email": row.get("git_committer_email"),
+            "ssh_key_used": bool(row.get("ssh_key_used", False)),
+            "is_composite": bool(row.get("is_composite", False)),
+            "wiki_enabled": bool(row.get("wiki_enabled", False)),
+        }
+        metadata_json = row.get("metadata_json")
+        if metadata_json:
+            extra = (
+                metadata_json
+                if isinstance(metadata_json, dict)
+                else json.loads(metadata_json)
+            )
+            result.update(extra)
+        return result
+
+    def _delete_metadata(self, username: str, user_alias: str) -> None:
+        """Delete activated repo metadata (PG or JSON file)."""
+        if self._pool is not None:
+            self._delete_metadata_pg(username, user_alias)
+        else:
+            self._delete_metadata_file(username, user_alias)
+
+    def _delete_metadata_file(self, username: str, user_alias: str) -> None:
+        """Delete metadata JSON file (standalone mode)."""
+        metadata_path = os.path.join(
+            self.activated_repos_dir, username, f"{user_alias}_metadata.json"
+        )
+        if os.path.exists(metadata_path):
+            os.remove(metadata_path)
+
+    def _delete_metadata_pg(self, username: str, user_alias: str) -> None:
+        """Delete metadata from PostgreSQL (cluster mode)."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM activated_repos WHERE username = %s AND user_alias = %s",
+                (username, user_alias),
+            )
+            conn.commit()
+
+    def _list_user_repos(self, username: str) -> List[dict]:
+        """List activated repos for a user (PG or filesystem scan)."""
+        if self._pool is not None:
+            return self._list_user_repos_pg(username)
+        return self._list_user_repos_fs(username)
+
+    def _list_user_repos_fs(self, username: str) -> List[dict]:
+        """List activated repos for a user from filesystem (standalone mode)."""
+        user_dir = os.path.join(self.activated_repos_dir, username)
+        if not os.path.exists(user_dir):
+            return []
+        repos = []
+        for filename in os.listdir(user_dir):
+            if filename.endswith("_metadata.json"):
+                metadata_path = os.path.join(user_dir, filename)
+                try:
+                    with open(metadata_path) as f:
+                        repo_data = json.load(f)
+                    user_alias = repo_data.get("user_alias", "")
+                    repo_dir = os.path.join(user_dir, user_alias)
+                    if os.path.exists(repo_dir):
+                        repos.append(repo_data)
+                except (json.JSONDecodeError, KeyError, IOError) as e:
+                    self.logger.warning(
+                        "Skipping corrupted metadata file %s: %s",
+                        metadata_path,
+                        e,
+                    )
+                    continue
+        return repos
+
+    def _list_all_repos(self) -> List[dict]:
+        """List all activated repos (PG or filesystem scan)."""
+        if self._pool is not None:
+            return self._list_all_repos_pg()
+        return self._list_all_repos_fs()
+
+    def _list_all_repos_fs(self) -> List[dict]:
+        """List all activated repos from filesystem (standalone mode)."""
+        if not os.path.exists(self.activated_repos_dir):
+            return []
+        all_repos: List[dict] = []
+        for username in os.listdir(self.activated_repos_dir):
+            user_dir = os.path.join(self.activated_repos_dir, username)
+            if os.path.isdir(user_dir):
+                all_repos.extend(self._list_user_repos_fs(username))
+        return all_repos
+
+    def _list_user_repos_pg(self, username: str) -> List[dict]:
+        """List activated repos for a user from PostgreSQL (cluster mode)."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM activated_repos WHERE username = %s ORDER BY user_alias",
+                (username,),
+            ).fetchall()
+        return [self._pg_row_to_metadata(r) for r in rows]
+
+    def _list_all_repos_pg(self) -> List[dict]:
+        """List all activated repos from PostgreSQL (cluster mode)."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM activated_repos ORDER BY username, user_alias"
+            ).fetchall()
+        return [self._pg_row_to_metadata(r) for r in rows]
 
     def activate_repository(
         self,

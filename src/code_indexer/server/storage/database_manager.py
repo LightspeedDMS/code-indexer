@@ -435,6 +435,36 @@ class DatabaseSchema:
         )
     """
 
+    # Bug #587: Activated repo metadata for cluster mode
+    CREATE_ACTIVATED_REPOS_TABLE = """
+        CREATE TABLE IF NOT EXISTS activated_repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            user_alias TEXT NOT NULL,
+            golden_repo_alias TEXT,
+            repo_path TEXT NOT NULL,
+            current_branch TEXT DEFAULT 'main',
+            activated_at TEXT,
+            last_accessed TEXT,
+            git_committer_email TEXT,
+            ssh_key_used INTEGER DEFAULT 0,
+            is_composite INTEGER DEFAULT 0,
+            wiki_enabled INTEGER DEFAULT 0,
+            metadata_json TEXT,
+            UNIQUE(username, user_alias)
+        )
+    """
+
+    CREATE_IDX_ACTIVATED_REPOS_USERNAME = """
+        CREATE INDEX IF NOT EXISTS idx_activated_repos_username
+        ON activated_repos(username)
+    """
+
+    CREATE_IDX_ACTIVATED_REPOS_GOLDEN = """
+        CREATE INDEX IF NOT EXISTS idx_activated_repos_golden
+        ON activated_repos(golden_repo_alias)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -527,6 +557,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_IDX_RESEARCH_MESSAGES_SESSION_ID)
             # Story #578: Server config centralization
             conn.execute(self.CREATE_SERVER_CONFIG_TABLE)
+            # Bug #587: Activated repos cluster metadata
+            conn.execute(self.CREATE_ACTIVATED_REPOS_TABLE)
+            conn.execute(self.CREATE_IDX_ACTIVATED_REPOS_USERNAME)
+            conn.execute(self.CREATE_IDX_ACTIVATED_REPOS_GOLDEN)
 
             conn.commit()
 

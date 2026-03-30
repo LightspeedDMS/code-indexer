@@ -1543,6 +1543,19 @@ def make_lifespan(
                     _config_svc.set_connection_pool(_cluster_pool)
                     _config_svc.start_config_reload(interval_seconds=30)
 
+                    # Bug #587: Wire cluster pool for activated repos
+                    if (
+                        golden_repo_manager is not None
+                        and hasattr(golden_repo_manager, "activated_repo_manager")
+                        and golden_repo_manager.activated_repo_manager is not None
+                    ):
+                        _arm = golden_repo_manager.activated_repo_manager
+                        _arm.set_connection_pool(_cluster_pool)
+                        # Use server_data_dir as shared NFS base
+                        _shared_data = str(Path(server_data_dir) / "data")
+                        _arm.set_shared_repos_dir(_shared_data)
+                        logger.info("Bug #587: ActivatedRepoManager cluster pool wired")
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
