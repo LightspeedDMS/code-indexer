@@ -68,6 +68,14 @@ class ConfigService:
         self._db_config_version: int = 0
         self._reload_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._on_change_callbacks: List[Any] = []
+
+    def register_on_change_callback(self, callback: Any) -> None:
+        """Register a callback fired when config reloads from DB.
+
+        Callback receives the new ServerConfig as its sole argument.
+        """
+        self._on_change_callbacks.append(callback)
 
     def initialize_runtime_db(self, db_path: str) -> None:
         """Initialize SQLite-backed runtime config (solo mode).
@@ -1401,6 +1409,12 @@ class ConfigService:
             ).fetchone()
         if row and row["version"] != self._db_config_version:
             self._load_runtime_from_pg()
+            # Fire change callbacks so services can react (Bug #586)
+            for cb in self._on_change_callbacks:
+                try:
+                    cb(self._config)
+                except Exception:
+                    logger.exception("Config change callback failed")
             return True
         return False
 

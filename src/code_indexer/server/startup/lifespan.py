@@ -1634,6 +1634,31 @@ def make_lifespan(
                             "Bug #581: SSH key sync failed (non-fatal): %s", exc
                         )
 
+                    # Bug #586: Sync API keys to local files on config change
+                    def _on_config_change(new_config: Any) -> None:
+                        try:
+                            from code_indexer.server.services.api_key_management import (
+                                ApiKeySyncService,
+                            )
+
+                            sync_svc = ApiKeySyncService()
+                            ci = new_config.claude_integration_config
+                            if ci and ci.anthropic_api_key:
+                                sync_svc.sync_anthropic_key(ci.anthropic_api_key)
+                            if ci and ci.voyage_api_key:
+                                sync_svc.sync_voyageai_key(ci.voyage_api_key)
+                        except Exception:
+                            logger.debug(
+                                "Bug #586: API key sync on config change failed",
+                                exc_info=True,
+                            )
+
+                    from code_indexer.server.services.config_service import (
+                        get_config_service as _get_cs,
+                    )
+
+                    _get_cs().register_on_change_callback(_on_config_change)
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
