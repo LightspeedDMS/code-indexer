@@ -62,11 +62,37 @@ class ConfigService:
         self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
         self._delegation_manager = ClaudeDelegationManager(server_dir_path)
-        # Story #578: PG-backed runtime config for cluster mode
-        self._pool: Any = None
-        self._pg_config_version: int = 0
+        # Story #578: Unified DB for runtime config (SQLite or PG)
+        self._pool: Any = None  # PG pool (set via set_connection_pool for cluster)
+        self._sqlite_db_path: Optional[str] = None  # SQLite path (solo mode)
+        self._db_config_version: int = 0
         self._reload_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+
+    def initialize_runtime_db(self, db_path: str) -> None:
+        """Initialize SQLite-backed runtime config (solo mode).
+
+        Called on startup. If server_config table is empty and config.json
+        has runtime keys, auto-migrates from file to DB.
+        """
+        self._sqlite_db_path = db_path
+        runtime = self._load_runtime_from_sqlite()
+        if runtime is not None:
+            # DB has runtime config -- merge with bootstrap
+            self._merge_runtime_config(runtime)
+            self._strip_config_file_to_bootstrap()
+        else:
+            # First boot or pre-migration: seed DB from config.json
+            config = self.get_config()
+            runtime_dict = self._extract_runtime_dict(config)
+            if runtime_dict:
+                self._save_runtime_to_sqlite(runtime_dict)
+                self._strip_config_file_to_bootstrap()
+                logger.info(
+                    "ConfigService: migrated %d runtime keys to SQLite",
+                    len(runtime_dict),
+                )
+        logger.info("ConfigService: using SQLite for runtime config")
 
     def set_connection_pool(self, pool: Any) -> None:
         """Enable PostgreSQL-backed config storage for cluster mode.
@@ -1359,7 +1385,7 @@ class ConfigService:
                 "SELECT version FROM server_config WHERE config_key = %s",
                 ("runtime",),
             ).fetchone()
-        if row and row["version"] != self._pg_config_version:
+        if row and row["version"] != self._db_config_version:
             self._load_runtime_from_pg()
             return True
         return False
@@ -1395,7 +1421,7 @@ class ConfigService:
                 (CONFIG_KEY_RUNTIME,),
             ).fetchone()
             if row:
-                self._pg_config_version = row[0]
+                self._db_config_version = row[0]
             else:
                 logger.error(
                     "Runtime config row missing from server_config after update"
@@ -1424,7 +1450,7 @@ class ConfigService:
             assert row is not None, (
                 "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             )
-            self._pg_config_version = row[0]
+            self._db_config_version = row[0]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
             len(runtime_dict),
@@ -1450,8 +1476,84 @@ class ConfigService:
         runtime_dict = (
             json.loads(config_json) if isinstance(config_json, str) else config_json
         )
-        self._pg_config_version = int(row["version"])
+        self._db_config_version = int(row["version"])
         self._merge_runtime_config(runtime_dict)
+
+    def _strip_config_file_to_bootstrap(self) -> None:
+        """Strip config.json to bootstrap-only keys, backing up original."""
+        import shutil
+
+        config = self.get_config()
+        full_dict = asdict(config)
+
+        # Check if already stripped
+        non_bootstrap = [k for k in full_dict if k not in BOOTSTRAP_KEYS]
+        if not non_bootstrap:
+            return
+
+        # Create backup (only once)
+        backup_dir = Path(self.config_manager.server_dir) / "config-migration-backup"
+        backup_file = backup_dir / "config.json.pre-centralization"
+        if not backup_file.exists():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.config_manager.config_file_path, str(backup_file))
+            logger.info("ConfigService: backed up config.json to %s", backup_file)
+
+        # Write bootstrap-only
+        bootstrap_dict = self._extract_bootstrap_dict(config)
+        self.config_manager.save_config_dict(bootstrap_dict)
+        logger.info(
+            "ConfigService: stripped config.json to %d bootstrap keys",
+            len(bootstrap_dict),
+        )
+
+    def _save_runtime_to_sqlite(self, runtime_dict: dict) -> None:
+        """Save runtime config to local SQLite server_config table."""
+        import sqlite3
+
+        assert self._sqlite_db_path is not None
+        conn = sqlite3.connect(self._sqlite_db_path)
+        try:
+            conn.execute(
+                "INSERT INTO server_config "
+                "(config_key, config_json, version, updated_by) "
+                "VALUES (?, ?, 1, ?) "
+                "ON CONFLICT(config_key) DO UPDATE SET "
+                "config_json = excluded.config_json, "
+                "version = server_config.version + 1, "
+                "updated_at = datetime('now'), "
+                "updated_by = excluded.updated_by",
+                (CONFIG_KEY_RUNTIME, json.dumps(runtime_dict), UPDATER_WEB_UI),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT version FROM server_config WHERE config_key = ?",
+                (CONFIG_KEY_RUNTIME,),
+            ).fetchone()
+            if row:
+                self._db_config_version = row[0]
+        finally:
+            conn.close()
+
+    def _load_runtime_from_sqlite(self) -> Optional[dict]:
+        """Load runtime config from local SQLite server_config table."""
+        import sqlite3
+
+        if not self._sqlite_db_path or not Path(self._sqlite_db_path).exists():
+            return None
+        conn = sqlite3.connect(self._sqlite_db_path)
+        try:
+            row = conn.execute(
+                "SELECT config_json, version FROM server_config WHERE config_key = ?",
+                (CONFIG_KEY_RUNTIME,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        self._db_config_version = int(row[1])
+        result: dict = json.loads(row[0])
+        return result
 
     def _merge_runtime_config(self, runtime_dict: dict) -> None:
         """Merge runtime dict into current config (runtime fields only).
@@ -1472,13 +1574,18 @@ class ConfigService:
         self._config = new_config  # Atomic reference swap
 
     def save_config(self, config: ServerConfig) -> None:
-        """Save config -- PG for runtime in cluster mode, file for standalone.
+        """Save config: runtime to DB (PG or SQLite), bootstrap to file.
 
-        In cluster mode (pool set): runtime to PG, bootstrap to file.
-        In standalone mode (no pool): full config to file (unchanged).
+        Priority: PG pool > SQLite > full file (legacy).
         """
+        runtime_dict = self._extract_runtime_dict(config)
+
         if self._pool is not None:
             self._save_runtime_to_pg(config)
+            bootstrap_dict = self._extract_bootstrap_dict(config)
+            self.config_manager.save_config_dict(bootstrap_dict)
+        elif self._sqlite_db_path is not None:
+            self._save_runtime_to_sqlite(runtime_dict)
             bootstrap_dict = self._extract_bootstrap_dict(config)
             self.config_manager.save_config_dict(bootstrap_dict)
         else:

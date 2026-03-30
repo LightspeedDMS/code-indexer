@@ -154,6 +154,10 @@ def initialize_services() -> Dict[str, Any]:
     schema = DatabaseSchema(str(db_path))
     schema.initialize_database()
 
+    # Story #578: Initialize SQLite-backed runtime config (unified model).
+    # Must happen after schema init (server_config table) and before PG pool.
+    config_service.initialize_runtime_db(str(db_path))
+
     # Epic #408: Cluster mode — determine storage backend
     _storage_mode = "sqlite"
     _backend_registry = None

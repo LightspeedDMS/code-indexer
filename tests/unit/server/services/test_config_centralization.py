@@ -102,11 +102,11 @@ class TestCheckConfigUpdate:
         mock_conn.execute.side_effect = [version_cursor, full_cursor]
 
         config_service._pool = mock_pool
-        config_service._pg_config_version = 1
+        config_service._db_config_version = 1
 
         result = config_service.check_config_update()
         assert result is True
-        assert config_service._pg_config_version == 2
+        assert config_service._db_config_version == 2
         assert config_service.get_config().service_display_name == "Reloaded"
 
 
@@ -141,7 +141,7 @@ class TestSaveConfigCluster:
         # so mock must return a tuple instead of a dict.
         mock_pool, mock_conn = _make_mock_pool(select_row=(2,))
         config_service._pool = mock_pool
-        config_service._pg_config_version = 1
+        config_service._db_config_version = 1
 
         config = config_service.get_config()
         config.service_display_name = "ClusterNode"
@@ -185,7 +185,7 @@ class TestSeedRuntimeToPg:
         # Verify INSERT was called
         calls = [str(c) for c in mock_conn.execute.call_args_list]
         assert any("INSERT INTO server_config" in c for c in calls)
-        assert config_service._pg_config_version == 1
+        assert config_service._db_config_version == 1
 
 
 class TestLoadRuntimeFromPg:
@@ -209,7 +209,7 @@ class TestLoadRuntimeFromPg:
         assert config.jwt_expiration_minutes == 99
         # Bootstrap values should be preserved
         assert config.host == original_host
-        assert config_service._pg_config_version == 5
+        assert config_service._db_config_version == 5
 
 
 class TestSetConnectionPool:
@@ -226,7 +226,7 @@ class TestSetConnectionPool:
         config_service.set_connection_pool(mock_pool)
 
         assert config_service._pool is mock_pool
-        assert config_service._pg_config_version == 3
+        assert config_service._db_config_version == 3
         assert config_service.get_config().service_display_name == "Wired"
 
 
@@ -260,7 +260,7 @@ class TestConfigReloadThread:
             select_row={"config_json": _json.dumps(runtime_dict), "version": 1}
         )
         config_service._pool = mock_pool
-        config_service._pg_config_version = 1
+        config_service._db_config_version = 1
 
         config_service.start_config_reload(interval_seconds=1)
         assert config_service._reload_thread is not None
@@ -281,3 +281,261 @@ class TestExtractBootstrapDict:
             assert key in BOOTSTRAP_KEYS, (
                 f"Non-bootstrap key '{key}' found in bootstrap dict"
             )
+
+
+class TestInitializeRuntimeDb:
+    """Verify initialize_runtime_db migrates config from file to SQLite."""
+
+    def test_initialize_runtime_db_migrates_from_file(self, tmp_server_dir):
+        """First boot: config.json has full config, SQLite is empty.
+
+        After initialize_runtime_db:
+        - SQLite server_config table has a 'runtime' row
+        - config.json is stripped to bootstrap-only keys
+        - Backup of original config.json is created
+        """
+        import sqlite3
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+        config = svc.get_config()
+        original_display_name = config.service_display_name
+
+        # Create SQLite DB with server_config table
+        db_path = os.path.join(tmp_server_dir, "data", "cidx_server.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS server_config ("
+            "config_key TEXT PRIMARY KEY DEFAULT 'runtime', "
+            "config_json TEXT NOT NULL, "
+            "version INTEGER NOT NULL DEFAULT 1, "
+            "updated_at TEXT DEFAULT (datetime('now')), "
+            "updated_by TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        # Act
+        svc.initialize_runtime_db(db_path)
+
+        # Assert: SQLite has runtime row
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT config_json, version FROM server_config "
+            "WHERE config_key = 'runtime'"
+        ).fetchone()
+        conn.close()
+        assert row is not None, "Runtime row should exist in SQLite"
+        runtime_dict = json.loads(row[0])
+        assert "service_display_name" in runtime_dict
+        assert runtime_dict["service_display_name"] == original_display_name
+
+        # Assert: config.json stripped to bootstrap only
+        config_path = os.path.join(tmp_server_dir, "config.json")
+        with open(config_path) as f:
+            saved = json.load(f)
+        for key in saved:
+            assert key in BOOTSTRAP_KEYS, (
+                f"Non-bootstrap key '{key}' in config.json after migration"
+            )
+
+        # Assert: backup created
+        backup_path = os.path.join(
+            tmp_server_dir,
+            "config-migration-backup",
+            "config.json.pre-centralization",
+        )
+        assert os.path.exists(backup_path)
+
+    def test_initialize_runtime_db_loads_existing(self, tmp_server_dir):
+        """Already migrated: SQLite has runtime row.
+
+        After initialize_runtime_db:
+        - Runtime values loaded from SQLite and merged into config
+        - Version tracked from DB
+        """
+        import sqlite3
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+
+        # Create SQLite DB with existing runtime config
+        db_path = os.path.join(tmp_server_dir, "data", "cidx_server.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS server_config ("
+            "config_key TEXT PRIMARY KEY DEFAULT 'runtime', "
+            "config_json TEXT NOT NULL, "
+            "version INTEGER NOT NULL DEFAULT 1, "
+            "updated_at TEXT DEFAULT (datetime('now')), "
+            "updated_by TEXT)"
+        )
+        runtime = {
+            "service_display_name": "FromSQLite",
+            "jwt_expiration_minutes": 77,
+        }
+        conn.execute(
+            "INSERT INTO server_config "
+            "(config_key, config_json, version, updated_by) "
+            "VALUES ('runtime', ?, 5, 'test')",
+            (json.dumps(runtime),),
+        )
+        conn.commit()
+        conn.close()
+
+        # Act
+        svc.initialize_runtime_db(db_path)
+
+        # Assert: config merged from SQLite
+        config = svc.get_config()
+        assert config.service_display_name == "FromSQLite"
+        assert config.jwt_expiration_minutes == 77
+        assert svc._db_config_version == 5
+
+
+class TestSaveConfigSqlite:
+    """Verify save_config writes to SQLite when runtime DB initialized."""
+
+    def test_save_config_writes_to_sqlite_in_solo(self, tmp_server_dir):
+        """After initialize_runtime_db, save_config writes runtime to SQLite."""
+        import sqlite3
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+
+        # Create SQLite DB
+        db_path = os.path.join(tmp_server_dir, "data", "cidx_server.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS server_config ("
+            "config_key TEXT PRIMARY KEY DEFAULT 'runtime', "
+            "config_json TEXT NOT NULL, "
+            "version INTEGER NOT NULL DEFAULT 1, "
+            "updated_at TEXT DEFAULT (datetime('now')), "
+            "updated_by TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        svc.initialize_runtime_db(db_path)
+
+        # Act: modify config and save
+        config = svc.get_config()
+        config.service_display_name = "UpdatedViaUI"
+        svc.save_config(config)
+
+        # Assert: SQLite updated
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT config_json FROM server_config WHERE config_key = 'runtime'"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        runtime = json.loads(row[0])
+        assert runtime["service_display_name"] == "UpdatedViaUI"
+
+        # Assert: config.json only has bootstrap keys
+        config_path = os.path.join(tmp_server_dir, "config.json")
+        with open(config_path) as f:
+            saved = json.load(f)
+        assert "service_display_name" not in saved
+
+    def test_save_config_writes_to_pg_after_pool_set(self, tmp_server_dir):
+        """After set_connection_pool, save_config uses PG over SQLite."""
+        import sqlite3
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+
+        # Initialize SQLite first
+        db_path = os.path.join(tmp_server_dir, "data", "cidx_server.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS server_config ("
+            "config_key TEXT PRIMARY KEY DEFAULT 'runtime', "
+            "config_json TEXT NOT NULL, "
+            "version INTEGER NOT NULL DEFAULT 1, "
+            "updated_at TEXT DEFAULT (datetime('now')), "
+            "updated_by TEXT)"
+        )
+        conn.commit()
+        conn.close()
+        svc.initialize_runtime_db(db_path)
+
+        # Set PG pool (cluster mode override)
+        runtime_dict = {"service_display_name": "PGNode"}
+        mock_pool, mock_conn = _make_mock_pool(
+            select_row={
+                "config_json": json.dumps(runtime_dict),
+                "version": 10,
+            }
+        )
+        svc.set_connection_pool(mock_pool)
+
+        # Re-mock for save (UPDATE + SELECT version)
+        update_cursor = MagicMock()
+        select_cursor = MagicMock()
+        select_cursor.fetchone.return_value = (11,)
+        mock_conn.execute.side_effect = [update_cursor, select_cursor]
+
+        config = svc.get_config()
+        config.service_display_name = "ClusterSave"
+        svc.save_config(config)
+
+        # Verify PG was called
+        calls = [str(c) for c in mock_conn.execute.call_args_list]
+        assert any("UPDATE server_config" in c for c in calls)
+
+
+class TestAutoMigrationBackup:
+    """Verify backup is created only once during migration."""
+
+    def test_auto_migration_creates_backup_only_once(self, tmp_server_dir):
+        """Calling initialize_runtime_db twice should not overwrite backup."""
+        import sqlite3
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+
+        db_path = os.path.join(tmp_server_dir, "data", "cidx_server.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS server_config ("
+            "config_key TEXT PRIMARY KEY DEFAULT 'runtime', "
+            "config_json TEXT NOT NULL, "
+            "version INTEGER NOT NULL DEFAULT 1, "
+            "updated_at TEXT DEFAULT (datetime('now')), "
+            "updated_by TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        # First call: creates backup
+        svc.initialize_runtime_db(db_path)
+        backup_path = os.path.join(
+            tmp_server_dir,
+            "config-migration-backup",
+            "config.json.pre-centralization",
+        )
+        assert os.path.exists(backup_path)
+        with open(backup_path) as f:
+            first_backup = f.read()
+
+        # Modify config.json (simulate drift)
+        config_path = os.path.join(tmp_server_dir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump({"host": "changed"}, f)
+
+        # Second call: should NOT overwrite backup
+        svc2 = ConfigService(server_dir_path=tmp_server_dir)
+        svc2.load_config()
+        svc2.initialize_runtime_db(db_path)
+
+        with open(backup_path) as f:
+            second_backup = f.read()
+        assert first_backup == second_backup
