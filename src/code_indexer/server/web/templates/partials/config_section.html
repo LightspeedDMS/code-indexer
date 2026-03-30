@@ -1418,10 +1418,10 @@ function saveLlmCredsConfig() {
 <!-- Timeout Settings Section -->
 <details class="config-section" id="section-timeouts">
     <summary>
-        <h2>Timeout Settings</h2>
+        <h2>Timeouts and Indexing Limit Settings</h2>
     </summary>
     <p class="section-description">
-        Configures timeouts for git operations and CIDX indexing processes. Longer timeouts accommodate large repositories or slow network connections but may delay error detection. Clone timeout applies to initial repository cloning, while pull and refresh timeouts apply to repository updates. Index timeout limits how long semantic indexing can run.
+        Configures timeouts for git operations and limits for CIDX indexing processes. Longer timeouts accommodate large repositories or slow network connections. HNSW Max Elements controls the maximum number of vectors per index -- increase for repositories with 100K+ files.
     </p>
     <article>
         <!-- Display Mode -->
