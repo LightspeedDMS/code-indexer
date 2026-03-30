@@ -490,6 +490,15 @@ class DatabaseSchema:
         )
     """
 
+    # Bug #576: OIDC state tokens for cluster mode
+    CREATE_OIDC_STATE_TOKENS_TABLE = """
+        CREATE TABLE IF NOT EXISTS oidc_state_tokens (
+            state_token TEXT PRIMARY KEY,
+            state_data TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -590,6 +599,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_RATE_LIMIT_FAILURES_TABLE)
             conn.execute(self.CREATE_IDX_RATE_LIMIT_FAILURES_LOOKUP)
             conn.execute(self.CREATE_RATE_LIMIT_LOCKOUTS_TABLE)
+            # Bug #576: OIDC state tokens for cluster mode
+            conn.execute(self.CREATE_OIDC_STATE_TOKENS_TABLE)
 
             conn.commit()
 
@@ -619,6 +630,8 @@ class DatabaseSchema:
             self._migrate_server_config_table(conn)
             # Bug #573/#574: Rate limiting tables (migration for existing DBs)
             self._migrate_rate_limit_tables(conn)
+            # Bug #576: OIDC state tokens (migration for existing DBs)
+            self._migrate_oidc_state_tokens_table(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -987,6 +1000,15 @@ class DatabaseSchema:
         conn.execute(self.CREATE_RATE_LIMIT_LOCKOUTS_TABLE)
         conn.commit()
         logger.debug("Ensured rate_limit tables exist")
+
+    def _migrate_oidc_state_tokens_table(self, conn: sqlite3.Connection) -> None:
+        """Create OIDC state tokens table for existing databases (Bug #576).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+        """
+        conn.execute(self.CREATE_OIDC_STATE_TOKENS_TABLE)
+        conn.commit()
+        logger.debug("Ensured oidc_state_tokens table exists")
 
 
 class DatabaseConnectionManager:

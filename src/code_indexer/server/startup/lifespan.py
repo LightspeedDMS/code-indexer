@@ -1554,6 +1554,17 @@ def make_lifespan(
                     oauth_token_rate_limiter.set_connection_pool(_cluster_pool)
                     oauth_register_rate_limiter.set_connection_pool(_cluster_pool)
 
+                    # Bug #576: Wire OIDC StateManager for cluster
+                    from code_indexer.server.auth.oidc import (
+                        routes as _oidc_routes,
+                    )
+
+                    if (
+                        hasattr(_oidc_routes, "state_manager")
+                        and _oidc_routes.state_manager is not None
+                    ):
+                        _oidc_routes.state_manager.set_connection_pool(_cluster_pool)
+
                     # Story #578: Centralize runtime config in PostgreSQL
                     from code_indexer.server.services.config_service import (
                         get_config_service,
