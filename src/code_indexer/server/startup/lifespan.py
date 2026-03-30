@@ -1602,6 +1602,31 @@ def make_lifespan(
 
                     get_token_blacklist().set_connection_pool(_cluster_pool)
 
+                    # Bug #581: Sync SSH keys from PG to local ~/.ssh/
+                    try:
+                        from code_indexer.server.services.ssh_key_sync_service import (
+                            SSHKeySyncService,
+                        )
+
+                        _ssh_backend = (
+                            backend_registry.ssh_keys
+                            if backend_registry is not None
+                            else None
+                        )
+                        assert _ssh_backend is not None
+                        _ssh_sync = SSHKeySyncService(ssh_keys_backend=_ssh_backend)
+                        _sync_result = _ssh_sync.sync()
+                        logger.info(
+                            "Bug #581: SSH key sync complete: %d written, %d removed, %d unchanged",
+                            len(_sync_result.get("written", [])),
+                            len(_sync_result.get("removed", [])),
+                            len(_sync_result.get("unchanged", [])),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Bug #581: SSH key sync failed (non-fatal): %s", exc
+                        )
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
