@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.7.0
+
+### Features
+
+**Epic #556 -- Admin Account Security Hardening**
+- feat: TOTP MFA core engine with QR code generation, recovery codes, and encrypted secret storage (Stories #558/#559)
+- feat: MFA login enforcement for Web UI and REST API (Stories #560/#561)
+- feat: MFA enforcement for SSO/OIDC login flow (Story #562)
+- feat: User-facing MFA setup routes at /user/mfa/ (setup, verify, disable, recovery codes)
+- feat: Login rate limiting with automatic account lockout (Story #557)
+- feat: Non-SSO admin REST/MCP access restriction (Story #563)
+- feat: Configurable admin session timeout (Story #564)
+- feat: Password expiry enforcement for non-SSO accounts (Story #565)
+- feat: Emergency MFA recovery CLI commands (Story #571)
+
+**Story #462 -- Collaborative and Competitive Delegation Modes**
+- feat: Collaborative mode (DAG-based orchestrated jobs) via POST /jobs/orchestrated
+- feat: Competitive mode (decompose-compete-judge pipeline) via POST /jobs/competitive
+- feat: DAG validation with cycle detection, terminal node check, max 10 steps
+- feat: Competitive validation (engines, distribution strategy, approach count, decomposer/judge config)
+
+**Story #568 -- MCP Acting Users**
+- feat: Optional acting_users parameter on MCP tool calls for scoped repository access
+- feat: Email-to-user-to-group-to-repo resolution with intersection (never elevates)
+- feat: Admin-only enforcement (non-admin silently ignores), input type validation
+
+**Story #578 -- Centralized Runtime Configuration**
+- feat: config.json split into bootstrap (file) and runtime (database)
+- feat: Unified model -- SQLite for solo mode, PostgreSQL for cluster mode, same code path
+- feat: Auto-migration on first boot (seeds DB from config.json, strips file, creates backup)
+- feat: 30-second version polling for cross-node config propagation
+- feat: Config change callbacks for service notification (ApiKeySyncService)
+- feat: Migration scripts: cluster-config-migrate.sh, verify_config_migration.py
+
+**Story #588 -- HNSW Max Elements Configurable**
+- feat: hnsw_max_elements added to ServerResourceConfig (default 1,000,000)
+- feat: Configurable via Web UI config screen under "Timeouts and Indexing Limit Settings"
+
+### Fixes (Cluster Compatibility -- Epic #408 Audit)
+- fix: Bug #572 -- Delta analysis runs now record metrics in dependency_map_run_history
+- fix: Bug #573/#574 -- All 4 rate limiters (password change, refresh token, OAuth token, OAuth register) cluster-aware with PG tables
+- fix: Bug #575 -- PasswordChangeSessionManager uses DB backend (SQLite/PG) instead of JSON file
+- fix: Bug #576 -- OIDC StateManager thread safety (threading.Lock) + PG-backed state tokens
+- fix: Bug #577 -- DelegationJobTracker uses delegation_job_results DB table for cross-node results
+- fix: Bug #579 -- RefreshTokenManager uses PG advisory locks for cross-node token rotation safety
+- fix: Bug #580 -- JobReconciliationService and SelfMonitoringService gated behind leader election
+- fix: Bug #581 -- SSHKeySyncService started during cluster startup (was never started)
+- fix: Bug #582 -- DistributedJobWorkerService polls for reclaimed jobs and re-executes them
+- fix: Bug #583 -- Token blacklist uses DB (SQLite/PG) for cluster-wide JWT revocation
+- fix: Bug #584 -- Background job cancellation synchronized across nodes via DB polling
+- fix: Bug #585 -- SelfMonitoringService receives PG backend in cluster mode
+- fix: Bug #586 -- ApiKeySyncService syncs keys to local files on cross-node config change
+- fix: Bug #587 -- Activated repos metadata stored in PG for cross-node visibility
+- fix: All ServerConfigManager().load_config() bypasses replaced with get_config_service()
+- fix: OIDC init reads from ConfigService (merged config) not bootstrap-only file
+- fix: JobTracker save_job uses INSERT OR IGNORE to prevent UNIQUE constraint violation
+
+### Migrations
+- 010_server_config.sql -- runtime configuration centralization table
+- 011_activated_repos.sql -- activated repo metadata for cluster mode
+- 012_fix_activated_repos_ssh_key.sql -- ssh_key_used column type BOOLEAN to TEXT
+- 013_rate_limiting_tables.sql -- generic rate_limit_failures and rate_limit_lockouts tables
+- 014_oidc_state_tokens.sql -- OIDC CSRF state tokens for cluster mode
+- 015_token_blacklist.sql -- JWT token blacklist for cluster-wide revocation
+- 016_delegation_job_results.sql -- delegation job results for cross-node tracking
+
+### Scripts
+- scripts/cluster-config-migrate.sh -- idempotent config migration for existing clusters
+- scripts/config_migration_helper.py -- Python helper for config split and PG insertion
+- scripts/verify_config_migration.py -- verify migration accuracy (backup vs DB+file)
+
 ## v9.6.3
 
 ### Fixes (Epic #556 -- Admin Account Security Hardening, Cluster Compatibility)

@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 9.5.37** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 9.7.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -338,7 +338,11 @@ Run multiple CIDX Server nodes sharing a single PostgreSQL database for horizont
 Key cluster features:
 - Leader election via PostgreSQL advisory lock ensures exactly one node runs schedulers at a time
 - Node heartbeat tracking with automatic failover detection (30-second threshold)
-- Distributed background job queue with orphaned job recovery
+- Distributed background job queue with orphaned job recovery and re-execution
+- Centralized runtime configuration in PostgreSQL with 30-second cross-node propagation
+- All security services cluster-aware: rate limiters, session invalidation, token blacklist, OIDC state, MFA
+- Activated repository metadata shared across nodes via PostgreSQL
+- HNSW max_elements configurable via Web UI (default 1,000,000)
 - Per-node metrics carousel in the admin dashboard
 - SQLite-to-PostgreSQL data migration tool for converting existing installations
 
@@ -348,8 +352,11 @@ For setup and operations see [Cluster Setup Guide](docs/cluster-setup.md).
 **Claude Delegation** (v8.5+):
 - **Protected Repository Analysis**: AI agents analyze code without exposing source to clients
 - **Delegation Functions**: Pre-defined AI workflows for code review, analysis, and transformation
+- **Collaborative Mode** (v9.7+): DAG-based orchestrated multi-step delegation with per-step engines and repos
+- **Competitive Mode** (v9.7+): Decompose-compete-judge pipeline with multiple AI engines
+- **Acting Users** (v9.7+): Scoped repository access via acting_users parameter for multi-tenant delegation
 - **Group-Based Access**: Control which users can execute which delegation functions
-- **Callback-Based Completion**: Efficient job polling with server-side callbacks
+- **Callback-Based Completion**: Efficient job polling with server-side callbacks and cross-node tracking
 
 **Security & Observability** (v8.5+):
 - **Group-Based Security**: Fine-grained access control using group membership
@@ -365,10 +372,14 @@ For setup and operations see [Cluster Setup Guide](docs/cluster-setup.md).
 - **Debug Memory Snapshot** (v9.5.7+): Localhost-only endpoints for diagnosing memory leaks without restarting the server. `GET /debug/memory-snapshot` returns object counts and sizes by type (top 100), with module-qualified names and self-monitoring overhead. `GET /debug/memory-compare?baseline={timestamp}` diffs against a prior snapshot. Secured by network restriction (127.0.0.1/::1 only, no auth required).
 
 **Authentication & Authorization**:
-- OAuth 2.0 and OIDC (OpenID Connect) support
+- OAuth 2.0 and OIDC (OpenID Connect) support with SSO
+- TOTP multi-factor authentication (MFA) with QR setup and recovery codes
+- Password expiry enforcement for non-SSO accounts
+- Login rate limiting with automatic account lockout
+- Configurable admin session timeout
 - Three role levels: admin (full access), power_user (activate repos), normal_user (query only)
-- Group-based function access for Claude Delegation
-- Secure token-based API access
+- Group-based repository and function access control
+- Secure token-based API access with cluster-wide JWT revocation
 
 **Performance**:
 - Cold query: ~277ms (first access, loads from disk)
