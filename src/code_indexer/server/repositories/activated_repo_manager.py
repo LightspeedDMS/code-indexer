@@ -458,9 +458,11 @@ class ActivatedRepoManager:
         # Check if repository already activated for this user
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_dir = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
-        if os.path.exists(repo_dir) and os.path.exists(metadata_file):
+        if (
+            os.path.exists(repo_dir)
+            and self._load_metadata(username, user_alias) is not None
+        ):
             raise ActivatedRepoError(
                 f"Repository '{user_alias}' already activated for user '{username}'"
             )
@@ -694,14 +696,12 @@ class ActivatedRepoManager:
                 "last_accessed": activated_at,
             }
 
-            metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
             try:
-                with open(metadata_file, "w") as f:
-                    json.dump(metadata, f, indent=2)
+                self._save_metadata(username, user_alias, metadata)
             except Exception as e:
                 # Clean up on failure
                 self.logger.error(
-                    f"Failed to create metadata file: {str(e)}",
+                    f"Failed to create metadata: {str(e)}",
                     extra={"correlation_id": get_correlation_id()},
                 )
                 if composite_path.exists():
@@ -755,36 +755,7 @@ class ActivatedRepoManager:
         Returns:
             List of activated repository dictionaries
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-
-        if not os.path.exists(user_dir):
-            return []
-
-        activated_repos = []
-
-        # Find all metadata files
-        for filename in os.listdir(user_dir):
-            if filename.endswith("_metadata.json"):
-                metadata_file = os.path.join(user_dir, filename)
-                try:
-                    with open(metadata_file, "r") as f:
-                        repo_data = json.load(f)
-
-                    # Verify corresponding directory exists
-                    user_alias = repo_data["user_alias"]
-                    repo_dir = os.path.join(user_dir, user_alias)
-
-                    if os.path.exists(repo_dir):
-                        activated_repos.append(repo_data)
-
-                except (json.JSONDecodeError, KeyError, IOError):
-                    # Skip corrupted metadata files
-                    self.logger.warning(
-                        f"Skipping corrupted metadata file: {metadata_file}"
-                    )
-                    continue
-
-        return activated_repos
+        return self._list_user_repos(username)
 
     def list_all_activated_repositories(self) -> List[Dict[str, Any]]:
         """
@@ -796,34 +767,7 @@ class ActivatedRepoManager:
         Returns:
             List of activated repository dictionaries from all users
         """
-        all_activated_repos = []
-
-        # Check if activated repos directory exists
-        if not os.path.exists(self.activated_repos_dir):
-            return []
-
-        # Iterate through all user directories
-        try:
-            for username in os.listdir(self.activated_repos_dir):
-                user_dir = os.path.join(self.activated_repos_dir, username)
-
-                # Skip if not a directory
-                if not os.path.isdir(user_dir):
-                    continue
-
-                # Get all repos for this user
-                user_repos = self.list_activated_repositories(username)
-                all_activated_repos.extend(user_repos)
-
-        except Exception as e:
-            self.logger.error(
-                f"Error listing all activated repositories: {str(e)}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-            # Return what we have so far rather than failing completely
-            return all_activated_repos
-
-        return all_activated_repos
+        return self._list_all_repos()
 
     def find_repos_by_golden_alias(
         self, golden_repo_alias: str
@@ -890,10 +834,12 @@ class ActivatedRepoManager:
         """
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_dir = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
         # Check if repository exists
-        if not os.path.exists(repo_dir) or not os.path.exists(metadata_file):
+        if (
+            not os.path.exists(repo_dir)
+            or self._load_metadata(username, user_alias) is None
+        ):
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
@@ -942,10 +888,12 @@ class ActivatedRepoManager:
 
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_dir = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
         # Check if repository exists
-        if not os.path.exists(repo_dir) or not os.path.exists(metadata_file):
+        if (
+            not os.path.exists(repo_dir)
+            or self._load_metadata(username, user_alias) is None
+        ):
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
@@ -1068,14 +1016,14 @@ class ActivatedRepoManager:
                 raise GitOperationError(error_msg)
 
             # Step 4: Update metadata
-            with open(metadata_file, "r") as f:
-                repo_data = json.load(f)
+            repo_data = self._load_metadata(username, user_alias)
+            if repo_data is None:
+                repo_data = {}
 
             repo_data["current_branch"] = branch_name
             repo_data["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
-            with open(metadata_file, "w") as f:
-                json.dump(repo_data, f, indent=2)
+            self._save_metadata(username, user_alias, repo_data)
 
             # Step 5: Return success with detailed operation information
             message = f"Successfully switched to branch '{branch_name}' in repository '{user_alias}'"
@@ -1130,10 +1078,12 @@ class ActivatedRepoManager:
         """
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_dir = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
         # Check if repository exists
-        if not os.path.exists(repo_dir) or not os.path.exists(metadata_file):
+        if (
+            not os.path.exists(repo_dir)
+            or self._load_metadata(username, user_alias) is None
+        ):
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
@@ -1152,19 +1102,20 @@ class ActivatedRepoManager:
                 return result.stdout.strip()
 
             # Fallback to metadata if git command fails
-            with open(metadata_file, "r") as f:
-                repo_data = json.load(f)
-
-            return str(repo_data.get("current_branch", "main"))
+            repo_data = self._load_metadata(username, user_alias)
+            if repo_data is not None:
+                return str(repo_data.get("current_branch", "main"))
+            return "main"
 
         except subprocess.TimeoutExpired:
             raise GitOperationError("Git operation timed out")
         except Exception as e:
             # Final fallback to metadata
             try:
-                with open(metadata_file, "r") as f:
-                    repo_data = json.load(f)
-                return str(repo_data.get("current_branch", "main"))
+                repo_data = self._load_metadata(username, user_alias)
+                if repo_data is not None:
+                    return str(repo_data.get("current_branch", "main"))
+                return "main"
             except Exception:
                 raise GitOperationError(f"Failed to get current branch: {str(e)}")
 
@@ -1192,19 +1143,15 @@ class ActivatedRepoManager:
         """
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_dir = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
         # Check if repository exists
-        if not os.path.exists(repo_dir) or not os.path.exists(metadata_file):
+        repo_data = self._load_metadata(username, user_alias)
+        if not os.path.exists(repo_dir) or repo_data is None:
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
 
         try:
-            # Read current metadata to get branch information
-            with open(metadata_file, "r") as f:
-                repo_data = json.load(f)
-
             current_branch = repo_data.get("current_branch", "master")
             golden_repo_alias = repo_data.get("golden_repo_alias")
 
@@ -1308,8 +1255,7 @@ class ActivatedRepoManager:
             # Step 4: Update metadata timestamp
             repo_data["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
-            with open(metadata_file, "w") as f:
-                json.dump(repo_data, f, indent=2)
+            self._save_metadata(username, user_alias, repo_data)
 
             # Step 5: Return success message with details
             changed_files = (
@@ -1362,10 +1308,10 @@ class ActivatedRepoManager:
         """
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_dir = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
         # Check if repository exists
-        if not os.path.exists(repo_dir) or not os.path.exists(metadata_file):
+        repo_data = self._load_metadata(username, user_alias)
+        if not os.path.exists(repo_dir) or repo_data is None:
             raise ActivatedRepoError(
                 f"Activated repository '{user_alias}' not found for user '{username}'"
             )
@@ -1378,10 +1324,6 @@ class ActivatedRepoManager:
             )
 
         try:
-            # Read current metadata to get current branch
-            with open(metadata_file, "r") as f:
-                repo_data = json.load(f)
-
             current_branch = repo_data.get("current_branch", "master")
 
             # Get list of local branches
@@ -1543,17 +1485,13 @@ class ActivatedRepoManager:
         """
         user_dir = os.path.join(self.activated_repos_dir, username)
         repo_path = os.path.join(user_dir, user_alias)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
         # Check if repository exists
-        if not os.path.exists(repo_path) or not os.path.exists(metadata_file):
+        metadata = self._load_metadata(username, user_alias)
+        if not os.path.exists(repo_path) or metadata is None:
             return None
 
         try:
-            # Load metadata from file
-            with open(metadata_file, "r") as f:
-                metadata: Dict[str, Any] = json.load(f)
-
             # For composite repos, refresh discovered_repos from config
             if metadata.get("is_composite", False):
                 try:
@@ -1572,8 +1510,7 @@ class ActivatedRepoManager:
             metadata["last_accessed"] = datetime.now(timezone.utc).isoformat()
 
             # Save updated metadata
-            with open(metadata_file, "w") as f:
-                json.dump(metadata, f, indent=2)
+            self._save_metadata(username, user_alias, metadata)
 
             return metadata
 
@@ -1609,16 +1546,10 @@ class ActivatedRepoManager:
         Returns:
             True if wiki is enabled, False otherwise
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
-        if not os.path.exists(metadata_file):
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
             return False
-        try:
-            with open(metadata_file, "r") as f:
-                metadata = json.load(f)
-            return bool(metadata.get("wiki_enabled", False))
-        except (json.JSONDecodeError, IOError):
-            return False
+        return bool(metadata.get("wiki_enabled", False))
 
     def set_wiki_enabled(self, username: str, user_alias: str, enabled: bool) -> None:
         """Set wiki_enabled flag on activated repo metadata.
@@ -1631,17 +1562,13 @@ class ActivatedRepoManager:
         Raises:
             ActivatedRepoError: If the repository metadata file does not exist
         """
-        user_dir = os.path.join(self.activated_repos_dir, username)
-        metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
-        if not os.path.exists(metadata_file):
+        metadata = self._load_metadata(username, user_alias)
+        if metadata is None:
             raise ActivatedRepoError(
                 f"Repository '{user_alias}' not found for user '{username}'"
             )
-        with open(metadata_file, "r") as f:
-            metadata = json.load(f)
         metadata["wiki_enabled"] = enabled
-        with open(metadata_file, "w") as f:
-            json.dump(metadata, f, indent=2)
+        self._save_metadata(username, user_alias, metadata)
 
     def _do_activate_repository(
         self,
@@ -1795,9 +1722,7 @@ class ActivatedRepoManager:
                 "ssh_key_used": ssh_key_used,
             }
 
-            metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
-            with open(metadata_file, "w") as f:
-                json.dump(metadata, f, indent=2)
+            self._save_metadata(username, user_alias, metadata)
 
             update_progress(95, "Finalizing activation")
 
@@ -1848,16 +1773,12 @@ class ActivatedRepoManager:
         """
         try:
             # Load metadata to determine repository type
-            user_dir = os.path.join(self.activated_repos_dir, username)
-            metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
+            metadata = self._load_metadata(username, user_alias)
 
-            if not os.path.exists(metadata_file):
+            if metadata is None:
                 raise ActivatedRepoError(
-                    f"Metadata file not found for repository '{user_alias}'"
+                    f"Metadata not found for repository '{user_alias}'"
                 )
-
-            with open(metadata_file, "r") as f:
-                metadata = json.load(f)
 
             # Route to appropriate deactivation method
             if metadata.get("is_composite", False):
@@ -1908,7 +1829,6 @@ class ActivatedRepoManager:
         try:
             user_dir = os.path.join(self.activated_repos_dir, username)
             repo_dir = os.path.join(user_dir, user_alias)
-            metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
             # Pre-deactivation resource analysis
             initial_size = 0
@@ -1976,27 +1896,24 @@ class ActivatedRepoManager:
                         },
                     )
 
-            # Remove metadata file with error handling
-            if os.path.exists(metadata_file):
-                try:
-                    os.remove(metadata_file)
-                except (OSError, IOError) as e:
-                    cleanup_warnings.append(f"Failed to remove metadata file: {str(e)}")
-                    # Log as administrative issue
-                    self.logger.warning(
-                        "Metadata cleanup issue",
-                        extra={
-                            "username": username,
-                            "user_alias": user_alias,
-                            "metadata_file": metadata_file,
-                            "error": str(e),
-                            "impact": "minor",
-                        },
-                    )
+            # Remove metadata via dual-mode helper
+            try:
+                self._delete_metadata(username, user_alias)
+            except (OSError, IOError) as e:
+                cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
+                self.logger.warning(
+                    "Metadata cleanup issue",
+                    extra={
+                        "username": username,
+                        "user_alias": user_alias,
+                        "error": str(e),
+                        "impact": "minor",
+                    },
+                )
 
             # Post-cleanup verification
-            cleanup_success = not os.path.exists(repo_dir) and not os.path.exists(
-                metadata_file
+            cleanup_success = not os.path.exists(repo_dir) and (
+                self._load_metadata(username, user_alias) is None
             )
 
             if not cleanup_success:
@@ -2068,9 +1985,7 @@ class ActivatedRepoManager:
         components_removed = 0
 
         try:
-            user_dir = os.path.join(self.activated_repos_dir, username)
             repo_path = Path(metadata["path"])
-            metadata_file = os.path.join(user_dir, f"{user_alias}_metadata.json")
 
             self.logger.info(
                 f"Starting composite repository deactivation for '{user_alias}'"
@@ -2131,30 +2046,28 @@ class ActivatedRepoManager:
                         },
                     )
 
-            # Step 4: Remove metadata file
-            if os.path.exists(metadata_file):
-                try:
-                    os.remove(metadata_file)
-                    self.logger.info(
-                        f"Removed metadata file: {metadata_file}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                except (OSError, IOError) as e:
-                    cleanup_warnings.append(f"Failed to remove metadata file: {str(e)}")
-                    self.logger.warning(
-                        "Metadata cleanup issue",
-                        extra={
-                            "username": username,
-                            "user_alias": user_alias,
-                            "metadata_file": metadata_file,
-                            "error": str(e),
-                            "impact": "minor",
-                        },
-                    )
+            # Step 4: Remove metadata via dual-mode helper
+            try:
+                self._delete_metadata(username, user_alias)
+                self.logger.info(
+                    f"Removed metadata for '{user_alias}'",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except (OSError, IOError) as e:
+                cleanup_warnings.append(f"Failed to remove metadata: {str(e)}")
+                self.logger.warning(
+                    "Metadata cleanup issue",
+                    extra={
+                        "username": username,
+                        "user_alias": user_alias,
+                        "error": str(e),
+                        "impact": "minor",
+                    },
+                )
 
             # Post-cleanup verification
-            cleanup_success = not repo_path.exists() and not os.path.exists(
-                metadata_file
+            cleanup_success = not repo_path.exists() and (
+                self._load_metadata(username, user_alias) is None
             )
 
             if not cleanup_success:
