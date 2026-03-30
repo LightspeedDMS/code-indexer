@@ -1231,12 +1231,13 @@ def make_lifespan(
         app.include_router(oidc_routes.router)
 
         try:
-            from code_indexer.server.utils.config_manager import ServerConfigManager
+            from code_indexer.server.services.config_service import get_config_service
             from code_indexer.server.auth.oidc.oidc_manager import OIDCManager
             from code_indexer.server.auth.oidc.state_manager import StateManager
 
-            config_manager = ServerConfigManager(server_dir_path=server_data_dir)
-            config = config_manager.load_config()
+            # Bug #578: Read from ConfigService (has merged runtime from DB),
+            # NOT directly from config.json (which is bootstrap-only after migration).
+            config = get_config_service().get_config()
             if (
                 config
                 and hasattr(config, "oidc_provider_config")
