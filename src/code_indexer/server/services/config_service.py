@@ -125,7 +125,7 @@ class ConfigService:
         if config is None:
             config = self.config_manager.create_default_config()
             # Save the default config so it persists
-            self.config_manager.save_config(config)
+            self.save_config(config)
 
         self._config = config
         return config
@@ -585,7 +585,7 @@ class ConfigService:
         # Validate and save (unless skipping for batch updates)
         if not skip_validation:
             self.config_manager.validate_config(config)
-            self.config_manager.save_config(config)
+            self.save_config(config)
             logger.info(
                 "Updated setting %s.%s to %s",
                 category,
@@ -1187,7 +1187,7 @@ class ConfigService:
 
         # Validate and save
         self.config_manager.validate_config(config)
-        self.config_manager.save_config(config)
+        self.save_config(config)
         logger.info(
             "Saved all settings", extra={"correlation_id": get_correlation_id()}
         )
@@ -1239,7 +1239,7 @@ class ConfigService:
                 normalized.append(ext)
 
         indexing.indexable_extensions = normalized
-        self.config_manager.save_config(config)
+        self.save_config(config)
         logger.info(
             "Updated indexing.indexable_extensions with %d extensions",
             len(normalized),

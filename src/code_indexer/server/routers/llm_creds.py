@@ -193,7 +193,7 @@ def save_config(
     config.claude_integration_config.llm_creds_provider_consumer_id = (
         request.llm_creds_provider_consumer_id
     )
-    config_svc.config_manager.save_config(config)
+    config_svc.save_config(config)
 
     # Lifecycle transitions
     existing_service = getattr(http_request.app.state, "llm_lifecycle_service", None)

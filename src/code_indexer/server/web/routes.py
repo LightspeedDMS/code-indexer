@@ -6757,7 +6757,7 @@ def reset_config(
         config_service = get_config_service()
         # Create a fresh default config and save it
         default_config = config_service.config_manager.create_default_config()
-        config_service.config_manager.save_config(default_config)
+        config_service.save_config(default_config)
         config_service._config = default_config  # Update cached config
 
         return _create_config_page_response(
@@ -6985,7 +6985,7 @@ async def update_config_section(
                 )
 
         # Only save to file after validation and OIDC test (if applicable)
-        config_service.config_manager.save_config(config)
+        config_service.save_config(config)
         logger.info(
             f"Saved {section} configuration with {len(data)} settings",
             extra={"correlation_id": get_correlation_id()},
@@ -9266,7 +9266,7 @@ async def save_self_monitoring_config(
     config.self_monitoring_config.model = model  # type: ignore[union-attr]
 
     # Save configuration
-    config_service.config_manager.save_config(config)
+    config_service.save_config(config)
 
     # Bug #128: Start/stop service based on enabled flag
     service = getattr(request.app.state, "self_monitoring_service", None)

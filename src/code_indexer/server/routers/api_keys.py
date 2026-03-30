@@ -340,7 +340,7 @@ def save_anthropic_key(
     config = config_service.load_config()
     assert config.claude_integration_config is not None
     config.claude_integration_config.anthropic_api_key = request.api_key
-    config_service.config_manager.save_config(config)
+    config_service.save_config(config)
 
     # Trigger immediate catch-up processing (Story #23, AC3)
     # This replaces the old flag-based deferred reconciliation (Story #20)
@@ -386,7 +386,7 @@ def save_voyageai_key(
     config = config_service.load_config()
     assert config.claude_integration_config is not None
     config.claude_integration_config.voyageai_api_key = request.api_key
-    config_service.config_manager.save_config(config)
+    config_service.save_config(config)
 
     return SaveApiKeyResponse(
         success=True,
@@ -567,7 +567,7 @@ def clear_anthropic_key(
 
     # Clear from config
     config.claude_integration_config.anthropic_api_key = ""
-    config_service.config_manager.save_config(config)
+    config_service.save_config(config)
 
     # Clear from environment only if it matches
     if os.environ.get("ANTHROPIC_API_KEY") == key_to_clear:
@@ -609,7 +609,7 @@ def clear_voyageai_key(
 
     # Clear from config
     config.claude_integration_config.voyageai_api_key = ""
-    config_service.config_manager.save_config(config)
+    config_service.save_config(config)
 
     # Clear from environment only if it matches
     if os.environ.get("VOYAGE_API_KEY") == key_to_clear:
