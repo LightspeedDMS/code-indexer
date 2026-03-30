@@ -1522,6 +1522,28 @@ def make_lifespan(
                     # callbacks handle start/stop so only the leader runs this.
                     _cluster_services.append(("reconciliation", _reconciliation))
 
+                    # Bug #582: Distributed job worker for reclaimed jobs
+                    from code_indexer.server.services.distributed_job_claimer import (
+                        DistributedJobClaimer,
+                    )
+                    from code_indexer.server.services.distributed_job_worker import (
+                        DistributedJobWorkerService,
+                    )
+
+                    _job_claimer = DistributedJobClaimer(
+                        pool=_cluster_pool, node_id=_node_id
+                    )
+                    _refresh_sched = (
+                        global_lifecycle_manager.refresh_scheduler
+                        if global_lifecycle_manager is not None
+                        else None
+                    )
+                    _dist_worker = DistributedJobWorkerService(
+                        claimer=_job_claimer,
+                        refresh_scheduler=_refresh_sched,
+                    )
+                    _cluster_services.append(("dist_job_worker", _dist_worker))
+
                     # Story #538: Enable PG advisory locks for password changes
                     from code_indexer.server.auth.concurrency_protection import (
                         password_change_concurrency_protection,
@@ -1728,6 +1750,7 @@ def make_lifespan(
                             extra={"correlation_id": get_correlation_id()},
                         )
                         _reconciliation.start()
+                        _dist_worker.start()
                         if self_monitoring_service is not None:
                             self_monitoring_service.start()
 
@@ -1741,6 +1764,13 @@ def make_lifespan(
                         except Exception as e:
                             logger.warning(
                                 f"Bug #580: Failed to stop reconciliation service: {e}",
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        try:
+                            _dist_worker.stop()
+                        except Exception as e:
+                            logger.warning(
+                                f"Bug #582: Failed to stop distributed job worker: {e}",
                                 extra={"correlation_id": get_correlation_id()},
                             )
                         if self_monitoring_service is not None:
