@@ -1014,6 +1014,12 @@ def make_lifespan(
                     # Get server name for issue identification (Bug #87)
                     server_name = server_config.service_display_name or "Neo"
 
+                    # Bug #585: Pass PG backend when available
+                    _sm_backend = (
+                        backend_registry.self_monitoring
+                        if backend_registry is not None
+                        else None
+                    )
                     self_monitoring_service = SelfMonitoringService(
                         enabled=sm_config.enabled,
                         cadence_minutes=sm_config.cadence_minutes,
@@ -1025,6 +1031,7 @@ def make_lifespan(
                         repo_root=str(repo_root),  # For Claude to run in repo context
                         github_token=github_token,
                         server_name=server_name,
+                        storage_backend=_sm_backend,
                     )
                     # Bug #580: Only auto-start in standalone mode.
                     # In cluster mode (postgres), leader election callbacks
