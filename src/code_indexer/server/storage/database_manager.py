@@ -447,7 +447,7 @@ class DatabaseSchema:
             activated_at TEXT,
             last_accessed TEXT,
             git_committer_email TEXT,
-            ssh_key_used INTEGER DEFAULT 0,
+            ssh_key_used TEXT DEFAULT NULL,
             is_composite INTEGER DEFAULT 0,
             wiki_enabled INTEGER DEFAULT 0,
             metadata_json TEXT,

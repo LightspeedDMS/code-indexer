@@ -188,7 +188,7 @@ class ActivatedRepoManager:
                     metadata.get("activated_at"),
                     metadata.get("last_accessed"),
                     metadata.get("git_committer_email"),
-                    metadata.get("ssh_key_used", False),
+                    metadata.get("ssh_key_used") or None,
                     metadata.get("is_composite", False),
                     metadata.get("wiki_enabled", False),
                     json.dumps(extra) if extra else None,
@@ -251,7 +251,7 @@ class ActivatedRepoManager:
                 str(row["last_accessed"]) if row["last_accessed"] else None
             ),
             "git_committer_email": row.get("git_committer_email"),
-            "ssh_key_used": bool(row.get("ssh_key_used", False)),
+            "ssh_key_used": row.get("ssh_key_used"),
             "is_composite": bool(row.get("is_composite", False)),
             "wiki_enabled": bool(row.get("wiki_enabled", False)),
         }
