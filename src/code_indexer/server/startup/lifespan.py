@@ -1535,6 +1535,25 @@ def make_lifespan(
                     mfa_challenge_manager.set_connection_pool(_cluster_pool)
                     _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
 
+                    # Bug #573: Wire cluster pools for password change
+                    # and refresh token rate limiters
+                    from code_indexer.server.auth.rate_limiter import (
+                        password_change_rate_limiter,
+                        refresh_token_rate_limiter,
+                    )
+
+                    password_change_rate_limiter.set_connection_pool(_cluster_pool)
+                    refresh_token_rate_limiter.set_connection_pool(_cluster_pool)
+
+                    # Bug #574: Wire cluster pools for OAuth rate limiters
+                    from code_indexer.server.auth.oauth_rate_limiter import (
+                        oauth_token_rate_limiter,
+                        oauth_register_rate_limiter,
+                    )
+
+                    oauth_token_rate_limiter.set_connection_pool(_cluster_pool)
+                    oauth_register_rate_limiter.set_connection_pool(_cluster_pool)
+
                     # Story #578: Centralize runtime config in PostgreSQL
                     from code_indexer.server.services.config_service import (
                         get_config_service,

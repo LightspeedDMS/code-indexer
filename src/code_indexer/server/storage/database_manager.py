@@ -465,6 +465,31 @@ class DatabaseSchema:
         ON activated_repos(golden_repo_alias)
     """
 
+    # Bug #573/#574: Generic rate limiting tables for cluster mode
+    CREATE_RATE_LIMIT_FAILURES_TABLE = """
+        CREATE TABLE IF NOT EXISTS rate_limit_failures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            limiter_type TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            failed_at REAL NOT NULL
+        )
+    """
+
+    CREATE_IDX_RATE_LIMIT_FAILURES_LOOKUP = """
+        CREATE INDEX IF NOT EXISTS idx_rate_limit_failures_lookup
+        ON rate_limit_failures(limiter_type, identifier, failed_at)
+    """
+
+    CREATE_RATE_LIMIT_LOCKOUTS_TABLE = """
+        CREATE TABLE IF NOT EXISTS rate_limit_lockouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            limiter_type TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            locked_until REAL NOT NULL,
+            UNIQUE(limiter_type, identifier)
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -561,6 +586,10 @@ class DatabaseSchema:
             conn.execute(self.CREATE_ACTIVATED_REPOS_TABLE)
             conn.execute(self.CREATE_IDX_ACTIVATED_REPOS_USERNAME)
             conn.execute(self.CREATE_IDX_ACTIVATED_REPOS_GOLDEN)
+            # Bug #573/#574: Generic rate limiting tables
+            conn.execute(self.CREATE_RATE_LIMIT_FAILURES_TABLE)
+            conn.execute(self.CREATE_IDX_RATE_LIMIT_FAILURES_LOOKUP)
+            conn.execute(self.CREATE_RATE_LIMIT_LOCKOUTS_TABLE)
 
             conn.commit()
 
@@ -588,6 +617,8 @@ class DatabaseSchema:
             self._migrate_users_password_changed_at(conn)
             # Story #578: Server config centralization (migration for existing DBs)
             self._migrate_server_config_table(conn)
+            # Bug #573/#574: Rate limiting tables (migration for existing DBs)
+            self._migrate_rate_limit_tables(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -945,6 +976,17 @@ class DatabaseSchema:
         conn.execute(self.CREATE_SERVER_CONFIG_TABLE)
         conn.commit()
         logger.debug("Ensured server_config table exists")
+
+    def _migrate_rate_limit_tables(self, conn: sqlite3.Connection) -> None:
+        """Create rate limiting tables for existing databases (Bug #573/#574).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+        """
+        conn.execute(self.CREATE_RATE_LIMIT_FAILURES_TABLE)
+        conn.execute(self.CREATE_IDX_RATE_LIMIT_FAILURES_LOOKUP)
+        conn.execute(self.CREATE_RATE_LIMIT_LOCKOUTS_TABLE)
+        conn.commit()
+        logger.debug("Ensured rate_limit tables exist")
 
 
 class DatabaseConnectionManager:

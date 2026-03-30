@@ -4,9 +4,13 @@ Rate limiters for OAuth endpoints to prevent abuse.
 Following CLAUDE.md principles: NO MOCKS - Real rate limiting implementation.
 """
 
+import logging
+import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
 from threading import Lock
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class OAuthTokenRateLimiter:
@@ -24,6 +28,13 @@ class OAuthTokenRateLimiter:
         self._lock = Lock()
         self._max_attempts = 10
         self._lockout_duration_minutes = 5
+        self._pool: Optional[Any] = None
+        self._limiter_type = "oauth_token"
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Enable PostgreSQL for cluster mode (Bug #574)."""
+        self._pool = pool
+        logger.info("%s: using PostgreSQL (cluster mode)", self.__class__.__name__)
 
     def check_rate_limit(self, client_id: str) -> Optional[str]:
         """
@@ -36,6 +47,9 @@ class OAuthTokenRateLimiter:
             None if not rate limited, error message if rate limited
         """
         with self._lock:
+            if self._pool is not None:
+                return self._pg_check_locked(client_id)
+
             now = datetime.now(timezone.utc)
             self._cleanup_expired_entries(now)
 
@@ -62,6 +76,9 @@ class OAuthTokenRateLimiter:
             True if client should be locked out, False otherwise
         """
         with self._lock:
+            if self._pool is not None:
+                return self._pg_record_failure(client_id)
+
             now = datetime.now(timezone.utc)
 
             if client_id not in self._attempts:
@@ -95,6 +112,9 @@ class OAuthTokenRateLimiter:
             client_id: Client ID that succeeded
         """
         with self._lock:
+            if self._pool is not None:
+                self._pg_record_success(client_id)
+                return
             if client_id in self._attempts:
                 del self._attempts[client_id]
 
@@ -109,6 +129,77 @@ class OAuthTokenRateLimiter:
 
         for client_id in expired_clients:
             del self._attempts[client_id]
+
+    # ------------------------------------------------------------------
+    # PostgreSQL helpers for cluster mode (Bug #574). Called under _lock.
+    # ------------------------------------------------------------------
+
+    def _pg_check_locked(self, identifier: str) -> Optional[str]:
+        """Check lockout in PostgreSQL. Called under self._lock."""
+        assert self._pool is not None
+        now = time.time()
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT locked_until FROM rate_limit_lockouts "
+                "WHERE limiter_type = %s AND identifier = %s "
+                "AND locked_until > %s",
+                (self._limiter_type, identifier, now),
+            ).fetchone()
+        if row is None:
+            return None
+        remaining = row[0] - now
+        remaining_minutes = int(remaining / 60) + 1
+        return f"Too many failed attempts. Try again in {remaining_minutes} minutes."
+
+    def _pg_record_failure(self, identifier: str) -> bool:
+        """Record failure in PostgreSQL, return True if locked out. Called under self._lock."""
+        assert self._pool is not None
+        now = time.time()
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO rate_limit_failures "
+                "(limiter_type, identifier, failed_at) VALUES (%s, %s, %s)",
+                (self._limiter_type, identifier, now),
+            )
+            # Window is 2x lockout duration to catch distributed retry attacks
+            cutoff = now - (self._lockout_duration_minutes * 60 * 2)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM rate_limit_failures "
+                "WHERE limiter_type = %s AND identifier = %s "
+                "AND failed_at > %s",
+                (self._limiter_type, identifier, cutoff),
+            ).fetchone()
+            count = row[0] if row else 0
+            if count >= self._max_attempts:
+                locked_until = now + (self._lockout_duration_minutes * 60)
+                conn.execute(
+                    "INSERT INTO rate_limit_lockouts "
+                    "(limiter_type, identifier, locked_until) "
+                    "VALUES (%s, %s, %s) "
+                    "ON CONFLICT (limiter_type, identifier) "
+                    "DO UPDATE SET locked_until = EXCLUDED.locked_until",
+                    (self._limiter_type, identifier, locked_until),
+                )
+                conn.commit()
+                return True
+            conn.commit()
+            return False
+
+    def _pg_record_success(self, identifier: str) -> None:
+        """Clear failures and lockouts in PostgreSQL. Called under self._lock."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM rate_limit_failures "
+                "WHERE limiter_type = %s AND identifier = %s",
+                (self._limiter_type, identifier),
+            )
+            conn.execute(
+                "DELETE FROM rate_limit_lockouts "
+                "WHERE limiter_type = %s AND identifier = %s",
+                (self._limiter_type, identifier),
+            )
+            conn.commit()
 
 
 class OAuthRegisterRateLimiter:
@@ -126,6 +217,13 @@ class OAuthRegisterRateLimiter:
         self._lock = Lock()
         self._max_attempts = 5
         self._lockout_duration_minutes = 15
+        self._pool: Optional[Any] = None
+        self._limiter_type = "oauth_register"
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Enable PostgreSQL for cluster mode (Bug #574)."""
+        self._pool = pool
+        logger.info("%s: using PostgreSQL (cluster mode)", self.__class__.__name__)
 
     def check_rate_limit(self, ip_address: str) -> Optional[str]:
         """
@@ -138,6 +236,9 @@ class OAuthRegisterRateLimiter:
             None if not rate limited, error message if rate limited
         """
         with self._lock:
+            if self._pool is not None:
+                return self._pg_check_locked(ip_address)
+
             now = datetime.now(timezone.utc)
             self._cleanup_expired_entries(now)
 
@@ -164,6 +265,9 @@ class OAuthRegisterRateLimiter:
             True if IP should be locked out, False otherwise
         """
         with self._lock:
+            if self._pool is not None:
+                return self._pg_record_failure(ip_address)
+
             now = datetime.now(timezone.utc)
 
             if ip_address not in self._attempts:
@@ -197,6 +301,9 @@ class OAuthRegisterRateLimiter:
             ip_address: IP address that succeeded
         """
         with self._lock:
+            if self._pool is not None:
+                self._pg_record_success(ip_address)
+                return
             if ip_address in self._attempts:
                 del self._attempts[ip_address]
 
@@ -211,6 +318,77 @@ class OAuthRegisterRateLimiter:
 
         for ip_address in expired_ips:
             del self._attempts[ip_address]
+
+    # ------------------------------------------------------------------
+    # PostgreSQL helpers for cluster mode (Bug #574). Called under _lock.
+    # ------------------------------------------------------------------
+
+    def _pg_check_locked(self, identifier: str) -> Optional[str]:
+        """Check lockout in PostgreSQL. Called under self._lock."""
+        assert self._pool is not None
+        now = time.time()
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT locked_until FROM rate_limit_lockouts "
+                "WHERE limiter_type = %s AND identifier = %s "
+                "AND locked_until > %s",
+                (self._limiter_type, identifier, now),
+            ).fetchone()
+        if row is None:
+            return None
+        remaining = row[0] - now
+        remaining_minutes = int(remaining / 60) + 1
+        return f"Too many failed attempts. Try again in {remaining_minutes} minutes."
+
+    def _pg_record_failure(self, identifier: str) -> bool:
+        """Record failure in PostgreSQL, return True if locked out. Called under self._lock."""
+        assert self._pool is not None
+        now = time.time()
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO rate_limit_failures "
+                "(limiter_type, identifier, failed_at) VALUES (%s, %s, %s)",
+                (self._limiter_type, identifier, now),
+            )
+            # Window is 2x lockout duration to catch distributed retry attacks
+            cutoff = now - (self._lockout_duration_minutes * 60 * 2)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM rate_limit_failures "
+                "WHERE limiter_type = %s AND identifier = %s "
+                "AND failed_at > %s",
+                (self._limiter_type, identifier, cutoff),
+            ).fetchone()
+            count = row[0] if row else 0
+            if count >= self._max_attempts:
+                locked_until = now + (self._lockout_duration_minutes * 60)
+                conn.execute(
+                    "INSERT INTO rate_limit_lockouts "
+                    "(limiter_type, identifier, locked_until) "
+                    "VALUES (%s, %s, %s) "
+                    "ON CONFLICT (limiter_type, identifier) "
+                    "DO UPDATE SET locked_until = EXCLUDED.locked_until",
+                    (self._limiter_type, identifier, locked_until),
+                )
+                conn.commit()
+                return True
+            conn.commit()
+            return False
+
+    def _pg_record_success(self, identifier: str) -> None:
+        """Clear failures and lockouts in PostgreSQL. Called under self._lock."""
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM rate_limit_failures "
+                "WHERE limiter_type = %s AND identifier = %s",
+                (self._limiter_type, identifier),
+            )
+            conn.execute(
+                "DELETE FROM rate_limit_lockouts "
+                "WHERE limiter_type = %s AND identifier = %s",
+                (self._limiter_type, identifier),
+            )
+            conn.commit()
 
 
 # Global rate limiter instances
