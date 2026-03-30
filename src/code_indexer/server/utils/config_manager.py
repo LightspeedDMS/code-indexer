@@ -12,6 +12,8 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, Dict, List, Union
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -1514,6 +1516,16 @@ class ServerConfigManager:
 
         # Remove obsolete reindexing_config field (deleted in previous commit)
         config_dict.pop("reindexing_config", None)
+
+        # Strip unknown keys to prevent TypeError on upgrade from older versions.
+        # Any key not in ServerConfig dataclass fields is silently removed.
+        from dataclasses import fields as dc_fields
+
+        known_fields = {f.name for f in dc_fields(ServerConfig)}
+        unknown_keys = [k for k in config_dict if k not in known_fields]
+        for k in unknown_keys:
+            config_dict.pop(k)
+            logger.warning("Stripped unknown config key '%s' (not in ServerConfig)", k)
 
         return ServerConfig(**config_dict)
 

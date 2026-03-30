@@ -75,6 +75,10 @@ dependencies = [
     "bleach>=6.0.0",
     # Wiki front matter parsing
     "python-frontmatter>=1.0.0",
+    # MFA/TOTP dependencies (Epic #556)
+    "pyotp>=2.9.0",
+    "qrcode>=7.4.0",
+    "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
