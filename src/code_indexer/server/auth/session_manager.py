@@ -152,6 +152,24 @@ class PasswordChangeSessionManager:
         timestamps_snap: Dict[str, str] = dict(self._password_change_timestamps)
         return sessions_snap, timestamps_snap
 
+    def set_backend(self, backend: Any) -> None:
+        """Switch to a protocol-backed storage backend (SQLite or PostgreSQL).
+
+        Replaces JSON file mode with the provided SessionsBackend implementation.
+        Called during startup to wire either SQLite or PostgreSQL backend.
+
+        Args:
+            backend: Any object implementing the SessionsBackend protocol.
+        """
+        self._use_sqlite = True  # Reuse the existing SQLite code path
+        self._sqlite_backend = backend
+        import logging
+
+        logging.getLogger(__name__).info(
+            "PasswordChangeSessionManager: using %s backend",
+            type(backend).__name__,
+        )
+
     def invalidate_all_user_sessions(self, username: str) -> None:
         """
         Invalidate all sessions for a user after password change.

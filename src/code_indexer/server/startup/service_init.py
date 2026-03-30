@@ -249,6 +249,17 @@ def initialize_services() -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
 
+    # Bug #575: Wire session manager to DB backend (SQLite or PG) for cluster support.
+    # The module-level singleton starts in JSON file mode; set_backend() switches it
+    # to use the protocol-backed storage so password-change invalidations are visible
+    # across all cluster nodes.
+    if _backend_registry is not None and _backend_registry.sessions is not None:
+        from code_indexer.server.auth.session_manager import (
+            session_manager as _session_mgr,
+        )
+
+        _session_mgr.set_backend(_backend_registry.sessions)
+
     # Story #528: Initialize JWT secret with PG DSN for cluster-wide sharing.
     # In PG mode, JWT secret is stored in shared cluster_secrets table so
     # all nodes sign/verify tokens with the same key.
