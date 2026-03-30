@@ -1443,6 +1443,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.timeouts.git_refresh_timeout }}</td>
                         <td class="config-note"></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">HNSW Max Elements</td>
+                        <td class="config-value">{{ config.timeouts.hnsw_max_elements }}</td>
+                        <td class="config-note">Maximum elements per HNSW vector index (default: 1,000,000)</td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -1467,6 +1472,10 @@ function saveLlmCredsConfig() {
                 <label for="timeout-refresh">
                     Git Refresh Timeout (sec)
                     <input type="number" id="timeout-refresh" name="git_refresh_timeout" value="{{ config.timeouts.git_refresh_timeout }}" min="1">
+                </label>
+                <label for="hnsw-max-elements">
+                    HNSW Max Elements
+                    <input type="number" id="hnsw-max-elements" name="hnsw_max_elements" value="{{ config.timeouts.hnsw_max_elements }}" min="10000" step="100000">
                 </label>
             </div>
             <div class="form-actions">
