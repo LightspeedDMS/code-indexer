@@ -1534,6 +1534,15 @@ def make_lifespan(
                     mfa_challenge_manager.set_connection_pool(_cluster_pool)
                     _login_rate_limiter_singleton.set_connection_pool(_cluster_pool)
 
+                    # Story #578: Centralize runtime config in PostgreSQL
+                    from code_indexer.server.services.config_service import (
+                        get_config_service,
+                    )
+
+                    _config_svc = get_config_service()
+                    _config_svc.set_connection_pool(_cluster_pool)
+                    _config_svc.start_config_reload(interval_seconds=30)
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
@@ -1652,6 +1661,19 @@ def make_lifespan(
             app.state.node_metrics_backend = None
 
         yield  # Server is now running
+
+        # Story #578: Stop config reload thread before cluster services
+        try:
+            from code_indexer.server.services.config_service import (
+                get_config_service,
+            )
+
+            get_config_service().stop_config_reload()
+        except Exception:
+            logger.debug(
+                "Config reload stop failed (expected during shutdown)",
+                exc_info=True,
+            )
 
         # Epic #408: Stop cluster services
         for svc_name, svc in reversed(_cluster_services):

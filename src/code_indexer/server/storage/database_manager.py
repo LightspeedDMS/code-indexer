@@ -424,6 +424,17 @@ class DatabaseSchema:
         ON node_metrics(timestamp)
     """
 
+    # Story #578: Centralized runtime configuration
+    CREATE_SERVER_CONFIG_TABLE = """
+        CREATE TABLE IF NOT EXISTS server_config (
+            config_key TEXT PRIMARY KEY DEFAULT 'runtime',
+            config_json TEXT NOT NULL,
+            version INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT DEFAULT (datetime('now')),
+            updated_by TEXT
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -514,6 +525,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_USERNAME)
             conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_CLIENT_ID)
             conn.execute(self.CREATE_IDX_RESEARCH_MESSAGES_SESSION_ID)
+            # Story #578: Server config centralization
+            conn.execute(self.CREATE_SERVER_CONFIG_TABLE)
 
             conn.commit()
 
@@ -539,6 +552,8 @@ class DatabaseSchema:
             self._migrate_node_metrics_table(conn)
             # Story #565: Password expiry - add password_changed_at column
             self._migrate_users_password_changed_at(conn)
+            # Story #578: Server config centralization (migration for existing DBs)
+            self._migrate_server_config_table(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -887,6 +902,15 @@ class DatabaseSchema:
         conn.execute(self.CREATE_WIKI_CACHE_TABLE)
         conn.execute(self.CREATE_WIKI_SIDEBAR_CACHE_TABLE)
         conn.commit()
+
+    def _migrate_server_config_table(self, conn: sqlite3.Connection) -> None:
+        """Create server_config table for existing databases (Story #578).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+        """
+        conn.execute(self.CREATE_SERVER_CONFIG_TABLE)
+        conn.commit()
+        logger.debug("Ensured server_config table exists")
 
 
 class DatabaseConnectionManager:

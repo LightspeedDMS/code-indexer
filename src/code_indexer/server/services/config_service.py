@@ -9,6 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import json
 import logging
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,6 +21,26 @@ from ..utils.config_manager import (
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
 logger = logging.getLogger(__name__)
+
+# Story #578: Keys that must stay in local config.json (chicken-and-egg: needed
+# before PG pool exists).  Everything else is "runtime" and lives in PG in
+# cluster mode.
+BOOTSTRAP_KEYS = frozenset(
+    {
+        "server_dir",
+        "host",
+        "port",
+        "workers",
+        "log_level",
+        "storage_mode",
+        "postgres_dsn",
+        "ontap",
+        "cluster",
+    }
+)
+CONFIG_KEY_RUNTIME = "runtime"
+UPDATER_WEB_UI = "web-ui"
+UPDATER_SEED = "config-seed"
 
 
 class ConfigService:
@@ -41,6 +62,53 @@ class ConfigService:
         self.config_manager = ServerConfigManager(server_dir_path)
         self._config: Optional[ServerConfig] = None
         self._delegation_manager = ClaudeDelegationManager(server_dir_path)
+        # Story #578: PG-backed runtime config for cluster mode
+        self._pool: Any = None
+        self._pg_config_version: int = 0
+        self._reload_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Enable PostgreSQL-backed config storage for cluster mode.
+
+        When set, runtime config is read from/written to the server_config
+        PG table. Bootstrap config continues to come from local config.json.
+        """
+        self._pool = pool
+        self._load_runtime_from_pg()
+        logger.info("ConfigService: using PostgreSQL for runtime config (cluster mode)")
+
+    def start_config_reload(self, interval_seconds: int = 30) -> None:
+        """Start background thread that polls PG for config version changes."""
+        if self._pool is None:
+            return
+        if self._reload_thread is not None and self._reload_thread.is_alive():
+            return
+        self._stop_event.clear()
+
+        def _poll_loop() -> None:
+            while not self._stop_event.wait(timeout=interval_seconds):
+                try:
+                    if self.check_config_update():
+                        logger.info("ConfigService: reloaded config from PG")
+                except Exception:
+                    logger.exception("ConfigService: config reload poll failed")
+
+        self._reload_thread = threading.Thread(
+            target=_poll_loop, daemon=True, name="config-reload"
+        )
+        self._reload_thread.start()
+        logger.info(
+            "ConfigService: config reload thread started (interval=%ds)",
+            interval_seconds,
+        )
+
+    def stop_config_reload(self) -> None:
+        """Stop the background config reload thread."""
+        self._stop_event.set()
+        if self._reload_thread is not None:
+            self._reload_thread.join(timeout=5)
+            logger.info("ConfigService: config reload thread stopped")
 
     def get_delegation_manager(self) -> ClaudeDelegationManager:
         """Get the Claude Delegation manager for config operations."""
@@ -1276,16 +1344,146 @@ class ConfigService:
         except Exception as e:
             logger.warning("Could not sync extensions for %s: %s", repo_path, e)
 
+    def check_config_update(self) -> bool:
+        """Check if config version changed in PG (called periodically).
+
+        Returns True if config was reloaded.
+        """
+        if self._pool is None:
+            return False
+        from psycopg.rows import dict_row
+
+        with self._pool.connection() as conn:
+            conn.row_factory = dict_row
+            row = conn.execute(
+                "SELECT version FROM server_config WHERE config_key = %s",
+                ("runtime",),
+            ).fetchone()
+        if row and row["version"] != self._pg_config_version:
+            self._load_runtime_from_pg()
+            return True
+        return False
+
+    @staticmethod
+    def _extract_runtime_dict(config: "ServerConfig") -> dict:
+        """Extract runtime (non-bootstrap) config as dict."""
+        full_dict = asdict(config)
+        return {k: v for k, v in full_dict.items() if k not in BOOTSTRAP_KEYS}
+
+    @staticmethod
+    def _extract_bootstrap_dict(config: "ServerConfig") -> dict:
+        """Extract bootstrap config as dict."""
+        full_dict = asdict(config)
+        return {k: v for k, v in full_dict.items() if k in BOOTSTRAP_KEYS}
+
+    def _save_runtime_to_pg(self, config: "ServerConfig") -> None:
+        """Save runtime config to PostgreSQL."""
+        assert self._pool is not None
+        runtime_dict = self._extract_runtime_dict(config)
+
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE server_config SET config_json = %s, "
+                "version = version + 1, updated_at = CURRENT_TIMESTAMP, "
+                "updated_by = %s WHERE config_key = %s",
+                (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
+            )
+            conn.commit()
+            # Finding 2 fix: no dict_row factory set, use positional index
+            row = conn.execute(
+                "SELECT version FROM server_config WHERE config_key = %s",
+                (CONFIG_KEY_RUNTIME,),
+            ).fetchone()
+            if row:
+                self._pg_config_version = row[0]
+            else:
+                logger.error(
+                    "Runtime config row missing from server_config after update"
+                )
+
+    def _seed_runtime_to_pg(self) -> None:
+        """Seed PG server_config table from current config (first boot)."""
+        assert self._pool is not None
+        config = self.get_config()
+        runtime_dict = self._extract_runtime_dict(config)
+
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO server_config (config_key, config_json, version, updated_by) "
+                "VALUES (%s, %s, 1, %s) "
+                "ON CONFLICT (config_key) DO NOTHING",
+                (CONFIG_KEY_RUNTIME, json.dumps(runtime_dict), UPDATER_SEED),
+            )
+            conn.commit()
+            # Finding 4 fix: SELECT actual version -- INSERT may have been a
+            # no-op if another node already seeded, so version could be > 1.
+            row = conn.execute(
+                "SELECT version FROM server_config WHERE config_key = %s",
+                (CONFIG_KEY_RUNTIME,),
+            ).fetchone()
+            assert row is not None, (
+                "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
+            )
+            self._pg_config_version = row[0]
+        logger.info(
+            "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
+            len(runtime_dict),
+        )
+
+    def _load_runtime_from_pg(self) -> None:
+        """Load runtime config from PostgreSQL and merge with bootstrap."""
+        assert self._pool is not None
+        from psycopg.rows import dict_row
+
+        with self._pool.connection() as conn:
+            conn.row_factory = dict_row
+            row = conn.execute(
+                "SELECT config_json, version FROM server_config WHERE config_key = %s",
+                (CONFIG_KEY_RUNTIME,),
+            ).fetchone()
+
+        if row is None:
+            self._seed_runtime_to_pg()
+            return
+
+        config_json = row["config_json"]
+        runtime_dict = (
+            json.loads(config_json) if isinstance(config_json, str) else config_json
+        )
+        self._pg_config_version = int(row["version"])
+        self._merge_runtime_config(runtime_dict)
+
+    def _merge_runtime_config(self, runtime_dict: dict) -> None:
+        """Merge runtime dict into current config (runtime fields only).
+
+        Reconstructs a full ServerConfig from a merged dict to correctly
+        deserialize nested dataclass fields (Finding 1 fix).  Uses atomic
+        reference swap for thread safety (Finding 3 fix).
+        """
+        config = self.get_config()
+        full_dict = asdict(config)
+        # Overwrite runtime fields only
+        for k, v in runtime_dict.items():
+            if k not in BOOTSTRAP_KEYS:
+                full_dict[k] = v
+        # Reconstruct ServerConfig through the existing deserialization path
+        # which correctly converts nested dicts to dataclass instances
+        new_config = self.config_manager._dict_to_server_config(full_dict)
+        self._config = new_config  # Atomic reference swap
+
     def save_config(self, config: ServerConfig) -> None:
-        """
-        Save configuration to disk (Story #203 - Fix Finding 2).
+        """Save config -- PG for runtime in cluster mode, file for standalone.
 
-        Delegates to underlying ServerConfigManager.save_config().
-
-        Args:
-            config: ServerConfig object to save
+        In cluster mode (pool set): runtime to PG, bootstrap to file.
+        In standalone mode (no pool): full config to file (unchanged).
         """
-        self.config_manager.save_config(config)
+        if self._pool is not None:
+            self._save_runtime_to_pg(config)
+            bootstrap_dict = self._extract_bootstrap_dict(config)
+            self.config_manager.save_config_dict(bootstrap_dict)
+        else:
+            self.config_manager.save_config(config)
+        self._config = config
 
 
 # Global service instance

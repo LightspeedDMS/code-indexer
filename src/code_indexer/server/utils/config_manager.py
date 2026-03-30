@@ -1069,6 +1069,16 @@ class ServerConfigManager:
         with open(self.config_file_path, "w") as f:
             json.dump(config_dict, f, indent=2)
 
+    def save_config_dict(self, config_dict: dict) -> None:
+        """Save a dict (not full ServerConfig) to config.json.
+
+        Used by Story #578 to write bootstrap-only keys in cluster mode.
+        """
+        self.server_dir.mkdir(parents=True, exist_ok=True)
+        with open(self.config_file_path, "w") as f:
+            json.dump(config_dict, f, indent=2)
+            f.write("\n")
+
     def load_config(self) -> Optional[ServerConfig]:
         """
         Load configuration from file.
@@ -1090,407 +1100,419 @@ class ServerConfigManager:
             if "server_dir" not in config_dict:
                 config_dict["server_dir"] = str(self.server_dir)
 
-            # Convert nested password_security dict to PasswordSecurityConfig
-            if "password_security" in config_dict and isinstance(
-                config_dict["password_security"], dict
-            ):
-                config_dict["password_security"] = PasswordSecurityConfig(
-                    **config_dict["password_security"]
-                )
-
-            # Convert nested resource_config dict to ServerResourceConfig
-            if "resource_config" in config_dict and isinstance(
-                config_dict["resource_config"], dict
-            ):
-                # Bug #467: Remove obsolete cidx_index_timeout (indexing no longer has timeout)
-                config_dict["resource_config"].pop("cidx_index_timeout", None)
-                config_dict["resource_config"] = ServerResourceConfig(
-                    **config_dict["resource_config"]
-                )
-
-            # Story #32: Migration from old config format to content_limits_config
-            # Must run BEFORE any conversions so we can read raw dict values
-            if "content_limits_config" not in config_dict:
-                migrated_config = {}
-
-                # Migrate from file_content_limits_config
-                if "file_content_limits_config" in config_dict:
-                    old_file_limits = config_dict["file_content_limits_config"]
-                    if isinstance(old_file_limits, dict):
-                        if "chars_per_token" in old_file_limits:
-                            migrated_config["chars_per_token"] = old_file_limits[
-                                "chars_per_token"
-                            ]
-                        if "max_tokens_per_request" in old_file_limits:
-                            migrated_config["file_content_max_tokens"] = (
-                                old_file_limits["max_tokens_per_request"]
-                            )
-
-                # Migrate from cache_config payload settings
-                if "cache_config" in config_dict:
-                    old_cache = config_dict["cache_config"]
-                    if isinstance(old_cache, dict):
-                        if "payload_cache_ttl_seconds" in old_cache:
-                            migrated_config["cache_ttl_seconds"] = old_cache[
-                                "payload_cache_ttl_seconds"
-                            ]
-
-                # Create content_limits_config with migrated values
-                if migrated_config:
-                    config_dict["content_limits_config"] = migrated_config
-
-            # Convert nested cache_config dict to CacheConfig
-            if "cache_config" in config_dict and isinstance(
-                config_dict["cache_config"], dict
-            ):
-                config_dict["cache_config"] = CacheConfig(**config_dict["cache_config"])
-
-            # Story #29: Migrate old omni_search_config to multi_search_limits_config
-            if "omni_search_config" in config_dict and isinstance(
-                config_dict["omni_search_config"], dict
-            ):
-                old_omni = config_dict.pop("omni_search_config")
-                # Initialize multi_search_limits_config dict if needed
-                if "multi_search_limits_config" not in config_dict:
-                    config_dict["multi_search_limits_config"] = {}
-                if isinstance(config_dict["multi_search_limits_config"], dict):
-                    # Map old field names to new omni_ prefixed names
-                    field_mapping = {
-                        "max_workers": "omni_max_workers",
-                        "per_repo_timeout_seconds": "omni_per_repo_timeout_seconds",
-                        "cache_max_entries": "omni_cache_max_entries",
-                        "cache_ttl_seconds": "omni_cache_ttl_seconds",
-                        "default_limit": "omni_default_limit",
-                        "max_limit": "omni_max_limit",
-                        "default_aggregation_mode": "omni_default_aggregation_mode",
-                        "max_results_per_repo": "omni_max_results_per_repo",
-                        "max_total_results_before_aggregation": "omni_max_total_results_before_aggregation",
-                        "pattern_metacharacters": "omni_pattern_metacharacters",
-                    }
-                    for old_key, new_key in field_mapping.items():
-                        if old_key in old_omni:
-                            config_dict["multi_search_limits_config"][new_key] = (
-                                old_omni[old_key]
-                            )
-
-            # Convert nested oidc_provider_config dict to OIDCProviderConfig
-            if "oidc_provider_config" in config_dict and isinstance(
-                config_dict["oidc_provider_config"], dict
-            ):
-                config_dict["oidc_provider_config"] = OIDCProviderConfig(
-                    **config_dict["oidc_provider_config"]
-                )
-
-            # Convert nested telemetry_config dict to TelemetryConfig
-            if "telemetry_config" in config_dict and isinstance(
-                config_dict["telemetry_config"], dict
-            ):
-                config_dict["telemetry_config"] = TelemetryConfig(
-                    **config_dict["telemetry_config"]
-                )
-
-            # Story #3 - Configuration Consolidation: Convert migrated config dicts
-            # Convert nested search_limits_config dict to SearchLimitsConfig
-            if "search_limits_config" in config_dict and isinstance(
-                config_dict["search_limits_config"], dict
-            ):
-                config_dict["search_limits_config"] = SearchLimitsConfig(
-                    **config_dict["search_limits_config"]
-                )
-
-            # Convert nested file_content_limits_config dict to FileContentLimitsConfig
-            if "file_content_limits_config" in config_dict and isinstance(
-                config_dict["file_content_limits_config"], dict
-            ):
-                config_dict["file_content_limits_config"] = FileContentLimitsConfig(
-                    **config_dict["file_content_limits_config"]
-                )
-
-            # Convert nested golden_repos_config dict to GoldenReposConfig
-            if "golden_repos_config" in config_dict and isinstance(
-                config_dict["golden_repos_config"], dict
-            ):
-                config_dict["golden_repos_config"] = GoldenReposConfig(
-                    **config_dict["golden_repos_config"]
-                )
-
-            # Story #3 - Phase 2: Convert P0/P1 config dicts
-            # Convert nested mcp_session_config dict to McpSessionConfig
-            if "mcp_session_config" in config_dict and isinstance(
-                config_dict["mcp_session_config"], dict
-            ):
-                config_dict["mcp_session_config"] = McpSessionConfig(
-                    **config_dict["mcp_session_config"]
-                )
-
-            # Convert nested health_config dict to HealthConfig
-            if "health_config" in config_dict and isinstance(
-                config_dict["health_config"], dict
-            ):
-                config_dict["health_config"] = HealthConfig(
-                    **config_dict["health_config"]
-                )
-
-            # Convert nested scip_config dict to ScipConfig
-            if "scip_config" in config_dict and isinstance(
-                config_dict["scip_config"], dict
-            ):
-                config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
-
-            # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
-            # Convert nested git_timeouts_config dict to GitTimeoutsConfig
-            if "git_timeouts_config" in config_dict and isinstance(
-                config_dict["git_timeouts_config"], dict
-            ):
-                # Bug #83 Phase 1: Remove obsolete timeout fields for backward compatibility
-                git_timeouts_dict = config_dict["git_timeouts_config"].copy()
-                obsolete_fields = [
-                    "git_command_timeout",
-                    "git_fetch_timeout",
-                    "github_provider_timeout",
-                    "gitlab_provider_timeout",
-                ]
-                for field in obsolete_fields:
-                    git_timeouts_dict.pop(field, None)
-
-                config_dict["git_timeouts_config"] = GitTimeoutsConfig(
-                    **git_timeouts_dict
-                )
-
-            # Convert nested error_handling_config dict to ErrorHandlingConfig
-            if "error_handling_config" in config_dict and isinstance(
-                config_dict["error_handling_config"], dict
-            ):
-                config_dict["error_handling_config"] = ErrorHandlingConfig(
-                    **config_dict["error_handling_config"]
-                )
-
-            # Convert nested api_limits_config dict to ApiLimitsConfig
-            if "api_limits_config" in config_dict and isinstance(
-                config_dict["api_limits_config"], dict
-            ):
-                config_dict["api_limits_config"] = ApiLimitsConfig(
-                    **config_dict["api_limits_config"]
-                )
-
-            # Convert nested web_security_config dict to WebSecurityConfig
-            if "web_security_config" in config_dict and isinstance(
-                config_dict["web_security_config"], dict
-            ):
-                config_dict["web_security_config"] = WebSecurityConfig(
-                    **config_dict["web_security_config"]
-                )
-
-            # Story #3 - Phase 2: Convert P3 config dicts (AC36)
-            # Convert nested auth_config dict to AuthConfig
-            if "auth_config" in config_dict and isinstance(
-                config_dict["auth_config"], dict
-            ):
-                config_dict["auth_config"] = AuthConfig(**config_dict["auth_config"])
-
-            # Story #15 - Configuration Refactoring: Convert indexing_config
-            if "indexing_config" in config_dict and isinstance(
-                config_dict["indexing_config"], dict
-            ):
-                config_dict["indexing_config"] = IndexingConfig(
-                    **config_dict["indexing_config"]
-                )
-
-            # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
-            if "scip_workspace_retention_days" in config_dict:
-                retention_days = config_dict.pop("scip_workspace_retention_days")
-                if "scip_config" not in config_dict:
-                    config_dict["scip_config"] = {}
-                if isinstance(config_dict["scip_config"], dict):
-                    config_dict["scip_config"]["scip_workspace_retention_days"] = (
-                        retention_days
-                    )
-                elif isinstance(config_dict["scip_config"], ScipConfig):
-                    config_dict[
-                        "scip_config"
-                    ].scip_workspace_retention_days = retention_days
-
-            # Story #15 AC2: Final conversion of scip_config after migration
-            # This handles the case where scip_config was created by migration above
-            if "scip_config" in config_dict and isinstance(
-                config_dict["scip_config"], dict
-            ):
-                config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
-
-            # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
-            claude_settings_keys = [
-                "anthropic_api_key",
-                "max_concurrent_claude_cli",
-                "description_refresh_interval_hours",
-            ]
-            claude_settings = {}
-            for key in claude_settings_keys:
-                if key in config_dict:
-                    claude_settings[key] = config_dict.pop(key)
-            if claude_settings:
-                if "claude_integration_config" not in config_dict:
-                    config_dict["claude_integration_config"] = {}
-                if isinstance(config_dict["claude_integration_config"], dict):
-                    config_dict["claude_integration_config"].update(claude_settings)
-                elif isinstance(
-                    config_dict["claude_integration_config"], ClaudeIntegrationConfig
-                ):
-                    for key, value in claude_settings.items():
-                        setattr(config_dict["claude_integration_config"], key, value)
-
-            # Story #15 AC3: Convert claude_integration_config dict to ClaudeIntegrationConfig
-            if "claude_integration_config" in config_dict and isinstance(
-                config_dict["claude_integration_config"], dict
-            ):
-                # Migration: remove obsolete dependency_map_pass3_max_turns field
-                # Pass 3 is now deterministic and no longer uses a max_turns setting
-                config_dict["claude_integration_config"].pop(
-                    "dependency_map_pass3_max_turns", None
-                )
-                config_dict["claude_integration_config"] = ClaudeIntegrationConfig(
-                    **config_dict["claude_integration_config"]
-                )
-
-            # Story #15 AC4 Migration: Move repository settings to repository_config
-            repo_settings_keys = [
-                "enable_pr_creation",
-                "pr_base_branch",
-                "default_branch",
-            ]
-            repo_settings = {}
-            for key in repo_settings_keys:
-                if key in config_dict:
-                    repo_settings[key] = config_dict.pop(key)
-            if repo_settings:
-                if "repository_config" not in config_dict:
-                    config_dict["repository_config"] = {}
-                if isinstance(config_dict["repository_config"], dict):
-                    config_dict["repository_config"].update(repo_settings)
-                elif isinstance(config_dict["repository_config"], RepositoryConfig):
-                    for key, value in repo_settings.items():
-                        setattr(config_dict["repository_config"], key, value)
-
-            # Story #15 AC4: Convert repository_config dict to RepositoryConfig
-            if "repository_config" in config_dict and isinstance(
-                config_dict["repository_config"], dict
-            ):
-                config_dict["repository_config"] = RepositoryConfig(
-                    **config_dict["repository_config"]
-                )
-
-            # Story #25: Convert multi_search_limits_config dict to MultiSearchLimitsConfig
-            if "multi_search_limits_config" in config_dict and isinstance(
-                config_dict["multi_search_limits_config"], dict
-            ):
-                config_dict["multi_search_limits_config"] = MultiSearchLimitsConfig(
-                    **config_dict["multi_search_limits_config"]
-                )
-
-            # Story #400 - AC5: Migrate old BackgroundJobsConfig.cleanup_max_age_hours
-            # to DataRetentionConfig.background_jobs_retention_hours.
-            # Must run BEFORE BackgroundJobsConfig conversion since we read the raw dict.
-            # Only migrates if data_retention_config is not already explicitly set.
-            if "data_retention_config" not in config_dict:
-                old_bg_jobs = config_dict.get("background_jobs_config")
-                if (
-                    isinstance(old_bg_jobs, dict)
-                    and "cleanup_max_age_hours" in old_bg_jobs
-                ):
-                    config_dict["data_retention_config"] = {
-                        "background_jobs_retention_hours": old_bg_jobs[
-                            "cleanup_max_age_hours"
-                        ]
-                    }
-
-            # Story #400: Remove obsolete cleanup_max_age_hours from background_jobs_config dict
-            # before converting to BackgroundJobsConfig (field no longer exists on dataclass).
-            if "background_jobs_config" in config_dict and isinstance(
-                config_dict["background_jobs_config"], dict
-            ):
-                config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
-
-            # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
-            if "background_jobs_config" in config_dict and isinstance(
-                config_dict["background_jobs_config"], dict
-            ):
-                config_dict["background_jobs_config"] = BackgroundJobsConfig(
-                    **config_dict["background_jobs_config"]
-                )
-
-            # Story #32: Convert content_limits_config dict to ContentLimitsConfig
-            # (Migration from old format happens earlier, before file_content_limits_config conversion)
-            if "content_limits_config" in config_dict and isinstance(
-                config_dict["content_limits_config"], dict
-            ):
-                config_dict["content_limits_config"] = ContentLimitsConfig(
-                    **config_dict["content_limits_config"]
-                )
-
-            # Story #72: Convert self_monitoring_config dict to SelfMonitoringConfig
-            # Story #566: Strip stale prompt_template and prompt_user_modified fields
-            # from existing config files for backward compatibility.
-            if "self_monitoring_config" in config_dict and isinstance(
-                config_dict["self_monitoring_config"], dict
-            ):
-                sm_dict = config_dict["self_monitoring_config"]
-                sm_dict.pop("prompt_template", None)
-                sm_dict.pop("prompt_user_modified", None)
-                config_dict["self_monitoring_config"] = SelfMonitoringConfig(**sm_dict)
-
-            # Story #136: Convert langfuse_config dict to LangfuseConfig
-            if "langfuse_config" in config_dict and isinstance(
-                config_dict["langfuse_config"], dict
-            ):
-                config_dict["langfuse_config"] = LangfuseConfig(
-                    **config_dict["langfuse_config"]
-                )
-
-            # Story #203: Convert mcp_self_registration dict to MCPSelfRegistrationConfig
-            if "mcp_self_registration" in config_dict and isinstance(
-                config_dict["mcp_self_registration"], dict
-            ):
-                config_dict["mcp_self_registration"] = MCPSelfRegistrationConfig(
-                    **config_dict["mcp_self_registration"]
-                )
-
-            # Story #323: Convert wiki_config dict to WikiConfig
-            if "wiki_config" in config_dict and isinstance(
-                config_dict["wiki_config"], dict
-            ):
-                config_dict["wiki_config"] = WikiConfig(**config_dict["wiki_config"])
-
-            # Story #400: Convert data_retention_config dict to DataRetentionConfig
-            if "data_retention_config" in config_dict and isinstance(
-                config_dict["data_retention_config"], dict
-            ):
-                config_dict["data_retention_config"] = DataRetentionConfig(
-                    **config_dict["data_retention_config"]
-                )
-
-            # Epic #408: Convert ontap dict to OntapConfig
-            if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):
-                config_dict["ontap"] = OntapConfig(**config_dict["ontap"])
-
-            # Epic #408: Convert cluster dict to ClusterConfig
-            if "cluster" in config_dict and isinstance(config_dict["cluster"], dict):
-                config_dict["cluster"] = ClusterConfig(**config_dict["cluster"])
-
-            # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig
-            if "password_expiry_config" in config_dict and isinstance(
-                config_dict["password_expiry_config"], dict
-            ):
-                config_dict["password_expiry_config"] = PasswordExpiryConfig(
-                    **config_dict["password_expiry_config"]
-                )
-
-            # Remove obsolete reindexing_config field (deleted in previous commit)
-            config_dict.pop("reindexing_config", None)
-
-            return ServerConfig(**config_dict)
+            return self._dict_to_server_config(config_dict)
         except json.JSONDecodeError as e:
             raise ValueError(f"Failed to parse configuration file: {e}")
         except TypeError as e:
             raise ValueError(f"Invalid configuration format: {e}")
+
+    def _dict_to_server_config(self, config_dict: dict) -> "ServerConfig":
+        """Convert a plain dict (with nested dicts) to a fully-typed ServerConfig.
+
+        Handles migration of obsolete field names and conversion of nested
+        dicts into their corresponding dataclass instances.  Both load_config()
+        and ConfigService._merge_runtime_config() use this to guarantee that
+        nested fields are proper dataclass instances, not plain dicts.
+
+        Args:
+            config_dict: Dict from JSON deserialization or ``dataclasses.asdict``.
+
+        Returns:
+            Fully-constructed ServerConfig with nested dataclass fields.
+
+        Raises:
+            TypeError: If a nested dict cannot be converted to its dataclass.
+        """
+        # Convert nested password_security dict to PasswordSecurityConfig
+        if "password_security" in config_dict and isinstance(
+            config_dict["password_security"], dict
+        ):
+            config_dict["password_security"] = PasswordSecurityConfig(
+                **config_dict["password_security"]
+            )
+
+        # Convert nested resource_config dict to ServerResourceConfig
+        if "resource_config" in config_dict and isinstance(
+            config_dict["resource_config"], dict
+        ):
+            # Bug #467: Remove obsolete cidx_index_timeout (indexing no longer has timeout)
+            config_dict["resource_config"].pop("cidx_index_timeout", None)
+            config_dict["resource_config"] = ServerResourceConfig(
+                **config_dict["resource_config"]
+            )
+
+        # Story #32: Migration from old config format to content_limits_config
+        # Must run BEFORE any conversions so we can read raw dict values
+        if "content_limits_config" not in config_dict:
+            migrated_config = {}
+
+            # Migrate from file_content_limits_config
+            if "file_content_limits_config" in config_dict:
+                old_file_limits = config_dict["file_content_limits_config"]
+                if isinstance(old_file_limits, dict):
+                    if "chars_per_token" in old_file_limits:
+                        migrated_config["chars_per_token"] = old_file_limits[
+                            "chars_per_token"
+                        ]
+                    if "max_tokens_per_request" in old_file_limits:
+                        migrated_config["file_content_max_tokens"] = old_file_limits[
+                            "max_tokens_per_request"
+                        ]
+
+            # Migrate from cache_config payload settings
+            if "cache_config" in config_dict:
+                old_cache = config_dict["cache_config"]
+                if isinstance(old_cache, dict):
+                    if "payload_cache_ttl_seconds" in old_cache:
+                        migrated_config["cache_ttl_seconds"] = old_cache[
+                            "payload_cache_ttl_seconds"
+                        ]
+
+            # Create content_limits_config with migrated values
+            if migrated_config:
+                config_dict["content_limits_config"] = migrated_config
+
+        # Convert nested cache_config dict to CacheConfig
+        if "cache_config" in config_dict and isinstance(
+            config_dict["cache_config"], dict
+        ):
+            config_dict["cache_config"] = CacheConfig(**config_dict["cache_config"])
+
+        # Story #29: Migrate old omni_search_config to multi_search_limits_config
+        if "omni_search_config" in config_dict and isinstance(
+            config_dict["omni_search_config"], dict
+        ):
+            old_omni = config_dict.pop("omni_search_config")
+            # Initialize multi_search_limits_config dict if needed
+            if "multi_search_limits_config" not in config_dict:
+                config_dict["multi_search_limits_config"] = {}
+            if isinstance(config_dict["multi_search_limits_config"], dict):
+                # Map old field names to new omni_ prefixed names
+                field_mapping = {
+                    "max_workers": "omni_max_workers",
+                    "per_repo_timeout_seconds": "omni_per_repo_timeout_seconds",
+                    "cache_max_entries": "omni_cache_max_entries",
+                    "cache_ttl_seconds": "omni_cache_ttl_seconds",
+                    "default_limit": "omni_default_limit",
+                    "max_limit": "omni_max_limit",
+                    "default_aggregation_mode": "omni_default_aggregation_mode",
+                    "max_results_per_repo": "omni_max_results_per_repo",
+                    "max_total_results_before_aggregation": "omni_max_total_results_before_aggregation",
+                    "pattern_metacharacters": "omni_pattern_metacharacters",
+                }
+                for old_key, new_key in field_mapping.items():
+                    if old_key in old_omni:
+                        config_dict["multi_search_limits_config"][new_key] = old_omni[
+                            old_key
+                        ]
+
+        # Convert nested oidc_provider_config dict to OIDCProviderConfig
+        if "oidc_provider_config" in config_dict and isinstance(
+            config_dict["oidc_provider_config"], dict
+        ):
+            config_dict["oidc_provider_config"] = OIDCProviderConfig(
+                **config_dict["oidc_provider_config"]
+            )
+
+        # Convert nested telemetry_config dict to TelemetryConfig
+        if "telemetry_config" in config_dict and isinstance(
+            config_dict["telemetry_config"], dict
+        ):
+            config_dict["telemetry_config"] = TelemetryConfig(
+                **config_dict["telemetry_config"]
+            )
+
+        # Story #3 - Configuration Consolidation: Convert migrated config dicts
+        # Convert nested search_limits_config dict to SearchLimitsConfig
+        if "search_limits_config" in config_dict and isinstance(
+            config_dict["search_limits_config"], dict
+        ):
+            config_dict["search_limits_config"] = SearchLimitsConfig(
+                **config_dict["search_limits_config"]
+            )
+
+        # Convert nested file_content_limits_config dict to FileContentLimitsConfig
+        if "file_content_limits_config" in config_dict and isinstance(
+            config_dict["file_content_limits_config"], dict
+        ):
+            config_dict["file_content_limits_config"] = FileContentLimitsConfig(
+                **config_dict["file_content_limits_config"]
+            )
+
+        # Convert nested golden_repos_config dict to GoldenReposConfig
+        if "golden_repos_config" in config_dict and isinstance(
+            config_dict["golden_repos_config"], dict
+        ):
+            config_dict["golden_repos_config"] = GoldenReposConfig(
+                **config_dict["golden_repos_config"]
+            )
+
+        # Story #3 - Phase 2: Convert P0/P1 config dicts
+        # Convert nested mcp_session_config dict to McpSessionConfig
+        if "mcp_session_config" in config_dict and isinstance(
+            config_dict["mcp_session_config"], dict
+        ):
+            config_dict["mcp_session_config"] = McpSessionConfig(
+                **config_dict["mcp_session_config"]
+            )
+
+        # Convert nested health_config dict to HealthConfig
+        if "health_config" in config_dict and isinstance(
+            config_dict["health_config"], dict
+        ):
+            config_dict["health_config"] = HealthConfig(**config_dict["health_config"])
+
+        # Convert nested scip_config dict to ScipConfig
+        if "scip_config" in config_dict and isinstance(
+            config_dict["scip_config"], dict
+        ):
+            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+
+        # Story #3 - Phase 2: Convert P2 config dicts (AC12-AC26)
+        # Convert nested git_timeouts_config dict to GitTimeoutsConfig
+        if "git_timeouts_config" in config_dict and isinstance(
+            config_dict["git_timeouts_config"], dict
+        ):
+            # Bug #83 Phase 1: Remove obsolete timeout fields for backward compatibility
+            git_timeouts_dict = config_dict["git_timeouts_config"].copy()
+            obsolete_fields = [
+                "git_command_timeout",
+                "git_fetch_timeout",
+                "github_provider_timeout",
+                "gitlab_provider_timeout",
+            ]
+            for field in obsolete_fields:
+                git_timeouts_dict.pop(field, None)
+
+            config_dict["git_timeouts_config"] = GitTimeoutsConfig(**git_timeouts_dict)
+
+        # Convert nested error_handling_config dict to ErrorHandlingConfig
+        if "error_handling_config" in config_dict and isinstance(
+            config_dict["error_handling_config"], dict
+        ):
+            config_dict["error_handling_config"] = ErrorHandlingConfig(
+                **config_dict["error_handling_config"]
+            )
+
+        # Convert nested api_limits_config dict to ApiLimitsConfig
+        if "api_limits_config" in config_dict and isinstance(
+            config_dict["api_limits_config"], dict
+        ):
+            config_dict["api_limits_config"] = ApiLimitsConfig(
+                **config_dict["api_limits_config"]
+            )
+
+        # Convert nested web_security_config dict to WebSecurityConfig
+        if "web_security_config" in config_dict and isinstance(
+            config_dict["web_security_config"], dict
+        ):
+            config_dict["web_security_config"] = WebSecurityConfig(
+                **config_dict["web_security_config"]
+            )
+
+        # Story #3 - Phase 2: Convert P3 config dicts (AC36)
+        # Convert nested auth_config dict to AuthConfig
+        if "auth_config" in config_dict and isinstance(
+            config_dict["auth_config"], dict
+        ):
+            config_dict["auth_config"] = AuthConfig(**config_dict["auth_config"])
+
+        # Story #15 - Configuration Refactoring: Convert indexing_config
+        if "indexing_config" in config_dict and isinstance(
+            config_dict["indexing_config"], dict
+        ):
+            config_dict["indexing_config"] = IndexingConfig(
+                **config_dict["indexing_config"]
+            )
+
+        # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
+        if "scip_workspace_retention_days" in config_dict:
+            retention_days = config_dict.pop("scip_workspace_retention_days")
+            if "scip_config" not in config_dict:
+                config_dict["scip_config"] = {}
+            if isinstance(config_dict["scip_config"], dict):
+                config_dict["scip_config"]["scip_workspace_retention_days"] = (
+                    retention_days
+                )
+            elif isinstance(config_dict["scip_config"], ScipConfig):
+                config_dict[
+                    "scip_config"
+                ].scip_workspace_retention_days = retention_days
+
+        # Story #15 AC2: Final conversion of scip_config after migration
+        # This handles the case where scip_config was created by migration above
+        if "scip_config" in config_dict and isinstance(
+            config_dict["scip_config"], dict
+        ):
+            config_dict["scip_config"] = ScipConfig(**config_dict["scip_config"])
+
+        # Story #15 AC3 Migration: Move Claude CLI settings to claude_integration_config
+        claude_settings_keys = [
+            "anthropic_api_key",
+            "max_concurrent_claude_cli",
+            "description_refresh_interval_hours",
+        ]
+        claude_settings = {}
+        for key in claude_settings_keys:
+            if key in config_dict:
+                claude_settings[key] = config_dict.pop(key)
+        if claude_settings:
+            if "claude_integration_config" not in config_dict:
+                config_dict["claude_integration_config"] = {}
+            if isinstance(config_dict["claude_integration_config"], dict):
+                config_dict["claude_integration_config"].update(claude_settings)
+            elif isinstance(
+                config_dict["claude_integration_config"], ClaudeIntegrationConfig
+            ):
+                for key, value in claude_settings.items():
+                    setattr(config_dict["claude_integration_config"], key, value)
+
+        # Story #15 AC3: Convert claude_integration_config dict to ClaudeIntegrationConfig
+        if "claude_integration_config" in config_dict and isinstance(
+            config_dict["claude_integration_config"], dict
+        ):
+            # Migration: remove obsolete dependency_map_pass3_max_turns field
+            # Pass 3 is now deterministic and no longer uses a max_turns setting
+            config_dict["claude_integration_config"].pop(
+                "dependency_map_pass3_max_turns", None
+            )
+            config_dict["claude_integration_config"] = ClaudeIntegrationConfig(
+                **config_dict["claude_integration_config"]
+            )
+
+        # Story #15 AC4 Migration: Move repository settings to repository_config
+        repo_settings_keys = [
+            "enable_pr_creation",
+            "pr_base_branch",
+            "default_branch",
+        ]
+        repo_settings = {}
+        for key in repo_settings_keys:
+            if key in config_dict:
+                repo_settings[key] = config_dict.pop(key)
+        if repo_settings:
+            if "repository_config" not in config_dict:
+                config_dict["repository_config"] = {}
+            if isinstance(config_dict["repository_config"], dict):
+                config_dict["repository_config"].update(repo_settings)
+            elif isinstance(config_dict["repository_config"], RepositoryConfig):
+                for key, value in repo_settings.items():
+                    setattr(config_dict["repository_config"], key, value)
+
+        # Story #15 AC4: Convert repository_config dict to RepositoryConfig
+        if "repository_config" in config_dict and isinstance(
+            config_dict["repository_config"], dict
+        ):
+            config_dict["repository_config"] = RepositoryConfig(
+                **config_dict["repository_config"]
+            )
+
+        # Story #25: Convert multi_search_limits_config dict to MultiSearchLimitsConfig
+        if "multi_search_limits_config" in config_dict and isinstance(
+            config_dict["multi_search_limits_config"], dict
+        ):
+            config_dict["multi_search_limits_config"] = MultiSearchLimitsConfig(
+                **config_dict["multi_search_limits_config"]
+            )
+
+        # Story #400 - AC5: Migrate old BackgroundJobsConfig.cleanup_max_age_hours
+        # to DataRetentionConfig.background_jobs_retention_hours.
+        # Must run BEFORE BackgroundJobsConfig conversion since we read the raw dict.
+        # Only migrates if data_retention_config is not already explicitly set.
+        if "data_retention_config" not in config_dict:
+            old_bg_jobs = config_dict.get("background_jobs_config")
+            if isinstance(old_bg_jobs, dict) and "cleanup_max_age_hours" in old_bg_jobs:
+                config_dict["data_retention_config"] = {
+                    "background_jobs_retention_hours": old_bg_jobs[
+                        "cleanup_max_age_hours"
+                    ]
+                }
+
+        # Story #400: Remove obsolete cleanup_max_age_hours from background_jobs_config dict
+        # before converting to BackgroundJobsConfig (field no longer exists on dataclass).
+        if "background_jobs_config" in config_dict and isinstance(
+            config_dict["background_jobs_config"], dict
+        ):
+            config_dict["background_jobs_config"].pop("cleanup_max_age_hours", None)
+
+        # Story #26: Convert background_jobs_config dict to BackgroundJobsConfig
+        if "background_jobs_config" in config_dict and isinstance(
+            config_dict["background_jobs_config"], dict
+        ):
+            config_dict["background_jobs_config"] = BackgroundJobsConfig(
+                **config_dict["background_jobs_config"]
+            )
+
+        # Story #32: Convert content_limits_config dict to ContentLimitsConfig
+        # (Migration from old format happens earlier, before file_content_limits_config conversion)
+        if "content_limits_config" in config_dict and isinstance(
+            config_dict["content_limits_config"], dict
+        ):
+            config_dict["content_limits_config"] = ContentLimitsConfig(
+                **config_dict["content_limits_config"]
+            )
+
+        # Story #72: Convert self_monitoring_config dict to SelfMonitoringConfig
+        # Story #566: Strip stale prompt_template and prompt_user_modified fields
+        # from existing config files for backward compatibility.
+        if "self_monitoring_config" in config_dict and isinstance(
+            config_dict["self_monitoring_config"], dict
+        ):
+            sm_dict = config_dict["self_monitoring_config"]
+            sm_dict.pop("prompt_template", None)
+            sm_dict.pop("prompt_user_modified", None)
+            config_dict["self_monitoring_config"] = SelfMonitoringConfig(**sm_dict)
+
+        # Story #136: Convert langfuse_config dict to LangfuseConfig
+        if "langfuse_config" in config_dict and isinstance(
+            config_dict["langfuse_config"], dict
+        ):
+            config_dict["langfuse_config"] = LangfuseConfig(
+                **config_dict["langfuse_config"]
+            )
+
+        # Story #203: Convert mcp_self_registration dict to MCPSelfRegistrationConfig
+        if "mcp_self_registration" in config_dict and isinstance(
+            config_dict["mcp_self_registration"], dict
+        ):
+            config_dict["mcp_self_registration"] = MCPSelfRegistrationConfig(
+                **config_dict["mcp_self_registration"]
+            )
+
+        # Story #323: Convert wiki_config dict to WikiConfig
+        if "wiki_config" in config_dict and isinstance(
+            config_dict["wiki_config"], dict
+        ):
+            config_dict["wiki_config"] = WikiConfig(**config_dict["wiki_config"])
+
+        # Story #400: Convert data_retention_config dict to DataRetentionConfig
+        if "data_retention_config" in config_dict and isinstance(
+            config_dict["data_retention_config"], dict
+        ):
+            config_dict["data_retention_config"] = DataRetentionConfig(
+                **config_dict["data_retention_config"]
+            )
+
+        # Epic #408: Convert ontap dict to OntapConfig
+        if "ontap" in config_dict and isinstance(config_dict["ontap"], dict):
+            config_dict["ontap"] = OntapConfig(**config_dict["ontap"])
+
+        # Epic #408: Convert cluster dict to ClusterConfig
+        if "cluster" in config_dict and isinstance(config_dict["cluster"], dict):
+            config_dict["cluster"] = ClusterConfig(**config_dict["cluster"])
+
+        # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig
+        if "password_expiry_config" in config_dict and isinstance(
+            config_dict["password_expiry_config"], dict
+        ):
+            config_dict["password_expiry_config"] = PasswordExpiryConfig(
+                **config_dict["password_expiry_config"]
+            )
+
+        # Remove obsolete reindexing_config field (deleted in previous commit)
+        config_dict.pop("reindexing_config", None)
+
+        return ServerConfig(**config_dict)
 
     def apply_env_overrides(self, config: ServerConfig) -> ServerConfig:
         """
