@@ -499,6 +499,14 @@ class DatabaseSchema:
         )
     """
 
+    # Bug #583: Token blacklist for cluster-wide JWT revocation
+    CREATE_TOKEN_BLACKLIST_TABLE = """
+        CREATE TABLE IF NOT EXISTS token_blacklist (
+            jti TEXT PRIMARY KEY,
+            blacklisted_at REAL NOT NULL
+        )
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -601,6 +609,8 @@ class DatabaseSchema:
             conn.execute(self.CREATE_RATE_LIMIT_LOCKOUTS_TABLE)
             # Bug #576: OIDC state tokens for cluster mode
             conn.execute(self.CREATE_OIDC_STATE_TOKENS_TABLE)
+            # Bug #583: Token blacklist for cluster-wide JWT revocation
+            conn.execute(self.CREATE_TOKEN_BLACKLIST_TABLE)
 
             conn.commit()
 
@@ -632,6 +642,8 @@ class DatabaseSchema:
             self._migrate_rate_limit_tables(conn)
             # Bug #576: OIDC state tokens (migration for existing DBs)
             self._migrate_oidc_state_tokens_table(conn)
+            # Bug #583: Token blacklist (migration for existing DBs)
+            self._migrate_token_blacklist_table(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -1009,6 +1021,15 @@ class DatabaseSchema:
         conn.execute(self.CREATE_OIDC_STATE_TOKENS_TABLE)
         conn.commit()
         logger.debug("Ensured oidc_state_tokens table exists")
+
+    def _migrate_token_blacklist_table(self, conn: sqlite3.Connection) -> None:
+        """Create token_blacklist table for existing databases (Bug #583).
+
+        Idempotent - uses CREATE TABLE IF NOT EXISTS.
+        """
+        conn.execute(self.CREATE_TOKEN_BLACKLIST_TABLE)
+        conn.commit()
+        logger.debug("Ensured token_blacklist table exists")
 
 
 class DatabaseConnectionManager:

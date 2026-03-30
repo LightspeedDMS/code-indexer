@@ -1587,6 +1587,11 @@ def make_lifespan(
                         _arm.set_shared_repos_dir(_shared_data)
                         logger.info("Bug #587: ActivatedRepoManager cluster pool wired")
 
+                    # Bug #583: Wire cluster pool for token blacklist
+                    from code_indexer.server.app import get_token_blacklist
+
+                    get_token_blacklist().set_connection_pool(_cluster_pool)
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.

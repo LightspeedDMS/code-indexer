@@ -78,18 +78,105 @@ from .startup.bootstrap import (  # noqa: F401
     register_langfuse_golden_repos,
 )
 
-# Token blacklist for logout functionality (Story #491) - MODULE LEVEL
-token_blacklist: set[str] = set()
+
+# Bug #583: Token blacklist for logout — cluster-aware (DB-backed).
+class TokenBlacklist:
+    """Token blacklist for JWT logout. In-memory + optional DB backend."""
+
+    def __init__(self) -> None:
+        self._local: set = set()
+        self._pool: Any = None
+        self._sqlite_db_path: Optional[str] = None
+
+    def set_connection_pool(self, pool: Any) -> None:
+        self._pool = pool
+        logging.getLogger(__name__).info(
+            "TokenBlacklist: using PostgreSQL (cluster mode)"
+        )
+
+    def set_sqlite_path(self, db_path: str) -> None:
+        self._sqlite_db_path = db_path
+
+    def add(self, jti: str) -> None:
+        self._local.add(jti)  # Always add to local for fast checks on same node
+        if self._pool is not None:
+            self._pg_add(jti)
+        elif self._sqlite_db_path:
+            self._sqlite_add(jti)
+
+    def contains(self, jti: str) -> bool:
+        # Check local first (fast path)
+        if jti in self._local:
+            return True
+        # Check DB (cross-node)
+        if self._pool is not None:
+            return self._pg_contains(jti)
+        elif self._sqlite_db_path:
+            return self._sqlite_contains(jti)
+        return False
+
+    def _pg_add(self, jti: str) -> None:
+        assert self._pool is not None
+        import time
+
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO token_blacklist (jti, blacklisted_at) "
+                "VALUES (%s, %s) ON CONFLICT (jti) DO NOTHING",
+                (jti, time.time()),
+            )
+            conn.commit()
+
+    def _pg_contains(self, jti: str) -> bool:
+        assert self._pool is not None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM token_blacklist WHERE jti = %s", (jti,)
+            ).fetchone()
+        return row is not None
+
+    def _sqlite_add(self, jti: str) -> None:
+        import sqlite3
+        import time
+
+        assert self._sqlite_db_path is not None
+        conn = sqlite3.connect(self._sqlite_db_path)
+        conn.execute(
+            "INSERT OR IGNORE INTO token_blacklist (jti, blacklisted_at) VALUES (?, ?)",
+            (jti, time.time()),
+        )
+        conn.commit()
+        conn.close()
+
+    def _sqlite_contains(self, jti: str) -> bool:
+        import sqlite3
+
+        assert self._sqlite_db_path is not None
+        conn = sqlite3.connect(self._sqlite_db_path)
+        row = conn.execute(
+            "SELECT 1 FROM token_blacklist WHERE jti = ?", (jti,)
+        ).fetchone()
+        conn.close()
+        return row is not None
+
+
+# Module-level singleton
+_token_blacklist = TokenBlacklist()
 
 
 def blacklist_token(jti: str) -> None:
     """Add token JTI to blacklist."""
-    token_blacklist.add(jti)
+    _token_blacklist.add(jti)
 
 
 def is_token_blacklisted(jti: str) -> bool:
     """Check if token JTI is blacklisted."""
-    return jti in token_blacklist
+    return _token_blacklist.contains(jti)
+
+
+def get_token_blacklist() -> TokenBlacklist:
+    """Get the token blacklist singleton (for wiring)."""
+    return _token_blacklist
 
 
 def create_app():

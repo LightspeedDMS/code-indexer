@@ -154,6 +154,11 @@ def initialize_services() -> Dict[str, Any]:
     schema = DatabaseSchema(str(db_path))
     schema.initialize_database()
 
+    # Bug #583: Wire token blacklist with SQLite path for standalone mode
+    from code_indexer.server.app import get_token_blacklist
+
+    get_token_blacklist().set_sqlite_path(str(db_path))
+
     # Story #578: Initialize SQLite-backed runtime config (unified model).
     # Must happen after schema init (server_config table) and before PG pool.
     config_service.initialize_runtime_db(str(db_path))
