@@ -142,7 +142,11 @@ class ConfigService:
 
     def load_config(self) -> ServerConfig:
         """
-        Load configuration from disk or create default.
+        Load configuration from file + DB merge, or file-only if no DB yet.
+
+        When runtime DB is initialized (solo or cluster), loads bootstrap
+        from config.json and merges runtime from DB. Otherwise reads full
+        config from file (pre-migration or early bootstrap).
 
         Returns:
             ServerConfig object with current settings
@@ -150,11 +154,21 @@ class ConfigService:
         config = self.config_manager.load_config()
         if config is None:
             config = self.config_manager.create_default_config()
-            # Save the default config so it persists
             self.save_config(config)
 
         self._config = config
-        return config
+
+        # If runtime DB is available, merge runtime from DB on top of
+        # the bootstrap-only file config. This prevents any caller of
+        # load_config() from overwriting the merged config with defaults.
+        if self._pool is not None:
+            self._load_runtime_from_pg()  # Merges internally
+        elif self._sqlite_db_path:
+            runtime = self._load_runtime_from_sqlite()
+            if runtime:
+                self._merge_runtime_config(runtime)
+
+        return self._config
 
     def get_config(self) -> ServerConfig:
         """
