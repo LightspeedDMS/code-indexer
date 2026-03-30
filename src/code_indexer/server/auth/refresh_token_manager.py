@@ -15,9 +15,11 @@ This module implements the security requirements from Story 03:
 - Comprehensive audit logging for security monitoring
 """
 
+import logging
 import sqlite3
 import secrets
 import hashlib
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
@@ -27,6 +29,8 @@ from pathlib import Path
 from .jwt_manager import JWTManager
 from .audit_logger import password_audit_logger
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -107,6 +111,7 @@ class RefreshTokenManager:
         self.jwt_manager = jwt_manager
         self.refresh_token_lifetime_days = refresh_token_lifetime_days
         self._lock = threading.Lock()
+        self._pool: Any = None
         self._backend = storage_backend
 
         if storage_backend:
@@ -130,6 +135,31 @@ class RefreshTokenManager:
 
         # Initialize database
         self._init_database()
+
+    def set_connection_pool(self, pool: Any) -> None:
+        """Enable PG advisory locks for cross-node token rotation safety."""
+        self._pool = pool
+        logger.info("RefreshTokenManager: using PG advisory locks (cluster mode)")
+
+    @contextmanager
+    def _distributed_lock(self):
+        """Acquire distributed lock: PG advisory lock or threading.Lock."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "SELECT pg_advisory_lock(hashtext(%s))",
+                    ("refresh_token_rotation",),
+                )
+                try:
+                    yield
+                finally:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtext(%s))",
+                        ("refresh_token_rotation",),
+                    )
+        else:
+            with self._lock:
+                yield
 
     def _init_database(self):
         """Initialize SQLite database for secure token storage."""
@@ -248,7 +278,7 @@ class RefreshTokenManager:
         Returns:
             Dictionary with access token, refresh token, and metadata
         """
-        with self._lock:
+        with self._distributed_lock():
             # Generate secure refresh token
             refresh_token = self._generate_refresh_token()
             token_id = self._generate_secure_id()
@@ -346,7 +376,7 @@ class RefreshTokenManager:
         family_id: str = ""
         username: str = ""
 
-        with self._lock:
+        with self._distributed_lock():
             result_holder: Dict[str, Any] = {}
 
             if self._backend:

@@ -1659,6 +1659,14 @@ def make_lifespan(
 
                     _get_cs().register_on_change_callback(_on_config_change)
 
+                    # Bug #579: PG advisory locks for refresh token rotation
+                    from code_indexer.server.app import refresh_token_manager
+
+                    if refresh_token_manager is not None and hasattr(
+                        refresh_token_manager, "set_connection_pool"
+                    ):
+                        refresh_token_manager.set_connection_pool(_cluster_pool)
+
                     app.state.leader_election = _leader_election
                     # Story #505/#506: Store node_id and postgres_dsn in app.state
                     # so check_health MCP handler and web routes can read them.
