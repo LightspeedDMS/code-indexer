@@ -617,6 +617,26 @@ class BackgroundJobManager:
 
         return {"success": False, "message": "Job not found or not authorized"}
 
+    def _check_db_cancellation(self, job_id: str) -> None:
+        """Poll DB for external cancellation (cross-node cluster support).
+
+        Called from progress_callback to detect cancellations triggered
+        on a different cluster node.  Bug #584.
+        """
+        try:
+            if self._sqlite_backend is not None:
+                job_data = self._sqlite_backend.get_job(job_id)
+                if job_data and job_data.get("status") == "cancelled":
+                    with self._lock:
+                        if job_id in self.jobs:
+                            self.jobs[job_id].cancelled = True
+                            logging.debug(
+                                "Bug #584: Detected cross-node cancellation for job %s",
+                                job_id,
+                            )
+        except Exception:
+            pass  # Best-effort — don't break progress reporting
+
     def _execute_job(
         self, job_id: str, func: Callable[[], Dict[str, Any]], args: tuple, kwargs: dict
     ) -> None:
@@ -686,6 +706,8 @@ class BackgroundJobManager:
                             self.jobs[job_id].phase_detail = detail
                 # Story #267 Component 3-4: Persist outside lock
                 self._persist_jobs(job_id=job_id)
+                # Bug #584: Check DB for cross-node cancellation
+                self._check_db_cancellation(job_id)
 
             # Check if function accepts progress callback
             func_signature = inspect.signature(func)
