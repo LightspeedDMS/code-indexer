@@ -256,6 +256,57 @@ setting = config.some_setting
 
 ---
 
+## CRITICAL: Config Bootstrap vs Runtime (Story #578)
+
+**config.json is BOOTSTRAP ONLY.** All runtime settings live in the database (SQLite for solo, PostgreSQL for cluster). On startup, the server reads bootstrap from file, then loads runtime from DB and merges.
+
+**Bootstrap keys** (stay in local config.json -- needed before DB is available):
+
+| Key | Required | Purpose |
+|-----|----------|---------|
+| `server_dir` | Yes | Data directory path (default: ~/.cidx-server) |
+| `host` | Yes | Network bind address |
+| `port` | Yes | HTTP port |
+| `workers` | No | Uvicorn workers (default: 1) |
+| `log_level` | No | Logging level (default: INFO) |
+| `storage_mode` | Cluster | `sqlite` (default) or `postgres` |
+| `postgres_dsn` | Cluster | PostgreSQL connection string |
+| `ontap` | No | ONTAP/NFS storage config |
+| `cluster` | Cluster | `{"node_id": "unique-name"}` |
+
+**Runtime keys** (in DB, managed via Web UI): All `*_config` sub-objects, `jwt_expiration_minutes`, `service_display_name`, OIDC, security policies, cache settings, etc.
+
+**Minimum solo config.json:**
+```json
+{
+  "server_dir": "~/.cidx-server",
+  "host": "127.0.0.1",
+  "port": 8000
+}
+```
+
+**Minimum cluster config.json (per node):**
+```json
+{
+  "server_dir": "~/.cidx-server",
+  "host": "0.0.0.0",
+  "port": 8000,
+  "storage_mode": "postgres",
+  "postgres_dsn": "postgresql://user:pass@host/db",
+  "cluster": {"node_id": "node-1"}
+}
+```
+
+**Auto-migration**: On first boot after upgrade, if config.json has runtime keys, they are automatically migrated to the DB, the file is stripped to bootstrap-only, and a backup is created at `~/.cidx-server/config-migration-backup/config.json.pre-centralization`.
+
+**Manual migration for existing clusters**: Run `scripts/cluster-config-migrate.sh` on each node (idempotent).
+
+**NEVER** create `ServerConfigManager()` and call `load_config()` directly in new code. Always use `get_config_service().get_config()` which returns the merged config from DB.
+
+*Recorded 2026-03-30*
+
+---
+
 ## CRITICAL: TESTING WORKFLOW
 
 **NEVER** run fast-automation.sh iteratively. Wastes hours.
