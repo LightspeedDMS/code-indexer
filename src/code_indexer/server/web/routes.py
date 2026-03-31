@@ -5136,6 +5136,7 @@ def _get_current_config() -> dict:
     provider_api_keys_config = {
         "anthropic_configured": bool(claude_cli_config.get("anthropic_api_key")),
         "voyageai_configured": bool(claude_cli_config.get("voyageai_api_key")),
+        "cohere_configured": bool(claude_cli_config.get("cohere_api_key")),
     }
 
     # Convert to template-friendly format

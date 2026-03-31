@@ -86,6 +86,19 @@ def seed_api_keys_on_startup(
                 "Cleared VoyageAI API key from process environment (config is blank)"
             )
 
+        # Cohere: config → env (unidirectional)
+        # Config has key → set env; config blank → clear env
+        if config.claude_integration_config.cohere_api_key:
+            os.environ["CO_API_KEY"] = config.claude_integration_config.cohere_api_key
+            logger.info(
+                "Synced Cohere API key from server config to process environment"
+            )
+        else:
+            os.environ.pop("CO_API_KEY", None)
+            logger.info(
+                "Cleared Cohere API key from process environment (config is blank)"
+            )
+
     except Exception as e:
         from code_indexer.server.logging_utils import format_error_log
 
