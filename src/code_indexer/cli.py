@@ -5985,6 +5985,38 @@ def query(
         secondary_collection_name = None
         secondary_provider_name_str = None
 
+        # Auto-routing: when enabled and no explicit strategy, select best provider (Story #491)
+        if not strategy and getattr(config, "auto_routing_enabled", False):
+            from .services.provider_health_monitor import ProviderHealthMonitor
+
+            configured_providers = EmbeddingProviderFactory.get_configured_providers(
+                config
+            )
+            if len(configured_providers) > 1:
+                monitor = ProviderHealthMonitor.get_instance(
+                    rolling_window_minutes=getattr(config, "health_window_minutes", 60),
+                    error_rate_threshold=getattr(
+                        config, "health_error_rate_threshold", 0.1
+                    ),
+                    latency_p95_threshold_ms=getattr(
+                        config, "health_latency_p95_threshold_ms", 5000.0
+                    ),
+                )
+                best = monitor.get_best_provider(configured_providers)
+                if best and best != (provider or config.embedding_provider):
+                    if not quiet:
+                        console.print(
+                            f"[dim]Auto-routing: selected {best} (best health score)[/dim]"
+                        )
+                    # Override the provider for this query
+                    embedding_provider = EmbeddingProviderFactory.create(
+                        config, console, provider_name=best
+                    )
+                    collection_name = vector_store_client.resolve_collection_name(
+                        config, embedding_provider
+                    )
+                    vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
+
         if effective_strategy in ("failover", "parallel"):
             configured_providers = EmbeddingProviderFactory.get_configured_providers(
                 config
