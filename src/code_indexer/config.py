@@ -136,7 +136,7 @@ class CohereConfig(BaseModel):
     api_key: str = ""
     api_endpoint: str = "https://api.cohere.com/v2/embed"
     model: str = "embed-v4.0"
-    default_dimension: int = 1024
+    default_dimension: int = 1536
     timeout: int = 30
     max_retries: int = 3
     retry_delay: float = 1.0
