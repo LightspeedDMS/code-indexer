@@ -3,8 +3,11 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+
+from ..auth.dependencies import get_current_admin_user_hybrid
+from ..auth.user_manager import User
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +33,10 @@ class BulkAddRequest(BaseModel):
 
 
 @router.get("/providers")
-async def list_providers(request: Request) -> Dict[str, Any]:
+async def list_providers(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
     """List configured embedding providers with valid API keys."""
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
@@ -43,7 +49,11 @@ async def list_providers(request: Request) -> Dict[str, Any]:
 
 
 @router.get("/status")
-async def get_provider_index_status(alias: str, request: Request) -> Dict[str, Any]:
+async def get_provider_index_status(
+    alias: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
     """Get per-provider index status for a repository."""
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
@@ -62,23 +72,41 @@ async def get_provider_index_status(alias: str, request: Request) -> Dict[str, A
 
 @router.post("/add", status_code=202)
 async def add_provider_index(
-    body: ProviderIndexRequest, request: Request
+    body: ProviderIndexRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Add provider index for a repository (background job)."""
-    return _submit_index_job(body.provider, body.alias, clear=False, request=request)
+    return _submit_index_job(
+        body.provider,
+        body.alias,
+        clear=False,
+        request=request,
+        current_user=current_user,
+    )
 
 
 @router.post("/recreate", status_code=202)
 async def recreate_provider_index(
-    body: ProviderIndexRequest, request: Request
+    body: ProviderIndexRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Recreate provider index from scratch (background job)."""
-    return _submit_index_job(body.provider, body.alias, clear=True, request=request)
+    return _submit_index_job(
+        body.provider,
+        body.alias,
+        clear=True,
+        request=request,
+        current_user=current_user,
+    )
 
 
 @router.post("/remove")
 async def remove_provider_index(
-    body: ProviderIndexRequest, request: Request
+    body: ProviderIndexRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user_hybrid),
 ) -> Dict[str, Any]:
     """Remove a provider's collection from a repository."""
     from code_indexer.server.services.provider_index_service import ProviderIndexService
@@ -107,7 +135,11 @@ async def remove_provider_index(
 
 
 @router.post("/bulk-add", status_code=202)
-async def bulk_add(body: BulkAddRequest, request: Request) -> Dict[str, Any]:
+async def bulk_add(
+    body: BulkAddRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
     """Bulk add provider index to all repositories that lack it."""
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
@@ -152,7 +184,7 @@ async def bulk_add(body: BulkAddRequest, request: Request) -> Dict[str, Any]:
         job_id = app.state.background_job_manager.submit_job(
             operation_type="provider_index_add",
             func=_provider_index_job,
-            submitter_username="admin",
+            submitter_username=current_user.username,
             repo_alias=alias,
             repo_path=repo_path,
             provider_name=body.provider,
@@ -172,7 +204,7 @@ async def bulk_add(body: BulkAddRequest, request: Request) -> Dict[str, Any]:
 
 
 def _submit_index_job(
-    provider: str, alias: str, clear: bool, request: Request
+    provider: str, alias: str, clear: bool, request: Request, current_user: User
 ) -> Dict[str, Any]:
     """Submit a provider index job."""
     from code_indexer.server.services.provider_index_service import ProviderIndexService
@@ -199,7 +231,7 @@ def _submit_index_job(
     job_id = app.state.background_job_manager.submit_job(
         operation_type=f"provider_index_{action}",
         func=_provider_index_job,
-        submitter_username="admin",
+        submitter_username=current_user.username,
         repo_alias=alias,
         repo_path=repo_path,
         provider_name=provider,

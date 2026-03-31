@@ -14,16 +14,15 @@ def provider_index_group():
 @provider_index_group.command("list-providers")
 def list_providers():
     """List configured embedding providers with valid API keys."""
-    from .services.embedding_factory import EmbeddingProviderFactory
     from .config import ConfigManager
+    from code_indexer.server.services.provider_index_service import ProviderIndexService
 
     console = Console()
     config = ConfigManager().load()
+    service = ProviderIndexService(config=config)
+    providers = service.list_providers()
 
-    configured = EmbeddingProviderFactory.get_configured_providers(config)
-    provider_info = EmbeddingProviderFactory.get_provider_info()
-
-    if not configured:
+    if not providers:
         console.print(
             "[yellow]No embedding providers configured with valid API keys[/yellow]"
         )
@@ -31,15 +30,16 @@ def list_providers():
 
     table = Table(title="Configured Embedding Providers")
     table.add_column("Provider", style="cyan")
-    table.add_column("Model", style="green")
+    table.add_column("Display Name", style="green")
+    table.add_column("Default Model")
     table.add_column("API Key Env", style="dim")
 
-    for name in configured:
-        info = provider_info.get(name, {})
+    for p in providers:
         table.add_row(
-            name,
-            info.get("default_model", "unknown"),
-            info.get("api_key_env", ""),
+            p["name"],
+            p["display_name"],
+            p["default_model"],
+            p["api_key_env"],
         )
 
     console.print(table)

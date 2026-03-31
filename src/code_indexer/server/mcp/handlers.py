@@ -16483,6 +16483,9 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"error": str(e)})
 
 
+_PROVIDER_INDEX_TIMEOUT_SECONDS = 3600
+
+
 def _provider_index_job(
     repo_path: str, provider_name: str, clear: bool = False, **kwargs
 ) -> Dict[str, Any]:
@@ -16493,19 +16496,31 @@ def _provider_index_job(
     if clear:
         cmd.append("--clear")
 
-    result = subprocess.run(
-        cmd,
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-        timeout=3600,  # 1 hour max
-    )
-
-    return {
-        "success": result.returncode == 0,
-        "stdout": result.stdout[-500:] if result.stdout else "",
-        "stderr": result.stderr[-500:] if result.stderr else "",
-    }
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
+        )
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout[-500:] if result.stdout else "",
+            "stderr": result.stderr[-500:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Provider index timed out after %s s for provider=%s repo=%s",
+            _PROVIDER_INDEX_TIMEOUT_SECONDS,
+            provider_name,
+            repo_path,
+        )
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Index build timed out after {_PROVIDER_INDEX_TIMEOUT_SECONDS} seconds",
+        }
 
 
 def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
