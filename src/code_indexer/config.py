@@ -67,13 +67,13 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
                 f"See migration guide at docs/migration-to-v8.md"
             )
 
-    # Check for invalid embedding provider (must be voyage-ai in v8.0+)
+    # Check for invalid embedding provider
     if "embedding_provider" in data:
         provider = data["embedding_provider"]
-        if provider != "voyage-ai":
+        if provider not in ("voyage-ai", "cohere"):
             raise ValueError(
-                f"Embedding provider '{provider}' is not supported in v8.0. "
-                f"Only 'voyage-ai' is supported. "
+                f"Embedding provider '{provider}' is not supported. "
+                f"Supported providers: voyage-ai, cohere. "
                 f"See migration guide at docs/migration-to-v8.md"
             )
 
@@ -128,6 +128,18 @@ class VoyageAIConfig(BaseModel):
 
 # Backward compatibility alias (VoyageConfig was renamed to VoyageAIConfig in v8.0)
 VoyageConfig = VoyageAIConfig
+
+
+class CohereConfig(BaseModel):
+    """Cohere embedding provider configuration."""
+
+    api_key: str = ""
+    api_endpoint: str = "https://api.cohere.com/v2/embed"
+    model: str = "embed-v4.0"
+    default_dimension: int = 1024
+    timeout: int = 30
+    max_retries: int = 3
+    retry_delay: float = 1.0
 
 
 class IndexingConfig(BaseModel):
@@ -481,7 +493,7 @@ class Config(BaseModel):
     )
 
     # Embedding provider selection
-    embedding_provider: Literal["voyage-ai"] = Field(
+    embedding_provider: Literal["voyage-ai", "cohere"] = Field(
         default="voyage-ai",
         description="Embedding provider to use",
     )
@@ -494,6 +506,7 @@ class Config(BaseModel):
 
     # Provider-specific configurations
     voyage_ai: VoyageAIConfig = Field(default_factory=VoyageAIConfig)
+    cohere: CohereConfig = Field(default_factory=CohereConfig)
 
     # Other service configurations
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
