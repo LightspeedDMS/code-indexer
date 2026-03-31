@@ -1035,6 +1035,41 @@ def _display_semantic_results(
             console.print("─" * 50)
 
 
+def _raw_results_to_query_results(
+    raw_results: List[Dict[str, Any]], provider_name: str
+) -> List[Any]:
+    """Convert raw query results to QueryResult objects for score fusion."""
+    from code_indexer.services.query_strategy import QueryResult
+
+    return [
+        QueryResult(
+            file_path=r.get("payload", {}).get("path", ""),
+            score=r.get("score", 0.0),
+            content=r.get("payload", {}).get("content", ""),
+            chunk_id=str(r.get("id", "")),
+            metadata=r.get("payload", {}),
+            source_provider=provider_name,
+        )
+        for r in raw_results
+    ]
+
+
+def _query_results_to_raw(query_results: List[Any]) -> List[Dict[str, Any]]:
+    """Convert QueryResult objects back to raw result format."""
+    return [
+        {
+            "score": qr.score,
+            "id": qr.chunk_id,
+            "payload": {
+                "path": qr.file_path,
+                "content": qr.content,
+                **qr.metadata,
+            },
+        }
+        for qr in query_results
+    ]
+
+
 def _execute_semantic_search(
     query: str,
     limit: int,
@@ -1049,6 +1084,8 @@ def _execute_semantic_search(
     config_manager,
     console: Console,
     provider_name: Optional[str] = None,
+    strategy: Optional[str] = None,
+    score_fusion: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Execute semantic search - extracted for parallel execution in hybrid mode.
 
@@ -4667,6 +4704,21 @@ def display_temporal_results(results, temporal_service):
     default=None,
     help="Embedding provider to use (default: from config)",
 )
+@click.option(
+    "--strategy",
+    type=click.Choice(
+        ["primary_only", "failover", "parallel", "specific"], case_sensitive=False
+    ),
+    default=None,
+    help="Query strategy: primary_only (default), failover, parallel (score fusion), specific (use --provider)",
+)
+@click.option(
+    "--score-fusion",
+    "score_fusion",
+    type=click.Choice(["rrf", "multiply", "average"], case_sensitive=False),
+    default=None,
+    help="Score fusion method for --strategy parallel (default: rrf)",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -4696,6 +4748,8 @@ def query(
     repo: Optional[str],
     repos: Optional[str],
     provider: Optional[str] = None,
+    strategy: Optional[str] = None,
+    score_fusion: Optional[str] = None,
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -4779,6 +4833,24 @@ def query(
         )
         console.print(
             "  [cyan]cidx query 'refactor' --time-range 2024-01-01..2024-12-31 --chunk-type commit_diff[/cyan]"
+        )
+        sys.exit(1)
+
+    # Validate strategy/score-fusion combinations (Story #488)
+    if score_fusion and (not strategy or strategy.lower() != "parallel"):
+        console = Console()
+        console.print("[red]Error: --score-fusion requires --strategy parallel[/red]")
+        sys.exit(1)
+
+    if strategy and strategy.lower() == "specific" and not provider:
+        console = Console()
+        console.print("[red]Error: --strategy specific requires --provider[/red]")
+        sys.exit(1)
+
+    if strategy and fts and not semantic:
+        console = Console()
+        console.print(
+            "[red]Error: --strategy is for semantic queries, incompatible with FTS-only mode[/red]"
         )
         sys.exit(1)
 
@@ -5428,6 +5500,8 @@ def query(
                     config_manager=ctx.obj["config_manager"],
                     console=console,
                     provider_name=provider,
+                    strategy=strategy,
+                    score_fusion=score_fusion,
                 )
 
                 # Wait for BOTH to complete (parallel execution)
@@ -5802,6 +5876,67 @@ def query(
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
 
+        # Strategy setup: prepare secondary provider if needed (Story #488)
+        import logging
+
+        effective_strategy = (strategy or "primary_only").lower()
+        secondary_multi_index_service = None
+        secondary_collection_name = None
+        secondary_provider_name_str = None
+
+        if effective_strategy in ("failover", "parallel"):
+            configured_providers = EmbeddingProviderFactory.get_configured_providers(
+                config
+            )
+            primary_provider_name = provider or config.embedding_provider
+            secondary_candidates = [
+                p for p in configured_providers if p != primary_provider_name
+            ]
+
+            if secondary_candidates:
+                secondary_provider_name_str = secondary_candidates[0]
+                try:
+                    secondary_emb_provider = EmbeddingProviderFactory.create(
+                        config, console, provider_name=secondary_provider_name_str
+                    )
+                    secondary_collection_name = (
+                        vector_store_client.resolve_collection_name(
+                            config, secondary_emb_provider
+                        )
+                    )
+                    from .services.multi_index_query_service import (
+                        MultiIndexQueryService as MIQSSecondary,
+                    )
+
+                    secondary_multi_index_service = MIQSSecondary(
+                        project_root=project_root,
+                        vector_store=vector_store_client,
+                        embedding_provider=secondary_emb_provider,
+                    )
+                    if not quiet:
+                        console.print(
+                            f"[dim]Strategy: {effective_strategy} "
+                            f"({primary_provider_name} + {secondary_provider_name_str})[/dim]"
+                        )
+                except Exception as e:
+                    logging.getLogger(__name__).warning(
+                        "Failed to initialize secondary provider %s: %s",
+                        secondary_provider_name_str,
+                        e,
+                    )
+                    if not quiet:
+                        console.print(
+                            "[yellow]Warning: Secondary provider unavailable, "
+                            "falling back to primary only[/yellow]"
+                        )
+                    secondary_multi_index_service = None
+            else:
+                if not quiet:
+                    console.print(
+                        "[yellow]Warning: No secondary provider configured, "
+                        "using primary only[/yellow]"
+                    )
+
         # Initialize timing dictionary for telemetry
         timing_info: Dict[str, Any] = {}
 
@@ -6099,17 +6234,81 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
-                # Use MultiIndexQueryService for unified query interface (supports multimodal)
-                raw_results, multi_index_timing = multi_index_service.query(
-                    query_text=query,
-                    limit=limit * 2,  # Get more to account for post-filtering
-                    collection_name=collection_name,
-                    filter_conditions=query_filter_conditions,
-                )
-                # Use multi-index timing from service
-                search_timing: Dict[str, Any] = multi_index_timing
+                # Strategy-aware query execution (Story #488)
+                if effective_strategy == "failover" and secondary_multi_index_service:
+                    try:
+                        raw_results, multi_index_timing = multi_index_service.query(
+                            query_text=query,
+                            limit=limit * 2,
+                            collection_name=collection_name,
+                            filter_conditions=query_filter_conditions,
+                        )
+                        search_timing: Dict[str, Any] = multi_index_timing
+                    except Exception as primary_err:
+                        if not quiet:
+                            console.print(
+                                f"[yellow]Primary provider failed, "
+                                f"failing over to {secondary_provider_name_str}[/yellow]"
+                            )
+                        logging.getLogger(__name__).warning(
+                            "Primary query failed, failing over: %s", primary_err
+                        )
+                        raw_results, multi_index_timing = (
+                            secondary_multi_index_service.query(
+                                query_text=query,
+                                limit=limit * 2,
+                                collection_name=str(secondary_collection_name),
+                                filter_conditions=query_filter_conditions,
+                            )
+                        )
+                        search_timing = multi_index_timing
+                elif effective_strategy == "parallel" and secondary_multi_index_service:
+                    from .services.query_strategy import (
+                        ScoreFusion,
+                        execute_parallel_query,
+                    )
+
+                    def _primary_query():
+                        r, _ = multi_index_service.query(
+                            query_text=query,
+                            limit=limit * 2,
+                            collection_name=collection_name,
+                            filter_conditions=query_filter_conditions,
+                        )
+                        pname = provider or config.embedding_provider
+                        return _raw_results_to_query_results(r, pname)
+
+                    def _secondary_query():
+                        r, _ = secondary_multi_index_service.query(
+                            query_text=query,
+                            limit=limit * 2,
+                            collection_name=str(secondary_collection_name),
+                            filter_conditions=query_filter_conditions,
+                        )
+                        return _raw_results_to_query_results(
+                            r, secondary_provider_name_str or "secondary"
+                        )
+
+                    fusion_method = ScoreFusion(score_fusion or "rrf")
+                    fused_results = execute_parallel_query(
+                        _primary_query,
+                        _secondary_query,
+                        fusion=fusion_method,
+                        limit=limit * 2,
+                    )
+                    raw_results = _query_results_to_raw(fused_results)
+                    search_timing = {}
+                else:
+                    # primary_only / specific / no secondary available
+                    raw_results, multi_index_timing = multi_index_service.query(
+                        query_text=query,
+                        limit=limit * 2,
+                        collection_name=collection_name,
+                        filter_conditions=query_filter_conditions,
+                    )
+                    search_timing = multi_index_timing
             else:
-                # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
+                # Non-FilesystemVectorStore: pre-compute embedding
                 query_embedding = embedding_provider.get_embedding(query)
                 raw_results_list = vector_store_client.search(
                     query_vector=query_embedding,
@@ -6118,7 +6317,7 @@ def query(
                     collection_name=collection_name,
                 )
                 raw_results = raw_results_list  # Type compatibility
-                search_timing = {}  # Filesystem doesn't return timing yet
+                search_timing = {}
             # Merge detailed search timing into main timing info
             timing_info.update(search_timing)
 
@@ -6157,15 +6356,88 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
-                # Use MultiIndexQueryService for unified query interface (supports multimodal)
-                raw_results, multi_index_timing = multi_index_service.query(
-                    query_text=query,
-                    limit=limit * 2,
-                    collection_name=collection_name,
-                    filter_conditions=filter_conditions if filter_conditions else None,
-                )
-                # Use multi-index timing from service
-                search_timing = multi_index_timing
+                # Strategy-aware query execution (Story #488)
+                if effective_strategy == "failover" and secondary_multi_index_service:
+                    try:
+                        raw_results, multi_index_timing = multi_index_service.query(
+                            query_text=query,
+                            limit=limit * 2,
+                            collection_name=collection_name,
+                            filter_conditions=filter_conditions
+                            if filter_conditions
+                            else None,
+                        )
+                        search_timing = multi_index_timing
+                    except Exception as primary_err:
+                        if not quiet:
+                            console.print(
+                                f"[yellow]Primary provider failed, "
+                                f"failing over to {secondary_provider_name_str}[/yellow]"
+                            )
+                        logging.getLogger(__name__).warning(
+                            "Primary query failed, failing over: %s", primary_err
+                        )
+                        raw_results, multi_index_timing = (
+                            secondary_multi_index_service.query(
+                                query_text=query,
+                                limit=limit * 2,
+                                collection_name=str(secondary_collection_name),
+                                filter_conditions=filter_conditions
+                                if filter_conditions
+                                else None,
+                            )
+                        )
+                        search_timing = multi_index_timing
+                elif effective_strategy == "parallel" and secondary_multi_index_service:
+                    from .services.query_strategy import (
+                        ScoreFusion,
+                        execute_parallel_query,
+                    )
+
+                    def _primary_query_ng():
+                        r, _ = multi_index_service.query(
+                            query_text=query,
+                            limit=limit * 2,
+                            collection_name=collection_name,
+                            filter_conditions=filter_conditions
+                            if filter_conditions
+                            else None,
+                        )
+                        pname = provider or config.embedding_provider
+                        return _raw_results_to_query_results(r, pname)
+
+                    def _secondary_query_ng():
+                        r, _ = secondary_multi_index_service.query(
+                            query_text=query,
+                            limit=limit * 2,
+                            collection_name=str(secondary_collection_name),
+                            filter_conditions=filter_conditions
+                            if filter_conditions
+                            else None,
+                        )
+                        return _raw_results_to_query_results(
+                            r, secondary_provider_name_str or "secondary"
+                        )
+
+                    fusion_method = ScoreFusion(score_fusion or "rrf")
+                    fused_results = execute_parallel_query(
+                        _primary_query_ng,
+                        _secondary_query_ng,
+                        fusion=fusion_method,
+                        limit=limit * 2,
+                    )
+                    raw_results = _query_results_to_raw(fused_results)
+                    search_timing = {}
+                else:
+                    raw_results, multi_index_timing = multi_index_service.query(
+                        query_text=query,
+                        limit=limit * 2,
+                        collection_name=collection_name,
+                        filter_conditions=filter_conditions
+                        if filter_conditions
+                        else None,
+                    )
+                    search_timing = multi_index_timing
                 timing_info.update(search_timing)
             else:
                 # Filesystem backend: pre-compute embedding
