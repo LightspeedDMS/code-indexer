@@ -91,6 +91,15 @@ async function submitAddIndex(alias) {
             ? { index_type: indexTypes[0] }
             : { index_types: indexTypes };
 
+        // Story #489: Include selected providers when Semantic is selected
+        if (indexTypes.includes('semantic')) {
+            const providerCheckboxes = document.querySelectorAll(`input[name="providers-${alias}"]:checked`);
+            const providers = Array.from(providerCheckboxes).map(cb => cb.value);
+            if (providers.length > 0) {
+                requestBody.providers = providers;
+            }
+        }
+
         const response = await fetch(`/api/admin/golden-repos/${alias}/indexes`, {
             method: 'POST',
             headers: {
@@ -297,4 +306,76 @@ function showSuccessMessage(message) {
     setTimeout(() => {
         successArticle.remove();
     }, 5000);
+}
+
+/**
+ * Toggle provider checkboxes visibility based on Semantic checkbox state (Story #489)
+ * @param {string} alias - Repository alias
+ */
+function toggleProviderCheckboxes(alias) {
+    const semanticCheckbox = document.getElementById(`index-type-semantic-${alias}`);
+    const providerDiv = document.getElementById(`provider-checkboxes-${alias}`);
+
+    if (!semanticCheckbox || !providerDiv) return;
+
+    if (semanticCheckbox.checked) {
+        providerDiv.style.display = 'block';
+        loadProviderCheckboxes(alias);
+    } else {
+        providerDiv.style.display = 'none';
+    }
+}
+
+/**
+ * Load provider checkboxes dynamically from server (Story #489)
+ * @param {string} alias - Repository alias
+ */
+async function loadProviderCheckboxes(alias) {
+    const providerList = document.getElementById(`provider-list-${alias}`);
+    if (!providerList) return;
+
+    // Don't reload if already loaded (check for checkboxes)
+    if (providerList.querySelector('input[type="checkbox"]')) return;
+
+    try {
+        // Fetch configured providers
+        const providersResp = await fetch('/api/admin/provider-indexes/providers', {
+            credentials: 'same-origin'
+        });
+        if (!providersResp.ok) throw new Error('Failed to load providers');
+        const providersData = await providersResp.json();
+
+        // Fetch provider index status for this repo
+        const statusResp = await fetch(`/api/admin/provider-indexes/status?alias=${alias}`, {
+            credentials: 'same-origin'
+        });
+        let statusData = {};
+        if (statusResp.ok) {
+            const statusJson = await statusResp.json();
+            statusData = statusJson.provider_indexes || {};
+        }
+
+        if (!providersData.providers || providersData.providers.length === 0) {
+            providerList.innerHTML = '<span style="font-size: 0.85em; color: var(--pico-muted-color);">No providers configured</span>';
+            return;
+        }
+
+        let html = '';
+        for (const provider of providersData.providers) {
+            const pStatus = statusData[provider.name] || {};
+            const hasIndex = pStatus.exists || false;
+            const rebuildLabel = hasIndex ? ' <span class="rebuild-label">(rebuild)</span>' : '';
+
+            html += `<label class="checkbox-label">
+                <input type="checkbox" name="providers-${alias}" value="${provider.name}" checked>
+                ${provider.display_name}${rebuildLabel}
+            </label>`;
+        }
+
+        providerList.innerHTML = html;
+
+    } catch (error) {
+        console.error('Failed to load providers:', error);
+        providerList.innerHTML = '<span style="font-size: 0.85em; color: var(--pico-color-red-550);">Failed to load providers</span>';
+    }
 }

@@ -341,18 +341,56 @@ def register_admin_ops_routes(
             )
 
         try:
-            # Bug #473 Fix: Submit ONE combined job for all index types (atomic, with lock + CoW).
-            # Previously submitted N independent jobs which raced each other without a write lock
-            # and never created a CoW snapshot, making rebuilt indexes invisible to queries.
-            job_id = golden_repo_manager.add_indexes_to_golden_repo(
-                alias=alias,
-                index_types=index_types,
-                submitter_username=current_user.username,
-            )
-            job_ids = [job_id]
+            job_ids = []
 
-            # Bug #473: Always single atomic job now. Return job_id for all cases.
-            # Also include job_ids for backward compatibility with multi-select consumers.
+            # Story #489: When providers are specified and semantic is requested,
+            # submit per-provider jobs instead of the generic semantic job.
+            remaining_index_types = list(index_types)
+            if request.providers and "semantic" in remaining_index_types:
+                from ..mcp.handlers import (
+                    _provider_index_job,
+                    _resolve_golden_repo_path,
+                )
+
+                remaining_index_types = [
+                    t for t in remaining_index_types if t != "semantic"
+                ]
+                repo_path = _resolve_golden_repo_path(alias)
+                if repo_path is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Golden repository '{alias}' not found or path not resolvable",
+                    )
+
+                for provider_name in request.providers:
+                    provider_job_id = background_job_manager.submit_job(
+                        operation_type="provider_index_add",
+                        func=_provider_index_job,
+                        submitter_username=current_user.username,
+                        repo_alias=alias,
+                        repo_path=repo_path,
+                        provider_name=provider_name,
+                        clear=False,
+                    )
+                    job_ids.append(provider_job_id)
+
+            # Submit combined job for remaining non-semantic index types (Bug #473 fix: atomic).
+            if remaining_index_types:
+                job_id = golden_repo_manager.add_indexes_to_golden_repo(
+                    alias=alias,
+                    index_types=remaining_index_types,
+                    submitter_username=current_user.username,
+                )
+                job_ids.append(job_id)
+
+            if not job_ids:
+                # No jobs submitted (e.g. providers list was provided but empty after all)
+                raise HTTPException(
+                    status_code=400,
+                    detail="No index jobs could be submitted. Verify providers and index types.",
+                )
+
+            # Return first job_id for backward compat; all job_ids for multi-select consumers.
             response = AddIndexResponse(
                 job_id=job_ids[0], job_ids=job_ids, status="pending"
             )

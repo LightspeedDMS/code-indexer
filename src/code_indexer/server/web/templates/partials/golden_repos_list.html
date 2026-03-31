@@ -248,7 +248,7 @@
                                 <label>Select Index Type(s):</label>
                                 <div class="index-checkboxes" id="index-checkboxes-{{ repo.alias }}">
                                     <label class="checkbox-label">
-                                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-semantic-{{ repo.alias }}" value="semantic">
+                                        <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-semantic-{{ repo.alias }}" value="semantic" onchange="toggleProviderCheckboxes('{{ repo.alias }}')">
                                         Semantic{% if repo.has_semantic %} <span class="rebuild-label">(rebuild)</span>{% endif %}
                                     </label>
                                     <label class="checkbox-label">
@@ -263,6 +263,15 @@
                                         <input type="checkbox" name="index-types-{{ repo.alias }}" id="index-type-scip-{{ repo.alias }}" value="scip">
                                         SCIP{% if repo.has_scip %} <span class="rebuild-label">(rebuild)</span>{% endif %}
                                     </label>
+                                </div>
+
+                                <!-- Provider Selection (Story #489) - visible when Semantic is checked -->
+                                <div id="provider-checkboxes-{{ repo.alias }}" class="provider-checkboxes" style="display: none; margin-top: 0.5rem; padding-left: 1rem; border-left: 2px solid var(--pico-muted-border-color);">
+                                    <label style="font-size: 0.9em; color: var(--pico-muted-color);">Embedding Provider(s):</label>
+                                    <div id="provider-list-{{ repo.alias }}" class="provider-list">
+                                        <!-- Populated dynamically via JS -->
+                                        <span class="loading-providers" style="font-size: 0.85em; color: var(--pico-muted-color);">Loading providers...</span>
+                                    </div>
                                 </div>
 
                                 <!-- Temporal Options (Story #478) -->

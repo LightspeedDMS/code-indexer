@@ -26,6 +26,10 @@ class AddIndexRequest(BaseModel):
         None,
         description="Array of index types for multi-select: semantic, fts, temporal, scip",
     )
+    providers: Optional[List[str]] = Field(
+        None,
+        description="List of embedding provider names to use when semantic indexing is selected (Story #489)",
+    )
 
     @model_validator(mode="after")
     def validate_at_least_one_type(self) -> "AddIndexRequest":
