@@ -1999,6 +1999,11 @@ cli.add_command(keys_group)
 # Story #656: Register Remote index management commands (implemented in cli_index.py)
 cli.add_command(index_remote_group)
 
+# Story #490: Register provider-index commands (implemented in cli_provider_index.py)
+from .cli_provider_index import provider_index_group  # noqa: E402
+
+cli.add_command(provider_index_group)
+
 
 @cli.group("groups")
 @require_mode("remote")
