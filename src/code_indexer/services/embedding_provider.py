@@ -32,7 +32,13 @@ class EmbeddingProvider(ABC):
         self.console = console
 
     @abstractmethod
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
+    ) -> List[float]:
         """Generate embedding for a single text.
 
         Args:
@@ -46,7 +52,11 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def get_embeddings_batch(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> List[List[float]]:
         """Generate embeddings for multiple texts in batch.
 
@@ -61,7 +71,11 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def get_embedding_with_metadata(
-        self, text: str, model: Optional[str] = None
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> EmbeddingResult:
         """Generate embedding with metadata (tokens, model info, etc.).
 
@@ -76,7 +90,11 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def get_embeddings_batch_with_metadata(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> BatchEmbeddingResult:
         """Generate batch embeddings with metadata.
 
@@ -90,7 +108,7 @@ class EmbeddingProvider(ABC):
         pass
 
     @abstractmethod
-    def health_check(self) -> bool:
+    def health_check(self, *, test_api: bool = False) -> bool:
         """Check if the embedding provider is healthy and accessible.
 
         Returns:

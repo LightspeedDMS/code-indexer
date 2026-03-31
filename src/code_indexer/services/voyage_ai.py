@@ -204,7 +204,13 @@ class VoyageAIClient(EmbeddingProvider):
         else:
             raise ConnectionError(f"Failed to connect to VoyageAI: {last_exception}")
 
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
+    ) -> List[float]:
         """Generate embedding for given text."""
         # Use get_embeddings_batch internally with single-item array
         batch_result = self.get_embeddings_batch([text], model)
@@ -213,7 +219,11 @@ class VoyageAIClient(EmbeddingProvider):
         return batch_result[0]
 
     def get_embeddings_batch(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> List[List[float]]:
         """Generate embeddings with dynamic token-aware batching (90% safety margin)."""
         if not texts:
@@ -318,7 +328,11 @@ class VoyageAIClient(EmbeddingProvider):
         return all_embeddings
 
     def get_embedding_with_metadata(
-        self, text: str, model: Optional[str] = None
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> EmbeddingResult:
         """Generate embedding with metadata."""
         # Use batch processing internally for consistency
@@ -336,7 +350,11 @@ class VoyageAIClient(EmbeddingProvider):
         )
 
     def get_embeddings_batch_with_metadata(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> BatchEmbeddingResult:
         """Generate batch embeddings with metadata."""
         if not texts:
