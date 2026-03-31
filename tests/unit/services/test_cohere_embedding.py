@@ -148,7 +148,7 @@ class TestCohereProviderInstantiation:
         assert "name" in info
         assert "provider" in info
         assert "dimensions" in info
-        assert "default_dimension" in info
+        assert "available_dimensions" in info
         assert "max_tokens" in info
         assert "max_texts_per_request" in info
         assert "supports_batch" in info
