@@ -79,7 +79,7 @@ class VoyageAIClient(EmbeddingProvider):
             # Fallback for unknown models
             return 120000  # Conservative default
 
-    def health_check(self, test_api: bool = False) -> bool:
+    def health_check(self, *, test_api: bool = False) -> bool:
         """Check if VoyageAI service is configured correctly.
 
         Args:

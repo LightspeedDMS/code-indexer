@@ -12,10 +12,12 @@ from typing import Any, Dict, List, Optional
 
 from rich.console import Console
 
+from code_indexer.services.embedding_provider import EmbeddingProvider
+
 logger = logging.getLogger(__name__)
 
 
-class CohereEmbeddingProvider:
+class CohereEmbeddingProvider(EmbeddingProvider):
     """Cohere Embed v4 embedding provider."""
 
     def __init__(self, config: Any, console: Optional[Console] = None):
@@ -29,6 +31,7 @@ class CohereEmbeddingProvider:
         Raises:
             ValueError: If no API key is available from config or environment.
         """
+        super().__init__(console)
         self.config = config
         self.console = console or Console()
 
@@ -216,6 +219,17 @@ class CohereEmbeddingProvider:
                 # Submit current batch
                 response = self._make_sync_request(current_batch, input_type)
                 embeddings = response.get("embeddings", {}).get("float", [])
+                # Validate response
+                if len(embeddings) != len(current_batch):
+                    raise RuntimeError(
+                        f"Cohere returned {len(embeddings)} embeddings "
+                        f"but expected {len(current_batch)}"
+                    )
+                for idx, emb in enumerate(embeddings):
+                    if emb is None or not emb:
+                        raise RuntimeError(
+                            f"Cohere returned None/empty embedding at index {idx}"
+                        )
                 all_embeddings.extend(embeddings)
                 current_batch = []
                 current_tokens = 0
@@ -227,6 +241,17 @@ class CohereEmbeddingProvider:
         if current_batch:
             response = self._make_sync_request(current_batch, input_type)
             embeddings = response.get("embeddings", {}).get("float", [])
+            # Validate response
+            if len(embeddings) != len(current_batch):
+                raise RuntimeError(
+                    f"Cohere returned {len(embeddings)} embeddings "
+                    f"but expected {len(current_batch)}"
+                )
+            for idx, emb in enumerate(embeddings):
+                if emb is None or not emb:
+                    raise RuntimeError(
+                        f"Cohere returned None/empty embedding at index {idx}"
+                    )
             all_embeddings.extend(embeddings)
 
         return all_embeddings
