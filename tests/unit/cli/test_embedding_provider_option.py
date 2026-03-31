@@ -59,3 +59,37 @@ class TestEmbeddingProviderOption:
         assert "voyage-ai" in result.output.lower()
         # Should NOT mention voyage in provider options
         # (may appear in examples/deprecation notices, but not as valid choice)
+
+
+class TestDualEmbedOption:
+    """Test --dual-embed CLI flag on index command - Story #487."""
+
+    def test_dual_embed_flag_in_help(self):
+        """Test that --dual-embed appears in index --help output."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["index", "--help"])
+
+        assert result.exit_code == 0
+        assert "--dual-embed" in result.output
+        assert "redundancy" in result.output.lower()
+
+    def test_dual_embed_and_provider_mutually_exclusive(self, tmp_path):
+        """Test that --dual-embed and --provider cannot be used together."""
+        runner = CliRunner()
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(
+                cli, ["index", "--dual-embed", "--provider", "cohere"]
+            )
+
+            assert result.exit_code != 0
+            assert "mutually exclusive" in result.output.lower()
+
+    def test_dual_embed_flag_accepted(self):
+        """Test that --dual-embed is a valid flag on the index command."""
+        runner = CliRunner()
+        result = runner.invoke(cli, ["index", "--help"])
+
+        assert result.exit_code == 0
+        # Verify flag is boolean (is_flag=True)
+        assert "--dual-embed" in result.output

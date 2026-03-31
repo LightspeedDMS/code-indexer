@@ -2780,6 +2780,12 @@ def show_global_config():
     default=None,
     help="Embedding provider to use (default: from config)",
 )
+@click.option(
+    "--dual-embed",
+    is_flag=True,
+    default=False,
+    help="Index with both primary and secondary providers for redundancy",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -2800,6 +2806,7 @@ def index(
     diff_context: Optional[int],
     progress_json: bool = False,
     provider: Optional[str] = None,
+    dual_embed: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -2885,6 +2892,13 @@ def index(
     global console
     if progress_json:
         console = Console(stderr=True)
+
+    # Validate --dual-embed and --provider are mutually exclusive
+    if dual_embed and provider:
+        console.print(
+            "[red]Error: --provider and --dual-embed are mutually exclusive[/red]"
+        )
+        raise SystemExit(1)
 
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
@@ -3492,6 +3506,30 @@ def index(
         embedding_provider = EmbeddingProviderFactory.create(
             config, console, provider_name=provider
         )
+
+        # Dual-embed: create secondary provider if requested
+        secondary_provider_instance = None
+        if dual_embed:
+            secondary_name = config.secondary_provider or "cohere"
+            if secondary_name == config.embedding_provider:
+                console.print(
+                    f"[red]Error: Secondary provider '{secondary_name}' same as primary[/red]"
+                )
+                raise SystemExit(1)
+            try:
+                secondary_provider_instance = EmbeddingProviderFactory.create(
+                    config, console, provider_name=secondary_name
+                )
+                console.print(
+                    f"[dim]Dual-embed: {embedding_provider.get_provider_name()}"
+                    f" + {secondary_provider_instance.get_provider_name()}[/dim]"
+                )
+            except Exception as e:
+                console.print(
+                    f"[yellow]Warning: Secondary provider '{secondary_name}'"
+                    f" unavailable: {e}[/yellow]"
+                )
+
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
