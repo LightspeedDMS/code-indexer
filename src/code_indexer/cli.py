@@ -1070,6 +1070,102 @@ def _query_results_to_raw(query_results: List[Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def _execute_strategy_query(
+    multi_index_service: Any,
+    secondary_multi_index_service: Any,
+    query: str,
+    limit: int,
+    collection_name: str,
+    secondary_collection_name: Optional[str],
+    filter_conditions: Any,
+    effective_strategy: str,
+    provider: Optional[str],
+    config: Any,
+    score_fusion: Optional[str],
+    secondary_provider_name_str: Optional[str],
+    quiet: bool,
+    console: "Console",
+) -> "tuple[List[Dict[str, Any]], Dict[str, Any]]":
+    """Execute query with strategy (failover/parallel/primary_only).
+
+    Returns (raw_results, search_timing_dict).
+    """
+    if effective_strategy == "failover" and secondary_multi_index_service:
+        try:
+            raw_results, timing = multi_index_service.query(
+                query_text=query,
+                limit=limit,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions,
+            )
+            return raw_results, timing
+        except Exception as primary_err:
+            if not quiet:
+                console.print(
+                    f"[yellow]Primary provider failed, "
+                    f"failing over to {secondary_provider_name_str}[/yellow]"
+                )
+            logging.getLogger(__name__).warning(
+                "Primary query failed, failing over: %s", primary_err
+            )
+            raw_results, timing = secondary_multi_index_service.query(
+                query_text=query,
+                limit=limit,
+                collection_name=str(secondary_collection_name),
+                filter_conditions=filter_conditions,
+            )
+            return raw_results, timing
+    elif effective_strategy == "parallel" and secondary_multi_index_service:
+        import time as time_mod
+        from code_indexer.services.query_strategy import (
+            ScoreFusion,
+            execute_parallel_query,
+        )
+
+        parallel_start = time_mod.time()
+
+        def _primary_q() -> List[Any]:
+            r, _ = multi_index_service.query(
+                query_text=query,
+                limit=limit,
+                collection_name=collection_name,
+                filter_conditions=filter_conditions,
+            )
+            pname = provider or getattr(config, "embedding_provider", None) or "primary"
+            return _raw_results_to_query_results(r, pname)
+
+        def _secondary_q() -> List[Any]:
+            r, _ = secondary_multi_index_service.query(
+                query_text=query,
+                limit=limit,
+                collection_name=str(secondary_collection_name),
+                filter_conditions=filter_conditions,
+            )
+            return _raw_results_to_query_results(
+                r, secondary_provider_name_str or "secondary"
+            )
+
+        fusion_method = ScoreFusion(score_fusion or "rrf")
+        fused_results = execute_parallel_query(
+            _primary_q,
+            _secondary_q,
+            fusion=fusion_method,
+            limit=limit,
+        )
+        parallel_ms = (time_mod.time() - parallel_start) * 1000
+        raw_results = _query_results_to_raw(fused_results)
+        return raw_results, {"parallel_query_ms": parallel_ms}
+    else:
+        # primary_only / specific / no secondary available
+        raw_results, timing = multi_index_service.query(
+            query_text=query,
+            limit=limit,
+            collection_name=collection_name,
+            filter_conditions=filter_conditions,
+        )
+        return raw_results, timing
+
+
 def _execute_semantic_search(
     query: str,
     limit: int,
@@ -6235,78 +6331,23 @@ def query(
 
             if isinstance(vector_store_client, FilesystemVectorStore):
                 # Strategy-aware query execution (Story #488)
-                if effective_strategy == "failover" and secondary_multi_index_service:
-                    try:
-                        raw_results, multi_index_timing = multi_index_service.query(
-                            query_text=query,
-                            limit=limit * 2,
-                            collection_name=collection_name,
-                            filter_conditions=query_filter_conditions,
-                        )
-                        search_timing: Dict[str, Any] = multi_index_timing
-                    except Exception as primary_err:
-                        if not quiet:
-                            console.print(
-                                f"[yellow]Primary provider failed, "
-                                f"failing over to {secondary_provider_name_str}[/yellow]"
-                            )
-                        logging.getLogger(__name__).warning(
-                            "Primary query failed, failing over: %s", primary_err
-                        )
-                        raw_results, multi_index_timing = (
-                            secondary_multi_index_service.query(
-                                query_text=query,
-                                limit=limit * 2,
-                                collection_name=str(secondary_collection_name),
-                                filter_conditions=query_filter_conditions,
-                            )
-                        )
-                        search_timing = multi_index_timing
-                elif effective_strategy == "parallel" and secondary_multi_index_service:
-                    from .services.query_strategy import (
-                        ScoreFusion,
-                        execute_parallel_query,
-                    )
-
-                    def _primary_query():
-                        r, _ = multi_index_service.query(
-                            query_text=query,
-                            limit=limit * 2,
-                            collection_name=collection_name,
-                            filter_conditions=query_filter_conditions,
-                        )
-                        pname = provider or config.embedding_provider
-                        return _raw_results_to_query_results(r, pname)
-
-                    def _secondary_query():
-                        r, _ = secondary_multi_index_service.query(
-                            query_text=query,
-                            limit=limit * 2,
-                            collection_name=str(secondary_collection_name),
-                            filter_conditions=query_filter_conditions,
-                        )
-                        return _raw_results_to_query_results(
-                            r, secondary_provider_name_str or "secondary"
-                        )
-
-                    fusion_method = ScoreFusion(score_fusion or "rrf")
-                    fused_results = execute_parallel_query(
-                        _primary_query,
-                        _secondary_query,
-                        fusion=fusion_method,
-                        limit=limit * 2,
-                    )
-                    raw_results = _query_results_to_raw(fused_results)
-                    search_timing = {}
-                else:
-                    # primary_only / specific / no secondary available
-                    raw_results, multi_index_timing = multi_index_service.query(
-                        query_text=query,
-                        limit=limit * 2,
-                        collection_name=collection_name,
-                        filter_conditions=query_filter_conditions,
-                    )
-                    search_timing = multi_index_timing
+                raw_results, search_timing_result = _execute_strategy_query(
+                    multi_index_service=multi_index_service,
+                    secondary_multi_index_service=secondary_multi_index_service,
+                    query=query,
+                    limit=limit * 2,
+                    collection_name=collection_name,
+                    secondary_collection_name=secondary_collection_name,
+                    filter_conditions=query_filter_conditions,
+                    effective_strategy=effective_strategy,
+                    provider=provider,
+                    config=config,
+                    score_fusion=score_fusion,
+                    secondary_provider_name_str=secondary_provider_name_str,
+                    quiet=quiet,
+                    console=console,
+                )
+                search_timing: Dict[str, Any] = search_timing_result
             else:
                 # Non-FilesystemVectorStore: pre-compute embedding
                 query_embedding = embedding_provider.get_embedding(query)
@@ -6357,87 +6398,22 @@ def query(
 
             if isinstance(vector_store_client, FilesystemVectorStore):
                 # Strategy-aware query execution (Story #488)
-                if effective_strategy == "failover" and secondary_multi_index_service:
-                    try:
-                        raw_results, multi_index_timing = multi_index_service.query(
-                            query_text=query,
-                            limit=limit * 2,
-                            collection_name=collection_name,
-                            filter_conditions=filter_conditions
-                            if filter_conditions
-                            else None,
-                        )
-                        search_timing = multi_index_timing
-                    except Exception as primary_err:
-                        if not quiet:
-                            console.print(
-                                f"[yellow]Primary provider failed, "
-                                f"failing over to {secondary_provider_name_str}[/yellow]"
-                            )
-                        logging.getLogger(__name__).warning(
-                            "Primary query failed, failing over: %s", primary_err
-                        )
-                        raw_results, multi_index_timing = (
-                            secondary_multi_index_service.query(
-                                query_text=query,
-                                limit=limit * 2,
-                                collection_name=str(secondary_collection_name),
-                                filter_conditions=filter_conditions
-                                if filter_conditions
-                                else None,
-                            )
-                        )
-                        search_timing = multi_index_timing
-                elif effective_strategy == "parallel" and secondary_multi_index_service:
-                    from .services.query_strategy import (
-                        ScoreFusion,
-                        execute_parallel_query,
-                    )
-
-                    def _primary_query_ng():
-                        r, _ = multi_index_service.query(
-                            query_text=query,
-                            limit=limit * 2,
-                            collection_name=collection_name,
-                            filter_conditions=filter_conditions
-                            if filter_conditions
-                            else None,
-                        )
-                        pname = provider or config.embedding_provider
-                        return _raw_results_to_query_results(r, pname)
-
-                    def _secondary_query_ng():
-                        r, _ = secondary_multi_index_service.query(
-                            query_text=query,
-                            limit=limit * 2,
-                            collection_name=str(secondary_collection_name),
-                            filter_conditions=filter_conditions
-                            if filter_conditions
-                            else None,
-                        )
-                        return _raw_results_to_query_results(
-                            r, secondary_provider_name_str or "secondary"
-                        )
-
-                    fusion_method = ScoreFusion(score_fusion or "rrf")
-                    fused_results = execute_parallel_query(
-                        _primary_query_ng,
-                        _secondary_query_ng,
-                        fusion=fusion_method,
-                        limit=limit * 2,
-                    )
-                    raw_results = _query_results_to_raw(fused_results)
-                    search_timing = {}
-                else:
-                    raw_results, multi_index_timing = multi_index_service.query(
-                        query_text=query,
-                        limit=limit * 2,
-                        collection_name=collection_name,
-                        filter_conditions=filter_conditions
-                        if filter_conditions
-                        else None,
-                    )
-                    search_timing = multi_index_timing
+                raw_results, search_timing = _execute_strategy_query(
+                    multi_index_service=multi_index_service,
+                    secondary_multi_index_service=secondary_multi_index_service,
+                    query=query,
+                    limit=limit * 2,
+                    collection_name=collection_name,
+                    secondary_collection_name=secondary_collection_name,
+                    filter_conditions=filter_conditions if filter_conditions else None,
+                    effective_strategy=effective_strategy,
+                    provider=provider,
+                    config=config,
+                    score_fusion=score_fusion,
+                    secondary_provider_name_str=secondary_provider_name_str,
+                    quiet=quiet,
+                    console=console,
+                )
                 timing_info.update(search_timing)
             else:
                 # Filesystem backend: pre-compute embedding

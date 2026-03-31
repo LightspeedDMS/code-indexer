@@ -1,5 +1,7 @@
 """Tests for query strategy and score fusion (Story #488)."""
 
+import pytest
+
 from code_indexer.services.query_strategy import (
     QueryStrategy,
     ScoreFusion,
@@ -126,3 +128,51 @@ class TestEnums:
         assert ScoreFusion.RRF.value == "rrf"
         assert ScoreFusion.MULTIPLY.value == "multiply"
         assert ScoreFusion.AVERAGE.value == "average"
+
+
+class TestEdgeCases:
+    def test_fuse_rrf_empty_inputs(self):
+        assert fuse_rrf([], []) == []
+
+    def test_fuse_multiply_empty_inputs(self):
+        assert fuse_multiply([], []) == []
+
+    def test_fuse_average_empty_inputs(self):
+        assert fuse_average([], []) == []
+
+    def test_parallel_both_fail(self):
+        def fail_primary():
+            raise RuntimeError("primary down")
+
+        def fail_secondary():
+            raise RuntimeError("secondary down")
+
+        result = execute_parallel_query(fail_primary, fail_secondary)
+        assert result == []
+
+    def test_failover_both_fail(self):
+        def fail_primary():
+            raise RuntimeError("primary down")
+
+        def fail_secondary():
+            raise RuntimeError("secondary down")
+
+        with pytest.raises(RuntimeError, match="secondary down"):
+            execute_failover_query(fail_primary, fail_secondary)
+
+    def test_fusion_does_not_mutate_inputs(self):
+        r1 = QueryResult(file_path="a.py", score=0.9, chunk_id="1", source_provider="p")
+        r2 = QueryResult(file_path="b.py", score=0.7, chunk_id="2", source_provider="s")
+        original_score_r1 = r1.score
+        original_score_r2 = r2.score
+        original_provider_r1 = r1.source_provider
+        original_provider_r2 = r2.source_provider
+        fuse_rrf([r1], [r2])
+        assert r1.score == original_score_r1, "fuse_rrf mutated input score"
+        assert r2.score == original_score_r2, "fuse_rrf mutated input score"
+        assert r1.source_provider == original_provider_r1, (
+            "fuse_rrf mutated input source_provider"
+        )
+        assert r2.source_provider == original_provider_r2, (
+            "fuse_rrf mutated input source_provider"
+        )

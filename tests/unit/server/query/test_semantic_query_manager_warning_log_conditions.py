@@ -516,3 +516,119 @@ class TestWarningLogConditions:
         assert "path_filter=*/src/*" in filter_warnings[0]
         assert "exclude_path=*/tests/*" in filter_warnings[0]
         assert "accuracy=high" in filter_warnings[0]
+
+
+class TestQueryStrategyLogging:
+    """Test that non-primary_only query strategies log a no-op fallback message."""
+
+    @pytest.fixture
+    def temp_data_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            yield temp_dir
+
+    @pytest.fixture
+    def query_manager(self, temp_data_dir):
+        activated_repo_manager = MagicMock()
+        background_job_manager = MagicMock()
+        return SemanticQueryManager(
+            data_dir=temp_data_dir,
+            activated_repo_manager=activated_repo_manager,
+            background_job_manager=background_job_manager,
+        )
+
+    @pytest.fixture
+    def mock_non_composite_repo(self, temp_data_dir):
+        repo_path = Path(temp_data_dir) / "test-repo"
+        repo_path.mkdir()
+        return str(repo_path)
+
+    def test_non_primary_only_strategy_logs_fallback(
+        self, query_manager, mock_non_composite_repo, caplog
+    ):
+        """Non-primary_only strategy should log that it falls back to primary_only."""
+        with (
+            patch(
+                "src.code_indexer.server.query.semantic_query_manager.SemanticQueryManager"
+                "._is_composite_repository",
+                return_value=False,
+            ),
+            patch(
+                "src.code_indexer.server.query.semantic_query_manager.SemanticQueryManager"
+                "._execute_cli_query",
+                return_value=[],
+            ),
+            patch(
+                "src.code_indexer.server.query.semantic_query_manager.MultiIndexService"
+            ) as mock_multi_index_cls,
+        ):
+            mock_service = MagicMock()
+            mock_service.query.return_value = ([], {})
+            mock_multi_index_cls.return_value = mock_service
+
+            with caplog.at_level(logging.INFO, logger="code_indexer"):
+                query_manager._search_single_repository(
+                    repo_path=mock_non_composite_repo,
+                    repository_alias="test-repo",
+                    query_text="test query",
+                    limit=10,
+                    min_score=None,
+                    file_extensions=None,
+                    language=None,
+                    exclude_language=None,
+                    path_filter=None,
+                    exclude_path=None,
+                    accuracy="balanced",
+                    search_mode="semantic",
+                    query_strategy="failover",
+                )
+
+        info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        strategy_msgs = [m for m in info_messages if "failover" in m]
+        assert len(strategy_msgs) >= 1, "Expected a log message mentioning the strategy"
+        assert any("primary_only" in m for m in strategy_msgs), (
+            "Expected fallback to primary_only to be mentioned in log"
+        )
+
+    def test_primary_only_strategy_does_not_log(
+        self, query_manager, mock_non_composite_repo, caplog
+    ):
+        """primary_only strategy (default) should not emit a strategy log message."""
+        with (
+            patch(
+                "src.code_indexer.server.query.semantic_query_manager.SemanticQueryManager"
+                "._is_composite_repository",
+                return_value=False,
+            ),
+            patch(
+                "src.code_indexer.server.query.semantic_query_manager.MultiIndexService"
+            ) as mock_multi_index_cls,
+        ):
+            mock_service = MagicMock()
+            mock_service.query.return_value = ([], {})
+            mock_multi_index_cls.return_value = mock_service
+
+            with caplog.at_level(logging.INFO, logger="code_indexer"):
+                query_manager._search_single_repository(
+                    repo_path=mock_non_composite_repo,
+                    repository_alias="test-repo",
+                    query_text="test query",
+                    limit=10,
+                    min_score=None,
+                    file_extensions=None,
+                    language=None,
+                    exclude_language=None,
+                    path_filter=None,
+                    exclude_path=None,
+                    accuracy="balanced",
+                    search_mode="semantic",
+                    query_strategy="primary_only",
+                )
+
+        strategy_msgs = [
+            r.message
+            for r in caplog.records
+            if r.levelno == logging.INFO and "QUERY-STRATEGY" in str(r.__dict__)
+        ]
+        assert len(strategy_msgs) == 0, (
+            "primary_only strategy should not emit a QUERY-STRATEGY log"
+        )

@@ -15,7 +15,7 @@ Score fusion methods (for parallel strategy):
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, Dict, List
 
@@ -90,28 +90,28 @@ def fuse_rrf(
 
     fused = []
     for key in sorted_keys[:limit]:
-        result = result_map[key]
-        result.score = scores[key]
-        result.source_provider = "fused"
-        fused.append(result)
+        fused.append(
+            replace(result_map[key], score=scores[key], source_provider="fused")
+        )
 
     return fused
 
 
-def _normalize_scores(results: List[QueryResult]) -> List[QueryResult]:
-    """Min-max normalize scores to [0, 1]."""
+def _normalize_scores(results: List[QueryResult]) -> Dict[str, float]:
+    """Min-max normalize scores to [0, 1], returned as dict keyed by dedup key."""
     if not results:
-        return results
-    scores = [r.score for r in results]
-    min_s = min(scores)
-    max_s = max(scores)
-    if max_s == min_s:
-        for r in results:
-            r.score = 1.0
-        return results
+        return {}
+    scores_list = [r.score for r in results]
+    min_s = min(scores_list)
+    max_s = max(scores_list)
+    normalized: Dict[str, float] = {}
     for r in results:
-        r.score = (r.score - min_s) / (max_s - min_s)
-    return results
+        key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
+        if max_s == min_s:
+            normalized[key] = 1.0
+        else:
+            normalized[key] = (r.score - min_s) / (max_s - min_s)
+    return normalized
 
 
 def fuse_multiply(
@@ -120,39 +120,34 @@ def fuse_multiply(
     limit: int = 10,
 ) -> List[QueryResult]:
     """Multiply normalized scores. Missing provider uses 0.5 (neutral)."""
-    primary_results = _normalize_scores(list(primary_results))
-    secondary_results = _normalize_scores(list(secondary_results))
+    primary_norm = _normalize_scores(list(primary_results))
+    secondary_norm = _normalize_scores(list(secondary_results))
 
-    primary_map: Dict[str, float] = {}
     result_map: Dict[str, QueryResult] = {}
 
     for r in primary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
-        primary_map[key] = r.score
         result_map[key] = r
 
-    secondary_map: Dict[str, float] = {}
     for r in secondary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
-        secondary_map[key] = r.score
         if key not in result_map:
             result_map[key] = r
 
-    all_keys = set(primary_map.keys()) | set(secondary_map.keys())
+    all_keys = set(primary_norm.keys()) | set(secondary_norm.keys())
     scores: Dict[str, float] = {}
     for key in all_keys:
-        p = primary_map.get(key, 0.5)
-        s = secondary_map.get(key, 0.5)
+        p = primary_norm.get(key, 0.5)
+        s = secondary_norm.get(key, 0.5)
         scores[key] = p * s
 
     sorted_keys = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)
 
     fused = []
     for key in sorted_keys[:limit]:
-        result = result_map[key]
-        result.score = scores[key]
-        result.source_provider = "fused"
-        fused.append(result)
+        fused.append(
+            replace(result_map[key], score=scores[key], source_provider="fused")
+        )
 
     return fused
 
@@ -163,29 +158,25 @@ def fuse_average(
     limit: int = 10,
 ) -> List[QueryResult]:
     """Average normalized scores. Single-provider results use their own score."""
-    primary_results = _normalize_scores(list(primary_results))
-    secondary_results = _normalize_scores(list(secondary_results))
+    primary_norm = _normalize_scores(list(primary_results))
+    secondary_norm = _normalize_scores(list(secondary_results))
 
-    primary_map: Dict[str, float] = {}
     result_map: Dict[str, QueryResult] = {}
 
     for r in primary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
-        primary_map[key] = r.score
         result_map[key] = r
 
-    secondary_map: Dict[str, float] = {}
     for r in secondary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
-        secondary_map[key] = r.score
         if key not in result_map:
             result_map[key] = r
 
-    all_keys = set(primary_map.keys()) | set(secondary_map.keys())
+    all_keys = set(primary_norm.keys()) | set(secondary_norm.keys())
     scores: Dict[str, float] = {}
     for key in all_keys:
-        p = primary_map.get(key)
-        s = secondary_map.get(key)
+        p = primary_norm.get(key)
+        s = secondary_norm.get(key)
         if p is not None and s is not None:
             scores[key] = (p + s) / 2
         elif p is not None:
@@ -197,10 +188,9 @@ def fuse_average(
 
     fused = []
     for key in sorted_keys[:limit]:
-        result = result_map[key]
-        result.score = scores[key]
-        result.source_provider = "fused"
-        fused.append(result)
+        fused.append(
+            replace(result_map[key], score=scores[key], source_provider="fused")
+        )
 
     return fused
 
