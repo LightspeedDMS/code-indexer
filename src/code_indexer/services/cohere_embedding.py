@@ -324,8 +324,8 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         return {
             "name": self.config.model,
             "provider": "cohere",
-            "dimensions": specs.get("dimensions", [1024]),
-            "default_dimension": specs.get("default_dimension", 1024),
+            "dimensions": int(specs.get("default_dimension", 1536)),
+            "available_dimensions": specs.get("dimensions", [1536]),
             "max_tokens": specs.get("token_limit", 128000),
             "max_texts_per_request": specs.get("texts_per_request", 96),
             "supports_batch": True,
