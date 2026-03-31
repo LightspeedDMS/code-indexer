@@ -1363,6 +1363,9 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     diff_type=params.get("diff_type"),
                     author=params.get("author"),
                     chunk_type=params.get("chunk_type"),
+                    # Query strategy parameters (Story #488 Phase 4)
+                    query_strategy=params.get("query_strategy"),
+                    score_fusion=params.get("score_fusion"),
                 )
                 execution_time_ms = int((time.time() - start_time) * 1000)
                 timeout_occurred = False
@@ -1525,6 +1528,9 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             diff_type=params.get("diff_type"),
             author=params.get("author"),
             chunk_type=params.get("chunk_type"),
+            # Query strategy parameters (Story #488 Phase 4)
+            query_strategy=params.get("query_strategy"),
+            score_fusion=params.get("score_fusion"),
         )
 
         # Story #182: Load category map for result enrichment (activated repos)

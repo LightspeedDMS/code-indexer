@@ -392,6 +392,9 @@ class SemanticQueryManager:
         diff_type: Optional[Union[str, List[str]]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        # Query strategy parameters (Story #488 Phase 4)
+        query_strategy: Optional[str] = None,
+        score_fusion: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Perform semantic query on user's activated repositories.
@@ -513,6 +516,9 @@ class SemanticQueryManager:
                 diff_type=diff_type,
                 author=author,
                 chunk_type=chunk_type,
+                # Query strategy parameters (Story #488 Phase 4)
+                query_strategy=query_strategy,
+                score_fusion=score_fusion,
             )
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
@@ -694,6 +700,9 @@ class SemanticQueryManager:
         diff_type: Optional[Union[str, List[str]]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        # Query strategy parameters (Story #488 Phase 4)
+        query_strategy: Optional[str] = None,
+        score_fusion: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Perform the actual search across user repositories.
@@ -814,6 +823,9 @@ class SemanticQueryManager:
                     diff_type=diff_type,
                     author=author,
                     chunk_type=chunk_type,
+                    # Query strategy parameters (Story #488 Phase 4)
+                    query_strategy=query_strategy,
+                    score_fusion=score_fusion,
                 )
                 all_results.extend(results)
 
@@ -880,6 +892,9 @@ class SemanticQueryManager:
         diff_type: Optional[Union[str, List[str]]] = None,
         author: Optional[str] = None,
         chunk_type: Optional[str] = None,
+        # Query strategy parameters (Story #488 Phase 4)
+        query_strategy: Optional[str] = None,
+        score_fusion: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -928,6 +943,13 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects from this repository
         """
+        # Log query strategy if non-default (Story #488 Phase 4)
+        if query_strategy is not None and query_strategy != "primary_only":
+            logger.info(
+                "Query strategy '%s' requested (server-side execution pending Story #491)",
+                query_strategy,
+                extra=get_log_extra("QUERY-STRATEGY-001"),
+            )
         try:
             # Check if this is a composite repository
             repo_path_obj = Path(repo_path)

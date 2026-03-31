@@ -142,6 +142,22 @@ inputSchema:
       - commit_message
       - commit_diff
       description: 'Filter temporal results: ''commit_message'' or ''commit_diff''.'
+    query_strategy:
+      type: string
+      enum:
+      - primary_only
+      - failover
+      - parallel
+      - specific
+      description: 'Query strategy: primary_only (default), failover (switch on failure), parallel (score fusion), specific (use
+        specific provider).'
+    score_fusion:
+      type: string
+      enum:
+      - rrf
+      - multiply
+      - average
+      description: 'Score fusion method for parallel strategy (default: rrf).'
     response_format:
       type: string
       enum:
