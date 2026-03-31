@@ -565,6 +565,13 @@ class Config(BaseModel):
         description="Git operations service account configuration",
     )
 
+    # Provider health monitoring (Story #491)
+    auto_routing_enabled: bool = False
+    health_window_minutes: int = 60
+    health_error_rate_threshold: float = 0.1
+    health_latency_p95_threshold_ms: float = 5000.0
+    health_availability_threshold: float = 0.95
+
     @field_validator("codebase_dir", mode="before")
     @classmethod
     def convert_path(cls, v: Any) -> Path:

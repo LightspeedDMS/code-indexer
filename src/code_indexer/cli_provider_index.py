@@ -182,6 +182,54 @@ def recreate(provider: str, repo: str):
         )
 
 
+@provider_index_group.command("health")
+def provider_health():
+    """Display per-provider health metrics."""
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+    console = Console()
+    monitor = ProviderHealthMonitor.get_instance()
+    health = monitor.get_health()
+
+    if not health:
+        console.print(
+            "[yellow]No health data available. Metrics are collected during query/index operations.[/yellow]"
+        )
+        return
+
+    table = Table(title="Provider Health Status")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Status", style="bold")
+    table.add_column("Score", justify="right")
+    table.add_column("p50 (ms)", justify="right")
+    table.add_column("p95 (ms)", justify="right")
+    table.add_column("p99 (ms)", justify="right")
+    table.add_column("Error Rate", justify="right")
+    table.add_column("Availability", justify="right")
+    table.add_column("Requests", justify="right")
+
+    for pname, status in health.items():
+        status_style = {
+            "healthy": "[green]healthy[/green]",
+            "degraded": "[yellow]degraded[/yellow]",
+            "down": "[red]down[/red]",
+        }.get(status.status, status.status)
+
+        table.add_row(
+            pname,
+            status_style,
+            f"{status.health_score:.2f}",
+            f"{status.p50_latency_ms:.0f}",
+            f"{status.p95_latency_ms:.0f}",
+            f"{status.p99_latency_ms:.0f}",
+            f"{status.error_rate:.1%}",
+            f"{status.availability:.1%}",
+            str(status.total_requests),
+        )
+
+    console.print(table)
+
+
 @provider_index_group.command("remove")
 @click.option("--provider", required=True, help="Embedding provider name")
 @click.option("--repo", required=True, help="Repository path")

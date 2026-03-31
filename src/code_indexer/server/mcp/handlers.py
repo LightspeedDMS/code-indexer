@@ -16611,3 +16611,43 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
 
 HANDLER_REGISTRY["manage_provider_indexes"] = manage_provider_indexes
 HANDLER_REGISTRY["bulk_add_provider_index"] = bulk_add_provider_index
+
+
+def get_provider_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Get provider health metrics (Story #491)."""
+    try:
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        monitor = ProviderHealthMonitor.get_instance()
+        provider = params.get("provider")
+        health = monitor.get_health(provider)
+
+        result = {}
+        for pname, status in health.items():
+            result[pname] = {
+                "status": status.status,
+                "health_score": status.health_score,
+                "p50_latency_ms": status.p50_latency_ms,
+                "p95_latency_ms": status.p95_latency_ms,
+                "p99_latency_ms": status.p99_latency_ms,
+                "error_rate": status.error_rate,
+                "availability": status.availability,
+                "total_requests": status.total_requests,
+                "successful_requests": status.successful_requests,
+                "failed_requests": status.failed_requests,
+                "window_minutes": status.window_minutes,
+            }
+
+        return _mcp_response(
+            {
+                "success": True,
+                "provider_health": result,
+            }
+        )
+
+    except Exception as e:
+        logger.error("get_provider_health error: %s", e, exc_info=True)
+        return _mcp_response({"error": str(e)})
+
+
+HANDLER_REGISTRY["get_provider_health"] = get_provider_health

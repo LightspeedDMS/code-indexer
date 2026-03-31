@@ -203,6 +203,33 @@ async def bulk_add(
     }
 
 
+@router.get("/health")
+async def get_provider_health_rest(
+    provider: Optional[str] = None,
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
+    """Get provider health metrics."""
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+    monitor = ProviderHealthMonitor.get_instance()
+    health = monitor.get_health(provider)
+
+    result = {}
+    for pname, status in health.items():
+        result[pname] = {
+            "status": status.status,
+            "health_score": status.health_score,
+            "p50_latency_ms": status.p50_latency_ms,
+            "p95_latency_ms": status.p95_latency_ms,
+            "p99_latency_ms": status.p99_latency_ms,
+            "error_rate": status.error_rate,
+            "availability": status.availability,
+            "total_requests": status.total_requests,
+        }
+
+    return {"provider_health": result}
+
+
 def _submit_index_job(
     provider: str, alias: str, clear: bool, request: Request, current_user: User
 ) -> Dict[str, Any]:
