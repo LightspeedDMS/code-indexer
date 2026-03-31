@@ -71,11 +71,17 @@ class ProviderIndexService:
                     config, provider_name=provider_name
                 )
                 model_name = provider.get_current_model()
-                slug = EmbeddingProviderFactory.generate_model_slug(
-                    provider_name, model_name
-                )
 
-                collection_dir = index_dir / slug
+                # Use resolve_collection_name for correct directory name
+                from code_indexer.backends.backend_factory import BackendFactory
+
+                backend = BackendFactory.create(
+                    config=config, project_root=Path(repo_path)
+                )
+                vs_client = backend.get_vector_store_client()
+                collection_name = vs_client.resolve_collection_name(config, provider)
+
+                collection_dir = index_dir / collection_name
                 exists = (
                     collection_dir.exists() and any(collection_dir.iterdir())
                     if collection_dir.exists()
@@ -85,24 +91,24 @@ class ProviderIndexService:
                 vector_count = 0
                 last_indexed = None
                 if exists:
-                    metadata_file = (
-                        Path(repo_path)
-                        / ".code-indexer"
-                        / f"metadata-{provider_name}.json"
-                    )
-                    if metadata_file.exists():
-                        import json
+                    import json
 
-                        with open(metadata_file) as f:
+                    # Check per-provider metadata first, then default
+                    ci_dir = Path(repo_path) / ".code-indexer"
+                    meta_file = ci_dir / f"metadata-{provider_name}.json"
+                    if not meta_file.exists():
+                        meta_file = ci_dir / "metadata.json"
+                    if meta_file.exists():
+                        with open(meta_file) as f:
                             meta = json.load(f)
-                        vector_count = meta.get("total_chunks", 0)
-                        last_indexed = meta.get("last_indexed")
+                        vector_count = meta.get("chunks_indexed", 0)
+                        last_indexed = meta.get("indexed_at")
 
                 status[provider_name] = {
                     "exists": exists,
                     "vector_count": vector_count,
                     "last_indexed": last_indexed,
-                    "collection_name": slug,
+                    "collection_name": collection_name,
                     "model": model_name,
                 }
             except Exception as e:
@@ -145,20 +151,23 @@ class ProviderIndexService:
         """
         import shutil
         from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+        from code_indexer.backends.backend_factory import BackendFactory
 
         config = self._get_config()
         provider = EmbeddingProviderFactory.create(config, provider_name=provider_name)
-        model_name = provider.get_current_model()
-        slug = EmbeddingProviderFactory.generate_model_slug(provider_name, model_name)
+
+        backend = BackendFactory.create(config=config, project_root=Path(repo_path))
+        vs_client = backend.get_vector_store_client()
+        collection_name = vs_client.resolve_collection_name(config, provider)
 
         index_dir = Path(repo_path) / ".code-indexer" / "index"
-        collection_dir = index_dir / slug
+        collection_dir = index_dir / collection_name
 
         if not collection_dir.exists():
             return {
                 "removed": False,
-                "collection_name": slug,
-                "message": f"Collection '{slug}' does not exist",
+                "collection_name": collection_name,
+                "message": f"Collection '{collection_name}' does not exist",
             }
 
         shutil.rmtree(collection_dir)
@@ -171,8 +180,8 @@ class ProviderIndexService:
 
         return {
             "removed": True,
-            "collection_name": slug,
-            "message": f"Removed collection '{slug}' for {provider_name}",
+            "collection_name": collection_name,
+            "message": f"Removed collection '{collection_name}' for {provider_name}",
         }
 
     def _get_config(self):

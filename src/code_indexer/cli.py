@@ -3690,8 +3690,23 @@ def index(
             console.print(error_message, style="red")
             sys.exit(1)
 
-        # Initialize smart indexer with progressive metadata
-        metadata_path = config_manager.config_path.parent / "metadata.json"
+        # Initialize smart indexer with per-provider progressive metadata (Story #485)
+        # Each provider tracks its own indexing progress to avoid skipping files
+        active_prov_name = embedding_provider.get_provider_name()
+        default_prov_name = getattr(config, "embedding_provider", None)
+
+        def _pnorm(s: str) -> str:
+            return s.replace("-", "").replace("_", "").lower()
+
+        use_default_metadata = default_prov_name is not None and _pnorm(
+            active_prov_name
+        ) == _pnorm(default_prov_name)
+        metadata_filename = (
+            "metadata.json"
+            if use_default_metadata
+            else f"metadata-{active_prov_name}.json"
+        )
+        metadata_path = config_manager.config_path.parent / metadata_filename
         smart_indexer = SmartIndexer(
             config, embedding_provider, vector_store_client, metadata_path
         )
@@ -4293,8 +4308,20 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
                 )
                 sys.exit(1)
 
-            # Initialize SmartIndexer (same as index command)
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            # Initialize SmartIndexer with per-provider metadata (Story #485)
+            active_pname = embedding_provider.get_provider_name()
+            default_prov = getattr(config, "embedding_provider", None)
+
+            def _norm(s: str) -> str:
+                return s.replace("-", "").replace("_", "").lower()
+
+            use_default_meta = default_prov is not None and _norm(
+                active_pname
+            ) == _norm(default_prov)
+            metadata_filename = (
+                "metadata.json" if use_default_meta else f"metadata-{active_pname}.json"
+            )
+            metadata_path = config_manager.config_path.parent / metadata_filename
             smart_indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )
