@@ -38,11 +38,14 @@ from code_indexer.server.auth.user_manager import User, UserRole
 # Valid key fixtures — satisfy ApiKeyValidator format rules:
 #   Anthropic: starts with "sk-ant-", min 40 chars
 #   VoyageAI:  starts with "pa-",     min 20 chars
+#   Cohere:    min 20 chars, no prefix check
 VALID_ANTHROPIC_KEY = "sk-ant-api03-" + "X" * 30  # 43 chars total
 VALID_VOYAGEAI_KEY = "pa-" + "Y" * 20  # 23 chars total
+VALID_COHERE_KEY = "C" * 40  # 40 chars total
 
 INVALID_ANTHROPIC_KEY = "bad-key"
 INVALID_VOYAGEAI_KEY = "bad-key"
+INVALID_COHERE_KEY = "short"  # too short (less than 20 chars)
 
 
 def _admin_user() -> User:
@@ -54,7 +57,9 @@ def _admin_user() -> User:
     )
 
 
-def _make_config(anthropic_key: str = "", voyageai_key: str = "") -> MagicMock:
+def _make_config(
+    anthropic_key: str = "", voyageai_key: str = "", cohere_key: str = ""
+) -> MagicMock:
     """Build a minimal config mock with ClaudeIntegrationConfig fields."""
     from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
@@ -63,6 +68,7 @@ def _make_config(anthropic_key: str = "", voyageai_key: str = "") -> MagicMock:
         claude_auth_mode="api_key",
         anthropic_api_key=anthropic_key,
         voyageai_api_key=voyageai_key,
+        cohere_api_key=cohere_key,
     )
     return cfg
 
@@ -595,7 +601,11 @@ class TestGetApiKeysStatus:
 
         assert response.status_code == 200
         data = response.json()
-        assert set(data.keys()) == {"anthropic_configured", "voyageai_configured"}
+        assert set(data.keys()) == {
+            "anthropic_configured",
+            "voyageai_configured",
+            "cohere_configured",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -645,20 +655,18 @@ class TestDeleteVoyageaiKey:
     def test_delete_voyageai_key_clears_config(self, client):
         """After deletion, config is persisted with empty voyageai_api_key."""
         cfg = _make_config(voyageai_key=VALID_VOYAGEAI_KEY)
-        mock_config_manager = MagicMock()
 
         with patch(
             "code_indexer.server.routers.api_keys.get_config_service"
         ) as mock_cs:
             mock_cs.return_value.load_config.return_value = cfg
-            mock_cs.return_value.config_manager = mock_config_manager
 
             response = client.delete("/api/api-keys/voyageai")
 
         assert response.status_code == 200
-        # Verify save_config was called with cleared key
-        mock_config_manager.save_config.assert_called_once()
-        saved_config = mock_config_manager.save_config.call_args[0][0]
+        # Verify save_config was called on the config_service (not config_manager)
+        mock_cs.return_value.save_config.assert_called_once()
+        saved_config = mock_cs.return_value.save_config.call_args[0][0]
         assert saved_config.claude_integration_config.voyageai_api_key == ""
 
     def test_delete_voyageai_key_requires_auth(self, unauthenticated_client):
@@ -677,6 +685,396 @@ class TestDeleteVoyageaiKey:
             mock_cs.return_value.config_manager = MagicMock()
 
             response = client.delete("/api/api-keys/voyageai")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "success" in data
+        assert "provider" in data
+        assert "message" in data
+
+
+# ---------------------------------------------------------------------------
+# 8. POST /api/api-keys/cohere — Save Cohere API key
+# ---------------------------------------------------------------------------
+
+
+class TestSaveCohereKey:
+    """POST /api/api-keys/cohere"""
+
+    def test_save_cohere_key_success(self, client):
+        """Valid key is saved; returns success=True with provider='cohere'."""
+        cfg = _make_config()
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_sync_service"
+            ) as mock_sync,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+
+            sync_result = MagicMock()
+            sync_result.success = True
+            sync_result.already_synced = False
+            mock_sync.return_value.sync_cohere_key.return_value = sync_result
+
+            response = client.post(
+                "/api/api-keys/cohere",
+                json={"api_key": VALID_COHERE_KEY},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["provider"] == "cohere"
+        assert data["already_synced"] is False
+
+    def test_save_cohere_key_already_synced(self, client):
+        """Key already synced returns success=True with already_synced=True."""
+        cfg = _make_config()
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_sync_service"
+            ) as mock_sync,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+
+            sync_result = MagicMock()
+            sync_result.success = True
+            sync_result.already_synced = True
+            mock_sync.return_value.sync_cohere_key.return_value = sync_result
+
+            response = client.post(
+                "/api/api-keys/cohere",
+                json={"api_key": VALID_COHERE_KEY},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["already_synced"] is True
+
+    def test_save_cohere_key_invalid_format(self, client):
+        """Malformed key returns 400 with validation error detail."""
+        response = client.post(
+            "/api/api-keys/cohere",
+            json={"api_key": INVALID_COHERE_KEY},
+        )
+        assert response.status_code == 400
+        assert "detail" in response.json()
+
+    def test_save_cohere_key_sync_failure_returns_500(self, client):
+        """Sync service failure raises 500."""
+        cfg = _make_config()
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_sync_service"
+            ) as mock_sync,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+
+            sync_result = MagicMock()
+            sync_result.success = False
+            sync_result.error = "Disk write failure"
+            mock_sync.return_value.sync_cohere_key.return_value = sync_result
+
+            response = client.post(
+                "/api/api-keys/cohere",
+                json={"api_key": VALID_COHERE_KEY},
+            )
+
+        assert response.status_code == 500
+
+    def test_save_cohere_key_persists_to_config(self, client):
+        """Valid key is persisted to server config via save_config."""
+        cfg = _make_config()
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_sync_service"
+            ) as mock_sync,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+
+            sync_result = MagicMock()
+            sync_result.success = True
+            sync_result.already_synced = False
+            mock_sync.return_value.sync_cohere_key.return_value = sync_result
+
+            client.post(
+                "/api/api-keys/cohere",
+                json={"api_key": VALID_COHERE_KEY},
+            )
+
+        mock_cs.return_value.save_config.assert_called_once()
+        saved_config = mock_cs.return_value.save_config.call_args[0][0]
+        assert saved_config.claude_integration_config.cohere_api_key == VALID_COHERE_KEY
+
+    def test_save_cohere_key_requires_auth(self, unauthenticated_client):
+        """Without auth the endpoint rejects the request."""
+        response = unauthenticated_client.post(
+            "/api/api-keys/cohere",
+            json={"api_key": VALID_COHERE_KEY},
+        )
+        assert response.status_code in (401, 403, 422, 500)
+
+
+# ---------------------------------------------------------------------------
+# 9. POST /api/api-keys/cohere/test — Test Cohere key (body)
+# ---------------------------------------------------------------------------
+
+
+class TestTestCohereKey:
+    """POST /api/api-keys/cohere/test"""
+
+    def test_test_cohere_key_success(self, client):
+        """Valid key passes format check and connectivity test returns success."""
+        connectivity_result = MagicMock()
+        connectivity_result.success = True
+        connectivity_result.provider = "cohere"
+        connectivity_result.error = None
+        connectivity_result.response_time_ms = 88
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
+        ) as mock_tester:
+            mock_tester.return_value.test_cohere_connectivity = AsyncMock(
+                return_value=connectivity_result
+            )
+
+            response = client.post(
+                "/api/api-keys/cohere/test",
+                json={"api_key": VALID_COHERE_KEY},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["provider"] == "cohere"
+        assert data["response_time_ms"] == 88
+
+    def test_test_cohere_key_connectivity_failure(self, client):
+        """Connectivity failure returns success=False with error message."""
+        connectivity_result = MagicMock()
+        connectivity_result.success = False
+        connectivity_result.provider = "cohere"
+        connectivity_result.error = "Connection refused"
+        connectivity_result.response_time_ms = None
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
+        ) as mock_tester:
+            mock_tester.return_value.test_cohere_connectivity = AsyncMock(
+                return_value=connectivity_result
+            )
+
+            response = client.post(
+                "/api/api-keys/cohere/test",
+                json={"api_key": VALID_COHERE_KEY},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "refused" in data["error"]
+
+    def test_test_cohere_key_invalid_format(self, client):
+        """Invalid key format rejected with 400 before connectivity test."""
+        response = client.post(
+            "/api/api-keys/cohere/test",
+            json={"api_key": INVALID_COHERE_KEY},
+        )
+        assert response.status_code == 400
+
+    def test_test_cohere_key_requires_auth(self, unauthenticated_client):
+        """Without auth the endpoint rejects the request."""
+        response = unauthenticated_client.post(
+            "/api/api-keys/cohere/test",
+            json={"api_key": VALID_COHERE_KEY},
+        )
+        assert response.status_code in (401, 403, 422, 500)
+
+
+# ---------------------------------------------------------------------------
+# 10. POST /api/api-keys/cohere/test-configured — Test configured Cohere key
+# ---------------------------------------------------------------------------
+
+
+class TestTestConfiguredCohereKey:
+    """POST /api/api-keys/cohere/test-configured"""
+
+    def test_test_configured_cohere_key_success(self, client):
+        """When key is configured, connectivity test is run and result returned."""
+        cfg = _make_config(cohere_key=VALID_COHERE_KEY)
+        connectivity_result = MagicMock()
+        connectivity_result.success = True
+        connectivity_result.provider = "cohere"
+        connectivity_result.error = None
+        connectivity_result.response_time_ms = 66
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
+            ) as mock_tester,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+            mock_tester.return_value.test_cohere_connectivity = AsyncMock(
+                return_value=connectivity_result
+            )
+
+            response = client.post("/api/api-keys/cohere/test-configured")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["provider"] == "cohere"
+
+    def test_test_configured_cohere_key_not_configured(self, client):
+        """When no key is configured, returns success=False with descriptive error."""
+        cfg = _make_config(cohere_key="")
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_config_service"
+        ) as mock_cs:
+            mock_cs.return_value.load_config.return_value = cfg
+
+            response = client.post("/api/api-keys/cohere/test-configured")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert data["provider"] == "cohere"
+        assert data["error"] is not None
+        assert "No Cohere" in data["error"] or "configured" in data["error"].lower()
+
+    def test_test_configured_cohere_key_connectivity_failure(self, client):
+        """Connectivity failure returns success=False even if key is configured."""
+        cfg = _make_config(cohere_key=VALID_COHERE_KEY)
+        connectivity_result = MagicMock()
+        connectivity_result.success = False
+        connectivity_result.provider = "cohere"
+        connectivity_result.error = "Network timeout"
+        connectivity_result.response_time_ms = None
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
+            ) as mock_tester,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+            mock_tester.return_value.test_cohere_connectivity = AsyncMock(
+                return_value=connectivity_result
+            )
+
+            response = client.post("/api/api-keys/cohere/test-configured")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "timeout" in data["error"].lower()
+
+    def test_test_configured_cohere_key_requires_auth(self, unauthenticated_client):
+        """Without auth the endpoint rejects the request."""
+        response = unauthenticated_client.post("/api/api-keys/cohere/test-configured")
+        assert response.status_code in (401, 403, 422, 500)
+
+
+# ---------------------------------------------------------------------------
+# 11. DELETE /api/api-keys/cohere — Delete Cohere key
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteCohereKey:
+    """DELETE /api/api-keys/cohere"""
+
+    def test_delete_cohere_key_success(self, client):
+        """Configured key is cleared; returns success=True and message."""
+        cfg = _make_config(cohere_key=VALID_COHERE_KEY)
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_config_service"
+        ) as mock_cs:
+            mock_cs.return_value.load_config.return_value = cfg
+
+            response = client.delete("/api/api-keys/cohere")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["provider"] == "cohere"
+        assert "message" in data
+
+    def test_delete_cohere_key_when_not_configured(self, client):
+        """When no key is configured, returns success=True with 'no key' message."""
+        cfg = _make_config(cohere_key="")
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_config_service"
+        ) as mock_cs:
+            mock_cs.return_value.load_config.return_value = cfg
+
+            response = client.delete("/api/api-keys/cohere")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert data["provider"] == "cohere"
+        assert "No key" in data["message"] or "configured" in data["message"].lower()
+
+    def test_delete_cohere_key_clears_config(self, client):
+        """After deletion, config is persisted with empty cohere_api_key."""
+        cfg = _make_config(cohere_key=VALID_COHERE_KEY)
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_config_service"
+        ) as mock_cs:
+            mock_cs.return_value.load_config.return_value = cfg
+
+            response = client.delete("/api/api-keys/cohere")
+
+        assert response.status_code == 200
+        # Verify save_config was called on the config_service
+        mock_cs.return_value.save_config.assert_called_once()
+        saved_config = mock_cs.return_value.save_config.call_args[0][0]
+        assert saved_config.claude_integration_config.cohere_api_key == ""
+
+    def test_delete_cohere_key_no_claude_json_step(self, client):
+        """DELETE cohere does NOT touch ~/.claude.json (unlike Anthropic)."""
+        cfg = _make_config(cohere_key=VALID_COHERE_KEY)
+
+        with (
+            patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
+            patch(
+                "code_indexer.server.routers.api_keys._clear_from_claude_config"
+            ) as mock_clear_claude,
+        ):
+            mock_cs.return_value.load_config.return_value = cfg
+
+            client.delete("/api/api-keys/cohere")
+
+        mock_clear_claude.assert_not_called()
+
+    def test_delete_cohere_key_requires_auth(self, unauthenticated_client):
+        """Without auth the endpoint rejects the request."""
+        response = unauthenticated_client.delete("/api/api-keys/cohere")
+        assert response.status_code in (401, 403, 422, 500)
+
+    def test_delete_cohere_key_response_shape(self, client):
+        """Response body contains success, provider and message fields."""
+        cfg = _make_config(cohere_key=VALID_COHERE_KEY)
+
+        with patch(
+            "code_indexer.server.routers.api_keys.get_config_service"
+        ) as mock_cs:
+            mock_cs.return_value.load_config.return_value = cfg
+
+            response = client.delete("/api/api-keys/cohere")
 
         assert response.status_code == 200
         data = response.json()

@@ -775,3 +775,15 @@ class ApiKeyAutoSeeder:
             The API key if found, None otherwise
         """
         return os.environ.get("VOYAGE_API_KEY")
+
+    def get_cohere_key(self) -> Optional[str]:
+        """
+        Get Cohere API key from available sources.
+
+        Priority:
+        1. CO_API_KEY environment variable
+
+        Returns:
+            The API key if found, None otherwise
+        """
+        return os.environ.get("CO_API_KEY")

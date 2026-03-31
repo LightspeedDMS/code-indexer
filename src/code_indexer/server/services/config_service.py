@@ -289,6 +289,11 @@ class ConfigService:
                     if config.claude_integration_config.voyageai_api_key
                     else None
                 ),
+                "cohere_api_key": (
+                    config.claude_integration_config.cohere_api_key[:6] + "***"
+                    if config.claude_integration_config.cohere_api_key
+                    else None
+                ),
                 "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
                 "description_refresh_enabled": config.claude_integration_config.description_refresh_enabled,
