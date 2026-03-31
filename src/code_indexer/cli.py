@@ -1048,6 +1048,7 @@ def _execute_semantic_search(
     project_root: Path,
     config_manager,
     console: Console,
+    provider_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Execute semantic search - extracted for parallel execution in hybrid mode.
 
@@ -1067,6 +1068,7 @@ def _execute_semantic_search(
         project_root: Project root directory
         config_manager: Configuration manager instance
         console: Rich console for output
+        provider_name: Optional embedding provider override
 
     Returns:
         List of semantic search results
@@ -1083,7 +1085,9 @@ def _execute_semantic_search(
         from .services.language_mapper import LanguageMapper
         from .services.multi_index_query_service import MultiIndexQueryService
 
-        embedding_provider = EmbeddingProviderFactory.create(config, console)
+        embedding_provider = EmbeddingProviderFactory.create(
+            config, console, provider_name=provider_name
+        )
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
@@ -2770,6 +2774,12 @@ def show_global_config():
     help="Internal: Emit JSON progress lines to stdout instead of Rich progress bar. "
     "Used by the server's background worker to stream progress updates.",
 )
+@click.option(
+    "--provider",
+    type=click.Choice(["voyage-ai", "cohere"], case_sensitive=False),
+    default=None,
+    help="Embedding provider to use (default: from config)",
+)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -2789,6 +2799,7 @@ def index(
     since_date: Optional[str],
     diff_context: Optional[int],
     progress_json: bool = False,
+    provider: Optional[str] = None,
 ):
     """Index the codebase for semantic search.
 
@@ -3478,7 +3489,9 @@ def index(
         # Initialize services - lazy imports for index path
         from .services.smart_indexer import SmartIndexer
 
-        embedding_provider = EmbeddingProviderFactory.create(config, console)
+        embedding_provider = EmbeddingProviderFactory.create(
+            config, console, provider_name=provider
+        )
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
@@ -4529,6 +4542,12 @@ def display_temporal_results(results, temporal_service):
     help="Query multiple repositories (comma-separated aliases, e.g., 'repo1,repo2,repo3'). Remote mode only. Mutually exclusive with --repo.",
 )
 # --show-unchanged removed: Story 2 - all temporal results are changes now
+@click.option(
+    "--provider",
+    type=click.Choice(["voyage-ai", "cohere"], case_sensitive=False),
+    default=None,
+    help="Embedding provider to use (default: from config)",
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -4557,6 +4576,7 @@ def query(
     chunk_type: Optional[str],
     repo: Optional[str],
     repos: Optional[str],
+    provider: Optional[str] = None,
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -4968,7 +4988,9 @@ def query(
             # Initialize vector store and embedding provider for temporal queries
             # Use the same pattern as regular query command
             config = config_manager.load()
-            embedding_provider = EmbeddingProviderFactory.create(config, console)
+            embedding_provider = EmbeddingProviderFactory.create(
+                config, console, provider_name=provider
+            )
             backend = BackendFactory.create(
                 config=config, project_root=Path(config.codebase_dir)
             )
@@ -5286,6 +5308,7 @@ def query(
                     project_root=project_root,
                     config_manager=ctx.obj["config_manager"],
                     console=console,
+                    provider_name=provider,
                 )
 
                 # Wait for BOTH to complete (parallel execution)
@@ -5621,7 +5644,9 @@ def query(
         from .services.language_validator import LanguageValidator
         from .services.language_mapper import LanguageMapper
 
-        embedding_provider = EmbeddingProviderFactory.create(config, console)
+        embedding_provider = EmbeddingProviderFactory.create(
+            config, console, provider_name=provider
+        )
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
