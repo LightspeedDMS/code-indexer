@@ -3568,7 +3568,11 @@ def index(
             console.print(f"📁 Non-git project: {git_status['project_id']}")
 
         # Use config.json setting directly
-        thread_count = config.voyage_ai.parallel_requests
+        # Default matches VoyageAIConfig.parallel_requests default
+        if hasattr(config, "voyage_ai"):
+            thread_count = config.voyage_ai.parallel_requests
+        else:
+            thread_count = 8
         console.print(
             f"🧵 Vector calculation threads: {thread_count} (from config.json)"
         )
@@ -3880,10 +3884,87 @@ def index(
                     progress_callback=progress_callback,
                     safety_buffer_seconds=60,  # 1-minute safety buffer
                     files_count_to_process=files_count_to_process,
-                    vector_thread_count=config.voyage_ai.parallel_requests,
+                    vector_thread_count=thread_count,
                     detect_deletions=detect_deletions,
                     enable_fts=fts,
                 )
+
+                # Dual-embed: second pass with secondary provider
+                if dual_embed and secondary_provider_instance is not None:
+                    sec_name = secondary_provider_instance.get_provider_name()
+                    if not progress_json:
+                        console.print(
+                            f"\n[bold]Dual-embed: indexing with {sec_name}...[/bold]"
+                        )
+                    gen = EmbeddingProviderFactory.generate_collection_name
+                    try:
+                        from .services.smart_indexer import (
+                            SmartIndexer as _SI,
+                        )
+
+                        # Per-provider metadata file
+                        sec_model = secondary_provider_instance.get_current_model()
+                        secondary_metadata_path = (
+                            config_manager.config_path.parent
+                            / f"metadata-{sec_name}.json"
+                        )
+                        # Secondary collection name
+                        secondary_collection = gen(
+                            base_name="code_index",
+                            provider_name=sec_name,
+                            model_name=sec_model,
+                        )
+                        secondary_indexer = _SI(
+                            config,
+                            secondary_provider_instance,
+                            vector_store_client,
+                            secondary_metadata_path,
+                        )
+                        # Override collection for secondary
+                        vector_store_client._current_collection_name = (
+                            secondary_collection
+                        )
+
+                        sec_cb = progress_callback if not progress_json else None
+                        secondary_stats = secondary_indexer.smart_index(
+                            force_full=clear,
+                            reconcile_with_database=reconcile,
+                            batch_size=batch_size,
+                            progress_callback=sec_cb,
+                            safety_buffer_seconds=60,
+                            files_count_to_process=(files_count_to_process),
+                            vector_thread_count=max(1, thread_count // 2),
+                            detect_deletions=detect_deletions,
+                            enable_fts=fts,
+                        )
+                        if not progress_json and secondary_stats:
+                            processed = secondary_stats.files_processed
+                            chunks = secondary_stats.chunks_created
+                            console.print(
+                                f"Secondary indexing:"
+                                f" {processed} files,"
+                                f" {chunks} chunks"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            "Secondary provider indexing failed (non-fatal): %s", e
+                        )
+                        if not progress_json:
+                            console.print(
+                                "[yellow]Secondary provider"
+                                " indexing failed"
+                                f" (non-fatal): {e}[/yellow]"
+                            )
+
+                    # Restore primary collection name
+                    pri_name = embedding_provider.get_provider_name()
+                    pri_model = embedding_provider.get_current_model()
+                    primary_collection = gen(
+                        base_name="code_index",
+                        provider_name=pri_name,
+                        model_name=pri_model,
+                    )
+                    vector_store_client._current_collection_name = primary_collection
 
                 # Show final completion state (if not interrupted)
                 if display_initialized and not handler.interrupted:
