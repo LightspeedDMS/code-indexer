@@ -1441,9 +1441,12 @@ class ConfigService:
     def _save_runtime_to_pg(self, config: "ServerConfig") -> None:
         """Save runtime config to PostgreSQL."""
         assert self._pool is not None
+        from psycopg.rows import dict_row
+
         runtime_dict = self._extract_runtime_dict(config)
 
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             conn.execute(
                 "UPDATE server_config SET config_json = %s, "
                 "version = version + 1, updated_at = CURRENT_TIMESTAMP, "
@@ -1451,13 +1454,12 @@ class ConfigService:
                 (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
             )
             conn.commit()
-            # Finding 2 fix: no dict_row factory set, use positional index
             row = conn.execute(
                 "SELECT version FROM server_config WHERE config_key = %s",
                 (CONFIG_KEY_RUNTIME,),
             ).fetchone()
             if row:
-                self._db_config_version = row[0]
+                self._db_config_version = row["version"]
             else:
                 logger.error(
                     "Runtime config row missing from server_config after update"
