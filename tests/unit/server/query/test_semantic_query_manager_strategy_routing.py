@@ -310,6 +310,45 @@ class TestSpecificStrategyRouting:
                 f"Expected source_provider='voyage-ai', got '{r.source_provider}'"
             )
 
+    def test_preferred_provider_without_explicit_strategy_routes_to_named_provider(
+        self,
+    ):
+        """preferred_provider alone (no query_strategy='specific') routes to named provider.
+
+        Reproduces the bug where preferred_provider was ignored unless query_strategy='specific'
+        was also supplied. With the fix, passing preferred_provider='cohere' with
+        query_strategy=None must still call search_repository_path_with_provider with
+        provider_name='cohere' and annotate results with source_provider='cohere'.
+        """
+        manager = _make_manager()
+
+        with patch(
+            "code_indexer.server.services.search_service.SemanticSearchService"
+        ) as mock_svc_cls:
+            mock_svc = MagicMock()
+            mock_svc.search_repository_path_with_provider.return_value = (
+                _fake_search_response()
+            )
+            mock_svc_cls.return_value = mock_svc
+
+            results = manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="authentication",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy=None,
+                preferred_provider="cohere",
+            )
+
+        mock_svc.search_repository_path_with_provider.assert_called_once()
+        call_kwargs = mock_svc.search_repository_path_with_provider.call_args.kwargs
+        assert call_kwargs.get("provider_name") == "cohere"
+
+        assert len(results) == 1
+        assert results[0].source_provider == "cohere"
+
     def test_primary_only_strategy_annotates_results_with_source_provider(self):
         """primary_only strategy annotates results with non-empty source_provider.
 

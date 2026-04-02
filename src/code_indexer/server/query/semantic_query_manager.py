@@ -965,7 +965,7 @@ class SemanticQueryManager:
             List of QueryResult objects from this repository
         """
         # Story #593: Handle SPECIFIC strategy routing before composite check
-        if query_strategy == "specific":
+        if query_strategy == "specific" or preferred_provider:
             if not preferred_provider:
                 raise ValueError("preferred_provider required for specific strategy")
             _supported_providers = {"voyage-ai", "cohere"}

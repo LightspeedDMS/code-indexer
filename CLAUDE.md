@@ -940,6 +940,66 @@ curl -s -X POST http://localhost:8000/mcp \
 
 *Recorded 2026-01-29*
 
+### MANDATORY: Post-E2E Log Audit
+
+**After every E2E test of the CIDX server, you MUST query the server database for errors and warnings introduced during the current development cycle. This is not optional.**
+
+**Storage backend depends on deployment mode** (check `config.json` `storage_mode`):
+
+| Mode | Backend | Use |
+|------|---------|-----|
+| Solo / standalone | SQLite (`~/.cidx-server/data/cidx_server.db`) | Default dev/staging |
+| Cluster | PostgreSQL (DSN from `config.json` `postgres_dsn`) | Multi-node testing |
+
+**Procedure**:
+
+1. Determine storage mode from the server's `config.json`.
+
+2. Query for recent ERROR and WARNING log entries covering the period since work began on the current cycle.
+
+**Solo/standalone (SQLite)**:
+
+```bash
+sqlite3 ~/.cidx-server/data/cidx_server.db \
+  "SELECT timestamp, level, logger, message FROM server_logs \
+   WHERE level IN ('ERROR','WARNING') \
+   ORDER BY timestamp DESC LIMIT 100;"
+```
+
+**Cluster (PostgreSQL)**:
+
+```bash
+psql "$POSTGRES_DSN" -c \
+  "SELECT timestamp, level, logger, message FROM server_logs \
+   WHERE level IN ('ERROR','WARNING') \
+   ORDER BY timestamp DESC LIMIT 100;"
+```
+
+Where `$POSTGRES_DSN` is the value of `postgres_dsn` from the node's `config.json`.
+
+3. Filter out noise: ignore log entries that pre-date the current development session. Focus only on entries that appeared after the last known-good state.
+
+4. For each ERROR or WARNING found:
+   - Determine whether it is caused by the changes made in this development cycle.
+   - If YES: treat it as a blocking issue -- go back to the drawing board, fix the root cause, redeploy, re-run E2E tests, and re-audit the logs.
+   - If NO (pre-existing, unrelated): document it and continue.
+
+5. Only mark the development cycle complete when the log audit finds zero new ERRORs and zero new WARNINGs attributable to the current changes.
+
+**Loop**:
+
+```
+E2E test passes
+     |
+Log audit: new ERRORs/WARNINGs?
+     |--- YES --> Fix root cause --> Redeploy --> Re-run E2E --> Log audit again
+     |--- NO  --> Development cycle complete
+```
+
+**VIOLATION**: Declaring "done" after E2E tests pass without performing the log audit = incomplete validation. Silent errors in logs are bugs.
+
+*Recorded 2026-04-02*
+
 ---
 
 ## CRITICAL: Background Job Implementation Checklist
