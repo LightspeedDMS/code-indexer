@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.4
+
+### Bug Fixes
+
+- fix: Bug #604 ext -- get_configured_providers now checks voyageai_api_key and cohere_api_key ServerConfig DB fields so API keys stored via Web UI Config screen are recognized without env vars
+
 ## v9.8.3
 
 ### Bug Fixes
