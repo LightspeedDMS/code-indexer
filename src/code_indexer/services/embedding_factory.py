@@ -177,8 +177,11 @@ class EmbeddingProviderFactory:
         # Check VoyageAI
         if os.getenv("VOYAGE_API_KEY"):
             providers.append("voyage-ai")
-        # Check Cohere
-        if config.cohere.api_key or os.getenv("CO_API_KEY"):
+        # Check Cohere (config may be ServerConfig which lacks .cohere — fall back to env var)
+        cohere_key_in_config = (
+            hasattr(config, "cohere") and config.cohere and config.cohere.api_key
+        )
+        if cohere_key_in_config or os.getenv("CO_API_KEY"):
             providers.append("cohere")
         return providers
 

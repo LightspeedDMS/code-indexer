@@ -216,6 +216,28 @@ class TestFactoryProviderCreation:
             assert "voyage-ai" in providers
             assert "cohere" in providers
 
+    def test_factory_get_configured_providers_server_config_no_cohere_attr(self):
+        """get_configured_providers() must not raise when config has no .cohere attribute.
+
+        ServerConfig (used in server context) has no .cohere sub-object.
+        The method must fall back to env var checks instead of crashing.
+        Bug #602: AttributeError: 'ServerConfig' object has no attribute 'cohere'
+        """
+        from unittest.mock import MagicMock
+        from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+
+        # Simulate ServerConfig: no .cohere attribute at all
+        server_config = MagicMock(spec=[])  # spec=[] means NO attributes
+
+        with patch.dict(
+            os.environ,
+            {"VOYAGE_API_KEY": "test-key", "CO_API_KEY": "test-cohere-key"},
+        ):
+            # Must not raise AttributeError
+            providers = EmbeddingProviderFactory.get_configured_providers(server_config)
+            assert "voyage-ai" in providers
+            assert "cohere" in providers
+
 
 class TestSlugSeparator:
     """generate_model_slug uses double-underscore separator."""
