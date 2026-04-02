@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 # Number of embedding values shown in error messages when validating None values
 _EMBED_PREVIEW_LEN = 10
 
+# Maximum sleep duration for any retry path to prevent indefinite thread blocking (#602)
+_MAX_RETRY_SLEEP_SECONDS = 300.0
+
 
 class CohereEmbeddingProvider(EmbeddingProvider):
     """Cohere Embed v4 embedding provider."""
@@ -156,25 +159,29 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     retry_after = float(
                         response.headers.get("retry-after", self.config.retry_delay)
                     )
+                    capped_delay = min(retry_after, _MAX_RETRY_SLEEP_SECONDS)
                     logger.warning(
                         "Cohere API rate limited (attempt %d/%d), retrying after %.1fs",
                         attempt + 1,
                         max_attempts,
-                        retry_after,
+                        capped_delay,
                     )
-                    time.sleep(retry_after)
+                    time.sleep(capped_delay)
                     continue
 
                 if response.status_code >= 500:
-                    delay = self.config.retry_delay * (2**attempt)
+                    delay = self.config.retry_delay * (
+                        2**attempt if self.config.exponential_backoff else 1
+                    )
+                    capped_delay = min(delay, _MAX_RETRY_SLEEP_SECONDS)
                     logger.warning(
                         "Cohere API server error %d (attempt %d/%d), retrying after %.1fs",
                         response.status_code,
                         attempt + 1,
                         max_attempts,
-                        delay,
+                        capped_delay,
                     )
-                    time.sleep(delay)
+                    time.sleep(capped_delay)
                     continue
 
                 response.raise_for_status()
@@ -187,15 +194,18 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             except Exception as exc:
                 last_error = exc
                 if attempt < self.config.max_retries:
-                    delay = self.config.retry_delay * (2**attempt)
+                    delay = self.config.retry_delay * (
+                        2**attempt if self.config.exponential_backoff else 1
+                    )
+                    capped_delay = min(delay, _MAX_RETRY_SLEEP_SECONDS)
                     logger.warning(
                         "Cohere API request failed (attempt %d/%d): %s, retrying after %.1fs",
                         attempt + 1,
                         max_attempts,
                         exc,
-                        delay,
+                        capped_delay,
                     )
-                    time.sleep(delay)
+                    time.sleep(capped_delay)
                     continue
                 latency_ms = (time.time() - _start) * 1000
                 ProviderHealthMonitor.get_instance().record_call(
