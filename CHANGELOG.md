@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.2
+
+### Bug Fixes
+
+- fix: Bug #605 -- _resolve_golden_repo_path now tries alias + "-global" suffix when base alias not found, fixing 404/500 on provider index add/status when Web UI passes base alias (e.g. "click" instead of "click-global")
+- fix: Bug #605 -- add_golden_repo_index() no longer swallows HTTPException(404) as HTTP 500; added explicit except HTTPException: raise before catch-all
+
 ## v9.8.1
 
 ### Bug Fixes
