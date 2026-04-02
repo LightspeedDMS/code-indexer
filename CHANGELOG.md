@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.6
+
+### Bug Fixes
+
+- fix: Bug #608 -- EmbeddingProviderFactory.create() and get_provider_model_info() crashed with AttributeError on ServerConfig (no .voyage_ai/.cohere nested objects); added hasattr guards falling back to VoyageAIConfig()/CohereConfig() defaults
+
 ## v9.8.5
 
 ### Bug Fixes

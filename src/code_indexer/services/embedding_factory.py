@@ -4,7 +4,7 @@ import re
 from typing import Optional, List, Dict, Any
 from rich.console import Console
 
-from ..config import Config
+from ..config import Config, CohereConfig, VoyageAIConfig
 from .embedding_provider import EmbeddingProvider
 from .voyage_ai import VoyageAIClient
 
@@ -109,11 +109,21 @@ class EmbeddingProviderFactory:
         effective_provider = provider_name or config.embedding_provider
 
         if effective_provider == "voyage-ai":
-            provider = VoyageAIClient(config.voyage_ai, None)
+            voyage_cfg = (
+                config.voyage_ai
+                if hasattr(config, "voyage_ai") and config.voyage_ai
+                else VoyageAIConfig()
+            )
+            provider = VoyageAIClient(voyage_cfg, None)
         elif effective_provider == "cohere":
             from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
-            provider = CohereEmbeddingProvider(config.cohere)
+            cohere_cfg = (
+                config.cohere
+                if hasattr(config, "cohere") and config.cohere
+                else CohereConfig()
+            )
+            provider = CohereEmbeddingProvider(cohere_cfg)
         else:
             raise ValueError(f"Unknown embedding provider: {effective_provider}")
 
@@ -152,13 +162,21 @@ class EmbeddingProviderFactory:
         effective_provider = provider_name or config.embedding_provider
 
         if effective_provider == "voyage-ai":
-            return VoyageAIClient(config.voyage_ai, console)
+            voyage_cfg = (
+                config.voyage_ai
+                if hasattr(config, "voyage_ai") and config.voyage_ai
+                else VoyageAIConfig()
+            )
+            return VoyageAIClient(voyage_cfg, console)
         elif effective_provider == "cohere":
             from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
-            provider: EmbeddingProvider = CohereEmbeddingProvider(
-                config.cohere, console
+            cohere_cfg = (
+                config.cohere
+                if hasattr(config, "cohere") and config.cohere
+                else CohereConfig()
             )
+            provider: EmbeddingProvider = CohereEmbeddingProvider(cohere_cfg, console)
             return provider
         else:
             raise ValueError(f"Unknown embedding provider: {effective_provider}")
