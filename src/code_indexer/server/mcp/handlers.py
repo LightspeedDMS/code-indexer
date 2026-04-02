@@ -16369,6 +16369,8 @@ def _resolve_golden_repo_path(alias: str) -> Optional[str]:
     golden_repos_dir = _get_golden_repos_dir()
     alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
     resolved: Optional[str] = alias_manager.read_alias(alias)
+    if resolved is None and not alias.endswith("-global"):
+        resolved = alias_manager.read_alias(alias + "-global")
     return resolved
 
 

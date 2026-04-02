@@ -416,6 +416,8 @@ def register_admin_ops_routes(
                 raise HTTPException(status_code=400, detail=error_msg)
             else:
                 raise HTTPException(status_code=400, detail=error_msg)
+        except HTTPException:
+            raise  # Bug #605: don't swallow HTTPException(404) as a 500
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
