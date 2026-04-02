@@ -21,6 +21,22 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+# Embedding dimension constants
+DEFAULT_VOYAGE_DIM = 1024
+DEFAULT_COHERE_DIM = 1536
+
+# Per-model dimension table for VoyageAI (as documented by VoyageAI API).
+VOYAGE_MODEL_DIMENSIONS = {
+    "voyage-code-3": DEFAULT_VOYAGE_DIM,
+    "voyage-multimodal-3": DEFAULT_VOYAGE_DIM,
+    "voyage-3": DEFAULT_VOYAGE_DIM,
+    "voyage-2": DEFAULT_VOYAGE_DIM,
+    "voyage-law-2": DEFAULT_VOYAGE_DIM,
+    "voyage-large-2": DEFAULT_COHERE_DIM,
+    "voyage-code-2": DEFAULT_COHERE_DIM,
+    "voyage-3-large": DEFAULT_COHERE_DIM,
+}
+
 
 class IndexHealthChecker:
     """
@@ -43,16 +59,14 @@ class IndexHealthChecker:
 
         # Resolve collection name (use first available collection or default to "voyage-3")
         collections = vector_store_client.list_collections()
-        self.collection_name = collections[0] if collections else "voyage-3"
+        self.collection_name = collections[0] if collections else "code-index"
 
         # Health check configuration
         self.sample_size = getattr(config, "validation_sample_size", 100)
         self.performance_sample_queries = getattr(
             config, "validation_performance_queries", 5
         )
-        self.expected_dimensions = getattr(
-            config.voyage_ai, "embedding_dimensions", 1024
-        )
+        self.expected_dimensions = self._resolve_expected_dimensions(config)
 
         # Quality thresholds
         self.dimension_consistency_threshold = 0.95
@@ -63,6 +77,53 @@ class IndexHealthChecker:
         logger.info(
             f"IndexHealthChecker initialized with collection: {self.collection_name}",
             extra={"correlation_id": get_correlation_id()},
+        )
+
+    @staticmethod
+    def _resolve_expected_dimensions(config) -> int:
+        """
+        Resolve expected embedding dimensions from the active provider config.
+
+        Raises ValueError for unknown providers or unknown VoyageAI models — fail
+        fast rather than silently producing incorrect dimension checks.
+
+        Args:
+            config: CIDX Config object with embedding_provider and provider sub-configs.
+
+        Returns:
+            Integer dimension count for the active embedding model.
+
+        Raises:
+            ValueError: If embedding_provider is unrecognized, or the VoyageAI model
+                        is not in VOYAGE_MODEL_DIMENSIONS.
+        """
+        provider = getattr(config, "embedding_provider", None)
+
+        if provider == "voyage-ai":
+            voyage_config = getattr(config, "voyage_ai", None)
+            if voyage_config is None:
+                raise ValueError(
+                    "embedding_provider is 'voyage-ai' but config.voyage_ai is missing"
+                )
+            model = getattr(voyage_config, "model", None)
+            if model not in VOYAGE_MODEL_DIMENSIONS:
+                raise ValueError(
+                    f"Unknown VoyageAI model '{model}': not in VOYAGE_MODEL_DIMENSIONS. "
+                    f"Known models: {sorted(VOYAGE_MODEL_DIMENSIONS)}"
+                )
+            return VOYAGE_MODEL_DIMENSIONS[model]
+
+        if provider == "cohere":
+            cohere_config = getattr(config, "cohere", None)
+            if cohere_config is None:
+                raise ValueError(
+                    "embedding_provider is 'cohere' but config.cohere is missing"
+                )
+            return int(getattr(cohere_config, "default_dimension", DEFAULT_COHERE_DIM))
+
+        raise ValueError(
+            f"Unknown embedding_provider '{provider}'. "
+            "Supported providers: 'voyage-ai', 'cohere'."
         )
 
     def check_embedding_dimensions(self) -> HealthCheckResult:

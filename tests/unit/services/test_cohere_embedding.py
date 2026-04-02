@@ -298,3 +298,547 @@ class TestCohereBatchSplitting:
         # cohere_models.yaml default for embed-v4.0)
         for batch_size in captured_batches:
             assert batch_size <= 96
+
+
+class TestCohereRetryLoopBug595Issue1:
+    """Bug #595 Issue 1: retry loop re-raises raw exception on last attempt.
+
+    When all retries are exhausted, the loop must fall through to the
+    categorized RuntimeError rather than re-raising the raw exception.
+    """
+
+    def test_network_error_on_last_attempt_raises_runtime_error(self, cohere_provider):
+        """After max_retries exhausted, must raise RuntimeError (not raw exception).
+
+        The RuntimeError must contain the attempt count so callers get
+        a categorized, human-readable error instead of a raw ConnectionError.
+        Also verifies the side_effect is called max_retries+1 times total.
+        """
+        import httpx
+        from unittest.mock import MagicMock
+
+        connection_error = httpx.ConnectError("DNS resolution failed")
+        expected_attempts = cohere_provider.config.max_retries + 1
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = connection_error
+
+        with patch("httpx.Client", mock_client_cls):
+            with pytest.raises(RuntimeError, match="Cohere API request failed after"):
+                cohere_provider._make_sync_request(["test text"])
+
+        assert mock_client_instance.post.call_count == expected_attempts
+
+    def test_network_error_does_not_propagate_as_raw_exception(self, cohere_provider):
+        """Raw network exceptions must NOT escape _make_sync_request directly.
+
+        Only RuntimeError (or ValueError for 401) should reach callers.
+        """
+        import httpx
+        from unittest.mock import MagicMock
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = httpx.TimeoutException(
+            "Request timed out"
+        )
+
+        with patch("httpx.Client", mock_client_cls):
+            with pytest.raises(RuntimeError):
+                cohere_provider._make_sync_request(["test"])
+
+    def test_runtime_error_mentions_attempt_count(self, cohere_provider):
+        """RuntimeError message must include number of attempts made."""
+        import httpx
+        from unittest.mock import MagicMock
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = httpx.ConnectError("connection refused")
+
+        with patch("httpx.Client", mock_client_cls):
+            with pytest.raises(RuntimeError) as exc_info:
+                cohere_provider._make_sync_request(["test"])
+
+        error_msg = str(exc_info.value)
+        # Must mention attempt count so caller knows how many retries occurred
+        assert (
+            "attempt" in error_msg.lower()
+            or str(cohere_provider.config.max_retries + 1) in error_msg
+        )
+
+
+class TestCohereErrorHandling401Bug595Issue2:
+    """Bug #595 Issue 2: no 401 detection — bad API key gives cryptic error.
+
+    A 401 response must raise ValueError with a clear message about
+    the CO_API_KEY environment variable.
+    """
+
+    def test_401_response_raises_value_error(self, cohere_provider):
+        """HTTP 401 must raise ValueError mentioning CO_API_KEY."""
+        import httpx
+        from unittest.mock import MagicMock
+
+        mock_client_cls = MagicMock()
+        mock_instance = mock_client_cls.return_value.__enter__.return_value
+        http_error = httpx.HTTPStatusError(
+            "401 Unauthorized",
+            request=type("Req", (), {})(),
+            response=type(
+                "Resp", (), {"status_code": 401, "text": "Unauthorized", "headers": {}}
+            )(),
+        )
+        mock_instance.post.side_effect = http_error
+
+        with patch("httpx.Client", mock_client_cls):
+            with pytest.raises(ValueError, match="CO_API_KEY"):
+                cohere_provider._make_sync_request(["test"])
+
+    def test_401_error_message_mentions_api_key(self, cohere_provider):
+        """ValueError for 401 must explicitly mention the environment variable name."""
+        import httpx
+        from unittest.mock import MagicMock
+
+        mock_client_cls = MagicMock()
+        mock_instance = mock_client_cls.return_value.__enter__.return_value
+        http_error = httpx.HTTPStatusError(
+            "401 Unauthorized",
+            request=type("Req", (), {})(),
+            response=type(
+                "Resp", (), {"status_code": 401, "text": "Unauthorized", "headers": {}}
+            )(),
+        )
+        mock_instance.post.side_effect = http_error
+
+        with patch("httpx.Client", mock_client_cls):
+            with pytest.raises(ValueError) as exc_info:
+                cohere_provider._make_sync_request(["test"])
+
+        error_msg = str(exc_info.value)
+        assert "CO_API_KEY" in error_msg
+        assert "Invalid" in error_msg or "invalid" in error_msg
+
+
+class TestCohereLoadModelSpecsFallbackBug595Issue3:
+    """Bug #595 Issue 3: _load_model_specs() has no exception handling.
+
+    When the YAML file is missing or unreadable, instantiation must not crash.
+    Instead, a hardcoded fallback for 'embed-v4.0' must be used.
+    """
+
+    def test_missing_yaml_does_not_crash_instantiation(self):
+        """CohereEmbeddingProvider must instantiate even when YAML is missing."""
+        from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+        from code_indexer.config import CohereConfig
+
+        with patch.dict(os.environ, {"CO_API_KEY": "test-key"}):
+            config = CohereConfig()
+            with patch("builtins.open", side_effect=FileNotFoundError("No such file")):
+                # Must not raise — must use fallback specs
+                provider = CohereEmbeddingProvider(config, None)
+                assert provider is not None
+
+    def test_fallback_specs_contain_embed_v4_0(self):
+        """After YAML load failure, model_specs must contain embed-v4.0 fallback."""
+        from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+        from code_indexer.config import CohereConfig
+
+        with patch.dict(os.environ, {"CO_API_KEY": "test-key"}):
+            config = CohereConfig()
+            with patch("builtins.open", side_effect=FileNotFoundError("No such file")):
+                provider = CohereEmbeddingProvider(config, None)
+                # model_specs must have cohere_models with embed-v4.0 key
+                assert "cohere_models" in provider.model_specs
+                assert "embed-v4.0" in provider.model_specs["cohere_models"]
+
+    def test_fallback_specs_allow_token_limit_lookup(self):
+        """After YAML load failure, _get_model_token_limit() must return a valid integer."""
+        from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+        from code_indexer.config import CohereConfig
+
+        with patch.dict(os.environ, {"CO_API_KEY": "test-key"}):
+            config = CohereConfig()
+            with patch("builtins.open", side_effect=FileNotFoundError("No such file")):
+                provider = CohereEmbeddingProvider(config, None)
+                limit = provider._get_model_token_limit()
+                assert isinstance(limit, int)
+                assert limit > 0
+
+
+class TestCohereHttpxClientContextManagerBug596Issue1:
+    """Bug #596 Issue 1: must use httpx.Client context manager, not httpx.post().
+
+    The _make_sync_request method must use `with httpx.Client(...) as client:`
+    so connections are properly closed even on exceptions.
+    """
+
+    def test_make_sync_request_uses_httpx_client_not_httpx_post(self, cohere_provider):
+        """_make_sync_request must use httpx.Client, not module-level httpx.post."""
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value.post.return_value = (
+            mock_response
+        )
+
+        with patch("httpx.post") as mock_post:
+            with patch("httpx.Client", mock_client_cls):
+                cohere_provider._make_sync_request(["test text"])
+
+                # httpx.Client must be called (context manager pattern)
+                assert mock_client_cls.called, "httpx.Client must be used"
+                # httpx.post must NOT be called (module-level function forbidden)
+                assert not mock_post.called, (
+                    "httpx.post (module-level) must not be used"
+                )
+
+    def test_httpx_client_used_as_context_manager(self, cohere_provider):
+        """httpx.Client must be used as a context manager (__enter__/__exit__ called)."""
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__enter__.return_value.post.return_value = (
+            mock_response
+        )
+
+        with patch("httpx.Client", mock_client_cls):
+            cohere_provider._make_sync_request(["test text"])
+
+        # Verify context manager protocol was invoked
+        mock_client_cls.return_value.__enter__.assert_called_once()
+        mock_client_cls.return_value.__exit__.assert_called_once()
+
+
+class TestCohereContextManagerProtocolBug596Issue2:
+    """Bug #596 Issue 2: CohereEmbeddingProvider must implement context manager protocol.
+
+    close(), __enter__, and __exit__ must exist and work correctly.
+    """
+
+    def test_close_method_exists(self, cohere_provider):
+        """CohereEmbeddingProvider must have a close() method."""
+        assert hasattr(cohere_provider, "close"), "close() method must exist"
+        assert callable(cohere_provider.close), "close must be callable"
+
+    def test_close_is_a_no_op(self, cohere_provider):
+        """close() must be a no-op (return None, no side effects)."""
+        result = cohere_provider.close()
+        assert result is None
+
+    def test_enter_method_exists(self, cohere_provider):
+        """CohereEmbeddingProvider must have __enter__ method."""
+        assert hasattr(cohere_provider, "__enter__"), "__enter__ must exist"
+
+    def test_enter_returns_self(self, cohere_provider):
+        """__enter__ must return self for use in with-statement."""
+        result = cohere_provider.__enter__()
+        assert result is cohere_provider
+
+    def test_exit_method_exists(self, cohere_provider):
+        """CohereEmbeddingProvider must have __exit__ method."""
+        assert hasattr(cohere_provider, "__exit__"), "__exit__ must exist"
+
+    def test_exit_calls_close(self, cohere_provider):
+        """__exit__ must call close()."""
+        close_called = []
+        original_close = cohere_provider.close
+
+        def tracking_close():
+            close_called.append(True)
+            return original_close()
+
+        cohere_provider.close = tracking_close
+        cohere_provider.__exit__(None, None, None)
+        assert close_called, "__exit__ must call close()"
+
+    def test_used_as_context_manager(self):
+        """CohereEmbeddingProvider must work in a with-statement without error."""
+        from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+        from code_indexer.config import CohereConfig
+
+        with patch.dict(os.environ, {"CO_API_KEY": "test-key"}):
+            config = CohereConfig()
+            with CohereEmbeddingProvider(config, None) as provider:
+                assert provider is not None
+                assert provider.get_provider_name() == "cohere"
+
+
+# ---------------------------------------------------------------------------
+# Bug #598 — constants, helpers, and tests
+# ---------------------------------------------------------------------------
+
+_DUMMY_EMBED_DIM = 10
+_DUMMY_EMBED_VECTOR = [0.1] * _DUMMY_EMBED_DIM
+_MODEL_DIM = 1024
+_SEARCH_LIMIT = 5
+_COHERE_MODEL = "embed-v4.0"
+
+
+def _build_non_filesystem_vector_store():
+    """Return a mock whose type is NOT FilesystemVectorStore."""
+    from unittest.mock import MagicMock
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    store = MagicMock()
+    assert not isinstance(store, FilesystemVectorStore)
+    store.health_check.return_value = True
+    store.resolve_collection_name.return_value = "test_collection"
+    store.ensure_payload_indexes.return_value = None
+    store.search.return_value = []
+    store.search_with_model_filter.return_value = []
+    return store
+
+
+def _make_cli_mocks(*, is_git: bool, vector_store, codebase_dir) -> dict:
+    """Return shared mock objects for CLI query tests.
+
+    Args:
+        is_git: Whether GitTopologyService should report git is available.
+        vector_store: The vector store mock to use.
+        codebase_dir: A real Path for codebase_dir (required by BackendFactory.create call).
+    """
+    import pathlib
+    from unittest.mock import Mock
+
+    cfg = Mock()
+    cfg.codebase_dir = pathlib.Path(codebase_dir)
+    cfg.mode = "local"
+    cfg.embedding_provider = "cohere"
+
+    mock_config_instance = Mock()
+    mock_config_instance.get_config.return_value = cfg
+    mock_config_instance.load.return_value = cfg
+    mock_config_instance.get_daemon_config.return_value = None  # Skip daemon delegation
+
+    mock_backend_instance = Mock()
+    mock_backend_instance.get_vector_store_client.return_value = vector_store
+
+    mock_git_instance = Mock()
+    mock_git_instance.is_git_available.return_value = is_git
+    mock_git_instance.get_current_branch.return_value = "main"
+
+    mock_query_instance = Mock()
+    mock_query_instance.get_current_branch_context.return_value = None
+    mock_query_instance.filter_results_by_current_branch.return_value = []
+
+    return {
+        "config_instance": mock_config_instance,
+        "backend_instance": mock_backend_instance,
+        "git_instance": mock_git_instance,
+        "query_instance": mock_query_instance,
+    }
+
+
+def _make_capturing_embed_mock():
+    """Return (mock, captured_calls_list) where mock records kwargs on get_embedding."""
+    from unittest.mock import Mock
+
+    captured: list = []
+
+    def capturing_get_embedding(text, **kwargs):
+        captured.append({"text": text, "kwargs": kwargs})
+        return _DUMMY_EMBED_VECTOR
+
+    mock = Mock()
+    mock.health_check.return_value = True
+    mock.get_provider_name.return_value = "cohere"
+    mock.get_current_model.return_value = _COHERE_MODEL
+    mock.get_model_info.return_value = {"name": _COHERE_MODEL, "dimensions": _MODEL_DIM}
+    mock.get_embedding.side_effect = capturing_get_embedding
+    return mock, captured
+
+
+def _setup_filesystem_store(tmp_path):
+    """Create a minimal FilesystemVectorStore instance with a valid collection for unit testing."""
+    import json
+    import threading
+    from unittest.mock import MagicMock
+    from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
+
+    store = FilesystemVectorStore.__new__(FilesystemVectorStore)
+    store.logger = MagicMock()
+    store.base_path = tmp_path
+    store.hnsw_index_cache = None
+    store._id_index = {}
+    store._id_index_lock = threading.Lock()
+
+    # Create collection directory with metadata so collection_exists() returns True
+    col_path = tmp_path / "test_collection"
+    col_path.mkdir()
+    meta = {"vector_size": _DUMMY_EMBED_DIM}
+    (col_path / "collection_meta.json").write_text(json.dumps(meta))
+    return store
+
+
+class TestEmbeddingPurposeQueryBug598:
+    """Bug #598: query paths must pass embedding_purpose='query' to get_embedding().
+
+    All three call sites in the search/query path omitted embedding_purpose,
+    causing Cohere to use 'search_document' input_type for queries (wrong).
+    """
+
+    def test_filesystem_vector_store_search_passes_embedding_purpose_query(
+        self, tmp_path
+    ):
+        """FilesystemVectorStore.search() must call get_embedding with embedding_purpose='query'.
+
+        The inner generate_embedding() function (~line 2150) must forward
+        embedding_purpose='query' so Cohere uses 'search_query' input_type.
+        """
+        import numpy as np
+        from unittest.mock import MagicMock
+
+        embedding_provider = MagicMock()
+        embedding_provider.get_embedding.return_value = _DUMMY_EMBED_VECTOR
+
+        mock_hnsw_index = MagicMock()
+        mock_hnsw_index.knn_query.return_value = (
+            np.array([[]], dtype=np.int64),
+            np.array([[]], dtype=np.float32),
+        )
+
+        store = _setup_filesystem_store(tmp_path)
+
+        with (
+            patch(
+                "code_indexer.storage.hnsw_index_manager.HNSWIndexManager"
+            ) as mock_hnsw_cls,
+            patch(
+                "code_indexer.storage.id_index_manager.IDIndexManager"
+            ) as mock_id_cls,
+        ):
+            mock_hnsw_cls.return_value.is_stale.return_value = False
+            mock_hnsw_cls.return_value.load_index.return_value = mock_hnsw_index
+            mock_hnsw_cls.return_value._load_id_mapping.return_value = {}
+            mock_hnsw_cls.return_value.query.return_value = ([], [])
+            mock_id_cls.return_value.load_index.return_value = {}
+
+            store.search(
+                query="test query",
+                embedding_provider=embedding_provider,
+                collection_name="test_collection",
+                limit=_SEARCH_LIMIT,
+                return_timing=False,
+            )
+
+        calls = embedding_provider.get_embedding.call_args_list
+        assert len(calls) >= 1, "get_embedding must be called during search"
+        assert any(c.kwargs.get("embedding_purpose") == "query" for c in calls), (
+            f"Expected embedding_purpose='query' in at least one get_embedding call. "
+            f"Actual calls: {calls}. "
+            "Bug #598: FilesystemVectorStore.search() must pass embedding_purpose='query'."
+        )
+
+    def test_cli_git_aware_non_filesystem_path_passes_embedding_purpose_query(
+        self, tmp_path
+    ):
+        """cli.py ~line 6417: git-aware non-FilesystemVectorStore branch must pass embedding_purpose='query'.
+
+        When is_git_available()=True and vector_store is not a FilesystemVectorStore,
+        the else branch calls embedding_provider.get_embedding(query) — which must
+        include embedding_purpose='query'.
+        """
+        from click.testing import CliRunner
+        from code_indexer.cli import cli
+
+        embed_mock, captured_calls = _make_capturing_embed_mock()
+        vector_store = _build_non_filesystem_vector_store()
+        mocks = _make_cli_mocks(
+            is_git=True, vector_store=vector_store, codebase_dir=tmp_path
+        )
+
+        runner = CliRunner()
+        with (
+            patch("code_indexer.cli.ConfigManager") as mock_cfg_cls,
+            patch("code_indexer.cli.BackendFactory.create") as mock_backend_cls,
+            patch(
+                "code_indexer.cli.EmbeddingProviderFactory.create",
+                return_value=embed_mock,
+            ),
+            patch(
+                "code_indexer.services.git_topology_service.GitTopologyService",
+                return_value=mocks["git_instance"],
+            ),
+            patch(
+                "code_indexer.services.generic_query_service.GenericQueryService",
+                return_value=mocks["query_instance"],
+            ),
+        ):
+            mock_cfg_cls.create_with_backtrack.return_value = mocks["config_instance"]
+            mock_backend_cls.return_value = mocks["backend_instance"]
+            runner.invoke(cli, ["query", "find auth code", "--quiet"])
+
+        query_calls = [c for c in captured_calls if c["text"] == "find auth code"]
+        assert len(query_calls) >= 1, (
+            f"get_embedding must be called with the query text. "
+            f"All captured calls: {captured_calls}"
+        )
+        assert all(
+            c["kwargs"].get("embedding_purpose") == "query" for c in query_calls
+        ), (
+            f"Expected embedding_purpose='query' in all query calls. "
+            f"Actual: {query_calls}. "
+            "Bug #598: cli.py git-aware non-FilesystemVectorStore path must pass embedding_purpose='query'."
+        )
+
+    def test_cli_non_git_non_filesystem_path_passes_embedding_purpose_query(
+        self, tmp_path
+    ):
+        """cli.py ~line 6485: non-git non-FilesystemVectorStore branch must pass embedding_purpose='query'.
+
+        When is_git_available()=False and vector_store is not a FilesystemVectorStore,
+        the else branch calls embedding_provider.get_embedding(query) — which must
+        include embedding_purpose='query'.
+        """
+        from click.testing import CliRunner
+        from code_indexer.cli import cli
+
+        embed_mock, captured_calls = _make_capturing_embed_mock()
+        vector_store = _build_non_filesystem_vector_store()
+        mocks = _make_cli_mocks(
+            is_git=False, vector_store=vector_store, codebase_dir=tmp_path
+        )
+
+        runner = CliRunner()
+        with (
+            patch("code_indexer.cli.ConfigManager") as mock_cfg_cls,
+            patch("code_indexer.cli.BackendFactory.create") as mock_backend_cls,
+            patch(
+                "code_indexer.cli.EmbeddingProviderFactory.create",
+                return_value=embed_mock,
+            ),
+            patch(
+                "code_indexer.services.git_topology_service.GitTopologyService",
+                return_value=mocks["git_instance"],
+            ),
+            patch(
+                "code_indexer.services.generic_query_service.GenericQueryService",
+                return_value=mocks["query_instance"],
+            ),
+        ):
+            mock_cfg_cls.create_with_backtrack.return_value = mocks["config_instance"]
+            mock_backend_cls.return_value = mocks["backend_instance"]
+            runner.invoke(cli, ["query", "find auth code", "--quiet"])
+
+        query_calls = [c for c in captured_calls if c["text"] == "find auth code"]
+        assert len(query_calls) >= 1, (
+            f"get_embedding must be called with the query text. "
+            f"All captured calls: {captured_calls}"
+        )
+        assert all(
+            c["kwargs"].get("embedding_purpose") == "query" for c in query_calls
+        ), (
+            f"Expected embedding_purpose='query' in all query calls. "
+            f"Actual: {query_calls}. "
+            "Bug #598: cli.py non-git non-FilesystemVectorStore path must pass embedding_purpose='query'."
+        )

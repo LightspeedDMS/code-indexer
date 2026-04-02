@@ -7,6 +7,7 @@ All imports lazy (no module-level imports of cohere SDK).
 import logging
 import os
 import time
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,6 +16,9 @@ from rich.console import Console
 from code_indexer.services.embedding_provider import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+# Number of embedding values shown in error messages when validating None values
+_EMBED_PREVIEW_LEN = 10
 
 
 class CohereEmbeddingProvider(EmbeddingProvider):
@@ -45,13 +49,33 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         self._load_model_specs()
 
     def _load_model_specs(self) -> None:
-        """Load model specifications from cohere_models.yaml."""
+        """Load model specifications from cohere_models.yaml.
+
+        Falls back to hardcoded embed-v4.0 spec if YAML is missing or unreadable.
+        """
         import yaml
 
-        module_dir = Path(__file__).parent.parent
-        yaml_path = module_dir / "data" / "cohere_models.yaml"
-        with open(yaml_path) as f:
-            self.model_specs = yaml.safe_load(f)
+        try:
+            module_dir = Path(__file__).parent.parent
+            yaml_path = module_dir / "data" / "cohere_models.yaml"
+            with open(yaml_path) as f:
+                self.model_specs = yaml.safe_load(f)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load cohere_models.yaml (%s), using hardcoded fallback for embed-v4.0",
+                exc,
+            )
+            self.model_specs = {
+                "cohere_models": {
+                    "embed-v4.0": {
+                        "default_dimension": 1536,
+                        "dimensions": [256, 512, 1024, 1536],
+                        "token_limit": 128000,
+                        "texts_per_request": 96,
+                    }
+                },
+                "api_constraints": {"safety_margin_percentage": 90},
+            }
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens using embedded tokenizer."""
@@ -95,6 +119,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             Parsed JSON response from the API.
 
         Raises:
+            ValueError: If the API key is invalid (401 Unauthorized).
             RuntimeError: If all retry attempts are exhausted.
         """
         import httpx
@@ -110,17 +135,21 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             "embedding_types": ["float"],
         }
 
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
         last_error: Optional[Exception] = None
         max_attempts = self.config.max_retries + 1
+        _start = time.time()
 
         for attempt in range(max_attempts):
             try:
-                response = httpx.post(
-                    self.config.api_endpoint,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.config.timeout,
-                )
+                _start = time.time()
+                with httpx.Client(timeout=self.config.timeout) as client:
+                    response = client.post(
+                        self.config.api_endpoint,
+                        headers=headers,
+                        json=payload,
+                    )
 
                 if response.status_code == 429:
                     # Rate limited - wait and retry
@@ -149,6 +178,10 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     continue
 
                 response.raise_for_status()
+                latency_ms = (time.time() - _start) * 1000
+                ProviderHealthMonitor.get_instance().record_call(
+                    "cohere", latency_ms, success=True
+                )
                 return dict(response.json())
 
             except Exception as exc:
@@ -164,8 +197,26 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     )
                     time.sleep(delay)
                     continue
-                raise
+                latency_ms = (time.time() - _start) * 1000
+                ProviderHealthMonitor.get_instance().record_call(
+                    "cohere", latency_ms, success=False
+                )
+                break
 
+        latency_ms = (time.time() - _start) * 1000
+        ProviderHealthMonitor.get_instance().record_call(
+            "cohere", latency_ms, success=False
+        )
+        if last_error is not None:
+            response_obj = getattr(last_error, "response", None)
+            if (
+                response_obj is not None
+                and getattr(response_obj, "status_code", None)
+                == HTTPStatus.UNAUTHORIZED
+            ):
+                raise ValueError(
+                    "Invalid Cohere API key. Check CO_API_KEY environment variable."
+                )
         raise RuntimeError(
             f"Cohere API request failed after {max_attempts} attempts: {last_error}"
         )
@@ -230,6 +281,11 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                         raise RuntimeError(
                             f"Cohere returned None/empty embedding at index {idx}"
                         )
+                    if any(v is None for v in emb):
+                        raise RuntimeError(
+                            f"Cohere returned embedding with None values at index {idx}: "
+                            f"{list(emb)[:_EMBED_PREVIEW_LEN]}..."
+                        )
                 all_embeddings.extend(embeddings)
                 current_batch = []
                 current_tokens = 0
@@ -251,6 +307,11 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                 if emb is None or not emb:
                     raise RuntimeError(
                         f"Cohere returned None/empty embedding at index {idx}"
+                    )
+                if any(v is None for v in emb):
+                    raise RuntimeError(
+                        f"Cohere returned embedding with None values at index {idx}: "
+                        f"{list(emb)[:_EMBED_PREVIEW_LEN]}..."
                     )
             all_embeddings.extend(embeddings)
 
@@ -331,6 +392,18 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             "supports_batch": True,
             "api_endpoint": self.config.api_endpoint,
         }
+
+    def close(self) -> None:
+        """Clean up resources (no-op, matches VoyageAI pattern)."""
+        pass
+
+    def __enter__(self):
+        """Support context manager protocol."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Support context manager protocol."""
+        self.close()
 
     def get_provider_name(self) -> str:
         """Get the name of this embedding provider."""
