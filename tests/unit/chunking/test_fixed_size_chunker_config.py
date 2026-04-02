@@ -252,6 +252,18 @@ class TestModelAwareChunking:
         assert chunker.overlap_size == 150  # 15% of 1000
         assert chunker.step_size == 850  # 1000 - 150
 
+    def test_cohere_embed_v4_uses_4096_chunk_size(self):
+        """Verify cohere embed-v4.0 uses optimized 4096 character chunks."""
+        config = Config()
+        config.embedding_provider = "cohere"
+        config.cohere.model = "embed-v4.0"
+
+        chunker = FixedSizeChunker(config)
+
+        assert chunker.chunk_size == 4096
+        assert chunker.overlap_size == 614  # 15% of 4096
+        assert chunker.step_size == 3482  # 4096 - 614
+
     def test_model_aware_chunking_actually_produces_different_sizes(self):
         """Verify that different VoyageAI models produce expected chunk sizes."""
         test_text = "a" * 10000  # Large enough for multiple chunks

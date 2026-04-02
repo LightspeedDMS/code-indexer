@@ -353,42 +353,56 @@ class ConfigService:
             },
             # Langfuse configuration (Story #136, Story #164)
             "langfuse": {
-                "enabled": config.langfuse_config.enabled
-                if config.langfuse_config
-                else False,
-                "public_key": config.langfuse_config.public_key
-                if config.langfuse_config
-                else "",
-                "secret_key": config.langfuse_config.secret_key
-                if config.langfuse_config
-                else "",
-                "host": config.langfuse_config.host
-                if config.langfuse_config
-                else "https://cloud.langfuse.com",
-                "auto_trace_enabled": config.langfuse_config.auto_trace_enabled
-                if config.langfuse_config
-                else False,
+                "enabled": (
+                    config.langfuse_config.enabled if config.langfuse_config else False
+                ),
+                "public_key": (
+                    config.langfuse_config.public_key if config.langfuse_config else ""
+                ),
+                "secret_key": (
+                    config.langfuse_config.secret_key if config.langfuse_config else ""
+                ),
+                "host": (
+                    config.langfuse_config.host
+                    if config.langfuse_config
+                    else "https://cloud.langfuse.com"
+                ),
+                "auto_trace_enabled": (
+                    config.langfuse_config.auto_trace_enabled
+                    if config.langfuse_config
+                    else False
+                ),
                 # Story #164: Langfuse Trace Pull Configuration
-                "pull_enabled": config.langfuse_config.pull_enabled
-                if config.langfuse_config
-                else False,
-                "pull_host": config.langfuse_config.pull_host
-                if config.langfuse_config
-                else "https://cloud.langfuse.com",
-                "pull_projects": [
-                    asdict(p) for p in config.langfuse_config.pull_projects
-                ]
-                if config.langfuse_config
-                else [],
-                "pull_sync_interval_seconds": config.langfuse_config.pull_sync_interval_seconds
-                if config.langfuse_config
-                else 300,
-                "pull_trace_age_days": config.langfuse_config.pull_trace_age_days
-                if config.langfuse_config
-                else 30,
-                "pull_max_concurrent_observations": config.langfuse_config.pull_max_concurrent_observations
-                if config.langfuse_config
-                else 5,
+                "pull_enabled": (
+                    config.langfuse_config.pull_enabled
+                    if config.langfuse_config
+                    else False
+                ),
+                "pull_host": (
+                    config.langfuse_config.pull_host
+                    if config.langfuse_config
+                    else "https://cloud.langfuse.com"
+                ),
+                "pull_projects": (
+                    [asdict(p) for p in config.langfuse_config.pull_projects]
+                    if config.langfuse_config
+                    else []
+                ),
+                "pull_sync_interval_seconds": (
+                    config.langfuse_config.pull_sync_interval_seconds
+                    if config.langfuse_config
+                    else 300
+                ),
+                "pull_trace_age_days": (
+                    config.langfuse_config.pull_trace_age_days
+                    if config.langfuse_config
+                    else 30
+                ),
+                "pull_max_concurrent_observations": (
+                    config.langfuse_config.pull_max_concurrent_observations
+                    if config.langfuse_config
+                    else 5
+                ),
             },
             # Claude Delegation configuration (Story #721)
             "claude_delegation": self._get_delegation_settings(),

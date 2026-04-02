@@ -209,9 +209,10 @@ class TestProviderIndexJobEnvVars:
         ):
             _provider_index_job(str(repo_path), "cohere")
 
-        assert captured_cmd[:2] == ["cidx", "index"], (
-            "Base command must be exactly ['cidx', 'index'] in order"
-        )
+        assert captured_cmd[:2] == [
+            "cidx",
+            "index",
+        ], "Base command must be exactly ['cidx', 'index'] in order"
         assert "--provider" not in captured_cmd, (
             "cidx index must NOT be called with --provider flag (it does not exist)"
         )

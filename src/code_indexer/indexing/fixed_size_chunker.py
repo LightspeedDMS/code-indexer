@@ -26,10 +26,11 @@ class FixedSizeChunker:
     5. No parsing - pure arithmetic operations
     6. Markdown image detection - extracts image references for multimodal embeddings
 
-    Model-specific chunk sizes (VoyageAI only in v8.0+):
+    Model-specific chunk sizes:
     - voyage-code-3: 4096 characters (1024 tokens, research optimal)
     - voyage-code-2: 4096 characters (1024 tokens, research optimal)
     - voyage-large-2: 4096 characters (1024 tokens, research optimal)
+    - embed-v4.0: 4096 characters (Cohere, large context model)
     - default: 1000 characters (conservative fallback)
     """
 
@@ -40,6 +41,7 @@ class FixedSizeChunker:
         "voyage-large-2": 4096,  # Large context models, 1024 tokens optimal
         "voyage-3": 4096,  # General purpose, 1024 tokens optimal
         "voyage-3-large": 4096,  # Large model, 1024 tokens optimal
+        "embed-v4.0": 4096,  # Cohere embed-v4.0, large context model
         "default": 1000,  # Conservative fallback for unknown models
     }
 
@@ -62,6 +64,11 @@ class FixedSizeChunker:
             if embedding_provider == "voyage-ai":
                 # Get specific VoyageAI model
                 model_name = config.voyage_ai.model
+                self.chunk_size = self.MODEL_CHUNK_SIZES.get(
+                    model_name, self.MODEL_CHUNK_SIZES["default"]
+                )
+            elif embedding_provider == "cohere":
+                model_name = config.cohere.model
                 self.chunk_size = self.MODEL_CHUNK_SIZES.get(
                     model_name, self.MODEL_CHUNK_SIZES["default"]
                 )

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.8
+
+### Bug Fixes
+
+- fix: Cohere embed-v4.0 now uses 4096-char chunks (matching voyage-ai) instead of falling back to 1000-char default in FixedSizeChunker
+
+### Removed
+
+- Deleted dead code: `TextChunker._get_language_splitters()` and `TextChunker._smart_split()` — language-aware splitter never used in the indexing pipeline
+
 ## v9.8.7
 
 ### Bug Fixes
