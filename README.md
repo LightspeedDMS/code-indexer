@@ -2,7 +2,7 @@
 
 AI-powered semantic code search for your codebase. Find code by meaning, not just keywords.
 
-**Version 9.7.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
+**Version 9.8.0** - [Changelog](CHANGELOG.md) | [Migration Guide](docs/migration-to-v8.md) | [Architecture](docs/architecture.md)
 
 ## Quick Navigation
 
@@ -16,6 +16,7 @@ AI-powered semantic code search for your codebase. Find code by meaning, not jus
   - [Git History Search](#git-history-search-temporal)
   - [Langfuse Trace Sync](#langfuse-trace-sync-v810) (NEW in v8.10)
   - [Inter-Repository Dependency Map](#inter-repository-dependency-map-v90) (NEW in v9.0)
+  - [Multi-Provider Embedding](#multi-provider-embedding-v98) (NEW in v9.8)
 - [Operating Modes](#operating-modes)
 - [Common Commands](#common-commands)
 - [Documentation](#documentation)
@@ -43,7 +44,7 @@ source code-indexer-env/bin/activate
 pip install git+https://github.com/LightspeedDMS/code-indexer.git@v8.6.0
 ```
 
-**Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key
+**Requirements**: Python 3.9+, 4GB+ RAM, VoyageAI API key (or Cohere API key)
 
 For detailed installation instructions including Windows, configuration, and troubleshooting, see [Installation Guide](docs/installation.md).
 
@@ -53,8 +54,8 @@ For detailed installation instructions including Windows, configuration, and tro
 # Navigate to your project
 cd /path/to/your/project
 
-# Set VoyageAI API key (required for semantic search)
-export VOYAGE_API_KEY="your-api-key-here"
+# Set embedding provider API key (VoyageAI by default; Cohere also supported)
+export VOYAGE_API_KEY="your-api-key"  # or export CO_API_KEY="your-key" for Cohere
 
 # Index your codebase
 cidx index
@@ -73,7 +74,7 @@ For comprehensive query options and search strategies, see [Query Guide](docs/qu
 
 ### Semantic Search
 
-Find code by meaning using AI embeddings powered by VoyageAI. Ask natural language questions and get semantically relevant results ranked by similarity.
+Find code by meaning using AI embeddings powered by VoyageAI or Cohere. Ask natural language questions and get semantically relevant results ranked by similarity.
 
 ```bash
 cidx query "authentication logic" --limit 10
@@ -262,6 +263,27 @@ edit_file(repository_alias="cidx-meta-global", path="dependency-map/authenticati
 - `dependency_map_pass_timeout_seconds`: Per-pass Claude CLI timeout (default: 600s)
 
 See: [Meta-Repo Discovery Guide](docs/meta-repo-discovery.md)
+
+### Multi-Provider Embedding (v9.8)
+
+CIDX supports multiple embedding providers for redundancy and flexibility:
+
+- **VoyageAI** (default): voyage-3 (1024 dims) or voyage-3-large (1536 dims)
+- **Cohere** (new): embed-v4.0 with 2048 dimensions, embedded tokenizer (no SDK required)
+
+**Query strategies** control which provider serves results:
+- `primary_only` — use configured primary provider (default)
+- `failover` — try primary, automatically fall back to secondary on failure
+- `parallel` — query both providers, fuse results (RRF, multiply, or average)
+- `specific` — explicitly target one provider with `--provider`
+
+**CLI usage:**
+```bash
+cidx query "authentication" --strategy parallel --score-fusion rrf
+cidx query "database setup" --strategy specific --provider cohere
+cidx provider-health  # check provider status
+cidx provider-index list  # manage per-provider indexes
+```
 
 ## Operating Modes
 

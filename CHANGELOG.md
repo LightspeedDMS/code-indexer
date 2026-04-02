@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.0
+
+### Features
+
+**Epic #485 -- Multi-Provider Embedding Support**
+
+**Cohere Embedding Provider (Stories #486, #487)**
+- feat: CohereEmbeddingProvider full implementation -- embedded tokenizer (no API client library dependency), retry logic with exponential backoff, 2048-dim vectors (Story #486)
+- feat: EmbeddingProviderFactory for provider selection and lifecycle management (Story #486)
+- feat: DualVectorCalculationManager for multi-provider parallel indexing -- both providers indexed simultaneously per file (Story #487)
+- feat: Per-provider metadata on indexed chunks and correct collection name resolution per provider (Story #487)
+- feat: Cohere API key management service layer with encrypted storage and config service integration
+
+**Provider Health Monitor (Story #491)**
+- feat: ProviderHealthMonitor singleton tracking per-provider success/failure rates, latency, and uptime (Phase 1)
+- feat: Health monitor configuration and integration with server config service (Phase 2)
+- feat: CLI command `cidx provider-health` for live provider health status (Phase 2)
+- feat: MCP tool `get_provider_health` for health status in agentic workflows (Phase 3)
+- feat: REST endpoint `GET /admin/provider-health` for programmatic health queries (Phase 4)
+- feat: Auto-routing integration -- queries and indexing operations automatically routed away from unhealthy providers (Phase 5)
+
+**Provider Index Management (Story #490)**
+- feat: ProviderIndexService for per-provider index operations (list, build, delete) (Phase 1)
+- feat: MCP tools `manage_provider_indexes` and `bulk_add_provider_index` (Phase 2)
+- feat: REST endpoints `GET/POST/DELETE /admin/repos/{alias}/provider-indexes` (Phase 3)
+- feat: CLI command group `cidx provider-index list/build/delete` (Phase 4)
+- feat: Web UI provider checkboxes on Add/Rebuild Index form (Story #489)
+
+**Multi-Provider Query Strategies (Story #488)**
+- feat: `query_strategy` parameter with four modes: `primary_only` (default), `failover` (primary then secondary on failure), `parallel` (both providers, fused results), `specific` (explicit provider selection) (Phase 1)
+- feat: `score_fusion` parameter: `rrf` (Reciprocal Rank Fusion), `multiply`, `average` (Phase 1)
+- feat: `preferred_provider` parameter for `specific` strategy (Phase 1)
+- feat: `source_provider` field annotated on all query results for provenance tracking (Phase 1)
+- feat: CLI flags `--strategy` and `--score-fusion` wired through full query path (Phases 2+3)
+- feat: `query_strategy`, `score_fusion`, and `preferred_provider` exposed on MCP and REST API (Phase 4)
+
+**Multi-Provider Query Controls in Web UI (Story #593)**
+- feat: `query_strategy` selector in Web UI search interface
+- feat: `score_fusion` and `preferred_provider` controls in Web UI
+- feat: `source_provider` badge displayed on search results
+
+**Langfuse README Generator (Story #592)**
+- feat: Auto-generates root README.md and per-session README.md files for Langfuse trace repos on every sync
+- feat: Atomic file writes with fingerprint-based skip logic to avoid redundant regeneration
+- feat: Session tables with timestamps and prompt snippets for navigability
+
+**API Key Management Infrastructure**
+- feat: VoyageAI and Cohere API key management service with encrypted storage
+- feat: REST endpoints for per-provider API key create, update, delete, and status
+
+### Fixes
+
+- fix: Bug #595 -- Cohere error handling improvements (structured error parsing, user-facing messages)
+- fix: Bug #596 -- httpx context manager correctness in Cohere client (resource leak prevention)
+- fix: Bug #600 -- ProviderHealthMonitor instrumentation wired into VoyageAI and Cohere clients
+- fix: Bug #601 -- Cohere None value validation in embeddings response + DEFAULT_COLLECTION_NAME resolution
+- fix: Cap Cohere retry delays at 300s maximum and honour `exponential_backoff` flag
+- fix: Guard VoyageMultimodalClient creation behind VOYAGE_API_KEY environment variable check
+- fix: config_service PostgreSQL dict_row access pattern correction
+
 ## v9.7.0
 
 ### Features

@@ -21,15 +21,17 @@ Complete reference for configuring CIDX.
 
 CIDX configuration involves three main areas:
 
-1. **Embedding Provider** - VoyageAI API key (required for semantic search)
+1. **Embedding Provider** - VoyageAI or Cohere API key (required for semantic search)
 2. **Configuration File** - `.code-indexer/config.json` per project
 3. **Environment Variables** - Optional tuning and server settings
 
 ## Embedding Provider
 
-### VoyageAI (Required)
+CIDX supports multiple embedding providers as of v9.8.0. At least one provider must be configured for semantic search. When multiple providers are configured, you can use multi-provider query strategies (see [Query Guide -- Multi-Provider Query Strategy](query-guide.md#multi-provider-query-strategy)).
 
-CIDX uses **VoyageAI embeddings** for semantic search. This is the **only supported provider** in v8.0+.
+### VoyageAI
+
+CIDX uses **VoyageAI embeddings** for semantic search. This is the default provider.
 
 **Get API Key**:
 1. Sign up at https://www.voyageai.com/
@@ -91,6 +93,91 @@ CIDX supports multiple VoyageAI models:
 | **voyage-large-2-instruct** | 1536 | Instruction-tuned large model |
 
 **Model Selection**: User-selectable via `--voyage-model` flag during `cidx init`. Default is `voyage-code-3`.
+
+### Cohere
+
+Cohere is supported as an embedding provider starting in v9.8.0. It can be used as the primary provider, as a secondary alongside VoyageAI, or as a standalone provider.
+
+**Get API Key**:
+1. Sign up at https://dashboard.cohere.com/
+2. Navigate to API Keys
+3. Generate a production API key
+4. Copy your API key
+
+**Configure API Key**:
+
+**Option 1: Environment Variable**
+
+```bash
+# Add to shell profile (~/.bashrc, ~/.zshrc, etc.)
+export CO_API_KEY="your-cohere-api-key-here"
+
+# Reload shell
+source ~/.bashrc  # or ~/.zshrc
+```
+
+**Option 2: Configuration File**
+
+Set the API key directly in `.code-indexer/config.json` (see Configuration File section below).
+
+**Verify Setup**:
+
+```bash
+# Check environment variable
+echo $CO_API_KEY
+
+# Check provider health
+cidx provider-health
+```
+
+**Supported Models**:
+
+| Model | Description |
+|-------|-------------|
+| **embed-v4.0** | Default Cohere embedding model |
+
+**Configuration in config.json**:
+
+To use Cohere as the embedding provider, set `embedding_provider` to `"cohere"` and add a `cohere` configuration block:
+
+```json
+{
+  "embedding_provider": "cohere",
+  "cohere": {
+    "api_key": "your-cohere-key",
+    "model": "embed-v4.0",
+    "max_retries": 3
+  }
+}
+```
+
+If `CO_API_KEY` is set in the environment, the `api_key` field in config.json can be omitted. The environment variable takes precedence.
+
+### Provider Health Monitoring
+
+When one or more providers are configured, use `cidx provider-health` to check the status, success rates, and latency of each provider:
+
+```bash
+cidx provider-health
+```
+
+This reports per-provider metrics including availability, request success rate, and average response latency.
+
+### Multi-Provider Setup
+
+To configure both VoyageAI and Cohere simultaneously, set both API keys (via environment variables or config) and specify the primary provider in `embedding_provider`. The secondary provider is available for failover and parallel query strategies.
+
+```json
+{
+  "embedding_provider": "voyage-ai",
+  "cohere": {
+    "model": "embed-v4.0",
+    "max_retries": 3
+  }
+}
+```
+
+With both `VOYAGE_API_KEY` and `CO_API_KEY` set in the environment, this configuration uses VoyageAI as the primary provider and Cohere as the secondary. Query strategy flags (`--strategy failover`, `--strategy parallel`) control how the secondary provider is used at query time.
 
 ## Configuration File
 
@@ -203,7 +290,9 @@ Created automatically by `cidx init` or first `cidx index`.
 **Default**: "voyage-ai"
 **Purpose**: Embedding provider selection
 
-**Note**: Only "voyage-ai" is supported in v8.0+. This field exists for future extensibility but cannot be changed currently.
+**Supported values**:
+- `"voyage-ai"` -- VoyageAI (default)
+- `"cohere"` -- Cohere (v9.8.0+)
 
 #### max_file_size
 
@@ -250,9 +339,12 @@ cidx index
 
 ### Required
 
+At least one embedding provider API key must be set.
+
 | Variable | Purpose | Example |
 |----------|---------|---------|
 | **VOYAGE_API_KEY** | VoyageAI API key | `export VOYAGE_API_KEY="your-api-key"` |
+| **CO_API_KEY** | Cohere API key (v9.8.0+) | `export CO_API_KEY="your-cohere-key"` |
 
 ### Optional (Server Mode Only)
 
@@ -509,5 +601,43 @@ cidx config --daemon
 cidx start
 ```
 
----
+### Cohere API Key Not Found
 
+**Error**: `ERROR: CO_API_KEY environment variable not set`
+
+**Solutions**:
+
+1. **Set environment variable**:
+   ```bash
+   export CO_API_KEY="your-cohere-key"
+   ```
+
+2. **Or set in config.json**:
+   ```json
+   {
+     "embedding_provider": "cohere",
+     "cohere": {
+       "api_key": "your-cohere-key"
+     }
+   }
+   ```
+
+3. **Verify it's set**:
+   ```bash
+   echo $CO_API_KEY
+   ```
+
+### Provider Health Check Failing
+
+**Problem**: `cidx provider-health` shows errors or high latency for a provider.
+
+**Solutions**:
+
+1. **Verify API key is valid** for the failing provider.
+2. **Check provider status page** (VoyageAI or Cohere) for outages.
+3. **Use failover strategy** to automatically route around a failing provider:
+   ```bash
+   cidx query "search term" --strategy failover
+   ```
+
+---

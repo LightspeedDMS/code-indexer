@@ -10,6 +10,7 @@ Complete guide to searching code with CIDX across all search modes and query par
   - [Full-Text Search (FTS)](#full-text-search-fts)
   - [Regex Search](#regex-search)
   - [Hybrid Search](#hybrid-search)
+- [Multi-Provider Query Strategy](#multi-provider-query-strategy)
 - [Query Parameters](#query-parameters)
 - [Filtering](#filtering)
 - [Temporal Queries](#temporal-queries)
@@ -168,6 +169,75 @@ cidx query "user validation tests" --fts --semantic --regex
 3. Ranks by combined relevance
 
 **Performance**: Combined time of both modes
+
+## Multi-Provider Query Strategy
+
+When multiple embedding providers are configured (e.g., VoyageAI and Cohere), the `--strategy` flag controls how CIDX routes queries across providers. The `--score-fusion` flag controls how results from multiple providers are merged when using the `parallel` strategy.
+
+### Strategy Options
+
+| Strategy | Behavior |
+|----------|----------|
+| `primary_only` | Query the primary provider only (default) |
+| `failover` | Query primary; if it fails, automatically fall back to the secondary provider |
+| `parallel` | Query all configured providers simultaneously and fuse the results |
+| `specific` | Query a single named provider via `--provider` |
+
+### CLI Usage
+
+```bash
+# Default: primary provider only
+cidx query "auth logic" --strategy primary_only
+
+# Auto-failover to secondary provider on error
+cidx query "auth logic" --strategy failover
+
+# Query all providers, fuse results
+cidx query "auth logic" --strategy parallel
+
+# Query all providers with explicit score fusion method
+cidx query "auth logic" --strategy parallel --score-fusion rrf
+
+# Target a specific provider by name
+cidx query "auth logic" --strategy specific --provider cohere
+```
+
+### Score Fusion (parallel strategy only)
+
+When `--strategy parallel` is used, results from each provider are merged using a score fusion algorithm:
+
+| Fusion Method | Description |
+|---------------|-------------|
+| `rrf` | Reciprocal Rank Fusion (default) -- ranks results by combining inverse rank positions across providers |
+| `multiply` | Multiplies normalized scores from each provider |
+| `average` | Averages normalized scores from each provider |
+
+```bash
+# Reciprocal Rank Fusion (default)
+cidx query "database connection" --strategy parallel --score-fusion rrf
+
+# Multiplicative fusion
+cidx query "database connection" --strategy parallel --score-fusion multiply
+
+# Average fusion
+cidx query "database connection" --strategy parallel --score-fusion average
+```
+
+### Result Attribution
+
+Each result includes a `source_provider` field indicating which embedding provider produced it. This is present in all strategy modes.
+
+```
+source_provider: voyage-ai    # Result from VoyageAI
+source_provider: cohere       # Result from Cohere
+```
+
+### When to Use Each Strategy
+
+- **primary_only**: Single-provider setup, or when you want deterministic results from one provider.
+- **failover**: Production environments where availability matters more than result diversity.
+- **parallel**: When you want the broadest recall by combining results from multiple embedding models.
+- **specific**: When you need results from a particular provider (e.g., comparing provider quality).
 
 ## Query Parameters
 
@@ -886,7 +956,7 @@ cidx query "anything" --time-range-all --quiet
 
 ## Parameter Reference
 
-Complete list of all 25 query parameters with CLI flags, types, and defaults. For implementation details, see [QUERY_PARAMETERS.md](../src/code_indexer/query/QUERY_PARAMETERS.md).
+Complete list of all 28 query parameters with CLI flags, types, and defaults. For implementation details, see [QUERY_PARAMETERS.md](../src/code_indexer/query/QUERY_PARAMETERS.md).
 
 | Parameter | CLI Flag | Type | Default | Modes | Description |
 |-----------|----------|------|---------|-------|-------------|
@@ -910,6 +980,9 @@ Complete list of all 25 query parameters with CLI flags, types, and defaults. Fo
 | chunk_type | --chunk-type | enum | None | Temporal | commit_message/commit_diff |
 | repo | --repo | string | None | Remote | Query global repo by alias |
 | repos | --repos | string | None | Remote | Query multiple repos (comma-separated) |
+| strategy | --strategy | enum | primary_only | Multi-Provider | primary_only/failover/parallel/specific |
+| score_fusion | --score-fusion | enum | rrf | Multi-Provider | rrf/multiply/average (parallel only) |
+| provider | --provider | string | None | Multi-Provider | Target provider name (specific only) |
 
 **API-Only Parameters** (not in CLI):
 - file_extensions (array) - Filter by extensions
