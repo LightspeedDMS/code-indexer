@@ -28,7 +28,37 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_COLLECTION_NAME = "voyage-3"
+DEFAULT_COLLECTION_NAME = "code-index"
+
+# Default model names per provider, used when the config section is missing
+_VOYAGE_DEFAULT_MODEL = "voyage-code-3"
+_COHERE_DEFAULT_MODEL = "embed-v4.0"
+
+
+def _resolve_default_collection(config: Config) -> str:
+    """Return a provider-specific collection name when no collections exist yet.
+
+    Uses ``EmbeddingProviderFactory.generate_collection_name`` so the name
+    follows the same slug convention as the rest of the codebase.
+
+    Raises:
+        ValueError: For unsupported or missing embedding providers.
+    """
+    from ...services.embedding_factory import EmbeddingProviderFactory
+
+    provider = getattr(config, "embedding_provider", None)
+    if provider == "voyage-ai":
+        voyage_cfg = getattr(config, "voyageai", None)
+        model = getattr(voyage_cfg, "model", _VOYAGE_DEFAULT_MODEL)
+    elif provider == "cohere":
+        cohere_cfg = getattr(config, "cohere", None)
+        model = getattr(cohere_cfg, "model", _COHERE_DEFAULT_MODEL)
+    else:
+        raise ValueError(f"Unsupported or missing embedding provider: {provider!r}")
+
+    return EmbeddingProviderFactory.generate_collection_name(
+        DEFAULT_COLLECTION_NAME, provider, model
+    )
 
 
 class IndexValidationEngine:
@@ -57,10 +87,11 @@ class IndexValidationEngine:
         self.vector_store_client = vector_store_client
         self.repository_path = Path(config.codebase_dir)
 
-        # Resolve collection name (use first available collection or default)
+        # Resolve collection name: use first existing collection or derive from
+        # the active provider so the fallback is never voyage-specific.
         collections = vector_store_client.list_collections()
         self.collection_name = (
-            collections[0] if collections else DEFAULT_COLLECTION_NAME
+            collections[0] if collections else _resolve_default_collection(config)
         )
 
         # Initialize health checker

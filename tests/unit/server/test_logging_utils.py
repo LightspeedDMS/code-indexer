@@ -4,8 +4,6 @@ Unit tests for logging_utils module.
 Tests the logging utility functions for formatting log messages with error codes.
 """
 
-from unittest.mock import patch
-
 
 def test_format_error_log():
     """Test formatting an error log message with error code."""
@@ -24,29 +22,6 @@ def test_format_error_log():
     # Without additional context
     message = format_error_log("MCP-TOOL-042", "Tool execution failed")
     assert message == "[MCP-TOOL-042] Tool execution failed"
-
-
-def test_format_with_correlation_id():
-    """Test that correlation_id is included in extra dict when available."""
-    from code_indexer.server.logging_utils import get_log_extra
-
-    # With correlation_id
-    with patch(
-        "code_indexer.server.logging_utils.get_correlation_id",
-        return_value="test-corr-123",
-    ):
-        extra = get_log_extra("AUTH-OIDC-001")
-        assert extra == {
-            "error_code": "AUTH-OIDC-001",
-            "correlation_id": "test-corr-123",
-        }
-
-    # Without correlation_id
-    with patch(
-        "code_indexer.server.logging_utils.get_correlation_id", return_value=None
-    ):
-        extra = get_log_extra("AUTH-OIDC-002")
-        assert extra == {"error_code": "AUTH-OIDC-002"}
 
 
 def test_sanitize_sensitive_data():

@@ -182,18 +182,17 @@ class TestSqliteForeignKeyEnforcement:
         manager = GroupAccessManager(db_path)
 
         # Get multiple connections and verify FK is enabled on each
+        # Note: _get_connection() returns a shared thread-local connection;
+        # do NOT call conn.close() here as it would close the shared connection.
         for i in range(5):
             conn = manager._get_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA foreign_keys")
-                result = cursor.fetchone()
-                assert result[0] == 1, (
-                    f"Connection {i + 1}: PRAGMA foreign_keys should be ON (1), "
-                    f"but got {result[0]}"
-                )
-            finally:
-                conn.close()
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA foreign_keys")
+            result = cursor.fetchone()
+            assert result[0] == 1, (
+                f"Connection {i + 1}: PRAGMA foreign_keys should be ON (1), "
+                f"but got {result[0]}"
+            )
 
     def test_user_group_membership_has_group_id_index(self, tmp_path: Path) -> None:
         """
@@ -233,9 +232,9 @@ class TestSqliteForeignKeyEnforcement:
                 "Queries filtering by group_id will perform full table scans. "
                 "Expected index: idx_user_group_membership_group_id"
             )
-            assert "group_id" in index_row["sql"].lower(), (
-                f"Index {index_row['name']} does not include group_id column: "
-                f"{index_row['sql']}"
+            # index_row is a plain tuple: (name, sql)
+            assert "group_id" in index_row[1].lower(), (
+                f"Index {index_row[0]} does not include group_id column: {index_row[1]}"
             )
         finally:
             conn.close()

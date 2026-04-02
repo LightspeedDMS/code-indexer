@@ -1471,6 +1471,8 @@ class ConfigService:
         config = self.get_config()
         runtime_dict = self._extract_runtime_dict(config)
 
+        from psycopg.rows import dict_row
+
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO server_config (config_key, config_json, version, updated_by) "
@@ -1481,6 +1483,7 @@ class ConfigService:
             conn.commit()
             # Finding 4 fix: SELECT actual version -- INSERT may have been a
             # no-op if another node already seeded, so version could be > 1.
+            conn.row_factory = dict_row
             row = conn.execute(
                 "SELECT version FROM server_config WHERE config_key = %s",
                 (CONFIG_KEY_RUNTIME,),
@@ -1488,7 +1491,7 @@ class ConfigService:
             assert row is not None, (
                 "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             )
-            self._db_config_version = row[0]
+            self._db_config_version = row["version"]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
             len(runtime_dict),

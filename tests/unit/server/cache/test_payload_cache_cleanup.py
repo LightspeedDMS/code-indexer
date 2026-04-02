@@ -12,6 +12,8 @@ import tempfile
 import time
 from pathlib import Path
 
+pytestmark = pytest.mark.slow
+
 
 class TestPayloadCacheCleanup:
     """Tests for PayloadCache cleanup operations (AC6)."""

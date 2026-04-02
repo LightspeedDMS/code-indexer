@@ -65,10 +65,16 @@ class DelegationJobTracker:
     def __init__(self) -> None:
         """Initialize the tracker with empty pending jobs dict."""
         self._pending_jobs: Dict[str, asyncio.Future] = {}
-        self._lock = asyncio.Lock()
+        self.__lock: Optional[asyncio.Lock] = None
         self._payload_cache: Optional["PayloadCache"] = None
         self._pool: Any = None
         self._sqlite_db_path: Optional[str] = None
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self.__lock is None:
+            self.__lock = asyncio.Lock()
+        return self.__lock
 
     def set_connection_pool(self, pool: Any) -> None:
         """

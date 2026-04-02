@@ -235,6 +235,35 @@
                         placeholder="0.0"
                         value="{{ min_score or '' }}"
                     >
+
+                    <!-- Query Strategy (Story #593) -->
+                    <label for="query_strategy">Query Strategy</label>
+                    <select id="query_strategy" name="query_strategy">
+                        <option value="primary_only" {% if query_strategy == 'primary_only' or not query_strategy %}selected{% endif %}>Primary Only (default)</option>
+                        <option value="failover" {% if query_strategy == 'failover' %}selected{% endif %}>Failover</option>
+                        <option value="parallel" {% if query_strategy == 'parallel' %}selected{% endif %}>Parallel (score fusion)</option>
+                        <option value="specific" {% if query_strategy == 'specific' %}selected{% endif %}>Specific Provider</option>
+                    </select>
+                    <small class="field-hint">How to route the query across embedding providers</small>
+
+                    <!-- Score Fusion (visible only when parallel selected) -->
+                    <div id="score_fusion_row" style="{% if query_strategy != 'parallel' %}display: none;{% endif %}">
+                        <label for="score_fusion">Score Fusion Method</label>
+                        <select id="score_fusion" name="score_fusion">
+                            <option value="rrf" {% if score_fusion == 'rrf' or not score_fusion %}selected{% endif %}>RRF - Reciprocal Rank Fusion (default)</option>
+                            <option value="multiply" {% if score_fusion == 'multiply' %}selected{% endif %}>Multiply</option>
+                            <option value="average" {% if score_fusion == 'average' %}selected{% endif %}>Average</option>
+                        </select>
+                    </div>
+
+                    <!-- Preferred Provider (visible only when specific selected) -->
+                    <div id="preferred_provider_row" style="{% if query_strategy != 'specific' %}display: none;{% endif %}">
+                        <label for="preferred_provider">Provider</label>
+                        <select id="preferred_provider" name="preferred_provider">
+                            <option value="voyage-ai" {% if preferred_provider == 'voyage-ai' %}selected{% endif %}>VoyageAI</option>
+                            <option value="cohere" {% if preferred_provider == 'cohere' %}selected{% endif %}>Cohere</option>
+                        </select>
+                    </div>
                 </div>
             </details>
 
@@ -317,6 +346,31 @@ document.querySelectorAll('input[name="search_mode"]').forEach(radio => {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', updateSearchModeOptions);
+
+// Show/hide score_fusion and preferred_provider based on query_strategy (Story #593)
+function updateQueryStrategyOptions() {
+    const strategySelect = document.getElementById('query_strategy');
+    const scoreFusionRow = document.getElementById('score_fusion_row');
+    const preferredProviderRow = document.getElementById('preferred_provider_row');
+
+    if (!strategySelect) return;
+
+    const val = strategySelect.value;
+    if (scoreFusionRow) {
+        scoreFusionRow.style.display = (val === 'parallel') ? '' : 'none';
+    }
+    if (preferredProviderRow) {
+        preferredProviderRow.style.display = (val === 'specific') ? '' : 'none';
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const strategySelect = document.getElementById('query_strategy');
+    if (strategySelect) {
+        strategySelect.addEventListener('change', updateQueryStrategyOptions);
+        updateQueryStrategyOptions();
+    }
+});
 
 function loadHistoryQuery(queryText, repository, searchMode) {
     // Fill form with history query

@@ -31,7 +31,8 @@ def backend(db_path: str) -> DependencyMapTrackingBackend:
     conn = conn_manager.get_connection()
 
     # Create schema directly for testing
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS dependency_map_tracking (
             id INTEGER PRIMARY KEY,
             last_run TEXT,
@@ -40,7 +41,8 @@ def backend(db_path: str) -> DependencyMapTrackingBackend:
             commit_hashes TEXT,
             error_message TEXT
         )
-    """)
+    """
+    )
     conn.commit()
     conn_manager.close_all()
 

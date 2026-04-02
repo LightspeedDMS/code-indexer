@@ -12,6 +12,8 @@ import time
 import requests
 from unittest.mock import patch, MagicMock
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.e2e
 class TestServerStartupCrashFix:

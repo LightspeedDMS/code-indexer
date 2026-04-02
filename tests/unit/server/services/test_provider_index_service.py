@@ -207,11 +207,21 @@ class TestRemoveProviderIndex:
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.generate_model_slug"
             ) as mock_slug,
+            patch(
+                "code_indexer.backends.backend_factory.BackendFactory.create"
+            ) as mock_backend_create,
         ):
             mock_provider = MagicMock()
             mock_provider.get_current_model.return_value = "voyage-code-3"
             mock_create.return_value = mock_provider
             mock_slug.return_value = "voyage_ai__voyage_code_3"
+            mock_backend = MagicMock()
+            mock_vs_client = MagicMock()
+            mock_vs_client.resolve_collection_name.return_value = (
+                "voyage_ai__voyage_code_3"
+            )
+            mock_backend.get_vector_store_client.return_value = mock_vs_client
+            mock_backend_create.return_value = mock_backend
 
             result = service.remove_provider_index(str(tmp_path), "voyage-ai")
             assert result["removed"] is False
@@ -240,11 +250,21 @@ class TestRemoveProviderIndex:
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.generate_model_slug"
             ) as mock_slug,
+            patch(
+                "code_indexer.backends.backend_factory.BackendFactory.create"
+            ) as mock_backend_create,
         ):
             mock_provider = MagicMock()
             mock_provider.get_current_model.return_value = "voyage-code-3"
             mock_create.return_value = mock_provider
             mock_slug.return_value = "voyage_ai__voyage_code_3"
+            mock_backend = MagicMock()
+            mock_vs_client = MagicMock()
+            mock_vs_client.resolve_collection_name.return_value = (
+                "voyage_ai__voyage_code_3"
+            )
+            mock_backend.get_vector_store_client.return_value = mock_vs_client
+            mock_backend_create.return_value = mock_backend
 
             result = service.remove_provider_index(str(tmp_path), "voyage-ai")
             assert result["removed"] is True
@@ -277,11 +297,21 @@ class TestRemoveProviderIndex:
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.generate_model_slug"
             ) as mock_slug,
+            patch(
+                "code_indexer.backends.backend_factory.BackendFactory.create"
+            ) as mock_backend_create,
         ):
             mock_provider = MagicMock()
             mock_provider.get_current_model.return_value = "voyage-code-3"
             mock_create.return_value = mock_provider
             mock_slug.return_value = "voyage_ai__voyage_code_3"
+            mock_backend = MagicMock()
+            mock_vs_client = MagicMock()
+            mock_vs_client.resolve_collection_name.return_value = (
+                "voyage_ai__voyage_code_3"
+            )
+            mock_backend.get_vector_store_client.return_value = mock_vs_client
+            mock_backend_create.return_value = mock_backend
 
             result = service.remove_provider_index(str(tmp_path), "voyage-ai")
             assert result["removed"] is True
@@ -308,11 +338,21 @@ class TestRemoveProviderIndex:
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.generate_model_slug"
             ) as mock_slug,
+            patch(
+                "code_indexer.backends.backend_factory.BackendFactory.create"
+            ) as mock_backend_create,
         ):
             mock_provider = MagicMock()
             mock_provider.get_current_model.return_value = "voyage-code-3"
             mock_create.return_value = mock_provider
             mock_slug.return_value = "voyage_ai__voyage_code_3"
+            mock_backend = MagicMock()
+            mock_vs_client = MagicMock()
+            mock_vs_client.resolve_collection_name.return_value = (
+                "voyage_ai__voyage_code_3"
+            )
+            mock_backend.get_vector_store_client.return_value = mock_vs_client
+            mock_backend_create.return_value = mock_backend
 
             # No metadata file present — should not raise
             result = service.remove_provider_index(str(tmp_path), "voyage-ai")
@@ -382,12 +422,22 @@ class TestGetProviderIndexStatus:
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.generate_model_slug"
             ) as mock_slug,
+            patch(
+                "code_indexer.backends.backend_factory.BackendFactory.create"
+            ) as mock_backend_create,
         ):
             mock_configured.return_value = ["voyage-ai"]
             mock_provider = MagicMock()
             mock_provider.get_current_model.return_value = "voyage-code-3"
             mock_create.return_value = mock_provider
             mock_slug.return_value = "voyage_ai__voyage_code_3"
+            mock_backend = MagicMock()
+            mock_vs_client = MagicMock()
+            mock_vs_client.resolve_collection_name.return_value = (
+                "voyage_ai__voyage_code_3"
+            )
+            mock_backend.get_vector_store_client.return_value = mock_vs_client
+            mock_backend_create.return_value = mock_backend
 
             result = service.get_provider_index_status(str(tmp_path), "test-repo")
 
@@ -412,7 +462,7 @@ class TestGetProviderIndexStatus:
 
         meta_file = tmp_path / ".code-indexer" / "metadata-voyage-ai.json"
         meta_file.write_text(
-            json.dumps({"total_chunks": 42, "last_indexed": "2026-01-01T00:00:00"})
+            json.dumps({"chunks_indexed": 42, "indexed_at": "2026-01-01T00:00:00"})
         )
 
         with (
@@ -425,12 +475,22 @@ class TestGetProviderIndexStatus:
             patch(
                 "code_indexer.services.embedding_factory.EmbeddingProviderFactory.generate_model_slug"
             ) as mock_slug,
+            patch(
+                "code_indexer.backends.backend_factory.BackendFactory.create"
+            ) as mock_backend_create,
         ):
             mock_configured.return_value = ["voyage-ai"]
             mock_provider = MagicMock()
             mock_provider.get_current_model.return_value = "voyage-code-3"
             mock_create.return_value = mock_provider
             mock_slug.return_value = "voyage_ai__voyage_code_3"
+            mock_backend = MagicMock()
+            mock_vs_client = MagicMock()
+            mock_vs_client.resolve_collection_name.return_value = (
+                "voyage_ai__voyage_code_3"
+            )
+            mock_backend.get_vector_store_client.return_value = mock_vs_client
+            mock_backend_create.return_value = mock_backend
 
             result = service.get_provider_index_status(str(tmp_path), "test-repo")
 

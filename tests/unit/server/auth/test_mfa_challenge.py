@@ -13,6 +13,8 @@ import pytest
 
 from code_indexer.server.auth.mfa_challenge import MfaChallengeManager
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def manager():

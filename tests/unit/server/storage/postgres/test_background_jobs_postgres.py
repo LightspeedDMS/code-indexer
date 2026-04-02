@@ -633,7 +633,7 @@ class TestCleanupOrphanedJobsOnStartup:
         pool, conn, cur = _make_pool(rowcount=2)
         backend = BackgroundJobsPostgresBackend(pool)
 
-        count = backend.cleanup_orphaned_jobs_on_startup()
+        count = backend.cleanup_orphaned_jobs_on_startup(node_id="test-node")
 
         assert count == 2
         sql, params = cur.execute.call_args[0]

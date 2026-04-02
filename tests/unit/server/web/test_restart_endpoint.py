@@ -16,6 +16,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture(autouse=True)
 def reset_restart_state():

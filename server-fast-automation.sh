@@ -111,59 +111,153 @@ else
     exit 1
 fi
 
-# 6. Run server unit tests only
-print_step "Running server unit tests"
-echo "ℹ️  Testing CIDX server functionality including:"
-echo "   • API endpoints and authentication"
-echo "   • Repository management"
-echo "   • Job management and sync orchestration"
-echo "   • Validation and error handling"
-echo "   • Branch operations"
+# 6. Run server unit tests in parallel chunks
+# Strategy: split into 6 parallel groups so wall time = max(chunk) instead of sum(all).
+# Heavy folders each get their own chunk or pairing.
+# Chunk 5 was previously a single oversized chunk (~500s); split into 5+6 to stay under 10min.
+# All chunks share the same pytest flags but use isolated CIDX_SERVER_DATA_DIR.
+print_step "Running server unit tests (6 parallel chunks)"
+echo "  Chunk 1: services/"
+echo "  Chunk 2: auth/"
+echo "  Chunk 3: storage/ + wiki/"
+echo "  Chunk 4: web/ + repositories/ + routers/"
+echo "  Chunk 5: mcp/ + telemetry/ + handlers/"
+echo "  Chunk 6: all remaining subdirs + root test files"
+
+# Tuning knobs — override via environment for CI or local profiling
+PYTEST_TIMEOUT="${PYTEST_TIMEOUT:-30}"
+PYTEST_DURATIONS="${PYTEST_DURATIONS:-10}"
 
 # Create telemetry directory
 TELEMETRY_DIR=".test-telemetry"
 mkdir -p "$TELEMETRY_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TELEMETRY_LOG="$TELEMETRY_DIR/server-test-${TIMESTAMP}.log"
-DURATIONS_LOG="$TELEMETRY_DIR/server-durations-${TIMESTAMP}.txt"
 
-echo "📊 Telemetry enabled: Results will be saved to $TELEMETRY_LOG"
-echo "⏱️  Duration report: $DURATIONS_LOG"
-
-# Run server-specific unit tests with telemetry
-# --timeout=60: kill any test that hangs longer than 60 seconds
+# Shared pytest options for all chunks
 # No --cov: coverage adds massive overhead (2-3x slowdown on large suites)
-PYTHONPATH="$(pwd)/src:$(pwd)/tests" pytest \
-    tests/unit/server/ \
-    -m "not slow and not e2e and not real_api and not integration" \
-    -v \
-    --durations=20 \
-    --tb=short \
-    --timeout=60 \
-    2>&1 | tee "$TELEMETRY_LOG"
+# CIDX_TEST_FAST_SQLITE=1: use MEMORY journal + synchronous=OFF instead of WAL
+#   to eliminate the 1.5s per-init overhead (saves ~500s on initialize_database calls)
+PYTEST_COMMON_OPTS=(
+    -m "not slow and not e2e and not real_api and not integration"
+    --tb=short
+    --timeout="$PYTEST_TIMEOUT"
+    --durations="$PYTEST_DURATIONS"
+    -q
+)
+PYPATH="$(pwd)/src:$(pwd)/tests"
 
-# Capture pytest exit code from pipe
-TEST_EXIT_CODE=${PIPESTATUS[0]}
+# Each chunk needs its own isolated data dir to avoid SQLite locking conflicts
+D1=$(mktemp -d /tmp/cidx-chunk1-XXXXXX)
+D2=$(mktemp -d /tmp/cidx-chunk2-XXXXXX)
+D3=$(mktemp -d /tmp/cidx-chunk3-XXXXXX)
+D4=$(mktemp -d /tmp/cidx-chunk4-XXXXXX)
+D5=$(mktemp -d /tmp/cidx-chunk5-XXXXXX)
+D6=$(mktemp -d /tmp/cidx-chunk6-XXXXXX)
 
-# Extract duration information
-echo "" > "$DURATIONS_LOG"
-echo "=== Top 20 Slowest Tests ===" >> "$DURATIONS_LOG"
-grep "slowest durations" -A 25 "$TELEMETRY_LOG" >> "$DURATIONS_LOG" 2>/dev/null || echo "No duration data captured" >> "$DURATIONS_LOG"
+# Log files for each chunk
+L1="$TELEMETRY_DIR/chunk1-services-${TIMESTAMP}.log"
+L2="$TELEMETRY_DIR/chunk2-auth-${TIMESTAMP}.log"
+L3="$TELEMETRY_DIR/chunk3-storage-wiki-${TIMESTAMP}.log"
+L4="$TELEMETRY_DIR/chunk4-web-repos-routers-${TIMESTAMP}.log"
+L5="$TELEMETRY_DIR/chunk5-rest-${TIMESTAMP}.log"
+L6="$TELEMETRY_DIR/chunk6-rest2-${TIMESTAMP}.log"
 
-# Check for failures in log
+# Cleanup temp dirs on exit
+trap 'rm -rf "$D1" "$D2" "$D3" "$D4" "$D5" "$D6"' EXIT
+
+WALL_START=$(date +%s)
+
+# Launch all 6 chunks in parallel
+CIDX_SERVER_DATA_DIR="$D1" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+    python3 -m pytest tests/unit/server/services/ "${PYTEST_COMMON_OPTS[@]}" \
+    >"$L1" 2>&1 &
+PID1=$!
+
+CIDX_SERVER_DATA_DIR="$D2" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+    python3 -m pytest tests/unit/server/auth/ "${PYTEST_COMMON_OPTS[@]}" \
+    >"$L2" 2>&1 &
+PID2=$!
+
+CIDX_SERVER_DATA_DIR="$D3" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+    python3 -m pytest tests/unit/server/storage/ tests/unit/server/wiki/ "${PYTEST_COMMON_OPTS[@]}" \
+    >"$L3" 2>&1 &
+PID3=$!
+
+CIDX_SERVER_DATA_DIR="$D4" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+    python3 -m pytest tests/unit/server/web/ tests/unit/server/repositories/ tests/unit/server/routers/ "${PYTEST_COMMON_OPTS[@]}" \
+    >"$L4" 2>&1 &
+PID4=$!
+
+CIDX_SERVER_DATA_DIR="$D5" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+    python3 -m pytest tests/unit/server/mcp/ tests/unit/server/telemetry/ tests/unit/server/handlers/ \
+    "${PYTEST_COMMON_OPTS[@]}" \
+    >"$L5" 2>&1 &
+PID5=$!
+
+CIDX_SERVER_DATA_DIR="$D6" CIDX_TEST_FAST_SQLITE=1 PYTHONPATH="$PYPATH" \
+    python3 -m pytest tests/unit/server/ \
+    --ignore=tests/unit/server/services/ \
+    --ignore=tests/unit/server/auth/ \
+    --ignore=tests/unit/server/storage/ \
+    --ignore=tests/unit/server/wiki/ \
+    --ignore=tests/unit/server/web/ \
+    --ignore=tests/unit/server/repositories/ \
+    --ignore=tests/unit/server/routers/ \
+    --ignore=tests/unit/server/mcp/ \
+    --ignore=tests/unit/server/telemetry/ \
+    --ignore=tests/unit/server/handlers/ \
+    "${PYTEST_COMMON_OPTS[@]}" \
+    >"$L6" 2>&1 &
+PID6=$!
+
+# Wait for all chunks and collect exit codes.
+# Use && ... || Cn=$? pattern: with set -e, plain `wait; Cn=$?` would abort
+# the script before Cn=$? runs if wait returns non-zero. The && ... || pattern
+# is exempt from set -e triggering (bash spec: && and || chains don't trigger ERR).
+wait $PID1 && C1=0 || C1=$?
+wait $PID2 && C2=0 || C2=$?
+wait $PID3 && C3=0 || C3=$?
+wait $PID4 && C4=0 || C4=$?
+wait $PID5 && C5=0 || C5=$?
+wait $PID6 && C6=0 || C6=$?
+
+WALL_END=$(date +%s)
+WALL_SECS=$((WALL_END - WALL_START))
+
+TEST_EXIT_CODE=$(( C1 | C2 | C3 | C4 | C5 | C6 ))
+
+# Report per-chunk results
+echo ""
+echo "=== Chunk Results (wall time: ${WALL_SECS}s) ==="
+for i in 1 2 3 4 5 6; do
+    eval "code=\$C$i"
+    eval "log=\$L$i"
+    # Extract summary line from log
+    summary=$(grep -E "passed|failed|error" "$log" | tail -1 || echo "no output")
+    if [ "$code" -eq 0 ]; then
+        echo "  Chunk $i: PASS — $summary"
+    else
+        echo "  Chunk $i: FAIL (exit $code) — $summary"
+    fi
+done
+
 if [ $TEST_EXIT_CODE -eq 0 ]; then
-    print_success "Server unit tests passed"
-    echo "📊 Telemetry saved to: $TELEMETRY_LOG"
-    echo "⏱️  Duration report: $DURATIONS_LOG"
+    print_success "Server unit tests passed (${WALL_SECS}s wall time)"
 else
-    print_error "Server unit tests failed (exit code: $TEST_EXIT_CODE)"
-    echo "📊 Failure telemetry saved to: $TELEMETRY_LOG"
-    echo "⏱️  Check $DURATIONS_LOG for slow/hanging tests"
-
-    # Show failure summary
+    print_error "Server unit tests FAILED"
     echo ""
-    echo "=== Failure Summary ==="
-    grep -E "failed.*passed|ERROR" "$TELEMETRY_LOG" | tail -5
+    echo "=== Failing chunk details ==="
+    for i in 1 2 3 4 5 6; do
+        eval "code=\$C$i"
+        eval "log=\$L$i"
+        if [ "$code" -ne 0 ]; then
+            echo ""
+            echo "--- Chunk $i failures ---"
+            grep -E "FAILED|ERROR" "$log" | head -20
+        fi
+    done
+    echo ""
+    echo "Full logs: $TELEMETRY_DIR/chunk*-${TIMESTAMP}.log"
     exit 1
 fi
 

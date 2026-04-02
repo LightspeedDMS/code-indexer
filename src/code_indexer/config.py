@@ -141,6 +141,22 @@ class CohereConfig(BaseModel):
     max_retries: int = 3
     retry_delay: float = 1.0
 
+    # Parallel processing configuration (mirrors VoyageAIConfig)
+    parallel_requests: int = Field(
+        default=8, description="Number of concurrent requests to Cohere API"
+    )
+    batch_size: int = Field(
+        default=96,
+        description="Maximum number of texts to send in a single batch request",
+    )
+    max_concurrent_batches_per_commit: int = Field(
+        default=10,
+        description="Maximum number of batches a single commit can have in-flight simultaneously (prevents monopolization)",
+    )
+    exponential_backoff: bool = Field(
+        default=True, description="Use exponential backoff for retries"
+    )
+
 
 class IndexingConfig(BaseModel):
     """Configuration for indexing behavior."""

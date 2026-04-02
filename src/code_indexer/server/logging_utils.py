@@ -14,7 +14,6 @@ Usage:
 """
 
 from typing import Any, Dict
-from code_indexer.server.middleware.correlation import get_correlation_id
 
 
 # Sensitive field names that should be redacted in logs
@@ -78,6 +77,8 @@ def get_log_extra(error_code: str) -> Dict[str, Any]:
             extra=get_log_extra("APP-GENERAL-002")
         )
     """
+    from code_indexer.server.middleware.correlation import get_correlation_id
+
     extra: Dict[str, Any] = {"error_code": error_code}
 
     # Add correlation_id if available

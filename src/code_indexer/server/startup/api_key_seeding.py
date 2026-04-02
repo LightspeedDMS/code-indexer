@@ -78,6 +78,7 @@ def seed_api_keys_on_startup(
             os.environ["VOYAGE_API_KEY"] = (
                 config.claude_integration_config.voyageai_api_key
             )
+            result["voyageai_seeded"] = True
             logger.info(
                 "Synced VoyageAI API key from server config to process environment"
             )

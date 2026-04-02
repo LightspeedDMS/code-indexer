@@ -194,3 +194,4 @@ coverage.json
 .local-testing
 /reports/manual-testing
 /reports/test-debug
+/.claude/worktrees

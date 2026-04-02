@@ -9,45 +9,64 @@ server services, returning them as a dict for use by create_app().
 import atexit
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
-# Bug #567: Module-level reference to PostgreSQL connection pool for atexit cleanup.
-# When pytest crashes or is killed, atexit handlers run and close the pool,
-# preventing idle connection accumulation that exhausts max_connections.
-_postgres_pool_for_cleanup: Optional[Any] = None
+# Bug #567 / fix: Track ALL PostgreSQL connection pools for atexit cleanup.
+# Previously used a singleton (Optional[Any]) that was overwritten on each
+# TestClient(app) creation — only the last pool was ever closed, leaving
+# 200+ idle connections to exhaust max_connections during test runs.
+# Now uses a list so every pool registered across all app startups is closed.
+_postgres_pools_for_cleanup: List[Any] = []
+_postgres_pools_lock = threading.Lock()
 
 
-def _cleanup_postgres_pool() -> None:
-    """Close the PostgreSQL connection pool on process exit (Bug #567).
+def _cleanup_postgres_pools() -> None:
+    """Close all PostgreSQL connection pools on process exit (Bug #567).
 
-    Registered via atexit to ensure connections are released even when
-    the process is killed or pytest crashes mid-run.
+    Registered once at module import via atexit. Closes every pool accumulated
+    across all TestClient(app) startups so no idle connections are leaked.
     """
-    global _postgres_pool_for_cleanup
-    if _postgres_pool_for_cleanup is not None:
+    with _postgres_pools_lock:
+        pools = list(_postgres_pools_for_cleanup)
+        _postgres_pools_for_cleanup.clear()
+    for pool in pools:
         try:
-            _postgres_pool_for_cleanup.close()
-        except Exception:
-            pass  # Best-effort cleanup on exit
-        _postgres_pool_for_cleanup = None
+            pool.close()
+        except Exception as exc:
+            logger.warning("Failed to close PostgreSQL pool during atexit: %s", exc)
+
+
+# Register the cleanup handler exactly once at module import time.
+# All pools are accumulated in the list; the single handler drains them all.
+atexit.register(_cleanup_postgres_pools)
 
 
 def register_postgres_pool_atexit_cleanup(pool: Any) -> None:
     """Register a PostgreSQL connection pool for atexit cleanup (Bug #567).
 
+    Appends pool to the shared cleanup list. The atexit handler is already
+    registered at module import time and will close all accumulated pools.
+
     Args:
-        pool: ConnectionPool instance to close on process exit.
+        pool: Non-None ConnectionPool instance with a close() method.
+
+    Raises:
+        ValueError: If pool is None or does not have a close() method.
     """
-    global _postgres_pool_for_cleanup
-    _postgres_pool_for_cleanup = pool
-    atexit.register(_cleanup_postgres_pool)
+    if pool is None or not hasattr(pool, "close"):
+        raise ValueError(
+            "pool must be a non-None object with a close() method, got: %r" % pool
+        )
+    with _postgres_pools_lock:
+        _postgres_pools_for_cleanup.append(pool)
 
 
 def initialize_services() -> Dict[str, Any]:
@@ -348,18 +367,18 @@ def initialize_services() -> Dict[str, Any]:
         data_dir=data_dir,
         resource_config=server_config.resource_config,
         db_path=db_path_str,
-        storage_backend=_backend_registry.golden_repo_metadata
-        if _backend_registry
-        else None,
+        storage_backend=(
+            _backend_registry.golden_repo_metadata if _backend_registry else None
+        ),
     )
     # Story #311: Instantiate JobTracker before BackgroundJobManager (Epic #261 Story 1B)
     from code_indexer.server.services.job_tracker import JobTracker as _JobTracker
 
     job_tracker = _JobTracker(
         db_path_str,
-        storage_backend=_backend_registry.background_jobs
-        if _backend_registry
-        else None,
+        storage_backend=(
+            _backend_registry.background_jobs if _backend_registry else None
+        ),
     )
     job_tracker.cleanup_orphaned_jobs_on_startup()
 
@@ -383,9 +402,9 @@ def initialize_services() -> Dict[str, Any]:
         background_jobs_config=server_config.background_jobs_config,
         job_tracker=job_tracker,
         data_retention_config=server_config.data_retention_config,
-        storage_backend=_backend_registry.background_jobs
-        if _backend_registry
-        else None,
+        storage_backend=(
+            _backend_registry.background_jobs if _backend_registry else None
+        ),
     )
     # Inject BackgroundJobManager into GoldenRepoManager for async operations
     golden_repo_manager.background_job_manager = background_job_manager
@@ -442,9 +461,9 @@ def initialize_services() -> Dict[str, Any]:
     repo_category_service = RepoCategoryService(
         db_path_str,
         storage_backend=_backend_registry.repo_category if _backend_registry else None,
-        golden_repo_backend=_backend_registry.golden_repo_metadata
-        if _backend_registry
-        else None,
+        golden_repo_backend=(
+            _backend_registry.golden_repo_metadata if _backend_registry else None
+        ),
     )
 
     # Wire RepoCategoryService to REST API router (Story #182)

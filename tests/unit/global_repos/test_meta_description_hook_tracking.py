@@ -24,7 +24,8 @@ def temp_db(tmp_path):
     import sqlite3
 
     conn = sqlite3.connect(str(db_path))
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS description_refresh_tracking (
             repo_alias TEXT PRIMARY KEY,
             last_run TEXT,
@@ -37,7 +38,8 @@ def temp_db(tmp_path):
             created_at TEXT,
             updated_at TEXT
         )
-    """)
+    """
+    )
     conn.commit()
     conn.close()
 

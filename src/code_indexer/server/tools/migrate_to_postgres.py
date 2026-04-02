@@ -361,9 +361,7 @@ class SqliteToPostgresMigrator:
                 pg_count: Optional[int] = None
                 try:
                     with pg_conn.cursor() as cur:
-                        cur.execute(
-                            f"SELECT COUNT(*) FROM {table_name}"  # noqa: S608
-                        )
+                        cur.execute(f"SELECT COUNT(*) FROM {table_name}")  # noqa: S608
                         row = cur.fetchone()
                         pg_count = row[0] if row else 0
                 except Exception as exc:

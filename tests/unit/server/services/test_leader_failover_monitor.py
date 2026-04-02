@@ -271,8 +271,8 @@ def test_on_lose_leadership_callback_fired_on_connection_loss():
     dead_cur.execute.side_effect = Exception("connection lost")
     dead_conn.cursor.return_value = dead_cur
 
-    # Inject "already leader" state
-    election._is_leader = True
+    # Inject "already leader" state (use the threading.Event, not a plain bool)
+    election._is_leader_event.set()
     election._lock_conn = dead_conn
 
     lose_event = threading.Event()

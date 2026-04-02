@@ -265,7 +265,7 @@ class TestScanRecordManagement:
             assert row[0] == scanner.scan_id
             assert row[1] == "RUNNING"
             assert row[2] == 100  # log_id_start
-            assert row[3] is None  # log_id_end (not set yet)
+            assert row[3] == 100  # log_id_end initialized to log_id_start value
             assert row[4] == 0  # issues_created
         finally:
             conn.close()
@@ -741,6 +741,8 @@ class TestExecuteScan:
                     ("scan-fail",),
                 ).fetchone()
                 assert row[0] == "FAILURE"
-                assert row[1] is None  # log_id_end NOT advanced on failure
+                assert (
+                    row[1] == 0
+                )  # log_id_end initialized to log_id_start (0), not advanced on failure
             finally:
                 conn.close()

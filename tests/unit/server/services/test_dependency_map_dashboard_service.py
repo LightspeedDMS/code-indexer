@@ -996,8 +996,8 @@ class TestRepoCoverageAccessFiltering:
             ],
             stored_hashes={"repo-1": "h1", "old-repo": "old"},
         )
-        service._current_commits_provider = (
-            lambda alias: "h1" if alias == "repo-1" else None
+        service._current_commits_provider = lambda alias: (
+            "h1" if alias == "repo-1" else None
         )
 
         result = service.get_repo_coverage(accessible_repos={"repo-1"})

@@ -33,6 +33,8 @@ from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.e2e
 class TestTokenRefreshRealComponents:

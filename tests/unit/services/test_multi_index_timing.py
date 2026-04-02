@@ -30,7 +30,9 @@ class TestMultiIndexTiming:
     @pytest.fixture
     def mock_embedding_provider(self):
         """Create mock embedding provider."""
-        return Mock()
+        provider = Mock()
+        provider.get_current_model.return_value = "voyage-code-3"
+        return provider
 
     @pytest.fixture
     def service(self, mock_project_root, mock_vector_store, mock_embedding_provider):

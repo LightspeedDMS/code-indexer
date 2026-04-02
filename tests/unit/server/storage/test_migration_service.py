@@ -539,9 +539,10 @@ class TestBackgroundJobsMigration:
         # Run second migration
         result2 = service.migrate_background_jobs()
 
-        # Second run should report already exists due to IntegrityError
-        assert result2["already_exists"] == 1
-        assert result2["migrated"] == 0
+        # Second run: save_job uses INSERT OR IGNORE, so duplicates are
+        # silently ignored (migrated increments, no IntegrityError raised)
+        assert result2["already_exists"] == 0
+        assert result2["migrated"] == 1
         assert result2["errors"] == 0
 
         # Should still have exactly 1 job (not duplicated)

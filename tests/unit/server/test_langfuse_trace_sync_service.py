@@ -1032,7 +1032,7 @@ class TestTwoPhaseHashCheck:
                     "content_hash": "hash123",
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Create the trace file on disk so the file existence check passes
             folder = service._get_trace_folder("test-project", trace)
@@ -1041,13 +1041,13 @@ class TestTwoPhaseHashCheck:
             trace_file.write_text('{"trace": {}, "observations": []}')
 
             # Process trace - should skip fetch
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
 
             # fetch_observations should NOT be called
             mock_api_client.fetch_observations.assert_not_called()
-            assert metrics.traces_unchanged == 1
+            assert result.metric_unchanged == 1
 
     def test_fetch_when_updated_at_changed(self):
         """Should fetch observations when updatedAt differs."""
@@ -1066,12 +1066,10 @@ class TestTwoPhaseHashCheck:
                     "content_hash": "hash123",
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Process trace - should fetch
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
-            )
+            service._process_trace(mock_api_client, trace, "test-project", trace_hashes)
 
             # fetch_observations SHOULD be called
             mock_api_client.fetch_observations.assert_called_once_with("t1")
@@ -1088,11 +1086,9 @@ class TestTwoPhaseHashCheck:
 
             trace = {"id": "t_new", "updatedAt": "2024-01-01T00:00:00+00:00"}
             trace_hashes = {}  # Empty - new trace
-            metrics = SyncMetrics()
+            SyncMetrics()
 
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
-            )
+            service._process_trace(mock_api_client, trace, "test-project", trace_hashes)
 
             # Should fetch for new trace
             mock_api_client.fetch_observations.assert_called_once_with("t_new")
@@ -1121,7 +1117,7 @@ class TestTwoPhaseHashCheck:
                     "content_hash": expected_hash,  # Same content hash
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Create the trace file on disk so the file existence check passes in Phase 2
             folder = service._get_trace_folder("test-project", trace)
@@ -1129,14 +1125,16 @@ class TestTwoPhaseHashCheck:
             trace_file = folder / "t1.json"
             trace_file.write_text('{"trace": {}, "observations": []}')
 
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
+            if result.hash_update is not None:
+                trace_hashes[result.trace_id] = result.hash_update
 
             # updatedAt should be updated
             assert trace_hashes["t1"]["updated_at"] == "2024-01-02T00:00:00+00:00"
             assert trace_hashes["t1"]["content_hash"] == expected_hash
-            assert metrics.traces_unchanged == 1
+            assert result.metric_unchanged == 1
 
     def test_process_trace_rewrites_when_file_missing(self):
         """Test that _process_trace re-writes trace when file is missing from disk despite hash match.
@@ -1168,12 +1166,15 @@ class TestTwoPhaseHashCheck:
                 }
             }
 
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Phase 1: should write to STAGING as {trace_id}.json and return 6-tuple metadata
-            rename_info = service._process_trace(
-                mock_api_client, trace, "TestProject", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "TestProject", trace_hashes
             )
+            rename_info = result.rename_info
+            if result.hash_update is not None:
+                trace_hashes[result.trace_id] = result.hash_update
 
             # Verify temp file was written to STAGING (not destination)
             staging_folder = service._get_staging_dir("TestProject", trace)
@@ -1204,11 +1205,9 @@ class TestTwoPhaseHashCheck:
             )
 
             # Should be counted as updated (not new, not unchanged)
-            assert metrics.traces_written_new == 0  # Not "new" - trace was in hashes
-            assert (
-                metrics.traces_written_updated == 1
-            )  # Re-written because file was missing
-            assert metrics.traces_unchanged == 0  # Should NOT be unchanged
+            assert result.metric_new == 0  # Not "new" - trace was in hashes
+            assert result.metric_updated == 1  # Re-written because file was missing
+            assert result.metric_unchanged == 0  # Should NOT be unchanged
 
 
 class TestSequentialNaming:
@@ -1232,12 +1231,15 @@ class TestSequentialNaming:
                 "sessionId": "test_session",
             }
             trace_hashes = {}
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Phase 1: Process trace (writes temp file, returns rename metadata)
-            rename_info = service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
+            rename_info = result.rename_info
+            if result.hash_update is not None:
+                trace_hashes[result.trace_id] = result.hash_update
 
             # Phase 2: Assign sequential names
             if rename_info:
@@ -1270,12 +1272,15 @@ class TestSequentialNaming:
                 "sessionId": "test_session",
             }
             trace_hashes = {}
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Phase 1 and 2
-            rename_info = service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
+            rename_info = result.rename_info
+            if result.hash_update is not None:
+                trace_hashes[result.trace_id] = result.hash_update
             if rename_info:
                 service._finalize_trace_files([rename_info], trace_hashes)
 
@@ -1295,7 +1300,7 @@ class TestSequentialNaming:
             mock_api_client.fetch_observations.return_value = []
 
             trace_hashes = {}
-            metrics = SyncMetrics()
+            SyncMetrics()
             pending_renames = []
 
             for i, suffix in enumerate(["aaaa1111", "bbbb2222", "cccc3333"]):
@@ -1306,9 +1311,10 @@ class TestSequentialNaming:
                     "userId": "test_user",
                     "sessionId": "test_session",
                 }
-                rename_info = service._process_trace(
-                    mock_api_client, trace, "test-project", trace_hashes, metrics
+                result = service._process_trace(
+                    mock_api_client, trace, "test-project", trace_hashes
                 )
+                rename_info = result.rename_info
                 if rename_info:
                     pending_renames.append(rename_info)
 
@@ -1344,12 +1350,15 @@ class TestSequentialNaming:
                 "sessionId": "test_session",
             }
             trace_hashes = {}
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Initial trace: Phase 1 + 2
-            rename_info = service._process_trace(
-                mock_api_client, trace_v1, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace_v1, "test-project", trace_hashes
             )
+            rename_info = result.rename_info
+            if result.hash_update is not None:
+                trace_hashes[result.trace_id] = result.hash_update
             if rename_info:
                 service._finalize_trace_files([rename_info], trace_hashes)
 
@@ -1364,11 +1373,13 @@ class TestSequentialNaming:
             trace_v2 = dict(trace_v1)
             trace_v2["updatedAt"] = "2024-01-02T00:00:00+00:00"
 
-            rename_info2 = service._process_trace(
-                mock_api_client, trace_v2, "test-project", trace_hashes, metrics
+            result2 = service._process_trace(
+                mock_api_client, trace_v2, "test-project", trace_hashes
             )
+            if result2.hash_update is not None:
+                trace_hashes[result2.trace_id] = result2.hash_update
             assert (
-                rename_info2 is None
+                result2.rename_info is None
             )  # No rename needed - already has stored_filename
 
             assert trace_hashes[trace_id]["filename"] == original_filename
@@ -1402,14 +1413,14 @@ class TestSequentialNaming:
                     "filename": filename,
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
 
             assert trace_hashes["trace-xyz-99887766"]["filename"] == filename
-            assert metrics.traces_unchanged == 1
+            assert result.metric_unchanged == 1
 
 
 class TestChronologicalTraceOrdering:
@@ -2228,12 +2239,12 @@ class TestMigrationFromOldNaming:
                     "content_hash": "somehash",
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
-            assert metrics.traces_unchanged == 1
+            assert result.metric_unchanged == 1
 
     def test_old_trace_migrates_on_content_change(self):
         """Old trace without filename gets new sequential name when content changes.
@@ -2267,12 +2278,13 @@ class TestMigrationFromOldNaming:
                     "content_hash": "old_hash",
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
             # Phase 1: Process trace (writes to staging, returns 6-tuple metadata)
-            rename_info = service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
+            rename_info = result.rename_info
 
             # Verify staging file exists
             staging_folder = service._get_staging_dir("test-project", trace)
@@ -2293,7 +2305,7 @@ class TestMigrationFromOldNaming:
             assert not (staging_folder / f"{trace['id']}.json").exists(), (
                 "Staging file should be moved"
             )
-            assert metrics.traces_written_updated == 1
+            assert result.metric_updated == 1
 
     def test_old_trace_unchanged_leaves_old_file_alone(self):
         """Old trace file should be left as-is if content hasn't changed."""
@@ -2320,14 +2332,14 @@ class TestMigrationFromOldNaming:
                     "content_hash": "somehash",
                 }
             }
-            metrics = SyncMetrics()
+            SyncMetrics()
 
-            service._process_trace(
-                mock_api_client, trace, "test-project", trace_hashes, metrics
+            result = service._process_trace(
+                mock_api_client, trace, "test-project", trace_hashes
             )
 
             assert old_file.exists()
-            assert metrics.traces_unchanged == 1
+            assert result.metric_unchanged == 1
 
 
 # ==============================================================================

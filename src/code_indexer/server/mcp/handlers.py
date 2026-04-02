@@ -1366,6 +1366,8 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     # Query strategy parameters (Story #488 Phase 4)
                     query_strategy=params.get("query_strategy"),
                     score_fusion=params.get("score_fusion"),
+                    # Multi-provider routing (Story #593)
+                    preferred_provider=params.get("preferred_provider"),
                 )
                 execution_time_ms = int((time.time() - start_time) * 1000)
                 timeout_occurred = False
@@ -1531,6 +1533,8 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Query strategy parameters (Story #488 Phase 4)
             query_strategy=params.get("query_strategy"),
             score_fusion=params.get("score_fusion"),
+            # Multi-provider routing (Story #593)
+            preferred_provider=params.get("preferred_provider"),
         )
 
         # Story #182: Load category map for result enrichment (activated repos)

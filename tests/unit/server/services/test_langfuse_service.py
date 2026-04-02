@@ -21,16 +21,16 @@ from code_indexer.server.utils.config_manager import (  # noqa: E402
 
 
 @pytest.fixture
-def mock_config_manager():
-    """Create a mock config manager."""
+def mock_config_service():
+    """Create a mock config service."""
     manager = Mock()
     return manager
 
 
 @pytest.fixture
-def langfuse_service(mock_config_manager):
+def langfuse_service(mock_config_service):
     """Create a LangfuseService instance."""
-    return LangfuseService(mock_config_manager)
+    return LangfuseService(mock_config_service)
 
 
 @pytest.fixture(autouse=True)
@@ -44,10 +44,10 @@ def reset_singleton():
 class TestLangfuseServiceInit:
     """Tests for LangfuseService initialization."""
 
-    def test_init_stores_config_manager(self, mock_config_manager):
-        """Test that init stores the config manager."""
-        service = LangfuseService(mock_config_manager)
-        assert service._config_manager is mock_config_manager
+    def test_init_stores_config_service(self, mock_config_service):
+        """Test that init stores the config service."""
+        service = LangfuseService(mock_config_service)
+        assert service._config_service is mock_config_service
 
     def test_init_components_are_none(self, langfuse_service):
         """Test that components start as None (lazy init)."""
@@ -60,7 +60,7 @@ class TestIsEnabled:
     """Tests for is_enabled method."""
 
     def test_is_enabled_when_config_exists_and_enabled(
-        self, langfuse_service, mock_config_manager
+        self, langfuse_service, mock_config_service
     ):
         """Test is_enabled returns True when config exists and enabled."""
         config = Mock(spec=ServerConfig)
@@ -70,12 +70,12 @@ class TestIsEnabled:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         assert langfuse_service.is_enabled() is True
 
     def test_is_enabled_when_config_exists_but_disabled(
-        self, langfuse_service, mock_config_manager
+        self, langfuse_service, mock_config_service
     ):
         """Test is_enabled returns False when config disabled."""
         config = Mock(spec=ServerConfig)
@@ -85,25 +85,25 @@ class TestIsEnabled:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         assert langfuse_service.is_enabled() is False
 
     def test_is_enabled_when_no_langfuse_config(
-        self, langfuse_service, mock_config_manager
+        self, langfuse_service, mock_config_service
     ):
         """Test is_enabled returns False when no langfuse config."""
         config = Mock(spec=ServerConfig)
         config.langfuse_config = None
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         assert langfuse_service.is_enabled() is False
 
     def test_is_enabled_when_no_config_at_all(
-        self, langfuse_service, mock_config_manager
+        self, langfuse_service, mock_config_service
     ):
         """Test is_enabled returns False when config is None."""
-        mock_config_manager.load_config.return_value = None
+        mock_config_service.get_config.return_value = None
 
         assert langfuse_service.is_enabled() is False
 
@@ -113,7 +113,7 @@ class TestClientProperty:
 
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_client_lazy_initialization(
-        self, mock_client_class, langfuse_service, mock_config_manager
+        self, mock_client_class, langfuse_service, mock_config_service
     ):
         """Test that client is lazily initialized on first access."""
         config = Mock(spec=ServerConfig)
@@ -124,7 +124,7 @@ class TestClientProperty:
             host="https://example.com",
         )
         config.langfuse_config = langfuse_config
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_instance = Mock()
         mock_client_class.return_value = mock_client_instance
@@ -137,7 +137,7 @@ class TestClientProperty:
 
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_client_returns_same_instance(
-        self, mock_client_class, langfuse_service, mock_config_manager
+        self, mock_client_class, langfuse_service, mock_config_service
     ):
         """Test that subsequent accesses return the same client instance."""
         config = Mock(spec=ServerConfig)
@@ -148,7 +148,7 @@ class TestClientProperty:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_instance = Mock()
         mock_client_class.return_value = mock_client_instance
@@ -171,7 +171,7 @@ class TestTraceManagerProperty:
         mock_client_class,
         mock_trace_manager_class,
         langfuse_service,
-        mock_config_manager,
+        mock_config_service,
     ):
         """Test that trace_manager is lazily initialized on first access."""
         config = Mock(spec=ServerConfig)
@@ -181,7 +181,7 @@ class TestTraceManagerProperty:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client = Mock()
         mock_client_class.return_value = mock_client
@@ -202,7 +202,7 @@ class TestTraceManagerProperty:
         mock_client_class,
         mock_trace_manager_class,
         langfuse_service,
-        mock_config_manager,
+        mock_config_service,
     ):
         """Test that subsequent accesses return same trace_manager."""
         config = Mock(spec=ServerConfig)
@@ -212,7 +212,7 @@ class TestTraceManagerProperty:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_class.return_value = Mock()
         mock_trace_manager_class.return_value = Mock()
@@ -237,7 +237,7 @@ class TestSpanLoggerProperty:
         mock_trace_manager_class,
         mock_span_logger_class,
         langfuse_service,
-        mock_config_manager,
+        mock_config_service,
     ):
         """Test that span_logger is lazily initialized on first access."""
         config = Mock(spec=ServerConfig)
@@ -247,7 +247,7 @@ class TestSpanLoggerProperty:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client = Mock()
         mock_client_class.return_value = mock_client
@@ -276,7 +276,7 @@ class TestSpanLoggerProperty:
         mock_trace_manager_class,
         mock_span_logger_class,
         langfuse_service,
-        mock_config_manager,
+        mock_config_service,
     ):
         """Test that subsequent accesses return same span_logger."""
         config = Mock(spec=ServerConfig)
@@ -286,7 +286,7 @@ class TestSpanLoggerProperty:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_class.return_value = Mock()
         mock_trace_manager_class.return_value = Mock()
@@ -305,7 +305,7 @@ class TestEagerInitialize:
 
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_eager_initialize_calls_client_eager_initialize(
-        self, mock_client_class, langfuse_service, mock_config_manager
+        self, mock_client_class, langfuse_service, mock_config_service
     ):
         """
         LangfuseService.eager_initialize() must call client.eager_initialize()
@@ -320,7 +320,7 @@ class TestEagerInitialize:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_instance = Mock()
         mock_client_class.return_value = mock_client_instance
@@ -331,7 +331,7 @@ class TestEagerInitialize:
 
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_eager_initialize_does_not_raise_on_client_failure(
-        self, mock_client_class, langfuse_service, mock_config_manager
+        self, mock_client_class, langfuse_service, mock_config_service
     ):
         """
         If client.eager_initialize() raises, eager_initialize() must swallow
@@ -345,7 +345,7 @@ class TestEagerInitialize:
             secret_key="bad-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_instance = Mock()
         mock_client_instance.eager_initialize.side_effect = RuntimeError(
@@ -358,7 +358,7 @@ class TestEagerInitialize:
 
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_eager_initialize_initializes_client_first(
-        self, mock_client_class, langfuse_service, mock_config_manager
+        self, mock_client_class, langfuse_service, mock_config_service
     ):
         """
         eager_initialize() must first ensure the client is created
@@ -372,7 +372,7 @@ class TestEagerInitialize:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_instance = Mock()
         mock_client_class.return_value = mock_client_instance
@@ -410,14 +410,14 @@ class TestCleanupSession:
 class TestGetLangfuseService:
     """Tests for get_langfuse_service singleton."""
 
-    @patch("code_indexer.server.services.langfuse_service.ServerConfigManager")
+    @patch("code_indexer.server.services.config_service.get_config_service")
     @patch("code_indexer.server.services.langfuse_service.LangfuseService")
     def test_get_langfuse_service_creates_singleton(
-        self, mock_service_class, mock_config_manager_class
+        self, mock_service_class, mock_get_config_svc
     ):
         """Test that get_langfuse_service creates singleton on first call."""
-        mock_config_manager = Mock()
-        mock_config_manager_class.return_value = mock_config_manager
+        mock_config_service = Mock()
+        mock_get_config_svc.return_value = mock_config_service
 
         mock_service_instance = Mock()
         mock_service_class.return_value = mock_service_instance
@@ -425,16 +425,16 @@ class TestGetLangfuseService:
         service = get_langfuse_service()
 
         assert service is mock_service_instance
-        mock_service_class.assert_called_once_with(mock_config_manager)
+        mock_service_class.assert_called_once_with(mock_config_service)
 
-    @patch("code_indexer.server.services.langfuse_service.ServerConfigManager")
+    @patch("code_indexer.server.services.config_service.get_config_service")
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_get_langfuse_service_returns_same_instance(
-        self, mock_client_class, mock_config_manager_class
+        self, mock_client_class, mock_get_config_svc
     ):
         """Test that subsequent calls return the same singleton."""
-        mock_config_manager = Mock()
-        mock_config_manager_class.return_value = mock_config_manager
+        mock_config_service = Mock()
+        mock_get_config_svc.return_value = mock_config_service
         config = Mock(spec=ServerConfig)
         config.langfuse_config = LangfuseConfig(
             enabled=False,
@@ -442,7 +442,7 @@ class TestGetLangfuseService:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_class.return_value = Mock()
 
@@ -455,14 +455,14 @@ class TestGetLangfuseService:
 class TestResetLangfuseService:
     """Tests for reset_langfuse_service."""
 
-    @patch("code_indexer.server.services.langfuse_service.ServerConfigManager")
+    @patch("code_indexer.server.services.config_service.get_config_service")
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_reset_langfuse_service_clears_singleton(
-        self, mock_client_class, mock_config_manager_class
+        self, mock_client_class, mock_get_config_svc
     ):
         """Test that reset clears the singleton."""
-        mock_config_manager = Mock()
-        mock_config_manager_class.return_value = mock_config_manager
+        mock_config_service = Mock()
+        mock_get_config_svc.return_value = mock_config_service
         config = Mock(spec=ServerConfig)
         config.langfuse_config = LangfuseConfig(
             enabled=False,
@@ -470,7 +470,7 @@ class TestResetLangfuseService:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_class.return_value = Mock()
 
@@ -491,7 +491,7 @@ class TestThreadSafety:
 
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_concurrent_client_access_returns_same_instance(
-        self, mock_client_class, mock_config_manager
+        self, mock_client_class, mock_config_service
     ):
         """Test that concurrent access to client property is thread-safe."""
         config = Mock(spec=ServerConfig)
@@ -501,12 +501,12 @@ class TestThreadSafety:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_instance = Mock()
         mock_client_class.return_value = mock_client_instance
 
-        service = LangfuseService(mock_config_manager)
+        service = LangfuseService(mock_config_service)
 
         # Collect client instances from multiple threads
         results = []
@@ -528,7 +528,7 @@ class TestThreadSafety:
     @patch("code_indexer.server.services.langfuse_service.TraceStateManager")
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_concurrent_trace_manager_access_returns_same_instance(
-        self, mock_client_class, mock_trace_manager_class, mock_config_manager
+        self, mock_client_class, mock_trace_manager_class, mock_config_service
     ):
         """Test concurrent access to trace_manager is thread-safe."""
         config = Mock(spec=ServerConfig)
@@ -538,13 +538,13 @@ class TestThreadSafety:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_class.return_value = Mock()
         mock_trace_manager_instance = Mock()
         mock_trace_manager_class.return_value = mock_trace_manager_instance
 
-        service = LangfuseService(mock_config_manager)
+        service = LangfuseService(mock_config_service)
 
         results = []
 
@@ -562,14 +562,14 @@ class TestThreadSafety:
         # TraceStateManager should only be initialized once
         mock_trace_manager_class.assert_called_once()
 
-    @patch("code_indexer.server.services.langfuse_service.ServerConfigManager")
+    @patch("code_indexer.server.services.config_service.get_config_service")
     @patch("code_indexer.server.services.langfuse_service.LangfuseClient")
     def test_concurrent_singleton_access_returns_same_instance(
-        self, mock_client_class, mock_config_manager_class
+        self, mock_client_class, mock_get_config_svc
     ):
         """Test concurrent access to singleton is thread-safe."""
-        mock_config_manager = Mock()
-        mock_config_manager_class.return_value = mock_config_manager
+        mock_config_service = Mock()
+        mock_get_config_svc.return_value = mock_config_service
         config = Mock(spec=ServerConfig)
         config.langfuse_config = LangfuseConfig(
             enabled=False,
@@ -577,7 +577,7 @@ class TestThreadSafety:
             secret_key="test-secret",
             host="https://example.com",
         )
-        mock_config_manager.load_config.return_value = config
+        mock_config_service.get_config.return_value = config
 
         mock_client_class.return_value = Mock()
 

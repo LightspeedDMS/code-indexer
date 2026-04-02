@@ -162,7 +162,7 @@ class DiagnosticsService:
         self._cache_ttl = timedelta(minutes=10)
         self._running = False
         self._running_categories: set = set()
-        self._lock = asyncio.Lock()
+        self.__lock: Optional[asyncio.Lock] = None
         # Feedback cache: cache_key -> (timestamp, feedback_text)
         self._feedback_cache: Dict[str, Tuple[datetime, str]] = {}
         self._backend = storage_backend
@@ -181,6 +181,12 @@ class DiagnosticsService:
 
         # Load persisted results from database on initialization
         self._load_results_from_db()
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self.__lock is None:
+            self.__lock = asyncio.Lock()
+        return self.__lock
 
     def is_running(self) -> bool:
         """Check if any diagnostics are currently running."""
@@ -1788,9 +1794,9 @@ class DiagnosticsService:
                     status=DiagnosticStatus.WARNING,
                     message="GitHub token has invalid format (expected ghp_* or github_pat_*)",
                     details={
-                        "token_prefix": token_data.token[:10]
-                        if len(token_data.token) >= 10
-                        else ""
+                        "token_prefix": (
+                            token_data.token[:10] if len(token_data.token) >= 10 else ""
+                        )
                     },
                 )
 
@@ -1865,9 +1871,9 @@ class DiagnosticsService:
                     status=DiagnosticStatus.WARNING,
                     message="GitLab token has invalid format (expected glpat-*)",
                     details={
-                        "token_prefix": token_data.token[:10]
-                        if len(token_data.token) >= 10
-                        else ""
+                        "token_prefix": (
+                            token_data.token[:10] if len(token_data.token) >= 10 else ""
+                        )
                     },
                 )
 

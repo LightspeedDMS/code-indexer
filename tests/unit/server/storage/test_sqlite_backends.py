@@ -2331,7 +2331,8 @@ class TestGoldenRepoMetadataSqliteBackend:
 
         # Create a legacy table that is missing the new columns
         conn = sqlite3.connect(str(db_path))
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE golden_repos_metadata (
                 alias TEXT PRIMARY KEY NOT NULL,
                 repo_url TEXT NOT NULL,
@@ -2341,7 +2342,8 @@ class TestGoldenRepoMetadataSqliteBackend:
                 enable_temporal INTEGER NOT NULL DEFAULT 0,
                 temporal_options TEXT
             )
-        """)
+        """
+        )
         conn.commit()
         conn.close()
 

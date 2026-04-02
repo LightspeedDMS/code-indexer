@@ -405,6 +405,8 @@ class TestApiMetricsPostgresBackendProtocolSatisfaction:
     def test_postgres_backend_module_importable(self):
         """The postgres api_metrics_backend module must be importable without a live DB."""
         try:
-            from code_indexer.server.storage.postgres import api_metrics_backend  # noqa: F401
+            from code_indexer.server.storage.postgres import (
+                api_metrics_backend,  # noqa: F401
+            )
         except ImportError as exc:
             pytest.fail(f"Failed to import api_metrics_backend module: {exc}")

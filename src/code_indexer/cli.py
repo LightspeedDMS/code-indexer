@@ -1035,137 +1035,6 @@ def _display_semantic_results(
             console.print("─" * 50)
 
 
-def _raw_results_to_query_results(
-    raw_results: List[Dict[str, Any]], provider_name: str
-) -> List[Any]:
-    """Convert raw query results to QueryResult objects for score fusion."""
-    from code_indexer.services.query_strategy import QueryResult
-
-    return [
-        QueryResult(
-            file_path=r.get("payload", {}).get("path", ""),
-            score=r.get("score", 0.0),
-            content=r.get("payload", {}).get("content", ""),
-            chunk_id=str(r.get("id", "")),
-            metadata=r.get("payload", {}),
-            source_provider=provider_name,
-        )
-        for r in raw_results
-    ]
-
-
-def _query_results_to_raw(query_results: List[Any]) -> List[Dict[str, Any]]:
-    """Convert QueryResult objects back to raw result format."""
-    return [
-        {
-            "score": qr.score,
-            "id": qr.chunk_id,
-            "payload": {
-                "path": qr.file_path,
-                "content": qr.content,
-                **qr.metadata,
-            },
-        }
-        for qr in query_results
-    ]
-
-
-def _execute_strategy_query(
-    multi_index_service: Any,
-    secondary_multi_index_service: Any,
-    query: str,
-    limit: int,
-    collection_name: str,
-    secondary_collection_name: Optional[str],
-    filter_conditions: Any,
-    effective_strategy: str,
-    provider: Optional[str],
-    config: Any,
-    score_fusion: Optional[str],
-    secondary_provider_name_str: Optional[str],
-    quiet: bool,
-    console: "Console",
-) -> "tuple[List[Dict[str, Any]], Dict[str, Any]]":
-    """Execute query with strategy (failover/parallel/primary_only).
-
-    Returns (raw_results, search_timing_dict).
-    """
-    if effective_strategy == "failover" and secondary_multi_index_service:
-        try:
-            raw_results, timing = multi_index_service.query(
-                query_text=query,
-                limit=limit,
-                collection_name=collection_name,
-                filter_conditions=filter_conditions,
-            )
-            return raw_results, timing
-        except Exception as primary_err:
-            if not quiet:
-                console.print(
-                    f"[yellow]Primary provider failed, "
-                    f"failing over to {secondary_provider_name_str}[/yellow]"
-                )
-            logging.getLogger(__name__).warning(
-                "Primary query failed, failing over: %s", primary_err
-            )
-            raw_results, timing = secondary_multi_index_service.query(
-                query_text=query,
-                limit=limit,
-                collection_name=str(secondary_collection_name),
-                filter_conditions=filter_conditions,
-            )
-            return raw_results, timing
-    elif effective_strategy == "parallel" and secondary_multi_index_service:
-        import time as time_mod
-        from code_indexer.services.query_strategy import (
-            ScoreFusion,
-            execute_parallel_query,
-        )
-
-        parallel_start = time_mod.time()
-
-        def _primary_q() -> List[Any]:
-            r, _ = multi_index_service.query(
-                query_text=query,
-                limit=limit,
-                collection_name=collection_name,
-                filter_conditions=filter_conditions,
-            )
-            pname = provider or getattr(config, "embedding_provider", None) or "primary"
-            return _raw_results_to_query_results(r, pname)
-
-        def _secondary_q() -> List[Any]:
-            r, _ = secondary_multi_index_service.query(
-                query_text=query,
-                limit=limit,
-                collection_name=str(secondary_collection_name),
-                filter_conditions=filter_conditions,
-            )
-            return _raw_results_to_query_results(
-                r, secondary_provider_name_str or "secondary"
-            )
-
-        fusion_method = ScoreFusion(score_fusion or "rrf")
-        fused_results = execute_parallel_query(
-            _primary_q,
-            _secondary_q,
-            fusion=fusion_method,
-            limit=limit,
-        )
-        parallel_ms = (time_mod.time() - parallel_start) * 1000
-        raw_results = _query_results_to_raw(fused_results)
-        return raw_results, {"parallel_query_ms": parallel_ms}
-    else:
-        # primary_only / specific / no secondary available
-        raw_results, timing = multi_index_service.query(
-            query_text=query,
-            limit=limit,
-            collection_name=collection_name,
-            filter_conditions=filter_conditions,
-        )
-        return raw_results, timing
-
-
 def _execute_semantic_search(
     query: str,
     limit: int,
@@ -1179,9 +1048,6 @@ def _execute_semantic_search(
     project_root: Path,
     config_manager,
     console: Console,
-    provider_name: Optional[str] = None,
-    strategy: Optional[str] = None,
-    score_fusion: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Execute semantic search - extracted for parallel execution in hybrid mode.
 
@@ -1201,7 +1067,6 @@ def _execute_semantic_search(
         project_root: Project root directory
         config_manager: Configuration manager instance
         console: Rich console for output
-        provider_name: Optional embedding provider override
 
     Returns:
         List of semantic search results
@@ -1218,9 +1083,7 @@ def _execute_semantic_search(
         from .services.language_mapper import LanguageMapper
         from .services.multi_index_query_service import MultiIndexQueryService
 
-        embedding_provider = EmbeddingProviderFactory.create(
-            config, console, provider_name=provider_name
-        )
+        embedding_provider = EmbeddingProviderFactory.create(config, console)
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
@@ -1251,8 +1114,6 @@ def _execute_semantic_search(
         collection_name = vector_store_client.resolve_collection_name(
             config, embedding_provider
         )
-        vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
-
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
 
@@ -1998,11 +1859,6 @@ cli.add_command(keys_group)
 
 # Story #656: Register Remote index management commands (implemented in cli_index.py)
 cli.add_command(index_remote_group)
-
-# Story #490: Register provider-index commands (implemented in cli_provider_index.py)
-from .cli_provider_index import provider_index_group  # noqa: E402
-
-cli.add_command(provider_index_group)
 
 
 @cli.group("groups")
@@ -2912,18 +2768,6 @@ def show_global_config():
     help="Internal: Emit JSON progress lines to stdout instead of Rich progress bar. "
     "Used by the server's background worker to stream progress updates.",
 )
-@click.option(
-    "--provider",
-    type=click.Choice(["voyage-ai", "cohere"], case_sensitive=False),
-    default=None,
-    help="Embedding provider to use (default: from config)",
-)
-@click.option(
-    "--dual-embed",
-    is_flag=True,
-    default=False,
-    help="Index with both primary and secondary providers for redundancy",
-)
 @click.pass_context
 @require_mode("local")
 def index(
@@ -2943,8 +2787,6 @@ def index(
     since_date: Optional[str],
     diff_context: Optional[int],
     progress_json: bool = False,
-    provider: Optional[str] = None,
-    dual_embed: bool = False,
 ):
     """Index the codebase for semantic search.
 
@@ -3030,13 +2872,6 @@ def index(
     global console
     if progress_json:
         console = Console(stderr=True)
-
-    # Validate --dual-embed and --provider are mutually exclusive
-    if dual_embed and provider:
-        console.print(
-            "[red]Error: --provider and --dual-embed are mutually exclusive[/red]"
-        )
-        raise SystemExit(1)
 
     # Validate --diff-context flag (must happen before daemon delegation)
     if diff_context is not None and not index_commits:
@@ -3641,33 +3476,7 @@ def index(
         # Initialize services - lazy imports for index path
         from .services.smart_indexer import SmartIndexer
 
-        embedding_provider = EmbeddingProviderFactory.create(
-            config, console, provider_name=provider
-        )
-
-        # Dual-embed: create secondary provider if requested
-        secondary_provider_instance = None
-        if dual_embed:
-            secondary_name = config.secondary_provider or "cohere"
-            if secondary_name == config.embedding_provider:
-                console.print(
-                    f"[red]Error: Secondary provider '{secondary_name}' same as primary[/red]"
-                )
-                raise SystemExit(1)
-            try:
-                secondary_provider_instance = EmbeddingProviderFactory.create(
-                    config, console, provider_name=secondary_name
-                )
-                console.print(
-                    f"[dim]Dual-embed: {embedding_provider.get_provider_name()}"
-                    f" + {secondary_provider_instance.get_provider_name()}[/dim]"
-                )
-            except Exception as e:
-                console.print(
-                    f"[yellow]Warning: Secondary provider '{secondary_name}'"
-                    f" unavailable: {e}[/yellow]"
-                )
-
+        embedding_provider = EmbeddingProviderFactory.create(config, console)
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
@@ -3690,23 +3499,8 @@ def index(
             console.print(error_message, style="red")
             sys.exit(1)
 
-        # Initialize smart indexer with per-provider progressive metadata (Story #485)
-        # Each provider tracks its own indexing progress to avoid skipping files
-        active_prov_name = embedding_provider.get_provider_name()
-        default_prov_name = getattr(config, "embedding_provider", None)
-
-        def _pnorm(s: str) -> str:
-            return s.replace("-", "").replace("_", "").lower()
-
-        use_default_metadata = default_prov_name is not None and _pnorm(
-            active_prov_name
-        ) == _pnorm(default_prov_name)
-        metadata_filename = (
-            "metadata.json"
-            if use_default_metadata
-            else f"metadata-{active_prov_name}.json"
-        )
-        metadata_path = config_manager.config_path.parent / metadata_filename
+        # Initialize smart indexer with progressive metadata
+        metadata_path = config_manager.config_path.parent / "metadata.json"
         smart_indexer = SmartIndexer(
             config, embedding_provider, vector_store_client, metadata_path
         )
@@ -3721,11 +3515,7 @@ def index(
             console.print(f"📁 Non-git project: {git_status['project_id']}")
 
         # Use config.json setting directly
-        # Default matches VoyageAIConfig.parallel_requests default
-        if hasattr(config, "voyage_ai"):
-            thread_count = config.voyage_ai.parallel_requests
-        else:
-            thread_count = 8
+        thread_count = config.voyage_ai.parallel_requests
         console.print(
             f"🧵 Vector calculation threads: {thread_count} (from config.json)"
         )
@@ -4037,87 +3827,10 @@ def index(
                     progress_callback=progress_callback,
                     safety_buffer_seconds=60,  # 1-minute safety buffer
                     files_count_to_process=files_count_to_process,
-                    vector_thread_count=thread_count,
+                    vector_thread_count=config.voyage_ai.parallel_requests,
                     detect_deletions=detect_deletions,
                     enable_fts=fts,
                 )
-
-                # Dual-embed: second pass with secondary provider
-                if dual_embed and secondary_provider_instance is not None:
-                    sec_name = secondary_provider_instance.get_provider_name()
-                    if not progress_json:
-                        console.print(
-                            f"\n[bold]Dual-embed: indexing with {sec_name}...[/bold]"
-                        )
-                    gen = EmbeddingProviderFactory.generate_collection_name
-                    try:
-                        from .services.smart_indexer import (
-                            SmartIndexer as _SI,
-                        )
-
-                        # Per-provider metadata file
-                        sec_model = secondary_provider_instance.get_current_model()
-                        secondary_metadata_path = (
-                            config_manager.config_path.parent
-                            / f"metadata-{sec_name}.json"
-                        )
-                        # Secondary collection name
-                        secondary_collection = gen(
-                            base_name="code_index",
-                            provider_name=sec_name,
-                            model_name=sec_model,
-                        )
-                        secondary_indexer = _SI(
-                            config,
-                            secondary_provider_instance,
-                            vector_store_client,
-                            secondary_metadata_path,
-                        )
-                        # Override collection for secondary
-                        vector_store_client._current_collection_name = (
-                            secondary_collection
-                        )
-
-                        sec_cb = progress_callback if not progress_json else None
-                        secondary_stats = secondary_indexer.smart_index(
-                            force_full=clear,
-                            reconcile_with_database=reconcile,
-                            batch_size=batch_size,
-                            progress_callback=sec_cb,
-                            safety_buffer_seconds=60,
-                            files_count_to_process=(files_count_to_process),
-                            vector_thread_count=max(1, thread_count // 2),
-                            detect_deletions=detect_deletions,
-                            enable_fts=fts,
-                        )
-                        if not progress_json and secondary_stats:
-                            processed = secondary_stats.files_processed
-                            chunks = secondary_stats.chunks_created
-                            console.print(
-                                f"Secondary indexing:"
-                                f" {processed} files,"
-                                f" {chunks} chunks"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            "Secondary provider indexing failed (non-fatal): %s", e
-                        )
-                        if not progress_json:
-                            console.print(
-                                "[yellow]Secondary provider"
-                                " indexing failed"
-                                f" (non-fatal): {e}[/yellow]"
-                            )
-
-                    # Restore primary collection name
-                    pri_name = embedding_provider.get_provider_name()
-                    pri_model = embedding_provider.get_current_model()
-                    primary_collection = gen(
-                        base_name="code_index",
-                        provider_name=pri_name,
-                        model_name=pri_model,
-                    )
-                    vector_store_client._current_collection_name = primary_collection
 
                 # Show final completion state (if not interrupted)
                 if display_initialized and not handler.interrupted:
@@ -4308,20 +4021,8 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
                 )
                 sys.exit(1)
 
-            # Initialize SmartIndexer with per-provider metadata (Story #485)
-            active_pname = embedding_provider.get_provider_name()
-            default_prov = getattr(config, "embedding_provider", None)
-
-            def _norm(s: str) -> str:
-                return s.replace("-", "").replace("_", "").lower()
-
-            use_default_meta = default_prov is not None and _norm(
-                active_pname
-            ) == _norm(default_prov)
-            metadata_filename = (
-                "metadata.json" if use_default_meta else f"metadata-{active_pname}.json"
-            )
-            metadata_path = config_manager.config_path.parent / metadata_filename
+            # Initialize SmartIndexer (same as index command)
+            metadata_path = config_manager.config_path.parent / "metadata.json"
             smart_indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )
@@ -4826,27 +4527,6 @@ def display_temporal_results(results, temporal_service):
     help="Query multiple repositories (comma-separated aliases, e.g., 'repo1,repo2,repo3'). Remote mode only. Mutually exclusive with --repo.",
 )
 # --show-unchanged removed: Story 2 - all temporal results are changes now
-@click.option(
-    "--provider",
-    type=click.Choice(["voyage-ai", "cohere"], case_sensitive=False),
-    default=None,
-    help="Embedding provider to use (default: from config)",
-)
-@click.option(
-    "--strategy",
-    type=click.Choice(
-        ["primary_only", "failover", "parallel", "specific"], case_sensitive=False
-    ),
-    default=None,
-    help="Query strategy: primary_only (default), failover, parallel (score fusion), specific (use --provider)",
-)
-@click.option(
-    "--score-fusion",
-    "score_fusion",
-    type=click.Choice(["rrf", "multiply", "average"], case_sensitive=False),
-    default=None,
-    help="Score fusion method for --strategy parallel (default: rrf)",
-)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -4875,9 +4555,6 @@ def query(
     chunk_type: Optional[str],
     repo: Optional[str],
     repos: Optional[str],
-    provider: Optional[str] = None,
-    strategy: Optional[str] = None,
-    score_fusion: Optional[str] = None,
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -4961,24 +4638,6 @@ def query(
         )
         console.print(
             "  [cyan]cidx query 'refactor' --time-range 2024-01-01..2024-12-31 --chunk-type commit_diff[/cyan]"
-        )
-        sys.exit(1)
-
-    # Validate strategy/score-fusion combinations (Story #488)
-    if score_fusion and (not strategy or strategy.lower() != "parallel"):
-        console = Console()
-        console.print("[red]Error: --score-fusion requires --strategy parallel[/red]")
-        sys.exit(1)
-
-    if strategy and strategy.lower() == "specific" and not provider:
-        console = Console()
-        console.print("[red]Error: --strategy specific requires --provider[/red]")
-        sys.exit(1)
-
-    if strategy and fts and not semantic:
-        console = Console()
-        console.print(
-            "[red]Error: --strategy is for semantic queries, incompatible with FTS-only mode[/red]"
         )
         sys.exit(1)
 
@@ -5307,9 +4966,7 @@ def query(
             # Initialize vector store and embedding provider for temporal queries
             # Use the same pattern as regular query command
             config = config_manager.load()
-            embedding_provider = EmbeddingProviderFactory.create(
-                config, console, provider_name=provider
-            )
+            embedding_provider = EmbeddingProviderFactory.create(config, console)
             backend = BackendFactory.create(
                 config=config, project_root=Path(config.codebase_dir)
             )
@@ -5627,9 +5284,6 @@ def query(
                     project_root=project_root,
                     config_manager=ctx.obj["config_manager"],
                     console=console,
-                    provider_name=provider,
-                    strategy=strategy,
-                    score_fusion=score_fusion,
                 )
 
                 # Wait for BOTH to complete (parallel execution)
@@ -5965,9 +5619,7 @@ def query(
         from .services.language_validator import LanguageValidator
         from .services.language_mapper import LanguageMapper
 
-        embedding_provider = EmbeddingProviderFactory.create(
-            config, console, provider_name=provider
-        )
+        embedding_provider = EmbeddingProviderFactory.create(config, console)
         backend = BackendFactory.create(
             config=config, project_root=Path(config.codebase_dir)
         )
@@ -5999,103 +5651,8 @@ def query(
         collection_name = vector_store_client.resolve_collection_name(
             config, embedding_provider
         )
-        vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
-
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
-
-        # Strategy setup: prepare secondary provider if needed (Story #488)
-        import logging
-
-        effective_strategy = (strategy or "primary_only").lower()
-        secondary_multi_index_service = None
-        secondary_collection_name = None
-        secondary_provider_name_str = None
-
-        # Auto-routing: when enabled and no explicit strategy, select best provider (Story #491)
-        if not strategy and getattr(config, "auto_routing_enabled", False):
-            from .services.provider_health_monitor import ProviderHealthMonitor
-
-            configured_providers = EmbeddingProviderFactory.get_configured_providers(
-                config
-            )
-            if len(configured_providers) > 1:
-                monitor = ProviderHealthMonitor.get_instance(
-                    rolling_window_minutes=getattr(config, "health_window_minutes", 60),
-                    error_rate_threshold=getattr(
-                        config, "health_error_rate_threshold", 0.1
-                    ),
-                    latency_p95_threshold_ms=getattr(
-                        config, "health_latency_p95_threshold_ms", 5000.0
-                    ),
-                )
-                best = monitor.get_best_provider(configured_providers)
-                if best and best != (provider or config.embedding_provider):
-                    if not quiet:
-                        console.print(
-                            f"[dim]Auto-routing: selected {best} (best health score)[/dim]"
-                        )
-                    # Override the provider for this query
-                    embedding_provider = EmbeddingProviderFactory.create(
-                        config, console, provider_name=best
-                    )
-                    collection_name = vector_store_client.resolve_collection_name(
-                        config, embedding_provider
-                    )
-                    vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
-
-        if effective_strategy in ("failover", "parallel"):
-            configured_providers = EmbeddingProviderFactory.get_configured_providers(
-                config
-            )
-            primary_provider_name = provider or config.embedding_provider
-            secondary_candidates = [
-                p for p in configured_providers if p != primary_provider_name
-            ]
-
-            if secondary_candidates:
-                secondary_provider_name_str = secondary_candidates[0]
-                try:
-                    secondary_emb_provider = EmbeddingProviderFactory.create(
-                        config, console, provider_name=secondary_provider_name_str
-                    )
-                    secondary_collection_name = (
-                        vector_store_client.resolve_collection_name(
-                            config, secondary_emb_provider
-                        )
-                    )
-                    from .services.multi_index_query_service import (
-                        MultiIndexQueryService as MIQSSecondary,
-                    )
-
-                    secondary_multi_index_service = MIQSSecondary(
-                        project_root=project_root,
-                        vector_store=vector_store_client,
-                        embedding_provider=secondary_emb_provider,
-                    )
-                    if not quiet:
-                        console.print(
-                            f"[dim]Strategy: {effective_strategy} "
-                            f"({primary_provider_name} + {secondary_provider_name_str})[/dim]"
-                        )
-                except Exception as e:
-                    logging.getLogger(__name__).warning(
-                        "Failed to initialize secondary provider %s: %s",
-                        secondary_provider_name_str,
-                        e,
-                    )
-                    if not quiet:
-                        console.print(
-                            "[yellow]Warning: Secondary provider unavailable, "
-                            "falling back to primary only[/yellow]"
-                        )
-                    secondary_multi_index_service = None
-            else:
-                if not quiet:
-                    console.print(
-                        "[yellow]Warning: No secondary provider configured, "
-                        "using primary only[/yellow]"
-                    )
 
         # Initialize timing dictionary for telemetry
         timing_info: Dict[str, Any] = {}
@@ -6394,27 +5951,20 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
-                # Strategy-aware query execution (Story #488)
-                raw_results, search_timing_result = _execute_strategy_query(
-                    multi_index_service=multi_index_service,
-                    secondary_multi_index_service=secondary_multi_index_service,
-                    query=query,
-                    limit=limit * 2,
+                # Use MultiIndexQueryService for unified query interface (supports multimodal)
+                raw_results, multi_index_timing = multi_index_service.query(
+                    query_text=query,
+                    limit=limit * 2,  # Get more to account for post-filtering
                     collection_name=collection_name,
-                    secondary_collection_name=secondary_collection_name,
                     filter_conditions=query_filter_conditions,
-                    effective_strategy=effective_strategy,
-                    provider=provider,
-                    config=config,
-                    score_fusion=score_fusion,
-                    secondary_provider_name_str=secondary_provider_name_str,
-                    quiet=quiet,
-                    console=console,
                 )
-                search_timing: Dict[str, Any] = search_timing_result
+                # Use multi-index timing from service
+                search_timing: Dict[str, Any] = multi_index_timing
             else:
-                # Non-FilesystemVectorStore: pre-compute embedding
-                query_embedding = embedding_provider.get_embedding(query)
+                # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
+                query_embedding = embedding_provider.get_embedding(
+                    query, embedding_purpose="query"
+                )
                 raw_results_list = vector_store_client.search(
                     query_vector=query_embedding,
                     filter_conditions=query_filter_conditions,
@@ -6422,7 +5972,7 @@ def query(
                     collection_name=collection_name,
                 )
                 raw_results = raw_results_list  # Type compatibility
-                search_timing = {}
+                search_timing = {}  # Filesystem doesn't return timing yet
             # Merge detailed search timing into main timing info
             timing_info.update(search_timing)
 
@@ -6461,28 +6011,22 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
-                # Strategy-aware query execution (Story #488)
-                raw_results, search_timing = _execute_strategy_query(
-                    multi_index_service=multi_index_service,
-                    secondary_multi_index_service=secondary_multi_index_service,
-                    query=query,
+                # Use MultiIndexQueryService for unified query interface (supports multimodal)
+                raw_results, multi_index_timing = multi_index_service.query(
+                    query_text=query,
                     limit=limit * 2,
                     collection_name=collection_name,
-                    secondary_collection_name=secondary_collection_name,
                     filter_conditions=filter_conditions if filter_conditions else None,
-                    effective_strategy=effective_strategy,
-                    provider=provider,
-                    config=config,
-                    score_fusion=score_fusion,
-                    secondary_provider_name_str=secondary_provider_name_str,
-                    quiet=quiet,
-                    console=console,
                 )
+                # Use multi-index timing from service
+                search_timing = multi_index_timing
                 timing_info.update(search_timing)
             else:
                 # Filesystem backend: pre-compute embedding
                 search_start = time.time()
-                query_embedding = embedding_provider.get_embedding(query)
+                query_embedding = embedding_provider.get_embedding(
+                    query, embedding_purpose="query"
+                )
                 raw_results_list = vector_store_client.search_with_model_filter(
                     query_vector=query_embedding,
                     embedding_model=current_model,
@@ -9531,18 +9075,16 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
         # Interactive credential collection if not provided
         if not username:
             username = click.prompt("Username", type=str)
-        username = username or ""
 
         if not password:
             password = getpass.getpass("Password: ")
-        password = password or ""
 
         # Validate inputs
-        if not username.strip():
+        if not (username or "").strip():
             console.print("❌ Username cannot be empty", style="red")
             sys.exit(1)
 
-        if not password.strip():
+        if not (password or "").strip():
             console.print("❌ Password cannot be empty", style="red")
             sys.exit(1)
 
@@ -9550,7 +9092,9 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
         auth_client = AuthAPIClient(server_url, project_root)
 
         with console.status("🔐 Authenticating..."):
-            auth_response = auth_client.login(username.strip(), password.strip())
+            auth_response = auth_client.login(
+                (username or "").strip(), (password or "").strip()
+            )
 
         console.print(f"✅ Successfully logged in as {username}", style="green")
         console.print("🔑 Credentials stored securely", style="cyan")
@@ -9627,18 +9171,16 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
         # Interactive credential collection if not provided
         if not username:
             username = click.prompt("Username", type=str)
-        username = username or ""
 
         if not password:
             password = getpass.getpass("Password: ")
-        password = password or ""
 
         # Validate inputs
-        if not username.strip():
+        if not (username or "").strip():
             console.print("❌ Username cannot be empty", style="red")
             sys.exit(1)
 
-        if not password.strip():
+        if not (password or "").strip():
             console.print("❌ Password cannot be empty", style="red")
             sys.exit(1)
 
@@ -9647,7 +9189,7 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
 
         with console.status("📝 Creating account..."):
             auth_response = auth_client.register(
-                username.strip(), password.strip(), role
+                (username or "").strip(), (password or "").strip(), role
             )
 
         console.print(
@@ -9788,14 +9330,14 @@ def auth_change_password(ctx):
         for attempt in range(max_attempts):
             try:
                 # Get current password
-                current_password = getpass.getpass("Current Password: ") or ""
+                current_password = getpass.getpass("Current Password: ")
                 if not current_password.strip():
                     console.print("❌ Current password cannot be empty", style="red")
                     continue
 
                 # Get new password with validation loop
                 while True:
-                    new_password = getpass.getpass("New Password: ") or ""
+                    new_password = getpass.getpass("New Password: ")
                     if not new_password.strip():
                         console.print("❌ New password cannot be empty", style="red")
                         continue
@@ -9900,10 +9442,9 @@ def auth_reset_password(ctx, username: Optional[str]):
         # Get username if not provided
         if not username:
             username = click.prompt("Username", type=str)
-        username = username or ""
 
         # Validate username
-        if not username.strip():
+        if not (username or "").strip():
             console.print("❌ Username cannot be empty", style="red")
             sys.exit(1)
 
@@ -9912,7 +9453,7 @@ def auth_reset_password(ctx, username: Optional[str]):
         # Create auth client and initiate reset
         auth_client = create_auth_client(server_url, project_root)
         with console.status("📤 Sending reset request..."):
-            auth_client.reset_password(username.strip())
+            auth_client.reset_password((username or "").strip())
 
         console.print(f"✅ Password reset request sent for {username}", style="green")
         console.print("📧 Check your email for reset instructions", style="blue")
@@ -10405,12 +9946,6 @@ def server_group(ctx):
     proper graceful shutdown and health monitoring.
     """
     pass
-
-
-# Register MFA auth subcommands under server group (Story #571)
-from .server.cli.mfa_commands import create_mfa_auth_group as _create_mfa_auth_group  # noqa: E402
-
-server_group.add_command(_create_mfa_auth_group())
 
 
 @server_group.command("start")

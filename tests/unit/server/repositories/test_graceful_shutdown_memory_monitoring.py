@@ -21,6 +21,8 @@ from code_indexer.server.repositories.resource_manager import (
     MemoryLeakWarning,
 )
 
+pytestmark = pytest.mark.slow
+
 
 class TestGracefulShutdownHandler:
     """

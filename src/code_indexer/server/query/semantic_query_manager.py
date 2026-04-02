@@ -68,6 +68,8 @@ class QueryResult:
     temporal_context: Optional[Dict[str, Any]] = (
         None  # Aggregate: first_seen, last_seen, commit_count
     )
+    # Embedding provider that served this result (Story #593)
+    source_provider: str = ""
 
     @classmethod
     def from_search_result(
@@ -92,6 +94,8 @@ class QueryResult:
             "similarity_score": self.similarity_score,
             "repository_alias": self.repository_alias,
             "source_repo": self.source_repo,
+            # Include source_provider always (Story #593 - multi-provider tracking)
+            "source_provider": self.source_provider,
         }
         # Include FTS match_text if present (Story #680)
         if self.match_text is not None:
@@ -395,6 +399,8 @@ class SemanticQueryManager:
         # Query strategy parameters (Story #488 Phase 4)
         query_strategy: Optional[str] = None,
         score_fusion: Optional[str] = None,
+        # Multi-provider routing (Story #593)
+        preferred_provider: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Perform semantic query on user's activated repositories.
@@ -519,6 +525,8 @@ class SemanticQueryManager:
                 # Query strategy parameters (Story #488 Phase 4)
                 query_strategy=query_strategy,
                 score_fusion=score_fusion,
+                # Multi-provider routing (Story #593)
+                preferred_provider=preferred_provider,
             )
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
@@ -526,6 +534,10 @@ class SemanticQueryManager:
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = True
             raise SemanticQueryError(f"Query timed out: {str(e)}")
+        except ValueError:
+            # Propagate ValueError (e.g., temporal validation errors like invalid date format)
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            raise
         except Exception as e:
             # Handle other exceptions that might indicate timeout or search failures
             execution_time_ms = int((time.time() - start_time) * 1000)
@@ -703,6 +715,8 @@ class SemanticQueryManager:
         # Query strategy parameters (Story #488 Phase 4)
         query_strategy: Optional[str] = None,
         score_fusion: Optional[str] = None,
+        # Multi-provider routing (Story #593)
+        preferred_provider: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Perform the actual search across user repositories.
@@ -826,6 +840,8 @@ class SemanticQueryManager:
                     # Query strategy parameters (Story #488 Phase 4)
                     query_strategy=query_strategy,
                     score_fusion=score_fusion,
+                    # Multi-provider routing (Story #593)
+                    preferred_provider=preferred_provider,
                 )
                 all_results.extend(results)
 
@@ -835,6 +851,9 @@ class SemanticQueryManager:
                     raise TimeoutError(
                         f"Query timed out while searching repository {repo_info['user_alias']}: {str(e)}"
                     )
+                # Propagate ValueError (e.g., temporal validation errors like invalid date format)
+                if isinstance(e, ValueError):
+                    raise
                 # For other errors, log warning and continue with other repos
                 logger.warning(
                     format_error_log(
@@ -895,6 +914,8 @@ class SemanticQueryManager:
         # Query strategy parameters (Story #488 Phase 4)
         query_strategy: Optional[str] = None,
         score_fusion: Optional[str] = None,
+        # Multi-provider routing (Story #593)
+        preferred_provider: Optional[str] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -943,10 +964,38 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects from this repository
         """
+        # Story #593: Handle SPECIFIC strategy routing before composite check
+        if query_strategy == "specific":
+            if not preferred_provider:
+                raise ValueError("preferred_provider required for specific strategy")
+            _supported_providers = {"voyage-ai", "cohere"}
+            if preferred_provider not in _supported_providers:
+                raise ValueError(
+                    f"Provider '{preferred_provider}' not available. "
+                    f"Supported providers: {sorted(_supported_providers)}"
+                )
+            results = self._search_with_provider(
+                repo_path=repo_path,
+                repository_alias=repository_alias,
+                query_text=query_text,
+                limit=limit,
+                min_score=min_score,
+                file_extensions=file_extensions,
+                language=language,
+                exclude_language=exclude_language,
+                path_filter=path_filter,
+                exclude_path=exclude_path,
+                accuracy=accuracy,
+                provider_name=preferred_provider,
+            )
+            for r in results:
+                r.source_provider = preferred_provider
+            return results
+
         # Log query strategy if non-default (Story #488 Phase 4)
         if query_strategy is not None and query_strategy != "primary_only":
             logger.info(
-                "Query strategy '%s' requested (server-side execution pending Story #491)",
+                "Query strategy '%s' requested",
                 query_strategy,
                 extra=get_log_extra("QUERY-STRATEGY-001"),
             )
@@ -1081,6 +1130,7 @@ class SemanticQueryManager:
                         continue
 
                 # Convert SearchResultItem to QueryResult
+                # Annotate source_provider: named provider if given, else "primary" (Story #593)
                 query_result = QueryResult(
                     file_path=search_item.file_path,
                     line_number=search_item.line_start,  # Use start line as line number
@@ -1088,6 +1138,7 @@ class SemanticQueryManager:
                     similarity_score=search_item.score,
                     repository_alias=repository_alias,
                     source_repo=None,  # Single repository, no source_repo
+                    source_provider=preferred_provider or "primary",
                 )
                 semantic_results.append(query_result)
 
@@ -1110,6 +1161,89 @@ class SemanticQueryManager:
             )
             # Re-raise exception to be handled by calling method
             raise
+
+    def _search_with_provider(
+        self,
+        repo_path: str,
+        repository_alias: str,
+        query_text: str,
+        limit: int,
+        min_score: Optional[float],
+        file_extensions: Optional[List[str]],
+        language: Optional[str] = None,
+        exclude_language: Optional[str] = None,
+        path_filter: Optional[str] = None,
+        exclude_path: Optional[str] = None,
+        accuracy: Optional[str] = None,
+        provider_name: Optional[str] = None,
+    ) -> List[QueryResult]:
+        """
+        Search a single repository using an explicitly named embedding provider.
+
+        This is the implementation backend for query_strategy='specific' (Story #593).
+        Uses SemanticSearchService with a provider_name override so a named provider
+        (e.g. 'cohere' or 'voyage-ai') is used instead of the repo-default provider.
+
+        Args:
+            repo_path: Path to the repository
+            repository_alias: Repository alias for result annotation
+            query_text: Query text
+            limit: Result limit
+            min_score: Score threshold
+            file_extensions: List of file extensions to filter results
+            language: Filter by programming language
+            exclude_language: Exclude files of specified language
+            path_filter: Filter by file path pattern
+            exclude_path: Exclude files matching path pattern
+            accuracy: Search accuracy profile
+            provider_name: Embedding provider name override (e.g. 'cohere', 'voyage-ai')
+
+        Returns:
+            List of QueryResult objects from this repository
+        """
+        from ..services.search_service import SemanticSearchService
+        from ..models.api_models import SemanticSearchRequest
+
+        search_service = SemanticSearchService()
+        search_request = SemanticSearchRequest(
+            query=query_text,
+            limit=limit,
+            include_source=True,
+            path_filter=path_filter,
+            language=language,
+            exclude_language=exclude_language,
+            exclude_path=exclude_path,
+            accuracy=accuracy,
+        )
+        search_response = search_service.search_repository_path_with_provider(
+            repo_path=repo_path,
+            search_request=search_request,
+            provider_name=provider_name,
+        )
+
+        results = []
+        for search_item in search_response.results:
+            if min_score is not None and search_item.score < min_score:
+                continue
+            if file_extensions is not None:
+                from pathlib import Path as _Path
+
+                if _Path(search_item.file_path).suffix.lower() not in [
+                    ext.lower() for ext in file_extensions
+                ]:
+                    continue
+            results.append(
+                QueryResult(
+                    file_path=search_item.file_path,
+                    line_number=search_item.line_start,
+                    code_snippet=search_item.content,
+                    similarity_score=search_item.score,
+                    repository_alias=repository_alias,
+                    source_repo=None,
+                    source_provider=provider_name or "",
+                )
+            )
+        return results
 
     def _build_cli_args(
         self,

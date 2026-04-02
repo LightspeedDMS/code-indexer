@@ -76,10 +76,10 @@ class TestRepositoryProviderBase:
             def platform(self) -> str:
                 return "test"
 
-            async def is_configured(self) -> bool:
+            def is_configured(self) -> bool:
                 return True
 
-            async def discover_repositories(
+            def discover_repositories(
                 self, page: int = 1, page_size: int = 50
             ) -> RepositoryDiscoveryResult:
                 return RepositoryDiscoveryResult(
@@ -109,10 +109,10 @@ class TestRepositoryProviderBase:
             def platform(self) -> str:
                 return "test"
 
-            async def is_configured(self) -> bool:
+            def is_configured(self) -> bool:
                 return True
 
-            async def discover_repositories(
+            def discover_repositories(
                 self, page: int = 1, page_size: int = 50
             ) -> RepositoryDiscoveryResult:
                 return RepositoryDiscoveryResult(

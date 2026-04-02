@@ -82,7 +82,18 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
 
         # Create mock search results with diverse file types - this simulates real repository content
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             # Create mock results that would come from a real search - with mixed file types
             mock_results = [
@@ -230,7 +241,18 @@ class TestSemanticQueryManagerFileExtensionBugReproduction:
         """Test edge cases for file extension filtering."""
 
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             # Edge case files - files with multiple dots, no extension, etc.
             mock_results = [

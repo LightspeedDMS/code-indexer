@@ -11,17 +11,23 @@ TDD: These tests are written FIRST, before implementation.
 import pytest
 import tempfile
 from pathlib import Path
-from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock
 
+from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
 
 from code_indexer.server.services.group_access_manager import (
     GroupAccessManager,
 )
-from code_indexer.server.app import create_app
-from code_indexer.server.auth.user_manager import User, UserRole
-from code_indexer.server.routers.groups import set_group_manager
+from code_indexer.server.routers.groups import (
+    router,
+    set_group_manager,
+    get_group_manager,
+)
+from code_indexer.server.auth.dependencies import (
+    get_current_admin_user,
+    get_current_user,
+)
 
 
 @pytest.fixture
@@ -36,189 +42,127 @@ def temp_db_path():
 
 @pytest.fixture
 def group_manager(temp_db_path):
-    """Create and initialize a GroupAccessManager for testing."""
-    manager = GroupAccessManager(temp_db_path)
-    set_group_manager(manager)
-    yield manager
+    """Create a GroupAccessManager instance."""
+    return GroupAccessManager(temp_db_path)
+
+
+@pytest.fixture
+def mock_admin_user():
+    """Create a mock admin user."""
+    user = MagicMock()
+    user.username = "admin_user"
+    user.role = "admin"
+    return user
+
+
+@pytest.fixture
+def client(group_manager, mock_admin_user):
+    """Create FastAPI test client with admin dependency overrides."""
+    app = FastAPI()
+    app.include_router(router)
+    set_group_manager(group_manager)
+    app.dependency_overrides[get_current_admin_user] = lambda: mock_admin_user
+    app.dependency_overrides[get_current_user] = lambda: mock_admin_user
+    app.dependency_overrides[get_group_manager] = lambda: group_manager
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
     set_group_manager(None)
 
 
-@pytest.fixture
-def client(group_manager):
-    """Create FastAPI test client with initialized group manager."""
-    app = create_app()
-    return TestClient(app)
-
-
-@pytest.fixture
-def mock_user_manager():
-    """Create mock user manager for authentication."""
-    with (
-        patch("code_indexer.server.app.user_manager") as app_mock,
-        patch("code_indexer.server.auth.dependencies.user_manager") as deps_mock,
-    ):
-        yield app_mock, deps_mock
-
-
-@pytest.fixture
-def admin_auth_token(client, mock_user_manager):
-    """Get authentication token for admin user."""
-    app_mock, deps_mock = mock_user_manager
-    admin_user = User(
-        username="admin",
-        password_hash="$2b$12$hash",
-        role=UserRole.ADMIN,
-        created_at=datetime.now(timezone.utc),
-    )
-    app_mock.authenticate_user.return_value = admin_user
-    deps_mock.get_user.return_value = admin_user
-
+def create_group_via_api(client: TestClient, name: str, description: str) -> int:
+    """Helper to create a group via API and return its id."""
     response = client.post(
-        "/auth/login", json={"username": "admin", "password": "admin"}
+        "/api/v1/groups",
+        json={"name": name, "description": description},
     )
-    return response.json()["access_token"]
+    assert response.status_code == status.HTTP_201_CREATED
+    return response.json()["id"]
 
 
 class TestAC8GroupNameUniqueness:
     """AC8: Creating duplicate name returns 409 Conflict (case-insensitive)."""
 
-    def test_duplicate_name_returns_409(self, client, admin_auth_token, group_manager):
+    def test_duplicate_name_returns_409(self, client):
         """Test creating duplicate name returns 409 Conflict."""
-        # Create first group
-        client.post(
-            "/api/v1/groups",
-            json={"name": "unique-team", "description": "First"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "unique-team", "First")
 
-        # Try to create duplicate
         response = client.post(
             "/api/v1/groups",
             json={"name": "unique-team", "description": "Duplicate"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
         )
 
-        assert response.status_code == 409
+        assert response.status_code == status.HTTP_409_CONFLICT
 
-    def test_duplicate_error_message(self, client, admin_auth_token, group_manager):
+    def test_duplicate_error_message(self, client):
         """Test error says 'Group name already exists'."""
-        # Create first group
-        client.post(
-            "/api/v1/groups",
-            json={"name": "error-message-test", "description": "First"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "error-message-test", "First")
 
-        # Try to create duplicate
         response = client.post(
             "/api/v1/groups",
             json={"name": "error-message-test", "description": "Duplicate"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
         )
 
         data = response.json()
         assert "already exists" in data["detail"].lower()
 
-    def test_case_insensitive_uniqueness(self, client, admin_auth_token, group_manager):
+    def test_case_insensitive_uniqueness(self, client):
         """Test name uniqueness is case-insensitive."""
-        # Create group with lowercase
-        client.post(
-            "/api/v1/groups",
-            json={"name": "case-test", "description": "First"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "case-test", "First")
 
-        # Try uppercase
         response = client.post(
             "/api/v1/groups",
             json={"name": "CASE-TEST", "description": "Should fail"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
         )
-        assert response.status_code == 409
+        assert response.status_code == status.HTTP_409_CONFLICT
 
-        # Try mixed case
         response = client.post(
             "/api/v1/groups",
             json={"name": "Case-Test", "description": "Should also fail"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
         )
-        assert response.status_code == 409
+        assert response.status_code == status.HTTP_409_CONFLICT
 
     def test_manager_create_group_case_insensitive(self, temp_db_path):
         """Test GroupAccessManager.create_group() enforces case-insensitive uniqueness."""
         manager = GroupAccessManager(temp_db_path)
         manager.create_group("my-group", "First")
 
-        # Attempting to create with different case should fail
         with pytest.raises(ValueError) as exc_info:
             manager.create_group("MY-GROUP", "Duplicate")
 
         assert "already exists" in str(exc_info.value).lower()
 
-    def test_update_name_uniqueness(self, client, admin_auth_token, group_manager):
+    def test_update_name_uniqueness(self, client):
         """Test updating name also enforces uniqueness."""
-        # Create two groups
-        client.post(
-            "/api/v1/groups",
-            json={"name": "existing-name", "description": "First"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "existing-name", "First")
+        other_id = create_group_via_api(client, "other-name", "Second")
 
-        create_response = client.post(
-            "/api/v1/groups",
-            json={"name": "other-name", "description": "Second"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
-        other_id = create_response.json()["id"]
-
-        # Try to update second to same name as first
         response = client.put(
             f"/api/v1/groups/{other_id}",
             json={"name": "existing-name"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
         )
 
-        assert response.status_code == 409
+        assert response.status_code == status.HTTP_409_CONFLICT
 
-    def test_update_to_same_name_case_insensitive(
-        self, client, admin_auth_token, group_manager
-    ):
+    def test_update_to_same_name_case_insensitive(self, client):
         """Test updating to a name that differs only in case fails."""
-        # Create two groups
-        client.post(
-            "/api/v1/groups",
-            json={"name": "first-group", "description": "First"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "first-group", "First")
+        second_id = create_group_via_api(client, "second-group", "Second")
 
-        create_response = client.post(
-            "/api/v1/groups",
-            json={"name": "second-group", "description": "Second"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
-        second_id = create_response.json()["id"]
-
-        # Try to update second to "FIRST-GROUP" (case-insensitive duplicate)
         response = client.put(
             f"/api/v1/groups/{second_id}",
             json={"name": "FIRST-GROUP"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
         )
 
-        assert response.status_code == 409
+        assert response.status_code == status.HTTP_409_CONFLICT
 
 
 class TestAC9ListAllGroupsSorted:
     """AC9: GET /api/v1/groups returns all groups sorted properly."""
 
-    def test_list_includes_default_groups(
-        self, client, admin_auth_token, group_manager
-    ):
+    def test_list_includes_default_groups(self, client):
         """Test list includes default groups."""
-        response = client.get(
-            "/api/v1/groups",
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        response = client.get("/api/v1/groups")
 
         data = response.json()
         names = [g["name"] for g in data]
@@ -226,49 +170,26 @@ class TestAC9ListAllGroupsSorted:
         assert "powerusers" in names
         assert "users" in names
 
-    def test_list_includes_custom_groups(self, client, admin_auth_token, group_manager):
+    def test_list_includes_custom_groups(self, client):
         """Test list includes custom groups."""
-        # Create custom groups
-        client.post(
-            "/api/v1/groups",
-            json={"name": "custom-a", "description": "A"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
-        client.post(
-            "/api/v1/groups",
-            json={"name": "custom-b", "description": "B"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "custom-a", "A")
+        create_group_via_api(client, "custom-b", "B")
 
-        response = client.get(
-            "/api/v1/groups",
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        response = client.get("/api/v1/groups")
 
         data = response.json()
         names = [g["name"] for g in data]
         assert "custom-a" in names
         assert "custom-b" in names
 
-    def test_list_sorted_default_groups_first(
-        self, client, admin_auth_token, group_manager
-    ):
+    def test_list_sorted_default_groups_first(self, client):
         """Test default groups are listed first."""
-        # Create custom groups with names that would sort before defaults alphabetically
-        client.post(
-            "/api/v1/groups",
-            json={"name": "aaa-first-alphabetically", "description": "A"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "aaa-first-alphabetically", "A")
 
-        response = client.get(
-            "/api/v1/groups",
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        response = client.get("/api/v1/groups")
 
         data = response.json()
 
-        # Find position of default groups vs custom
         default_indices = []
         custom_indices = []
         for i, group in enumerate(data):
@@ -277,53 +198,28 @@ class TestAC9ListAllGroupsSorted:
             else:
                 custom_indices.append(i)
 
-        # All default groups should come before all custom groups
         if default_indices and custom_indices:
             assert max(default_indices) < min(custom_indices), (
                 "Default groups should be listed before custom groups"
             )
 
-    def test_list_custom_groups_sorted_by_name(
-        self, client, admin_auth_token, group_manager
-    ):
+    def test_list_custom_groups_sorted_by_name(self, client):
         """Test custom groups are sorted alphabetically by name."""
-        # Create custom groups in non-alphabetical order
-        client.post(
-            "/api/v1/groups",
-            json={"name": "zebra-team", "description": "Z"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
-        client.post(
-            "/api/v1/groups",
-            json={"name": "alpha-team", "description": "A"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
-        client.post(
-            "/api/v1/groups",
-            json={"name": "beta-team", "description": "B"},
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        create_group_via_api(client, "zebra-team", "Z")
+        create_group_via_api(client, "alpha-team", "A")
+        create_group_via_api(client, "beta-team", "B")
 
-        response = client.get(
-            "/api/v1/groups",
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        response = client.get("/api/v1/groups")
 
         data = response.json()
         custom_groups = [g for g in data if not g["is_default"]]
         custom_names = [g["name"] for g in custom_groups]
 
-        # Should be alphabetically sorted
         assert custom_names == sorted(custom_names)
 
-    def test_list_response_includes_all_fields(
-        self, client, admin_auth_token, group_manager
-    ):
+    def test_list_response_includes_all_fields(self, client):
         """Test list response includes required fields (id, name, description, is_default)."""
-        response = client.get(
-            "/api/v1/groups",
-            headers={"Authorization": f"Bearer {admin_auth_token}"},
-        )
+        response = client.get("/api/v1/groups")
 
         data = response.json()
         for group in data:
@@ -336,22 +232,18 @@ class TestAC9ListAllGroupsSorted:
         """Test GroupAccessManager.get_all_groups() returns sorted list."""
         manager = GroupAccessManager(temp_db_path)
 
-        # Create custom groups in non-alphabetical order
         manager.create_group("zebra", "Z group")
         manager.create_group("alpha", "A group")
 
         groups = manager.get_all_groups()
 
-        # Default groups first, then custom sorted by name
         default_groups = [g for g in groups if g.is_default]
         custom_groups = [g for g in groups if not g.is_default]
 
-        # Verify default groups come first
         default_count = len(default_groups)
         for i in range(default_count):
             assert groups[i].is_default, f"Group at index {i} should be default"
 
-        # Verify custom groups are sorted alphabetically
         custom_names = [g.name for g in custom_groups]
         assert custom_names == sorted(custom_names), (
             "Custom groups should be sorted alphabetically"

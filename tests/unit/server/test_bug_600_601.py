@@ -131,13 +131,17 @@ class TestBug600CohereHealthMonitor:
             "id": "test",
         }
 
-        with patch("httpx.post") as mock_post:
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.headers = {}
             mock_response.raise_for_status = MagicMock()
             mock_response.json.return_value = fake_response
-            mock_post.return_value = mock_response
+            mock_client.post.return_value = mock_response
 
             cohere_provider._make_sync_request(["hello"], "search_document")
 
@@ -184,13 +188,17 @@ class TestBug601CohereNoneValidation:
             "embeddings": {"float": [[0.1, None, 0.3]]},
         }
 
-        with patch("httpx.post") as mock_post:
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.headers = {}
             mock_response.raise_for_status = MagicMock()
             mock_response.json.return_value = bad_response
-            mock_post.return_value = mock_response
+            mock_client.post.return_value = mock_response
 
             with pytest.raises(RuntimeError, match="None values"):
                 cohere_provider.get_embeddings_batch(["hello world"])
@@ -203,13 +211,17 @@ class TestBug601CohereNoneValidation:
             "embeddings": {"float": [[0.1, 0.2, 0.3]]},
         }
 
-        with patch("httpx.post") as mock_post:
+        with patch("httpx.Client") as mock_client_class:
+            mock_client = MagicMock()
+            mock_client.__enter__ = MagicMock(return_value=mock_client)
+            mock_client.__exit__ = MagicMock(return_value=False)
+            mock_client_class.return_value = mock_client
             mock_response = MagicMock()
             mock_response.status_code = 200
             mock_response.headers = {}
             mock_response.raise_for_status = MagicMock()
             mock_response.json.return_value = good_response
-            mock_post.return_value = mock_response
+            mock_client.post.return_value = mock_response
 
             result = cohere_provider.get_embeddings_batch(["hello world"])
         assert result == [[0.1, 0.2, 0.3]]

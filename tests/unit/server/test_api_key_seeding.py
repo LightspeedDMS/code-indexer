@@ -239,7 +239,7 @@ class TestConfigKeysSyncedToEnv:
         config_service.config_manager.save_config.assert_not_called()
 
     def test_result_dict_always_returns_false(self, tmp_path):
-        """Result dict always returns False — nothing is seeded into config."""
+        """voyageai_seeded is True when key present (Bug #599 fix), anthropic always False."""
         config_service = _make_config_service(
             anthropic_api_key="sk-ant-existing",
             voyageai_api_key="pa-voyage-existing",
@@ -257,4 +257,4 @@ class TestConfigKeysSyncedToEnv:
             )
 
         assert result["anthropic_seeded"] is False
-        assert result["voyageai_seeded"] is False
+        assert result["voyageai_seeded"] is True

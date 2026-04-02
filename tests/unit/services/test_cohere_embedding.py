@@ -842,3 +842,164 @@ class TestEmbeddingPurposeQueryBug598:
             f"Actual: {query_calls}. "
             "Bug #598: cli.py non-git non-FilesystemVectorStore path must pass embedding_purpose='query'."
         )
+
+
+class TestCohereRetryDelayCapBug602:
+    """#602: All retry delays must be capped at 300s to avoid indefinite thread blocking."""
+
+    def test_retry_after_header_capped_at_300s(self, cohere_provider):
+        """A 429 response with Retry-After: 86400 must sleep at most 300s."""
+        from unittest.mock import MagicMock, patch
+
+        mock_response_429 = MagicMock()
+        mock_response_429.status_code = 429
+        mock_response_429.headers = {"retry-after": "86400"}
+
+        mock_response_ok = MagicMock()
+        mock_response_ok.status_code = 200
+        mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = [mock_response_429, mock_response_ok]
+
+        sleep_calls = []
+        with patch("httpx.Client", mock_client_cls):
+            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                cohere_provider._make_sync_request(["test"])
+
+        assert sleep_calls, "time.sleep must be called after a 429 response"
+        assert all(s <= 300.0 for s in sleep_calls), (
+            f"Bug #602: all sleep durations must be <= 300s. Got: {sleep_calls}"
+        )
+
+    def test_5xx_backoff_capped_at_300s(self, cohere_provider):
+        """A 500 response must sleep at most 300s regardless of computed backoff."""
+        from unittest.mock import MagicMock, patch
+
+        mock_response_500 = MagicMock()
+        mock_response_500.status_code = 500
+
+        mock_response_ok = MagicMock()
+        mock_response_ok.status_code = 200
+        mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = [mock_response_500, mock_response_ok]
+
+        sleep_calls = []
+        with patch("httpx.Client", mock_client_cls):
+            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                cohere_provider._make_sync_request(["test"])
+
+        assert sleep_calls, "time.sleep must be called after a 500 response"
+        assert all(s <= 300.0 for s in sleep_calls), (
+            f"Bug #602: all sleep durations must be <= 300s. Got: {sleep_calls}"
+        )
+
+    def test_network_error_delay_capped_at_300s(self, cohere_provider):
+        """A network exception must sleep at most 300s regardless of computed backoff."""
+        import httpx
+        from unittest.mock import MagicMock, patch
+
+        mock_response_ok = MagicMock()
+        mock_response_ok.status_code = 200
+        mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = [
+            httpx.ConnectError("connection refused"),
+            mock_response_ok,
+        ]
+
+        sleep_calls = []
+        with patch("httpx.Client", mock_client_cls):
+            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                cohere_provider._make_sync_request(["test"])
+
+        assert sleep_calls, "time.sleep must be called after a network error"
+        assert all(s <= 300.0 for s in sleep_calls), (
+            f"Bug #602: all sleep durations must be <= 300s. Got: {sleep_calls}"
+        )
+
+
+class TestCohereExponentialBackoffFlagBug603:
+    """#603: exponential_backoff=False must use flat delay; True must use increasing delay."""
+
+    def test_exponential_backoff_false_uses_flat_delay_on_5xx(self, cohere_provider):
+        """When exponential_backoff=False, all 5xx retry sleeps must use the same fixed delay."""
+        from unittest.mock import MagicMock, patch
+
+        cohere_provider.config.exponential_backoff = False
+        base_delay = cohere_provider.config.retry_delay
+
+        mock_response_500 = MagicMock()
+        mock_response_500.status_code = 500
+
+        mock_response_ok = MagicMock()
+        mock_response_ok.status_code = 200
+        mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        # Three 500 responses then success to capture multiple sleep calls
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = [
+            mock_response_500,
+            mock_response_500,
+            mock_response_ok,
+        ]
+
+        sleep_calls = []
+        with patch("httpx.Client", mock_client_cls):
+            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                cohere_provider._make_sync_request(["test"])
+
+        assert len(sleep_calls) >= 2, (
+            f"Expected at least 2 sleep calls for 2 failed attempts. Got: {sleep_calls}"
+        )
+        # All delays must equal base_delay (flat, not exponential)
+        assert all(s == min(base_delay, 300.0) for s in sleep_calls), (
+            f"Bug #603: with exponential_backoff=False, all sleeps must equal {base_delay}s. "
+            f"Got: {sleep_calls}"
+        )
+
+    def test_exponential_backoff_true_uses_increasing_delay_on_5xx(
+        self, cohere_provider
+    ):
+        """When exponential_backoff=True, successive 5xx retry sleeps must increase."""
+        from unittest.mock import MagicMock, patch
+
+        cohere_provider.config.exponential_backoff = True
+        # Use a small base delay so exponential growth is visible before 300s cap
+        cohere_provider.config.retry_delay = 1.0
+
+        mock_response_500 = MagicMock()
+        mock_response_500.status_code = 500
+
+        mock_response_ok = MagicMock()
+        mock_response_ok.status_code = 200
+        mock_response_ok.json.return_value = {"embeddings": {"float": [[0.1, 0.2]]}}
+
+        mock_client_cls = MagicMock()
+        mock_client_instance = mock_client_cls.return_value.__enter__.return_value
+        mock_client_instance.post.side_effect = [
+            mock_response_500,
+            mock_response_500,
+            mock_response_ok,
+        ]
+
+        sleep_calls = []
+        with patch("httpx.Client", mock_client_cls):
+            with patch("time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+                cohere_provider._make_sync_request(["test"])
+
+        assert len(sleep_calls) >= 2, (
+            f"Expected at least 2 sleep calls for 2 failed attempts. Got: {sleep_calls}"
+        )
+        # Second sleep must be strictly greater than first (exponential growth)
+        assert sleep_calls[1] > sleep_calls[0], (
+            f"Bug #603: with exponential_backoff=True, delays must increase. "
+            f"Got: {sleep_calls}"
+        )

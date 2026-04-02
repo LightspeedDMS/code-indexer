@@ -539,6 +539,7 @@ class TestWikiDisablePreservesViewRecords:
 
 
 class TestIncrementViewConcurrency:
+    @pytest.mark.slow
     def test_concurrent_increments_are_atomic(self, cache_db):
         """10 threads each increment 100 times. Final count must be 1000."""
         import threading

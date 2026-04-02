@@ -51,13 +51,13 @@ def test_handler_accesses_dependency_map_service_from_app_state(
         # Set up app.state (correct pattern)
         mock_app_module.app.state.dependency_map_service = mock_app_state
 
-        # Mock config loading via ServerConfigManager
+        # Mock config loading via get_config_service (actual pattern used by handler)
         with patch(
-            "code_indexer.server.utils.config_manager.ServerConfigManager"
-        ) as mock_scm:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_cs:
             mock_config = Mock()
             mock_config.claude_integration_config.dependency_map_enabled = True
-            mock_scm.return_value.load_config.return_value = mock_config
+            mock_get_cs.return_value.get_config.return_value = mock_config
 
             # Act
             mcp_result = handle_trigger_dependency_analysis(
@@ -70,20 +70,20 @@ def test_handler_accesses_dependency_map_service_from_app_state(
     assert "job_id" in result
 
 
-def test_handler_loads_config_via_server_config_manager(admin_user, mock_app_state):
-    """Test that handler loads config via ServerConfigManager, not app_module.config."""
+def test_handler_loads_config_via_config_service(admin_user, mock_app_state):
+    """Test that handler loads config via get_config_service, not ServerConfigManager."""
     # Arrange
     with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
         mock_app_module.app.state.dependency_map_service = mock_app_state
 
-        # Mock ServerConfigManager (correct pattern)
+        # Mock get_config_service (actual pattern used by handler)
         with patch(
-            "code_indexer.server.utils.config_manager.ServerConfigManager"
-        ) as mock_scm:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_cs:
             mock_config = Mock()
             mock_config.claude_integration_config.dependency_map_enabled = True
-            mock_scm_instance = mock_scm.return_value
-            mock_scm_instance.load_config.return_value = mock_config
+            mock_cs_instance = mock_get_cs.return_value
+            mock_cs_instance.get_config.return_value = mock_config
 
             # Act
             mcp_result = handle_trigger_dependency_analysis(
@@ -91,9 +91,9 @@ def test_handler_loads_config_via_server_config_manager(admin_user, mock_app_sta
             )
             unwrap_mcp_response(mcp_result)
 
-            # Assert - ServerConfigManager was used to load config
-            mock_scm.assert_called_once()
-            mock_scm_instance.load_config.assert_called_once()
+            # Assert - get_config_service was used to load config
+            mock_get_cs.assert_called_once()
+            mock_cs_instance.get_config.assert_called_once()
 
 
 def test_handler_returns_error_when_feature_disabled(admin_user, mock_app_state):
@@ -129,12 +129,13 @@ def test_handler_returns_error_when_service_unavailable(admin_user):
         # Service not available on app.state
         mock_app_module.app.state.dependency_map_service = None
 
+        # Must mock get_config_service so config check passes before service check
         with patch(
-            "code_indexer.server.utils.config_manager.ServerConfigManager"
-        ) as mock_scm:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_cs:
             mock_config = Mock()
             mock_config.claude_integration_config.dependency_map_enabled = True
-            mock_scm.return_value.load_config.return_value = mock_config
+            mock_get_cs.return_value.get_config.return_value = mock_config
 
             # Act
             mcp_result = handle_trigger_dependency_analysis(

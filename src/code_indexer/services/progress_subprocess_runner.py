@@ -34,6 +34,7 @@ Usage::
 import logging
 import subprocess
 import threading
+from pathlib import Path
 from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,11 @@ def gather_repo_metrics(repo_path) -> tuple:
         (file_count, commit_count) as integers.  Returns (0, 0) if repo is
         not a git repository or if git commands fail (graceful degradation).
     """
+    # Check if this is actually a git repository (Bug #589: local:// repos have no .git)
+    git_dir = Path(repo_path) / ".git"
+    if not git_dir.exists():
+        return (0, 0)
+
     repo_str = str(repo_path)
 
     # Count tracked files
@@ -235,7 +241,10 @@ def run_with_popen_progress(
     all_stderr.append(stderr_output)
 
     if process.returncode != 0:
-        error_details = stderr_output or f"Exit code {process.returncode}"
+        stdout_output = "".join(all_stdout)
+        error_details = (
+            stderr_output or stdout_output or f"Exit code {process.returncode}"
+        )
         raise IndexingSubprocessError(f"Failed to {error_label}: {error_details}")
 
     return high_water

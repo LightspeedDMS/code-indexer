@@ -29,8 +29,12 @@ from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 
 from ..repositories.activated_repo_manager import ActivatedRepoError  # noqa: E402
-from ..repositories.repository_listing_manager import RepositoryListingError  # noqa: E402
-from ..services.repository_discovery_service import RepositoryDiscoveryError  # noqa: E402
+from ..repositories.repository_listing_manager import (
+    RepositoryListingError,
+)  # noqa: E402
+from ..services.repository_discovery_service import (
+    RepositoryDiscoveryError,
+)  # noqa: E402
 from ..validators.composite_repo_validator import CompositeRepoValidator  # noqa: E402
 from ..repositories.golden_repo_manager import GitOperationError  # noqa: E402
 

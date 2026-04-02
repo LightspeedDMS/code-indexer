@@ -28,6 +28,9 @@ from src.code_indexer.server.query.semantic_query_manager import (
     SemanticQueryManager,
 )
 
+# Story #375 removed filter warning logs; these tests are obsolete.
+pytestmark = pytest.mark.skip(reason="Story #375 removed filter warning logs")
+
 
 class TestWarningLogConditions:
     """Test suite for warning log conditions in _search_single_repository."""

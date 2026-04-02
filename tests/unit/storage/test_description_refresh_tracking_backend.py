@@ -30,7 +30,8 @@ def backend(db_path: str) -> DescriptionRefreshTrackingBackend:
     conn = conn_manager.get_connection()
 
     # Create schema directly for testing
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS description_refresh_tracking (
             repo_alias TEXT PRIMARY KEY,
             last_run TEXT,
@@ -43,7 +44,8 @@ def backend(db_path: str) -> DescriptionRefreshTrackingBackend:
             created_at TEXT,
             updated_at TEXT
         )
-    """)
+    """
+    )
     conn.commit()
     conn_manager.close_all()
 

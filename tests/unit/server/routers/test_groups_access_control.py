@@ -191,7 +191,10 @@ class TestListGroupsEndpoint:
         client = TestClient(app)
         try:
             response = client.get("/api/v1/groups")
-            assert response.status_code in (401, 403), (
+            assert response.status_code in (
+                401,
+                403,
+            ), (
                 f"Unauthenticated request should return 401 or 403, got {response.status_code}"
             )
         finally:
@@ -231,7 +234,10 @@ class TestGetGroupEndpoint:
         client = TestClient(app)
         try:
             response = client.get("/api/v1/groups/1")
-            assert response.status_code in (401, 403), (
+            assert response.status_code in (
+                401,
+                403,
+            ), (
                 f"Unauthenticated request should return 401 or 403, got {response.status_code}"
             )
         finally:

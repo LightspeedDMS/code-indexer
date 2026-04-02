@@ -189,16 +189,22 @@ class BackgroundJobsPostgresBackend:
                             cancelled,
                             repo_alias,
                             resolution_attempts,
-                            json.dumps(claude_actions)
-                            if claude_actions is not None
-                            else None,
+                            (
+                                json.dumps(claude_actions)
+                                if claude_actions is not None
+                                else None
+                            ),
                             failure_reason,
-                            json.dumps(extended_error)
-                            if extended_error is not None
-                            else None,
-                            json.dumps(language_resolution_status)
-                            if language_resolution_status is not None
-                            else None,
+                            (
+                                json.dumps(extended_error)
+                                if extended_error is not None
+                                else None
+                            ),
+                            (
+                                json.dumps(language_resolution_status)
+                                if language_resolution_status is not None
+                                else None
+                            ),
                             progress_info,
                             json.dumps(metadata) if metadata is not None else None,
                         ),

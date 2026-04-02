@@ -96,7 +96,8 @@ class TestGoldenReposMetadataMigration:
             # Create database with old schema (without category_id)
             conn = sqlite3.connect(str(db_path))
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS golden_repos_metadata (
                         alias TEXT PRIMARY KEY NOT NULL,
                         repo_url TEXT NOT NULL,
@@ -104,7 +105,8 @@ class TestGoldenReposMetadataMigration:
                         clone_path TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     )
-                """)
+                """
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -132,7 +134,8 @@ class TestGoldenReposMetadataMigration:
             # Create database with old schema
             conn = sqlite3.connect(str(db_path))
             try:
-                conn.execute("""
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS golden_repos_metadata (
                         alias TEXT PRIMARY KEY NOT NULL,
                         repo_url TEXT NOT NULL,
@@ -140,7 +143,8 @@ class TestGoldenReposMetadataMigration:
                         clone_path TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     )
-                """)
+                """
+                )
                 conn.commit()
             finally:
                 conn.close()

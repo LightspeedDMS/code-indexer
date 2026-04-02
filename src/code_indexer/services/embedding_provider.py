@@ -36,14 +36,17 @@ class EmbeddingProvider(ABC):
         self,
         text: str,
         model: Optional[str] = None,
-        *,
-        embedding_purpose: str = "document",
+        embedding_purpose: Optional[str] = None,
     ) -> List[float]:
         """Generate embedding for a single text.
 
         Args:
             text: Text to embed
             model: Optional model override
+            embedding_purpose: Optional purpose hint ("query" or "document").
+                Providers that distinguish query vs document embeddings (e.g. Cohere)
+                use this to select the correct input_type. Defaults to None which
+                preserves existing behavior (treated as document/indexing context).
 
         Returns:
             List of floats representing the embedding vector
@@ -52,11 +55,7 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def get_embeddings_batch(
-        self,
-        texts: List[str],
-        model: Optional[str] = None,
-        *,
-        embedding_purpose: str = "document",
+        self, texts: List[str], model: Optional[str] = None
     ) -> List[List[float]]:
         """Generate embeddings for multiple texts in batch.
 
@@ -71,11 +70,7 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def get_embedding_with_metadata(
-        self,
-        text: str,
-        model: Optional[str] = None,
-        *,
-        embedding_purpose: str = "document",
+        self, text: str, model: Optional[str] = None
     ) -> EmbeddingResult:
         """Generate embedding with metadata (tokens, model info, etc.).
 
@@ -90,11 +85,7 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def get_embeddings_batch_with_metadata(
-        self,
-        texts: List[str],
-        model: Optional[str] = None,
-        *,
-        embedding_purpose: str = "document",
+        self, texts: List[str], model: Optional[str] = None
     ) -> BatchEmbeddingResult:
         """Generate batch embeddings with metadata.
 
@@ -108,7 +99,7 @@ class EmbeddingProvider(ABC):
         pass
 
     @abstractmethod
-    def health_check(self, *, test_api: bool = False) -> bool:
+    def health_check(self) -> bool:
         """Check if the embedding provider is healthy and accessible.
 
         Returns:

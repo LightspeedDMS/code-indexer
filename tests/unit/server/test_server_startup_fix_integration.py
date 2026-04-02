@@ -13,6 +13,8 @@ import json
 import psutil
 from pathlib import Path
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.e2e
 class TestServerStartupFixIntegration:

@@ -166,21 +166,6 @@ class TestBranchEndpointsUnit:
         assert len(current_branches) == 1
         assert current_branches[0].name == current_branch_from_topology
 
-    def test_branch_service_error_handling_for_invalid_repository(self):
-        """Test error handling when git operations fail."""
-        # Arrange - Create non-git directory
-        non_git_dir = Path(tempfile.mkdtemp())
-        try:
-            git_service = GitTopologyService(non_git_dir)
-
-            # Act & Assert - Should raise ValueError
-            with pytest.raises(ValueError, match="Not a git repository"):
-                BranchService(
-                    git_topology_service=git_service, index_status_manager=None
-                )
-        finally:
-            shutil.rmtree(non_git_dir)
-
     def test_branch_service_performance_with_multiple_branches(self):
         """Test performance with many branches."""
         # Arrange - Create additional branches

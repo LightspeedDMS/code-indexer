@@ -42,6 +42,11 @@
                     {{ result.repository_alias }}
                 </span>
                 {% endif %}
+                {% if result.source_provider %}
+                <span class="result-provider provider-{{ result.source_provider | replace('-', '_') }}" title="Embedding provider">
+                    {{ result.source_provider }}
+                </span>
+                {% endif %}
             </div>
         </header>
 
