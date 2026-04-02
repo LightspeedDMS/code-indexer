@@ -33,8 +33,12 @@ class BackendFactory:
         Raises:
             ValueError: If configuration is invalid
         """
-        if config.vector_store is None:
-            raise ValueError("Invalid configuration: missing vector_store field")
+        # ServerConfig has no vector_store attribute; default to filesystem (only supported backend)
+        if not hasattr(config, "vector_store") or config.vector_store is None:
+            logger.info("Creating FilesystemBackend (no vector_store config)")
+            return FilesystemBackend(
+                project_root=project_root, hnsw_index_cache=hnsw_cache
+            )
 
         provider = config.vector_store.provider
 
