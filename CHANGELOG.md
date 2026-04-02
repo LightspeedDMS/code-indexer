@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.1
+
+### Bug Fixes
+
+- fix: Bug #604 -- Guard config.cohere attribute access in EmbeddingProviderFactory.get_configured_providers() for ServerConfig objects; falls back to CO_API_KEY env var check, fixing HTTP 500 on GET /api/admin/provider-indexes/providers (Web UI "Load providers" 500 when Semantic checkbox checked in Add/Rebuild Index form)
+
 ## v9.8.0
 
 ### Features
