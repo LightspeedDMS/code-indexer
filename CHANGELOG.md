@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.5
+
+### Bug Fixes
+
+- fix: Bug #607 -- _provider_index_job and cli_provider_index add/recreate commands used non-existent --provider flag on cidx index; fixed to temporarily set embedding_provider in .code-indexer/config.json and inject API key as env var, then restore original config in finally block
+
 ## v9.8.4
 
 ### Bug Fixes

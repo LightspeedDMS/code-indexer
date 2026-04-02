@@ -116,16 +116,42 @@ def add(provider: str, repo: str):
     if error:
         raise click.ClickException(error)
 
+    import json as _json
+
+    config_path = repo_path / ".code-indexer" / "config.json"
+    if not config_path.exists():
+        raise click.ClickException(
+            f"Repository not initialized. Run 'cidx init' in {repo_path} first."
+        )
+
+    with open(config_path) as _f:
+        config_data: dict = _json.load(_f)
+    had_provider_key = "embedding_provider" in config_data
+    original_provider = config_data.get("embedding_provider")
+
+    config_data["embedding_provider"] = provider
+    with open(config_path, "w") as _f:
+        _json.dump(config_data, _f)
+
     console.print(f"Building {provider} index for {repo_path.name}...")
 
     try:
         result = subprocess.run(
-            ["cidx", "index", "--provider", provider],
+            ["cidx", "index"],
             cwd=str(repo_path),
             capture_output=False,
         )
     except FileNotFoundError:
         raise click.ClickException("cidx not found; install it or add it to PATH")
+    finally:
+        with open(config_path) as _f:
+            config_data = _json.load(_f)
+        if had_provider_key:
+            config_data["embedding_provider"] = original_provider
+        else:
+            config_data.pop("embedding_provider", None)
+        with open(config_path, "w") as _f:
+            _json.dump(config_data, _f)
 
     if result.returncode == 0:
         console.print(f"[green]Successfully built {provider} index[/green]")
@@ -161,18 +187,44 @@ def recreate(provider: str, repo: str):
     if error:
         raise click.ClickException(error)
 
+    import json as _json
+
+    config_path = repo_path / ".code-indexer" / "config.json"
+    if not config_path.exists():
+        raise click.ClickException(
+            f"Repository not initialized. Run 'cidx init' in {repo_path} first."
+        )
+
+    with open(config_path) as _f:
+        config_data: dict = _json.load(_f)
+    had_provider_key = "embedding_provider" in config_data
+    original_provider = config_data.get("embedding_provider")
+
+    config_data["embedding_provider"] = provider
+    with open(config_path, "w") as _f:
+        _json.dump(config_data, _f)
+
     console.print(
         f"Rebuilding {provider} index for {repo_path.name} (clear + rebuild)..."
     )
 
     try:
         result = subprocess.run(
-            ["cidx", "index", "--provider", provider, "--clear"],
+            ["cidx", "index", "--clear"],
             cwd=str(repo_path),
             capture_output=False,
         )
     except FileNotFoundError:
         raise click.ClickException("cidx not found; install it or add it to PATH")
+    finally:
+        with open(config_path) as _f:
+            config_data = _json.load(_f)
+        if had_provider_key:
+            config_data["embedding_provider"] = original_provider
+        else:
+            config_data.pop("embedding_provider", None)
+        with open(config_path, "w") as _f:
+            _json.dump(config_data, _f)
 
     if result.returncode == 0:
         console.print(f"[green]Successfully rebuilt {provider} index[/green]")

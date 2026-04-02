@@ -16495,10 +16495,62 @@ _PROVIDER_INDEX_TIMEOUT_SECONDS = 3600
 def _provider_index_job(
     repo_path: str, provider_name: str, clear: bool = False, **kwargs
 ) -> Dict[str, Any]:
-    """Background job worker for provider index add/recreate (Story #490)."""
-    import subprocess
+    """Background job worker for provider index add/recreate (Story #490, Bug #607).
 
-    cmd = ["cidx", "index", "--provider", provider_name]
+    Temporarily sets embedding_provider in .code-indexer/config.json, runs
+    cidx index (no --provider flag -- it does not exist), then restores the
+    original value in a finally block.
+    """
+    import json
+    import os
+    import subprocess
+    from pathlib import Path
+
+    config_path = Path(repo_path) / ".code-indexer" / "config.json"
+
+    # --- Read current config and record state before any mutation ---
+    config_data: Dict[str, Any] = {}
+    had_embedding_key: bool = False
+    original_provider: str = ""
+
+    try:
+        if config_path.exists():
+            with open(config_path) as f:
+                config_data = json.load(f)
+            had_embedding_key = "embedding_provider" in config_data
+            original_provider = config_data.get("embedding_provider", "")
+
+        # Temporarily write the target provider so cidx index picks it up.
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_data["embedding_provider"] = provider_name
+        with open(config_path, "w") as f:
+            json.dump(config_data, f)
+    except Exception as exc:
+        logger.error(
+            "Failed to prepare provider config for provider=%s repo=%s: %s",
+            provider_name,
+            repo_path,
+            exc,
+        )
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Failed to prepare provider config: {exc}",
+        }
+
+    # Build subprocess env with the appropriate API key for this provider.
+    env = os.environ.copy()
+    server_config = get_config_service().get_config()
+    if provider_name == "cohere":
+        api_key = getattr(server_config, "cohere_api_key", None)
+        if api_key:
+            env["CO_API_KEY"] = api_key
+    elif provider_name == "voyage-ai":
+        api_key = getattr(server_config, "voyageai_api_key", None)
+        if api_key:
+            env["VOYAGE_API_KEY"] = api_key
+
+    cmd = ["cidx", "index"]
     if clear:
         cmd.append("--clear")
 
@@ -16509,6 +16561,7 @@ def _provider_index_job(
             capture_output=True,
             text=True,
             timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
+            env=env,
         )
         return {
             "success": result.returncode == 0,
@@ -16527,6 +16580,23 @@ def _provider_index_job(
             "stdout": "",
             "stderr": f"Index build timed out after {_PROVIDER_INDEX_TIMEOUT_SECONDS} seconds",
         }
+    finally:
+        # Always restore config.json to its pre-job state.
+        try:
+            if config_path.exists():
+                with open(config_path) as f:
+                    current = json.load(f)
+                if had_embedding_key:
+                    current["embedding_provider"] = original_provider
+                else:
+                    current.pop("embedding_provider", None)
+                with open(config_path, "w") as f:
+                    json.dump(current, f)
+        except Exception:
+            logger.warning(
+                "Failed to restore embedding_provider in %s after provider index job",
+                config_path,
+            )
 
 
 def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
