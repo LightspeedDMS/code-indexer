@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.3
+
+### Bug Fixes
+
+- fix: Bug #606 -- Provider checkboxes in Add/Rebuild Index form rendered as two blue vertical lines instead of native checkboxes; added .provider-list input[type="checkbox"] CSS rules with same Pico CSS override as .index-checkboxes
+
 ## v9.8.2
 
 ### Bug Fixes
