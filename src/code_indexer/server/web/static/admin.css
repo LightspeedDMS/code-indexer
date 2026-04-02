@@ -792,6 +792,34 @@ button.danger, .button.danger {
     font-style: italic;
 }
 
+/* Provider checkboxes - same native appearance override as index-checkboxes (Bug #606) */
+.provider-list .checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    padding: 0.25rem 0;
+}
+
+.provider-list input[type="checkbox"] {
+    /* Override Pico CSS - show native checkbox appearance */
+    -webkit-appearance: checkbox;
+    -moz-appearance: checkbox;
+    appearance: checkbox;
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #3b82f6;
+}
+
+.provider-list .rebuild-label {
+    font-size: 0.75rem;
+    color: var(--pico-muted-color);
+    font-style: italic;
+}
+
 .all-indexes-present {
     color: var(--pico-muted-color);
     font-size: 0.85rem;
