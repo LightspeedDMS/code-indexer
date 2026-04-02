@@ -35,9 +35,9 @@ def diagnostics_service():
 
 @pytest.fixture
 def mock_config_manager():
-    """Mock ServerConfigManager with test configuration."""
+    """Mock get_config_service with test configuration."""
     with patch(
-        "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        "code_indexer.server.services.config_service.get_config_service"
     ) as mock:
         config = MagicMock()
         config.server_dir = "/test/server"
@@ -47,7 +47,7 @@ def mock_config_manager():
         config.telemetry_config = MagicMock()
         config.telemetry_config.enabled = True
         config.telemetry_config.collector_endpoint = "http://localhost:4317"
-        mock.return_value.load_config.return_value = config
+        mock.return_value.get_config.return_value = config
         yield mock
 
 
@@ -353,12 +353,12 @@ async def test_check_oidc_provider_not_configured(
 ):
     """Test OIDC Provider diagnostic returns NOT_CONFIGURED when OIDC disabled."""
     with patch(
-        "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        "code_indexer.server.services.config_service.get_config_service"
     ) as mock:
         config = MagicMock()
         config.oidc_provider_config = MagicMock()
         config.oidc_provider_config.enabled = False
-        mock.return_value.load_config.return_value = config
+        mock.return_value.get_config.return_value = config
 
         result = await diagnostics_service.check_oidc_provider()
 
@@ -428,12 +428,12 @@ async def test_check_otel_collector_not_configured(
 ):
     """Test OpenTelemetry Collector diagnostic returns NOT_CONFIGURED when telemetry disabled."""
     with patch(
-        "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+        "code_indexer.server.services.config_service.get_config_service"
     ) as mock:
         config = MagicMock()
         config.telemetry_config = MagicMock()
         config.telemetry_config.enabled = False
-        mock.return_value.load_config.return_value = config
+        mock.return_value.get_config.return_value = config
 
         result = await diagnostics_service.check_otel_collector()
 
@@ -624,14 +624,14 @@ async def test_all_apis_return_not_configured_when_not_configured(
             mock_delegation.return_value.load_config.return_value = delegation_config
 
             with patch(
-                "code_indexer.server.services.diagnostics_service.ServerConfigManager"
+                "code_indexer.server.services.config_service.get_config_service"
             ) as mock_config:
                 config = MagicMock()
                 config.oidc_provider_config = MagicMock()
                 config.oidc_provider_config.enabled = False
                 config.telemetry_config = MagicMock()
                 config.telemetry_config.enabled = False
-                mock_config.return_value.load_config.return_value = config
+                mock_config.return_value.get_config.return_value = config
 
                 # Run all checks
                 github_result = await diagnostics_service.check_github_api()

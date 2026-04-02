@@ -79,7 +79,7 @@ class VoyageAIClient(EmbeddingProvider):
             # Fallback for unknown models
             return 120000  # Conservative default
 
-    def health_check(self, test_api: bool = False) -> bool:
+    def health_check(self, *, test_api: bool = False) -> bool:
         """Check if VoyageAI service is configured correctly.
 
         Args:
@@ -116,6 +116,8 @@ class VoyageAIClient(EmbeddingProvider):
         self, texts: List[str], model: Optional[str] = None
     ) -> Dict[str, Any]:
         """Make synchronous request to VoyageAI API."""
+        from .provider_health_monitor import ProviderHealthMonitor
+
         model_name = model or self.config.model
 
         # Prepare request payload
@@ -123,8 +125,10 @@ class VoyageAIClient(EmbeddingProvider):
 
         # Retry logic
         last_exception: Optional[Exception] = None
+        _start = time.time()
         for attempt in range(self.config.max_retries + 1):
             try:
+                _start = time.time()
                 with httpx.Client(
                     headers={
                         "Authorization": f"Bearer {self.api_key}",
@@ -138,6 +142,10 @@ class VoyageAIClient(EmbeddingProvider):
                 result = response.json()
 
                 if isinstance(result, dict):
+                    latency_ms = (time.time() - _start) * 1000
+                    ProviderHealthMonitor.get_instance().record_call(
+                        "voyage-ai", latency_ms, success=True
+                    )
                     return result
                 else:
                     raise ValueError(f"Unexpected response format: {type(result)}")
@@ -181,7 +189,11 @@ class VoyageAIClient(EmbeddingProvider):
                 else:
                     break
 
-        # All retries exhausted
+        # All retries exhausted — record failure before raising
+        latency_ms = (time.time() - _start) * 1000
+        ProviderHealthMonitor.get_instance().record_call(
+            "voyage-ai", latency_ms, success=False
+        )
         if isinstance(last_exception, httpx.HTTPStatusError):
             if last_exception.response.status_code == 401:
                 raise ValueError(
@@ -204,7 +216,12 @@ class VoyageAIClient(EmbeddingProvider):
         else:
             raise ConnectionError(f"Failed to connect to VoyageAI: {last_exception}")
 
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        embedding_purpose: Optional[str] = None,
+    ) -> List[float]:
         """Generate embedding for given text."""
         # Use get_embeddings_batch internally with single-item array
         batch_result = self.get_embeddings_batch([text], model)
@@ -213,7 +230,11 @@ class VoyageAIClient(EmbeddingProvider):
         return batch_result[0]
 
     def get_embeddings_batch(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> List[List[float]]:
         """Generate embeddings with dynamic token-aware batching (90% safety margin)."""
         if not texts:
@@ -318,7 +339,11 @@ class VoyageAIClient(EmbeddingProvider):
         return all_embeddings
 
     def get_embedding_with_metadata(
-        self, text: str, model: Optional[str] = None
+        self,
+        text: str,
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> EmbeddingResult:
         """Generate embedding with metadata."""
         # Use batch processing internally for consistency
@@ -336,7 +361,11 @@ class VoyageAIClient(EmbeddingProvider):
         )
 
     def get_embeddings_batch_with_metadata(
-        self, texts: List[str], model: Optional[str] = None
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        *,
+        embedding_purpose: str = "document",
     ) -> BatchEmbeddingResult:
         """Generate batch embeddings with metadata."""
         if not texts:

@@ -289,6 +289,11 @@ class ConfigService:
                     if config.claude_integration_config.voyageai_api_key
                     else None
                 ),
+                "cohere_api_key": (
+                    config.claude_integration_config.cohere_api_key[:6] + "***"
+                    if config.claude_integration_config.cohere_api_key
+                    else None
+                ),
                 "max_concurrent_claude_cli": config.claude_integration_config.max_concurrent_claude_cli,
                 "description_refresh_interval_hours": config.claude_integration_config.description_refresh_interval_hours,
                 "description_refresh_enabled": config.claude_integration_config.description_refresh_enabled,
@@ -1436,9 +1441,12 @@ class ConfigService:
     def _save_runtime_to_pg(self, config: "ServerConfig") -> None:
         """Save runtime config to PostgreSQL."""
         assert self._pool is not None
+        from psycopg.rows import dict_row
+
         runtime_dict = self._extract_runtime_dict(config)
 
         with self._pool.connection() as conn:
+            conn.row_factory = dict_row
             conn.execute(
                 "UPDATE server_config SET config_json = %s, "
                 "version = version + 1, updated_at = CURRENT_TIMESTAMP, "
@@ -1446,13 +1454,12 @@ class ConfigService:
                 (json.dumps(runtime_dict), UPDATER_WEB_UI, CONFIG_KEY_RUNTIME),
             )
             conn.commit()
-            # Finding 2 fix: no dict_row factory set, use positional index
             row = conn.execute(
                 "SELECT version FROM server_config WHERE config_key = %s",
                 (CONFIG_KEY_RUNTIME,),
             ).fetchone()
             if row:
-                self._db_config_version = row[0]
+                self._db_config_version = row["version"]
             else:
                 logger.error(
                     "Runtime config row missing from server_config after update"
@@ -1464,6 +1471,8 @@ class ConfigService:
         config = self.get_config()
         runtime_dict = self._extract_runtime_dict(config)
 
+        from psycopg.rows import dict_row
+
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO server_config (config_key, config_json, version, updated_by) "
@@ -1474,6 +1483,7 @@ class ConfigService:
             conn.commit()
             # Finding 4 fix: SELECT actual version -- INSERT may have been a
             # no-op if another node already seeded, so version could be > 1.
+            conn.row_factory = dict_row
             row = conn.execute(
                 "SELECT version FROM server_config WHERE config_key = %s",
                 (CONFIG_KEY_RUNTIME,),
@@ -1481,7 +1491,7 @@ class ConfigService:
             assert row is not None, (
                 "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             )
-            self._db_config_version = row[0]
+            self._db_config_version = row["version"]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
             len(runtime_dict),

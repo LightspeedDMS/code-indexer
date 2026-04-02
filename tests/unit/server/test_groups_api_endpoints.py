@@ -128,8 +128,10 @@ class TestGroupsListEndpoint:
         response = client.get("/api/v1/groups")
         assert response.status_code == 401
 
-    def test_list_groups_accessible_by_power_user(self, client, mock_user_manager):
-        """Test GET /api/v1/groups is accessible by power users."""
+    def test_list_groups_not_accessible_by_power_user(
+        self, client, auth_token, mock_user_manager
+    ):
+        """Test GET /api/v1/groups requires admin role (power users get 403)."""
         app_mock, deps_mock = mock_user_manager
         power_user = User(
             username="poweruser",
@@ -137,22 +139,19 @@ class TestGroupsListEndpoint:
             role=UserRole.POWER_USER,
             created_at=datetime.now(timezone.utc),
         )
-        app_mock.authenticate_user.return_value = power_user
+        # Override get_user so the route sees a power user even with admin JWT
         deps_mock.get_user.return_value = power_user
 
-        login_response = client.post(
-            "/auth/login", json={"username": "poweruser", "password": "password"}
-        )
-        token = login_response.json()["access_token"]
-
         response = client.get(
-            "/api/v1/groups", headers={"Authorization": f"Bearer {token}"}
+            "/api/v1/groups", headers={"Authorization": f"Bearer {auth_token}"}
         )
-        # Power users should be able to list groups
-        assert response.status_code == 200
+        # list_groups uses get_current_admin_user — non-admin gets 403
+        assert response.status_code == 403
 
-    def test_list_groups_accessible_by_normal_user(self, client, mock_user_manager):
-        """Test GET /api/v1/groups is accessible by normal users."""
+    def test_list_groups_not_accessible_by_normal_user(
+        self, client, auth_token, mock_user_manager
+    ):
+        """Test GET /api/v1/groups requires admin role (normal users get 403)."""
         app_mock, deps_mock = mock_user_manager
         normal_user = User(
             username="normaluser",
@@ -160,19 +159,14 @@ class TestGroupsListEndpoint:
             role=UserRole.NORMAL_USER,
             created_at=datetime.now(timezone.utc),
         )
-        app_mock.authenticate_user.return_value = normal_user
+        # Override get_user so the route sees a normal user even with admin JWT
         deps_mock.get_user.return_value = normal_user
 
-        login_response = client.post(
-            "/auth/login", json={"username": "normaluser", "password": "password"}
-        )
-        token = login_response.json()["access_token"]
-
         response = client.get(
-            "/api/v1/groups", headers={"Authorization": f"Bearer {token}"}
+            "/api/v1/groups", headers={"Authorization": f"Bearer {auth_token}"}
         )
-        # Normal users should be able to list groups
-        assert response.status_code == 200
+        # list_groups uses get_current_admin_user — non-admin gets 403
+        assert response.status_code == 403
 
 
 class TestGroupDetailsEndpoint:
@@ -381,29 +375,25 @@ class TestGroupMembershipEndpoints:
         )
         return response.json()["access_token"]
 
-    def test_assign_user_to_group_requires_admin(self, client, mock_user_manager):
+    def test_assign_user_to_group_requires_admin(
+        self, client, auth_token, mock_user_manager
+    ):
         """Test that assigning users to groups requires admin role."""
         app_mock, deps_mock = mock_user_manager
-        # Login as power user
         power_user = User(
             username="poweruser",
             password_hash="$2b$12$hash",
             role=UserRole.POWER_USER,
             created_at=datetime.now(timezone.utc),
         )
-        app_mock.authenticate_user.return_value = power_user
+        # Override get_user so the route sees a power user even with admin JWT
         deps_mock.get_user.return_value = power_user
-
-        login_response = client.post(
-            "/auth/login", json={"username": "poweruser", "password": "password"}
-        )
-        token = login_response.json()["access_token"]
 
         # Try to assign user to group - should fail with 403
         response = client.post(
             "/api/v1/groups/1/members",
             json={"user_id": "testuser"},
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {auth_token}"},
         )
         assert response.status_code == 403
 

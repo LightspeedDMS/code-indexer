@@ -1110,9 +1110,9 @@ class TestAllHandlersCoverage:
             ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_write_token",
-                return_value=(None, "no cred")
-                if project_denied
-                else ("test_token", None),
+                return_value=(
+                    (None, "no cred") if project_denied else ("test_token", None)
+                ),
             ),
         ]
 

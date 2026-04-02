@@ -170,6 +170,7 @@ class TestGetUser:
             "alice@example.com",
             "2024-01-01T00:00:00+00:00",
             None,
+            None,
         )
         cursor.fetchall.return_value = []
         backend = _make_backend(pool)
@@ -195,6 +196,7 @@ class TestGetUser:
             None,
             "2024-01-01T00:00:00+00:00",
             json.dumps(oidc_data),
+            None,
         )
         cursor.fetchall.return_value = []
         backend = _make_backend(pool)
@@ -236,13 +238,14 @@ class TestListUsers:
     def test_returns_all_user_dicts(self) -> None:
         pool, conn, cursor = _make_pool_and_conn()
         rows = [
-            ("alice", "hash1", "admin", None, "2024-01-01T00:00:00+00:00", None),
+            ("alice", "hash1", "admin", None, "2024-01-01T00:00:00+00:00", None, None),
             (
                 "bob",
                 "hash2",
                 "user",
                 "bob@example.com",
                 "2024-01-02T00:00:00+00:00",
+                None,
                 None,
             ),
         ]
@@ -282,6 +285,7 @@ class TestUpdateUser:
             None,
             "2024-01-01T00:00:00+00:00",
             None,
+            None,
         )
         cursor.fetchall.return_value = []
         cursor.rowcount = 1
@@ -297,6 +301,7 @@ class TestUpdateUser:
             "user",
             None,
             "2024-01-01T00:00:00+00:00",
+            None,
             None,
         )
         cursor.fetchall.return_value = []

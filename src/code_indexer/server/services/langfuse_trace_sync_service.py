@@ -51,6 +51,9 @@ class ProcessTraceResult:
     # trace was written (new or updated). Used by sync_project() to trigger per-user
     # refresh instead of non-existent project-level alias.
     repo_folder_name: Optional[str] = None
+    # Session ID of the written trace (Story #592); set alongside repo_folder_name.
+    # Used by _sync_project_inner to build _last_modified_sessions_by_repo for README generation.
+    session_id: Optional[str] = None
 
 
 class SyncMetrics:
@@ -100,6 +103,10 @@ class LangfuseTraceSyncService:
         self._current_tracked_job_id: Optional[str] = (
             None  # Bug #436: track for stop() cleanup
         )
+        # Story #592: tracks session IDs written per repo folder in the last sync cycle.
+        # Reset at the start of each sync_project() call; populated during _sync_project_inner().
+        # Format: {repo_folder_name: set_of_session_ids}
+        self._last_modified_sessions_by_repo: Dict[str, set] = {}
 
     def start(self) -> None:
         """Start background sync thread."""
@@ -321,9 +328,13 @@ class LangfuseTraceSyncService:
         project_name = project_info.get("name", "unknown")
 
         # 3. Run sync and collect per-user repos that received writes.
-        modified_repos = self._sync_project_inner(
+        # Story #592: reset per-sync session tracking before this project's run
+        self._last_modified_sessions_by_repo = {}
+        modified_repos, sessions_by_repo = self._sync_project_inner(
             api_client, project_name, trace_age_days, max_concurrent_observations
         )
+        # Story #592: expose session IDs for README generation via on_sync_complete callback
+        self._last_modified_sessions_by_repo = sessions_by_repo
 
         # 4. Trigger refresh for each per-user repo that received writes (Story #227).
         #    Each per-user repo has its own entry in RefreshScheduler's registry.
@@ -379,7 +390,7 @@ class LangfuseTraceSyncService:
         project_name: str,
         trace_age_days: int,
         max_concurrent_observations: int,
-    ) -> set:
+    ) -> Tuple[set, Dict[str, set]]:
         """Internal sync logic for a single project.
 
         Returns:
@@ -418,6 +429,8 @@ class LangfuseTraceSyncService:
         seen_trace_ids = set()  # Finding 1: track seen traces for pruning
         pending_renames = []  # Lightweight: (timestamp, trace_id, folder_path, trace_type, short_id)
         modified_repos: set = set()  # Per-user repo folder names that received writes
+        # Story #592: session IDs written per repo folder — used for README generation
+        modified_sessions_by_repo: Dict[str, set] = {}
 
         page = 1
         while True:
@@ -468,6 +481,11 @@ class LangfuseTraceSyncService:
                         # Collect per-user repo folder name for post-sync refresh
                         if result.repo_folder_name is not None:
                             modified_repos.add(result.repo_folder_name)
+                            # Story #592: track session IDs per repo for README generation
+                            if result.session_id is not None:
+                                modified_sessions_by_repo.setdefault(
+                                    result.repo_folder_name, set()
+                                ).add(result.session_id)
                     except Exception as e:
                         metrics.traces_checked += 1
                         metrics.errors_count += 1
@@ -534,7 +552,7 @@ class LangfuseTraceSyncService:
             f"{metrics.traces_unchanged} unchanged, {metrics.errors_count} errors ({elapsed_ms}ms)"
         )
 
-        return modified_repos
+        return modified_repos, modified_sessions_by_repo
 
     def _process_trace(
         self,
@@ -625,6 +643,7 @@ class LangfuseTraceSyncService:
                 result.metric_updated = 1
 
             result.repo_folder_name = repo_folder_name
+            result.session_id = trace.get("sessionId")
             return result
         else:
             # New trace or migration from old naming - write to STAGING directory
@@ -659,6 +678,7 @@ class LangfuseTraceSyncService:
             )
 
             result.repo_folder_name = repo_folder_name
+            result.session_id = trace.get("sessionId")
             return result
 
     @staticmethod

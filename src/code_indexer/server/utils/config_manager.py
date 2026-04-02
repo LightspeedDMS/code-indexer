@@ -493,6 +493,8 @@ class ClaudeIntegrationConfig:
     anthropic_api_key: Optional[str] = None
     # VoyageAI API key for embeddings (Story #20)
     voyageai_api_key: Optional[str] = None
+    # Cohere API key for embeddings (Story #486)
+    cohere_api_key: Optional[str] = None
     # Maximum concurrent Claude CLI processes (Story #24: default 2 for resource-constrained systems)
     max_concurrent_claude_cli: int = 2
     # Refresh interval for description generation in hours (moved from ServerConfig)

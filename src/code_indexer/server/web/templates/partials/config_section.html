@@ -149,6 +149,22 @@
                             {% endif %}
                         </td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Cohere API Key</td>
+                        <td class="config-value">
+                            {% if config.provider_api_keys.cohere_configured %}
+                            <span class="status-badge status-configured">Configured</span>
+                            {% else %}
+                            <span class="status-badge status-not-configured">Not Configured</span>
+                            {% endif %}
+                        </td>
+                        <td class="config-actions">
+                            {% if config.provider_api_keys.cohere_configured %}
+                            <button type="button" class="outline small" onclick="testConfiguredCohereKey()">Test</button>
+                            <span id="cohere-display-status" class="key-status"></span>
+                            {% endif %}
+                        </td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -199,6 +215,27 @@
                     <button type="button" class="contrast small" onclick="clearVoyageAIKey()">Clear</button>
                     {% endif %}
                     <span id="voyageai-status" class="key-status"></span>
+                </div>
+            </fieldset>
+
+            <!-- Cohere API Key -->
+            <fieldset>
+                <legend>Cohere API Key</legend>
+                <div class="form-grid">
+                    <label for="cohere-api-key">
+                        API Key
+                        <input type="password" id="cohere-api-key" name="cohere_api_key"
+                               placeholder="Cohere API key..." autocomplete="off">
+                        <small>Minimum 20 characters</small>
+                    </label>
+                </div>
+                <div class="form-actions-inline">
+                    <button type="button" class="primary small" onclick="saveCohereKey()">Save Key</button>
+                    <button type="button" class="outline small" onclick="testCohereKey()">Test Connectivity</button>
+                    {% if config.provider_api_keys.cohere_configured %}
+                    <button type="button" class="contrast small" onclick="clearCohereKey()">Clear</button>
+                    {% endif %}
+                    <span id="cohere-status" class="key-status"></span>
                 </div>
             </fieldset>
 
@@ -3190,6 +3227,141 @@ async function clearVoyageAIKey() {
 
     try {
         const response = await fetch('/api/api-keys/voyageai', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include'
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = data.message;
+            statusSpan.className = 'key-status success';
+            // Refresh to update display
+            setTimeout(() => location.reload(), 1000);
+        } else {
+            statusSpan.textContent = data.detail || 'Clear failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+// Cohere API Key functions (Story #486)
+async function saveCohereKey() {
+    const keyInput = document.getElementById('cohere-api-key');
+    const statusSpan = document.getElementById('cohere-status');
+    const apiKey = keyInput.value.trim();
+
+    if (!apiKey) {
+        statusSpan.textContent = 'Please enter an API key';
+        statusSpan.className = 'key-status error';
+        return;
+    }
+
+    statusSpan.textContent = 'Saving...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/cohere', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = 'Saved successfully';
+            statusSpan.className = 'key-status success';
+            keyInput.value = '';
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            statusSpan.textContent = data.detail || data.error || 'Save failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function testCohereKey() {
+    const keyInput = document.getElementById('cohere-api-key');
+    const statusSpan = document.getElementById('cohere-status');
+    const apiKey = keyInput.value.trim();
+
+    if (!apiKey) {
+        statusSpan.textContent = 'Please enter an API key to test';
+        statusSpan.className = 'key-status error';
+        return;
+    }
+
+    statusSpan.textContent = 'Testing connectivity...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/cohere/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ api_key: apiKey })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = `Connected (${data.response_time_ms}ms)`;
+            statusSpan.className = 'key-status success';
+        } else {
+            statusSpan.textContent = data.detail || data.error || 'Test failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function testConfiguredCohereKey() {
+    const statusSpan = document.getElementById('cohere-display-status');
+    statusSpan.textContent = 'Testing...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/cohere/test-configured', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+            statusSpan.textContent = `Connected (${data.response_time_ms}ms)`;
+            statusSpan.className = 'key-status success';
+        } else {
+            statusSpan.textContent = data.detail || data.error || 'Test failed';
+            statusSpan.className = 'key-status error';
+        }
+    } catch (error) {
+        statusSpan.textContent = 'Network error';
+        statusSpan.className = 'key-status error';
+    }
+}
+
+async function clearCohereKey() {
+    if (!confirm('Are you sure you want to clear the Cohere API key? This will remove it from the server configuration.')) {
+        return;
+    }
+
+    const statusSpan = document.getElementById('cohere-status');
+    statusSpan.textContent = 'Clearing...';
+    statusSpan.className = 'key-status';
+
+    try {
+        const response = await fetch('/api/api-keys/cohere', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include'

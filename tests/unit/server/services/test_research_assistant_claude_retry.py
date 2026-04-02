@@ -16,6 +16,12 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+# Timing constants — generous values to avoid flakiness under CPU contention
+SINGLE_CALL_WAIT = 0.3  # Wait for background thread with one subprocess call
+RETRY_CALL_WAIT = (
+    0.8  # Wait for background thread with two subprocess calls (retry path)
+)
+
 
 class TestResearchAssistantClaudeRetry:
     """Test Research Assistant Claude CLI retry logic for Bug #153."""
@@ -69,7 +75,7 @@ class TestResearchAssistantClaudeRetry:
             # Wait for background thread
             import time
 
-            time.sleep(0.2)
+            time.sleep(SINGLE_CALL_WAIT)
 
         # Verify command used --session-id (not --resume)
         assert len(captured_commands) == 1, "Should execute Claude CLI once"
@@ -104,7 +110,7 @@ class TestResearchAssistantClaudeRetry:
             # Wait for background thread
             import time
 
-            time.sleep(0.2)
+            time.sleep(SINGLE_CALL_WAIT)
 
         # Verify command used --resume (not --session-id)
         assert len(captured_commands) == 1, (
@@ -159,10 +165,10 @@ class TestResearchAssistantClaudeRetry:
             # Execute subsequent prompt
             _job_id = research_service.execute_prompt(session_id, "Second question")
 
-            # Wait for background thread
+            # Wait for background thread — retry path makes 2 subprocess calls
             import time
 
-            time.sleep(0.2)
+            time.sleep(RETRY_CALL_WAIT)
 
         # Verify retry logic was triggered
         assert len(captured_commands) == 2, (
@@ -221,10 +227,10 @@ class TestResearchAssistantClaudeRetry:
             # Execute subsequent prompt
             _job_id = research_service.execute_prompt(session_id, "Second question")
 
-            # Wait for background thread
+            # Wait for background thread — retry path makes 2 subprocess calls
             import time
 
-            time.sleep(0.2)
+            time.sleep(RETRY_CALL_WAIT)
 
         # Verify retry logic was triggered
         assert len(captured_commands) == 2, "Should execute Claude CLI twice"
@@ -260,7 +266,7 @@ class TestResearchAssistantClaudeRetry:
             # Wait for background thread
             import time
 
-            time.sleep(0.2)
+            time.sleep(SINGLE_CALL_WAIT)
 
         # Verify NO retry happened (only one call)
         assert len(captured_commands) == 1, (
@@ -298,7 +304,7 @@ class TestResearchAssistantClaudeRetry:
             # Wait for background thread
             import time
 
-            time.sleep(0.2)
+            time.sleep(SINGLE_CALL_WAIT)
 
         # Verify NO retry happened (only one call)
         assert len(captured_commands) == 1, (

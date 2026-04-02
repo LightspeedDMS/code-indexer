@@ -3372,7 +3372,8 @@ Should not be included."""
         staging_dir.mkdir()
 
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
+        domain_a.write_text(
+            """---
 domain: domain-a
 ---
 
@@ -3382,7 +3383,8 @@ domain: domain-a
 
 Within domain-a, **repo-a-one** calls **repo-a-two**.
 No external connections.
-""")
+"""
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a-one", "repo-a-two"]},
@@ -3401,7 +3403,8 @@ No external connections.
         staging_dir.mkdir()
 
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
+        domain_a.write_text(
+            """---
 domain: domain-a
 ---
 
@@ -3409,10 +3412,12 @@ domain: domain-a
 
 ## Overview
 Standalone domain.
-""")
+"""
+        )
 
         domain_b = staging_dir / "domain-b.md"
-        domain_b.write_text("""---
+        domain_b.write_text(
+            """---
 domain: domain-b
 ---
 
@@ -3420,7 +3425,8 @@ domain: domain-b
 
 ## Overview
 Another standalone domain.
-""")
+"""
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},
@@ -3440,7 +3446,8 @@ Another standalone domain.
         staging_dir.mkdir()
 
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
+        domain_a.write_text(
+            """---
 domain: domain-a
 ---
 
@@ -3449,7 +3456,8 @@ domain: domain-a
 ## Cross-Domain Connections
 
 We use adobe for graphics processing.
-""")
+"""
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},
@@ -3576,7 +3584,8 @@ We use adobe for graphics processing.
 
         # Only create domain-a file, domain-b file is missing
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
+        domain_a.write_text(
+            """---
 domain: domain-a
 ---
 
@@ -3585,7 +3594,8 @@ domain: domain-a
 ## Cross-Domain Connections
 
 Uses **repo-b** from domain-b.
-""")
+"""
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},
@@ -3663,7 +3673,8 @@ Uses **repo-b** from domain-b.
 
         # Create domain files with NO cross-domain connections
         domain_a = staging_dir / "domain-a.md"
-        domain_a.write_text("""---
+        domain_a.write_text(
+            """---
 domain: domain-a
 ---
 
@@ -3671,7 +3682,8 @@ domain: domain-a
 
 ## Overview
 Standalone domain.
-""")
+"""
+        )
 
         domain_list = [
             {"name": "domain-a", "participating_repos": ["repo-a"]},

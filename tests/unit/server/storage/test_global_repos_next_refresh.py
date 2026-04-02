@@ -140,7 +140,8 @@ class TestSchemaMigration:
 
         # Create a raw database without next_refresh (simulating old schema)
         conn = sqlite3.connect(str(db_path))
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS global_repos (
                 alias_name TEXT PRIMARY KEY,
                 repo_name TEXT NOT NULL,
@@ -152,7 +153,8 @@ class TestSchemaMigration:
                 temporal_options TEXT,
                 enable_scip BOOLEAN DEFAULT FALSE
             )
-        """)
+        """
+        )
         conn.execute(
             "INSERT INTO global_repos VALUES (?,?,?,?,?,?,?,?,?)",
             (
@@ -187,7 +189,8 @@ class TestSchemaMigration:
         db_path = tmp_path / "migrate2.db"
 
         conn = sqlite3.connect(str(db_path))
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS global_repos (
                 alias_name TEXT PRIMARY KEY,
                 repo_name TEXT NOT NULL,
@@ -199,7 +202,8 @@ class TestSchemaMigration:
                 temporal_options TEXT,
                 enable_scip BOOLEAN DEFAULT FALSE
             )
-        """)
+        """
+        )
         conn.execute(
             "INSERT INTO global_repos VALUES (?,?,?,?,?,?,?,?,?)",
             (

@@ -1600,7 +1600,8 @@ class GoldenRepoMetadataSqliteBackend:
         """Ensure the golden_repos_metadata table exists (idempotent)."""
 
         def operation(conn):
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS golden_repos_metadata (
                     alias TEXT PRIMARY KEY NOT NULL,
                     repo_url TEXT NOT NULL,
@@ -1613,7 +1614,8 @@ class GoldenRepoMetadataSqliteBackend:
                     category_auto_assigned INTEGER DEFAULT 0,
                     wiki_enabled INTEGER DEFAULT 0
                 )
-            """)
+            """
+            )
             # Migrate existing tables: add columns that may be missing
             cursor = conn.execute("PRAGMA table_info(golden_repos_metadata)")
             existing_cols = {row[1] for row in cursor.fetchall()}
@@ -2197,7 +2199,8 @@ class DependencyMapTrackingBackend:
         """
 
         def operation(conn):
-            conn.execute("""
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS dependency_map_tracking (
                     id INTEGER PRIMARY KEY,
                     last_run TEXT,
@@ -2206,8 +2209,10 @@ class DependencyMapTrackingBackend:
                     commit_hashes TEXT,
                     error_message TEXT
                 )
-            """)
-            conn.execute("""
+            """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS dependency_map_run_history (
                     run_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT,
@@ -2220,7 +2225,8 @@ class DependencyMapTrackingBackend:
                     pass1_duration_s REAL,
                     pass2_duration_s REAL
                 )
-            """)
+            """
+            )
             return None
 
         self._conn_manager.execute_atomic(operation)
@@ -2318,6 +2324,30 @@ class DependencyMapTrackingBackend:
             }
             for row in rows
         ]
+
+    def cleanup_old_history(self, cutoff_iso: str) -> int:
+        """Delete dependency_map_run_history records older than cutoff_iso.
+
+        Args:
+            cutoff_iso: ISO 8601 timestamp; records with timestamp before
+                        this value are deleted.
+
+        Returns:
+            Number of deleted records.
+        """
+        self._ensure_run_history_table()
+        deleted = 0
+
+        def operation(conn):
+            nonlocal deleted
+            cursor = conn.execute(
+                "DELETE FROM dependency_map_run_history WHERE timestamp < ?",
+                (cutoff_iso,),
+            )
+            deleted = cursor.rowcount
+
+        self._conn_manager.execute_atomic(operation)
+        return deleted
 
     def close(self) -> None:
         """Close database connections."""

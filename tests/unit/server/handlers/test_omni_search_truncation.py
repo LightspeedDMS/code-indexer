@@ -8,7 +8,7 @@ TDD methodology: Tests written BEFORE the fix is implemented.
 """
 
 import pytest
-from unittest.mock import patch, Mock, AsyncMock
+from unittest.mock import patch, Mock
 
 
 @pytest.fixture
@@ -65,8 +65,7 @@ class TestOmniSearchAppliesTruncation:
     Story #50: Truncation functions are now sync, mocks updated accordingly.
     """
 
-    @pytest.mark.asyncio
-    async def test_semantic_truncation_applied_to_aggregated_results(
+    def test_semantic_truncation_applied_to_aggregated_results(
         self, setup_payload_cache, mock_user, mock_config_service
     ):
         """_omni_search_code applies _apply_payload_truncation for semantic mode."""
@@ -102,7 +101,7 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_apply_payload_truncation", side_effect=tracking_fn
             ),
             patch.object(
-                handlers, "_expand_wildcard_patterns", side_effect=lambda x: x
+                handlers, "_expand_wildcard_patterns", side_effect=lambda x, u: x
             ),
         ):
             mock_service = Mock()
@@ -113,7 +112,7 @@ class TestOmniSearchAppliesTruncation:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
             params = {
@@ -122,13 +121,12 @@ class TestOmniSearchAppliesTruncation:
                 "search_mode": "semantic",
                 "limit": 10,
             }
-            await handlers._omni_search_code(params, mock_user)
+            handlers._omni_search_code(params, mock_user)
 
         assert len(truncation_calls) > 0, "Semantic truncation should be called"
         assert truncation_calls[-1] == 2, "Should truncate 2 aggregated results"
 
-    @pytest.mark.asyncio
-    async def test_fts_truncation_applied_for_fts_mode(
+    def test_fts_truncation_applied_for_fts_mode(
         self, setup_payload_cache, mock_user, mock_config_service
     ):
         """_omni_search_code applies _apply_fts_payload_truncation for FTS mode."""
@@ -161,7 +159,7 @@ class TestOmniSearchAppliesTruncation:
                 handlers, "_apply_fts_payload_truncation", side_effect=tracking_fn
             ),
             patch.object(
-                handlers, "_expand_wildcard_patterns", side_effect=lambda x: x
+                handlers, "_expand_wildcard_patterns", side_effect=lambda x, u: x
             ),
         ):
             mock_service = Mock()
@@ -172,7 +170,7 @@ class TestOmniSearchAppliesTruncation:
                 ),
                 errors=None,
             )
-            mock_service.search = AsyncMock(return_value=mock_response)
+            mock_service.search = Mock(return_value=mock_response)
             mock_service_class.return_value = mock_service
 
             params = {
@@ -181,6 +179,6 @@ class TestOmniSearchAppliesTruncation:
                 "search_mode": "fts",
                 "limit": 10,
             }
-            await handlers._omni_search_code(params, mock_user)
+            handlers._omni_search_code(params, mock_user)
 
         assert len(truncation_calls) > 0, "FTS truncation should be called for FTS mode"

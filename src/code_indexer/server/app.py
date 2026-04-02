@@ -25,10 +25,14 @@ JOB_STATUS_RUNNING = "running"
 from .models.api_models import QueryResultItem as QueryResultItem  # noqa: F401
 from .models.query import SemanticQueryRequest as SemanticQueryRequest  # noqa: F401
 from .models.query import SemanticQueryResponse as SemanticQueryResponse  # noqa: F401
-from .models.repos import ActivateRepositoryRequest as ActivateRepositoryRequest  # noqa: F401
+from .models.repos import (
+    ActivateRepositoryRequest as ActivateRepositoryRequest,
+)  # noqa: F401
 from .models.repos import AddGoldenRepoRequest as AddGoldenRepoRequest  # noqa: F401
 from .models.repos import ComponentRepoInfo as ComponentRepoInfo  # noqa: F401
-from .models.repos import RepositoryDetailsResponse as RepositoryDetailsResponse  # noqa: F401
+from .models.repos import (
+    RepositoryDetailsResponse as RepositoryDetailsResponse,
+)  # noqa: F401
 from .models.jobs import AddIndexRequest as AddIndexRequest  # noqa: F401
 from .models.auth import ChangePasswordRequest as ChangePasswordRequest  # noqa: F401
 

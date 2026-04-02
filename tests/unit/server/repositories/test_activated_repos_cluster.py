@@ -76,7 +76,8 @@ class SqlitePoolAdapter:
         self._create_schema()
 
     def _create_schema(self):
-        self._conn.execute("""
+        self._conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS activated_repos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL,
@@ -93,7 +94,8 @@ class SqlitePoolAdapter:
                 metadata_json TEXT,
                 UNIQUE(username, user_alias)
             )
-        """)
+        """
+        )
         self._conn.commit()
 
     @contextmanager
@@ -299,7 +301,7 @@ class TestMetadataPgOperations:
         assert loaded["current_branch"] == "feature-x"
         assert loaded["path"] == "/nfs/load-repo"
         assert loaded["git_committer_email"] == "test@example.com"
-        assert loaded["ssh_key_used"] is True
+        assert loaded["ssh_key_used"]
         assert loaded["wiki_enabled"] is True
 
     def test_delete_metadata_pg_removes_row(self, pg_manager):

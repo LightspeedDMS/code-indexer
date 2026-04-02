@@ -74,6 +74,7 @@ def test_client(group_manager, mock_admin_user):
     yield TestClient(app)
 
     app.dependency_overrides.clear()
+    set_group_manager(None)
 
 
 class TestAC1ListUsersWithGroupInformation:

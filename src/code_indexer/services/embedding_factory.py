@@ -37,7 +37,7 @@ class EmbeddingProviderFactory:
         provider_slug = re.sub(r"_+", "_", provider_slug).strip("_")
         model_slug = re.sub(r"_+", "_", model_slug).strip("_")
 
-        return f"{provider_slug}_{model_slug}"
+        return f"{provider_slug}__{model_slug}"
 
     @staticmethod
     def generate_collection_name(
@@ -94,46 +94,54 @@ class EmbeddingProviderFactory:
         return hash_obj.hexdigest()[:8]
 
     @staticmethod
-    def get_provider_model_info(config: Config) -> Dict[str, Any]:
+    def get_provider_model_info(
+        config: Config, provider_name: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Get current provider and model information.
 
         Args:
             config: Main configuration object
+            provider_name: Optional override for provider selection
 
         Returns:
             Dictionary containing provider name, model name, and model info
         """
-        provider_name = config.embedding_provider
+        effective_provider = provider_name or config.embedding_provider
 
-        # Only VoyageAI is supported in v8.0+
-        if provider_name != "voyage-ai":
-            raise ValueError(
-                f"Embedding provider '{provider_name}' is no longer supported.\n"
-                "Code-indexer v8.0+ only supports VoyageAI embeddings.\n"
-                "Please update your configuration to use VoyageAI."
-            )
+        if effective_provider == "voyage-ai":
+            provider = VoyageAIClient(config.voyage_ai, None)
+        elif effective_provider == "cohere":
+            from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
 
-        provider = VoyageAIClient(config.voyage_ai, None)
+            provider = CohereEmbeddingProvider(config.cohere)
+        else:
+            raise ValueError(f"Unknown embedding provider: {effective_provider}")
+
         model_name = provider.get_current_model()
         model_info = provider.get_model_info()
 
         return {
-            "provider_name": provider_name,
+            "provider_name": effective_provider,
             "model_name": model_name,
             "model_info": model_info,
             "dimensions": model_info["dimensions"],
             "slug": EmbeddingProviderFactory.generate_model_slug(
-                provider_name, model_name
+                effective_provider, model_name
             ),
         }
 
     @staticmethod
-    def create(config: Config, console: Optional[Console] = None) -> EmbeddingProvider:
+    def create(
+        config: Config,
+        console: Optional[Console] = None,
+        provider_name: Optional[str] = None,
+    ) -> EmbeddingProvider:
         """Create an embedding provider based on configuration.
 
         Args:
             config: Main configuration object
             console: Optional console for output
+            provider_name: Optional override for provider selection
 
         Returns:
             Configured embedding provider
@@ -141,32 +149,42 @@ class EmbeddingProviderFactory:
         Raises:
             ValueError: If provider is not supported
         """
-        provider_name = config.embedding_provider
+        effective_provider = provider_name or config.embedding_provider
 
-        # Only VoyageAI is supported in v8.0+
-        if provider_name != "voyage-ai":
-            raise ValueError(
-                f"Embedding provider '{provider_name}' is no longer supported.\n"
-                "Code-indexer v8.0+ only supports VoyageAI embeddings.\n"
-                "Please update your configuration to use VoyageAI."
+        if effective_provider == "voyage-ai":
+            return VoyageAIClient(config.voyage_ai, console)
+        elif effective_provider == "cohere":
+            from code_indexer.services.cohere_embedding import CohereEmbeddingProvider
+
+            provider: EmbeddingProvider = CohereEmbeddingProvider(
+                config.cohere, console
             )
-
-        return VoyageAIClient(config.voyage_ai, console)
+            return provider
+        else:
+            raise ValueError(f"Unknown embedding provider: {effective_provider}")
 
     @staticmethod
     def get_available_providers() -> List[str]:
-        """Get list of available embedding providers.
+        """Get list of available embedding providers."""
+        return ["voyage-ai", "cohere"]
 
-        As of v8.0+, only VoyageAI is supported.
-        """
-        return ["voyage-ai"]
+    @staticmethod
+    def get_configured_providers(config: Config) -> List[str]:
+        """Return list of provider names with valid API keys."""
+        import os
+
+        providers: List[str] = []
+        # Check VoyageAI
+        if os.getenv("VOYAGE_API_KEY"):
+            providers.append("voyage-ai")
+        # Check Cohere
+        if config.cohere.api_key or os.getenv("CO_API_KEY"):
+            providers.append("cohere")
+        return providers
 
     @staticmethod
     def get_provider_info() -> Dict[str, Dict[str, Any]]:
-        """Get information about available providers.
-
-        As of v8.0+, only VoyageAI is supported.
-        """
+        """Get information about available providers."""
         return {
             "voyage-ai": {
                 "name": "VoyageAI",
@@ -177,5 +195,15 @@ class EmbeddingProviderFactory:
                 "supports_batch": True,
                 "parallel_capable": True,
                 "default_model": "voyage-code-3",
+            },
+            "cohere": {
+                "name": "Cohere",
+                "description": "High-quality embeddings via Cohere API",
+                "type": "cloud",
+                "requires_api_key": True,
+                "api_key_env": "CO_API_KEY",
+                "supports_batch": True,
+                "parallel_capable": True,
+                "default_model": "embed-v4.0",
             },
         }

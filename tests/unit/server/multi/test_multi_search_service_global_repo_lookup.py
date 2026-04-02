@@ -124,26 +124,16 @@ class TestGetRepositoryPathFunctional:
         index_dir = tmp_path / "indexes" / "my-repo_12345"
         index_dir.mkdir(parents=True)
 
-        # Mock GlobalRegistry to return repo with alias_name
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "my-repo-global",
-                "repo_name": "my-repo",
-                "index_path": str(index_dir),
-            }
-        ]
+        # Mock backend_registry on app.state (actual implementation pattern)
+        mock_backend_registry = MagicMock()
+        mock_backend_registry.global_repos.get_repo.return_value = MagicMock()
 
         # Mock AliasManager to return the target path
         mock_alias_manager_instance = MagicMock()
         mock_alias_manager_instance.read_alias.return_value = str(index_dir)
 
-        # Patch at the origin locations (since imports are lazy inside the method)
         with (
-            patch(
-                "code_indexer.server.utils.registry_factory.get_server_global_registry",
-                return_value=mock_registry,
-            ),
+            patch("code_indexer.server.app.app") as mock_fastapi_app,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
                 return_value=mock_alias_manager_instance,
@@ -153,11 +143,15 @@ class TestGetRepositoryPathFunctional:
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
+            mock_fastapi_app.state.backend_registry = mock_backend_registry
+
             # This should find the repo using alias_name lookup
             result = service._get_repository_path("my-repo-global")
 
             assert result == str(index_dir)
-            mock_registry.list_global_repos.assert_called_once()
+            mock_backend_registry.global_repos.get_repo.assert_called_once_with(
+                "my-repo-global"
+            )
             mock_alias_manager_instance.read_alias.assert_called_once_with(
                 "my-repo-global"
             )
@@ -172,21 +166,19 @@ class TestGetRepositoryPathFunctional:
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        # Mock GlobalRegistry to return empty list
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = []
+        # Mock backend_registry on app.state — get_repo returns None (not found)
+        mock_backend_registry = MagicMock()
+        mock_backend_registry.global_repos.get_repo.return_value = None
 
-        # Patch at origin location
         with (
-            patch(
-                "code_indexer.server.utils.registry_factory.get_server_global_registry",
-                return_value=mock_registry,
-            ),
+            patch("code_indexer.server.app.app") as mock_fastapi_app,
             patch(
                 "code_indexer.server.multi.multi_search_service._get_golden_repos_dir",
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
+            mock_fastapi_app.state.backend_registry = mock_backend_registry
+
             with pytest.raises(FileNotFoundError) as exc_info:
                 service._get_repository_path("nonexistent-global")
 
@@ -209,26 +201,16 @@ class TestGetRepositoryPathFunctional:
         config = MultiSearchConfig(max_workers=5, query_timeout_seconds=30)
         service = MultiSearchService(config)
 
-        # Mock GlobalRegistry to return repo
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "orphan-repo-global",
-                "repo_name": "orphan-repo",
-                "index_path": "/some/path",
-            }
-        ]
+        # Mock backend_registry on app.state — get_repo returns truthy (repo exists)
+        mock_backend_registry = MagicMock()
+        mock_backend_registry.global_repos.get_repo.return_value = MagicMock()
 
         # Mock AliasManager to return None (alias file missing or corrupted)
         mock_alias_manager_instance = MagicMock()
         mock_alias_manager_instance.read_alias.return_value = None
 
-        # Patch at origin locations
         with (
-            patch(
-                "code_indexer.server.utils.registry_factory.get_server_global_registry",
-                return_value=mock_registry,
-            ),
+            patch("code_indexer.server.app.app") as mock_fastapi_app,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
                 return_value=mock_alias_manager_instance,
@@ -238,6 +220,8 @@ class TestGetRepositoryPathFunctional:
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
+            mock_fastapi_app.state.backend_registry = mock_backend_registry
+
             with pytest.raises(FileNotFoundError) as exc_info:
                 service._get_repository_path("orphan-repo-global")
 
@@ -261,26 +245,16 @@ class TestGetRepositoryPathFunctional:
         # Path that doesn't exist
         nonexistent_path = str(tmp_path / "does-not-exist")
 
-        # Mock GlobalRegistry to return repo
-        mock_registry = MagicMock()
-        mock_registry.list_global_repos.return_value = [
-            {
-                "alias_name": "stale-repo-global",
-                "repo_name": "stale-repo",
-                "index_path": nonexistent_path,
-            }
-        ]
+        # Mock backend_registry on app.state — get_repo returns truthy (repo exists)
+        mock_backend_registry = MagicMock()
+        mock_backend_registry.global_repos.get_repo.return_value = MagicMock()
 
         # Mock AliasManager to return the nonexistent path
         mock_alias_manager_instance = MagicMock()
         mock_alias_manager_instance.read_alias.return_value = nonexistent_path
 
-        # Patch at origin locations
         with (
-            patch(
-                "code_indexer.server.utils.registry_factory.get_server_global_registry",
-                return_value=mock_registry,
-            ),
+            patch("code_indexer.server.app.app") as mock_fastapi_app,
             patch(
                 "code_indexer.global_repos.alias_manager.AliasManager",
                 return_value=mock_alias_manager_instance,
@@ -290,6 +264,8 @@ class TestGetRepositoryPathFunctional:
                 return_value=str(tmp_path / "golden-repos"),
             ),
         ):
+            mock_fastapi_app.state.backend_registry = mock_backend_registry
+
             with pytest.raises(FileNotFoundError) as exc_info:
                 service._get_repository_path("stale-repo-global")
 

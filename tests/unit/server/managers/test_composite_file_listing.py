@@ -58,10 +58,10 @@ class TestFileInfoModel:
             component_repo="repo1",
         )
 
-        # Should be able to serialize to dict
+        # Should be able to serialize to dict; @field_serializer converts datetime to ISO string
         data = file_info.model_dump()
         assert "modified" in data
-        assert isinstance(data["modified"], datetime)
+        assert isinstance(data["modified"], str)
 
     def test_fileinfo_model_directory_flag(self):
         """Test FileInfo model handles both files and directories."""

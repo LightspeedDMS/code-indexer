@@ -56,6 +56,7 @@ from ..routers.research_assistant import router as research_assistant_router
 from ..web.mfa_routes import mfa_router, user_mfa_router
 from ..routers.repository_health import router as repository_health_router
 from ..routers.activated_repos import router as activated_repos_router
+from ..routers.provider_indexes import router as provider_indexes_router
 from ..routers.llm_creds import router as llm_creds_router
 from ..routers.debug_routes import debug_router
 from ..routers.groups import (
@@ -261,6 +262,7 @@ def register_inline_routes(
     app.include_router(mfa_router)  # Story #559: MFA setup UI
     app.include_router(repository_health_router)
     app.include_router(activated_repos_router)
+    app.include_router(provider_indexes_router)
     app.include_router(debug_router)
 
     # Mount Web Admin UI routes and static files

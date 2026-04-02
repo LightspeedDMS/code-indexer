@@ -95,7 +95,6 @@ def test_with_scheduler_wired_write_lock_is_acquired():
                 alias="test-repo",
                 index_types=["semantic"],
                 submitter_username="admin",
-                is_admin=True,
             )
 
     # Execute the background worker
@@ -119,7 +118,6 @@ def test_without_scheduler_wired_no_attribute_error():
         alias="test-repo",
         index_types=["semantic"],
         submitter_username="admin",
-        is_admin=True,
     )
 
     # The job is submitted, worker captured

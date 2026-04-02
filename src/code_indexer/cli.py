@@ -1114,8 +1114,6 @@ def _execute_semantic_search(
         collection_name = vector_store_client.resolve_collection_name(
             config, embedding_provider
         )
-        vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
-
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
 
@@ -5653,8 +5651,6 @@ def query(
         collection_name = vector_store_client.resolve_collection_name(
             config, embedding_provider
         )
-        vector_store_client._current_collection_name = collection_name  # type: ignore[attr-defined]
-
         # Ensure payload indexes exist (read-only check for query operations)
         vector_store_client.ensure_payload_indexes(collection_name, context="query")
 
@@ -5966,7 +5962,9 @@ def query(
                 search_timing: Dict[str, Any] = multi_index_timing
             else:
                 # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
-                query_embedding = embedding_provider.get_embedding(query)
+                query_embedding = embedding_provider.get_embedding(
+                    query, embedding_purpose="query"
+                )
                 raw_results_list = vector_store_client.search(
                     query_vector=query_embedding,
                     filter_conditions=query_filter_conditions,
@@ -6026,7 +6024,9 @@ def query(
             else:
                 # Filesystem backend: pre-compute embedding
                 search_start = time.time()
-                query_embedding = embedding_provider.get_embedding(query)
+                query_embedding = embedding_provider.get_embedding(
+                    query, embedding_purpose="query"
+                )
                 raw_results_list = vector_store_client.search_with_model_filter(
                     query_vector=query_embedding,
                     embedding_model=current_model,
@@ -9075,18 +9075,16 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
         # Interactive credential collection if not provided
         if not username:
             username = click.prompt("Username", type=str)
-        username = username or ""
 
         if not password:
             password = getpass.getpass("Password: ")
-        password = password or ""
 
         # Validate inputs
-        if not username.strip():
+        if not (username or "").strip():
             console.print("❌ Username cannot be empty", style="red")
             sys.exit(1)
 
-        if not password.strip():
+        if not (password or "").strip():
             console.print("❌ Password cannot be empty", style="red")
             sys.exit(1)
 
@@ -9094,7 +9092,9 @@ def auth_login(ctx, username: Optional[str], password: Optional[str]):
         auth_client = AuthAPIClient(server_url, project_root)
 
         with console.status("🔐 Authenticating..."):
-            auth_response = auth_client.login(username.strip(), password.strip())
+            auth_response = auth_client.login(
+                (username or "").strip(), (password or "").strip()
+            )
 
         console.print(f"✅ Successfully logged in as {username}", style="green")
         console.print("🔑 Credentials stored securely", style="cyan")
@@ -9171,18 +9171,16 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
         # Interactive credential collection if not provided
         if not username:
             username = click.prompt("Username", type=str)
-        username = username or ""
 
         if not password:
             password = getpass.getpass("Password: ")
-        password = password or ""
 
         # Validate inputs
-        if not username.strip():
+        if not (username or "").strip():
             console.print("❌ Username cannot be empty", style="red")
             sys.exit(1)
 
-        if not password.strip():
+        if not (password or "").strip():
             console.print("❌ Password cannot be empty", style="red")
             sys.exit(1)
 
@@ -9191,7 +9189,7 @@ def auth_register(ctx, username: Optional[str], password: Optional[str], role: s
 
         with console.status("📝 Creating account..."):
             auth_response = auth_client.register(
-                username.strip(), password.strip(), role
+                (username or "").strip(), (password or "").strip(), role
             )
 
         console.print(
@@ -9332,14 +9330,14 @@ def auth_change_password(ctx):
         for attempt in range(max_attempts):
             try:
                 # Get current password
-                current_password = getpass.getpass("Current Password: ") or ""
+                current_password = getpass.getpass("Current Password: ")
                 if not current_password.strip():
                     console.print("❌ Current password cannot be empty", style="red")
                     continue
 
                 # Get new password with validation loop
                 while True:
-                    new_password = getpass.getpass("New Password: ") or ""
+                    new_password = getpass.getpass("New Password: ")
                     if not new_password.strip():
                         console.print("❌ New password cannot be empty", style="red")
                         continue
@@ -9444,10 +9442,9 @@ def auth_reset_password(ctx, username: Optional[str]):
         # Get username if not provided
         if not username:
             username = click.prompt("Username", type=str)
-        username = username or ""
 
         # Validate username
-        if not username.strip():
+        if not (username or "").strip():
             console.print("❌ Username cannot be empty", style="red")
             sys.exit(1)
 
@@ -9456,7 +9453,7 @@ def auth_reset_password(ctx, username: Optional[str]):
         # Create auth client and initiate reset
         auth_client = create_auth_client(server_url, project_root)
         with console.status("📤 Sending reset request..."):
-            auth_client.reset_password(username.strip())
+            auth_client.reset_password((username or "").strip())
 
         console.print(f"✅ Password reset request sent for {username}", style="green")
         console.print("📧 Check your email for reset instructions", style="blue")
@@ -9949,12 +9946,6 @@ def server_group(ctx):
     proper graceful shutdown and health monitoring.
     """
     pass
-
-
-# Register MFA auth subcommands under server group (Story #571)
-from .server.cli.mfa_commands import create_mfa_auth_group as _create_mfa_auth_group  # noqa: E402
-
-server_group.add_command(_create_mfa_auth_group())
 
 
 @server_group.command("start")

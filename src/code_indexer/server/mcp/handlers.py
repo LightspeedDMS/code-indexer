@@ -1363,6 +1363,11 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     diff_type=params.get("diff_type"),
                     author=params.get("author"),
                     chunk_type=params.get("chunk_type"),
+                    # Query strategy parameters (Story #488 Phase 4)
+                    query_strategy=params.get("query_strategy"),
+                    score_fusion=params.get("score_fusion"),
+                    # Multi-provider routing (Story #593)
+                    preferred_provider=params.get("preferred_provider"),
                 )
                 execution_time_ms = int((time.time() - start_time) * 1000)
                 timeout_occurred = False
@@ -1525,6 +1530,11 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             diff_type=params.get("diff_type"),
             author=params.get("author"),
             chunk_type=params.get("chunk_type"),
+            # Query strategy parameters (Story #488 Phase 4)
+            query_strategy=params.get("query_strategy"),
+            score_fusion=params.get("score_fusion"),
+            # Multi-provider routing (Story #593)
+            preferred_provider=params.get("preferred_provider"),
         )
 
         # Story #182: Load category map for result enrichment (activated repos)
@@ -16345,3 +16355,303 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
 
 
 HANDLER_REGISTRY["wiki_article_analytics"] = handle_wiki_article_analytics
+
+
+def _resolve_golden_repo_path(alias: str) -> Optional[str]:
+    """Resolve golden repo alias to filesystem path via AliasManager.
+
+    Uses the same pattern as search_code (line ~1276) to get the current
+    target path, which remains correct after refreshes (registry path becomes stale).
+
+    Returns:
+        Resolved filesystem path string, or None if alias not found.
+    """
+    golden_repos_dir = _get_golden_repos_dir()
+    alias_manager = AliasManager(str(Path(golden_repos_dir) / "aliases"))
+    resolved: Optional[str] = alias_manager.read_alias(alias)
+    return resolved
+
+
+def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Manage provider-specific semantic indexes (Story #490)."""
+    try:
+        from code_indexer.server.services.provider_index_service import (
+            ProviderIndexService,
+        )
+
+        action = params.get("action")
+        if not action:
+            return _mcp_response({"error": "Missing required parameter: action"})
+
+        service = ProviderIndexService(config=get_config_service().get_config())
+
+        if action == "list_providers":
+            providers = service.list_providers()
+            return _mcp_response(
+                {
+                    "success": True,
+                    "providers": providers,
+                    "count": len(providers),
+                }
+            )
+
+        if action == "status":
+            repo_alias = params.get("repository_alias")
+            if not repo_alias:
+                return _mcp_response(
+                    {"error": "Missing required parameter: repository_alias"}
+                )
+
+            # Resolve repo path
+            repo_path = _resolve_golden_repo_path(repo_alias)
+            if not repo_path:
+                return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
+
+            status = service.get_provider_index_status(repo_path, repo_alias)
+            return _mcp_response(
+                {
+                    "success": True,
+                    "repository_alias": repo_alias,
+                    "provider_indexes": status,
+                }
+            )
+
+        # add, recreate, remove require provider
+        provider_name = params.get("provider")
+        repo_alias = params.get("repository_alias")
+
+        if not provider_name:
+            return _mcp_response({"error": "Missing required parameter: provider"})
+        if not repo_alias:
+            return _mcp_response(
+                {"error": "Missing required parameter: repository_alias"}
+            )
+
+        # Validate provider
+        error = service.validate_provider(provider_name)
+        if error:
+            providers = service.list_providers()
+            return _mcp_response(
+                {
+                    "error": error,
+                    "available_providers": [p["name"] for p in providers],
+                }
+            )
+
+        # Resolve repo path
+        repo_path = _resolve_golden_repo_path(repo_alias)
+        if not repo_path:
+            return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
+
+        if action == "remove":
+            result = service.remove_provider_index(repo_path, provider_name)
+            return _mcp_response(
+                {
+                    "success": result["removed"],
+                    "message": result["message"],
+                    "collection_name": result["collection_name"],
+                }
+            )
+
+        if action in ("add", "recreate"):
+            clear = action == "recreate"
+
+            if app_module.background_job_manager is None:
+                return _mcp_response({"error": "Background job manager not available"})
+
+            job_id = app_module.background_job_manager.submit_job(
+                operation_type=f"provider_index_{action}",
+                func=_provider_index_job,
+                submitter_username=user.username,
+                repo_alias=repo_alias,
+                repo_path=repo_path,
+                provider_name=provider_name,
+                clear=clear,
+            )
+
+            return _mcp_response(
+                {
+                    "success": True,
+                    "job_id": job_id,
+                    "action": action,
+                    "provider": provider_name,
+                    "repository_alias": repo_alias,
+                    "message": f"Background job submitted to {action} {provider_name} index for {repo_alias}",
+                }
+            )
+
+        return _mcp_response({"error": f"Unknown action: {action}"})
+
+    except Exception as e:
+        logger.error("manage_provider_indexes error: %s", e, exc_info=True)
+        return _mcp_response({"error": str(e)})
+
+
+_PROVIDER_INDEX_TIMEOUT_SECONDS = 3600
+
+
+def _provider_index_job(
+    repo_path: str, provider_name: str, clear: bool = False, **kwargs
+) -> Dict[str, Any]:
+    """Background job worker for provider index add/recreate (Story #490)."""
+    import subprocess
+
+    cmd = ["cidx", "index", "--provider", provider_name]
+    if clear:
+        cmd.append("--clear")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
+        )
+        return {
+            "success": result.returncode == 0,
+            "stdout": result.stdout[-500:] if result.stdout else "",
+            "stderr": result.stderr[-500:] if result.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Provider index timed out after %s s for provider=%s repo=%s",
+            _PROVIDER_INDEX_TIMEOUT_SECONDS,
+            provider_name,
+            repo_path,
+        )
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": f"Index build timed out after {_PROVIDER_INDEX_TIMEOUT_SECONDS} seconds",
+        }
+
+
+def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Bulk add provider index to all repositories (Story #490)."""
+    try:
+        from code_indexer.server.services.provider_index_service import (
+            ProviderIndexService,
+        )
+
+        provider_name = params.get("provider")
+        if not provider_name:
+            return _mcp_response({"error": "Missing required parameter: provider"})
+
+        service = ProviderIndexService(config=get_config_service().get_config())
+
+        # Validate provider
+        error = service.validate_provider(provider_name)
+        if error:
+            providers = service.list_providers()
+            return _mcp_response(
+                {
+                    "error": error,
+                    "available_providers": [p["name"] for p in providers],
+                }
+            )
+
+        # Get all golden repos
+        global_repos = _list_global_repos()
+        filter_pattern = params.get("filter")
+
+        job_ids = []
+        skipped = []
+
+        if app_module.background_job_manager is None:
+            return _mcp_response({"error": "Background job manager not available"})
+
+        for repo in global_repos:
+            alias = repo.get("alias_name", "")
+
+            # Apply filter if specified
+            if filter_pattern:
+                category = repo.get("category", "")
+                if filter_pattern.startswith("category:"):
+                    filter_cat = filter_pattern.split(":", 1)[1]
+                    if filter_cat.lower() not in category.lower():
+                        continue
+
+            # Check if provider index already exists
+            repo_path = _resolve_golden_repo_path(alias)
+            if not repo_path:
+                continue
+
+            status = service.get_provider_index_status(repo_path, alias)
+            provider_status = status.get(provider_name, {})
+
+            if provider_status.get("exists"):
+                skipped.append(alias)
+                continue
+
+            # Submit job
+            job_id = app_module.background_job_manager.submit_job(
+                operation_type="provider_index_add",
+                func=_provider_index_job,
+                submitter_username=user.username,
+                repo_alias=alias,
+                repo_path=repo_path,
+                provider_name=provider_name,
+                clear=False,
+            )
+            job_ids.append({"alias": alias, "job_id": job_id})
+
+        return _mcp_response(
+            {
+                "success": True,
+                "provider": provider_name,
+                "jobs_created": len(job_ids),
+                "jobs": job_ids,
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+                "message": f"Created {len(job_ids)} jobs, skipped {len(skipped)} repos (already have {provider_name} index)",
+            }
+        )
+
+    except Exception as e:
+        logger.error("bulk_add_provider_index error: %s", e, exc_info=True)
+        return _mcp_response({"error": str(e)})
+
+
+HANDLER_REGISTRY["manage_provider_indexes"] = manage_provider_indexes
+HANDLER_REGISTRY["bulk_add_provider_index"] = bulk_add_provider_index
+
+
+def get_provider_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Get provider health metrics (Story #491)."""
+    try:
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        monitor = ProviderHealthMonitor.get_instance()
+        provider = params.get("provider")
+        health = monitor.get_health(provider)
+
+        result = {}
+        for pname, status in health.items():
+            result[pname] = {
+                "status": status.status,
+                "health_score": status.health_score,
+                "p50_latency_ms": status.p50_latency_ms,
+                "p95_latency_ms": status.p95_latency_ms,
+                "p99_latency_ms": status.p99_latency_ms,
+                "error_rate": status.error_rate,
+                "availability": status.availability,
+                "total_requests": status.total_requests,
+                "successful_requests": status.successful_requests,
+                "failed_requests": status.failed_requests,
+                "window_minutes": status.window_minutes,
+            }
+
+        return _mcp_response(
+            {
+                "success": True,
+                "provider_health": result,
+            }
+        )
+
+    except Exception as e:
+        logger.error("get_provider_health error: %s", e, exc_info=True)
+        return _mcp_response({"error": str(e)})
+
+
+HANDLER_REGISTRY["get_provider_health"] = get_provider_health

@@ -564,18 +564,32 @@ class VectorCalculationManager:
             error_msg = str(e)
 
             # TIMEOUT ARCHITECTURE FIX: Check for API timeout and trigger global cancellation
-            # Import httpx for timeout detection
-            import httpx
+            # Use httpx timeout detection (used by VoyageAI, Cohere, etc.) with fallback
+            try:
+                import httpx as _httpx
 
-            if isinstance(
-                e, (httpx.TimeoutException, httpx.ReadTimeout, httpx.ConnectTimeout)
-            ):
+                is_timeout = isinstance(
+                    e,
+                    (
+                        _httpx.TimeoutException,
+                        _httpx.ReadTimeout,
+                        _httpx.ConnectTimeout,
+                    ),
+                )
+            except ImportError:
+                is_timeout = "timeout" in str(e).lower()
+
+            if is_timeout:
+                provider_name = self.embedding_provider.get_provider_name()
                 logger.error(
-                    f"VoyageAI API timeout for batch {task.task_id} - triggering global cancellation"
+                    f"{provider_name} API timeout for batch {task.task_id}"
+                    " - triggering global cancellation"
                 )
                 # Signal global cancellation to all workers
                 self.request_cancellation()
-                error_msg = f"VoyageAI API timeout - cancelling all work: {error_msg}"
+                error_msg = (
+                    f"{provider_name} API timeout - cancelling all work: {error_msg}"
+                )
 
             # Check if this is a server throttling error
             if self._is_server_throttling_error(e):
@@ -739,53 +753,51 @@ class VectorCalculationManager:
 
     def get_resolved_thread_count(self, config) -> int:
         """
-        Get thread count from config.json setting directly.
+        Get thread count resolved at construction time.
 
         Args:
-            config: Configuration object containing config.json settings
+            config: Configuration object (unused, kept for backward compatibility)
 
         Returns:
-            Thread count from config.voyage_ai.parallel_requests
+            Thread count set during VectorCalculationManager initialization
         """
-        return int(config.voyage_ai.parallel_requests)
+        return self.thread_count
 
     def resolve_thread_count_with_precedence(
         self, cli_thread_count: Optional[int] = None, config=None
     ) -> Dict[str, Any]:
         """
-        Get thread count from config.json setting directly.
+        Get thread count resolved at construction time.
 
         Args:
             cli_thread_count: Not used (removed CLI option)
-            config: Configuration object containing config.json settings
+            config: Configuration object (unused, kept for backward compatibility)
 
         Returns:
             Dictionary with thread count and source information
         """
-        count = config.voyage_ai.parallel_requests if config else 8
+        count = self.thread_count
         return {
             "count": count,
-            "source": "config.json" if config else "default",
-            "message": (
-                f"{count} (from config.json)" if config else f"{count} (default)"
-            ),
+            "source": "constructor",
+            "message": f"{count} (from initialization)",
         }
 
     def get_thread_count_with_source(self, config) -> Dict[str, Any]:
         """
-        Get thread count from config.json setting directly.
+        Get thread count resolved at construction time.
 
         Args:
-            config: Configuration object containing config.json settings
+            config: Configuration object (unused, kept for backward compatibility)
 
         Returns:
             Dictionary with thread count and source information for display
         """
-        count = config.voyage_ai.parallel_requests
+        count = self.thread_count
         return {
             "count": count,
-            "source": "config.json",
-            "message": f"{count} (from config.json)",
+            "source": "constructor",
+            "message": f"{count} (from initialization)",
         }
 
     def get_unified_thread_count(self, config) -> int:

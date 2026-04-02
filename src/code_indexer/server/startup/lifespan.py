@@ -278,9 +278,9 @@ def make_lifespan(
             groups_db_path = Path(server_data_dir) / "groups.db"
             group_manager = GroupAccessManager(
                 groups_db_path,
-                storage_backend=backend_registry.groups
-                if backend_registry is not None
-                else None,
+                storage_backend=(
+                    backend_registry.groups if backend_registry is not None else None
+                ),
             )
             set_group_manager(group_manager)
             app.state.group_manager = group_manager
@@ -299,9 +299,9 @@ def make_lifespan(
 
             audit_service = AuditLogService(
                 groups_db_path,
-                storage_backend=backend_registry.audit_log
-                if backend_registry is not None
-                else None,
+                storage_backend=(
+                    backend_registry.audit_log if backend_registry is not None else None
+                ),
             )
             app.state.audit_service = audit_service
             group_manager.set_audit_service(audit_service)
@@ -476,9 +476,11 @@ def make_lifespan(
             payload_cache = PayloadCache(
                 db_path=cache_db_path,
                 config=payload_cache_config,
-                storage_backend=backend_registry.payload_cache
-                if backend_registry is not None
-                else None,
+                storage_backend=(
+                    backend_registry.payload_cache
+                    if backend_registry is not None
+                    else None
+                ),
             )
             payload_cache.initialize()
             payload_cache.start_background_cleanup()
@@ -695,9 +697,11 @@ def make_lifespan(
                 config_manager=config_service,
                 claude_cli_manager=get_claude_cli_manager(),
                 meta_dir=meta_dir,
-                analysis_model=server_config.golden_repos_config.analysis_model
-                if server_config.golden_repos_config
-                else "opus",
+                analysis_model=(
+                    server_config.golden_repos_config.analysis_model
+                    if server_config.golden_repos_config
+                    else "opus"
+                ),
                 job_tracker=job_tracker,
             )
 
@@ -870,9 +874,11 @@ def make_lifespan(
                 cidx_meta_path=cidx_meta_path,
                 pass_timeout=server_config.claude_integration_config.dependency_map_pass_timeout_seconds,
                 mcp_registration_service=mcp_registration_service,
-                analysis_model=server_config.golden_repos_config.analysis_model
-                if server_config.golden_repos_config
-                else "opus",
+                analysis_model=(
+                    server_config.golden_repos_config.analysis_model
+                    if server_config.golden_repos_config
+                    else "opus"
+                ),
             )
 
             # Create service
@@ -881,9 +887,11 @@ def make_lifespan(
                 config_manager=config_service,
                 tracking_backend=tracking_backend,
                 analyzer=analyzer,
-                refresh_scheduler=global_lifecycle_manager.refresh_scheduler
-                if global_lifecycle_manager
-                else None,
+                refresh_scheduler=(
+                    global_lifecycle_manager.refresh_scheduler
+                    if global_lifecycle_manager
+                    else None
+                ),
                 job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
             )
 
@@ -1001,9 +1009,11 @@ def make_lifespan(
                         server_dir_path=server_data_dir,
                         use_sqlite=True,
                         db_path=db_path,
-                        storage_backend=backend_registry.ci_tokens
-                        if backend_registry is not None
-                        else None,
+                        storage_backend=(
+                            backend_registry.ci_tokens
+                            if backend_registry is not None
+                            else None
+                        ),
                         cluster_secret=_cluster_secret,
                     )
                     github_token_data = token_manager.get_token("github")
@@ -1334,20 +1344,46 @@ def make_lifespan(
 
             # Define callback for auto-registering new Langfuse folders after sync
             def _on_langfuse_sync_complete():
-                """Auto-register new Langfuse folders after sync."""
+                """Auto-register new Langfuse folders after sync and generate READMEs."""
                 if golden_repo_manager is not None:
                     register_langfuse_golden_repos(
                         golden_repo_manager, str(golden_repos_dir)
                     )
+                # Generate README files for repos that received new/updated traces
+                if langfuse_sync_service is not None:  # type: ignore[name-defined]
+                    try:
+                        from code_indexer.server.services.langfuse_readme_generator import (
+                            LangfuseReadmeGenerator,
+                        )
+
+                        data_dir = Path(server_data_dir) / "data"
+                        gen = LangfuseReadmeGenerator()
+                        for (
+                            repo_folder,
+                            session_ids,
+                        ) in langfuse_sync_service._last_modified_sessions_by_repo.items():  # type: ignore[name-defined]
+                            repo_path = data_dir / "golden-repos" / repo_folder
+                            gen.generate_for_repo(repo_path, session_ids)
+                    except Exception as readme_err:
+                        logger.error(
+                            format_error_log(
+                                "APP-GENERAL-030",
+                                f"Failed to generate Langfuse READMEs after sync: {readme_err}",
+                                exc_info=True,
+                                extra={"correlation_id": get_correlation_id()},
+                            )
+                        )
 
             # Create service with config_getter callable
             langfuse_sync_service = LangfuseTraceSyncService(  # type: ignore[name-defined]
                 config_getter=config_service.get_config,
                 data_dir=str(Path(server_data_dir) / "data"),
                 on_sync_complete=_on_langfuse_sync_complete,
-                refresh_scheduler=global_lifecycle_manager.refresh_scheduler
-                if global_lifecycle_manager
-                else None,
+                refresh_scheduler=(
+                    global_lifecycle_manager.refresh_scheduler
+                    if global_lifecycle_manager
+                    else None
+                ),
                 job_tracker=job_tracker,
             )
 

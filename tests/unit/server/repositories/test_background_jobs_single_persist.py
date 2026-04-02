@@ -12,6 +12,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from src.code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
     BackgroundJob,
@@ -19,6 +21,8 @@ from src.code_indexer.server.repositories.background_jobs import (
 )
 from src.code_indexer.server.storage.database_manager import DatabaseSchema
 from src.code_indexer.server.utils.config_manager import BackgroundJobsConfig
+
+pytestmark = pytest.mark.slow
 
 
 class TestSingleJobPersist:

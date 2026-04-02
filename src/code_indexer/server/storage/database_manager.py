@@ -559,8 +559,14 @@ class DatabaseSchema:
             # Enable foreign keys
             conn.execute("PRAGMA foreign_keys = ON")
 
-            # Enable WAL mode for concurrent reads
-            conn.execute("PRAGMA journal_mode = WAL")
+            # In test mode (CIDX_TEST_FAST_SQLITE=1), skip WAL and use in-memory journal
+            # to avoid the 1.5s overhead per init from WAL file creation + fsync.
+            # In production, WAL enables concurrent reads during writes.
+            if os.environ.get("CIDX_TEST_FAST_SQLITE") == "1":
+                conn.execute("PRAGMA journal_mode = MEMORY")
+                conn.execute("PRAGMA synchronous = OFF")
+            else:
+                conn.execute("PRAGMA journal_mode = WAL")
 
             # Create all tables
             conn.execute(self.CREATE_GLOBAL_REPOS_TABLE)

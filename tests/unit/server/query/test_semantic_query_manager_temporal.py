@@ -184,9 +184,17 @@ class TestTemporalServiceIntegration:
         temporal_dir = repo_path / ".code-indexer" / "index" / "temporal"
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
-        with patch(
-            "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-        ) as MockTemporalService:
+        with (
+            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
+            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch(
+                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ),
+            patch("src.code_indexer.server.app._server_hnsw_cache", None),
+            patch(
+                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+            ) as MockTemporalService,
+        ):
             # Mock temporal service
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
@@ -252,9 +260,17 @@ class TestTemporalMetadata:
         temporal_dir = repo_path / ".code-indexer" / "index" / "temporal"
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
-        with patch(
-            "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-        ) as MockTemporalService:
+        with (
+            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
+            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch(
+                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ),
+            patch("src.code_indexer.server.app._server_hnsw_cache", None),
+            patch(
+                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+            ) as MockTemporalService,
+        ):
             # Mock temporal result with full context
             mock_temporal_result = Mock(
                 file_path="auth.py",
@@ -315,9 +331,17 @@ class TestTemporalErrorHandling:
         self, semantic_query_manager, activated_repo_manager_mock
     ):
         """Acceptance Criterion 10: Clear error for invalid date formats."""
-        with patch(
-            "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-        ) as MockTemporalService:
+        with (
+            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
+            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch(
+                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ),
+            patch("src.code_indexer.server.app._server_hnsw_cache", None),
+            patch(
+                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+            ) as MockTemporalService,
+        ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
             # Simulate validation error from TemporalSearchService
@@ -340,9 +364,17 @@ class TestTemporalErrorHandling:
         self, semantic_query_manager, activated_repo_manager_mock
     ):
         """Acceptance Criterion 10: Clear error for wrong separator."""
-        with patch(
-            "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-        ) as MockTemporalService:
+        with (
+            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
+            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch(
+                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ),
+            patch("src.code_indexer.server.app._server_hnsw_cache", None),
+            patch(
+                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+            ) as MockTemporalService,
+        ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
             mock_temporal_service.query_temporal.side_effect = ValueError(
@@ -363,9 +395,17 @@ class TestTemporalErrorHandling:
         self, semantic_query_manager, activated_repo_manager_mock
     ):
         """Acceptance Criterion 10: Clear error for invalid date range."""
-        with patch(
-            "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-        ) as MockTemporalService:
+        with (
+            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
+            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch(
+                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ),
+            patch("src.code_indexer.server.app._server_hnsw_cache", None),
+            patch(
+                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+            ) as MockTemporalService,
+        ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
             mock_temporal_service.query_temporal.side_effect = ValueError(
@@ -399,9 +439,17 @@ class TestPerformanceRequirements:
         temporal_dir = repo_path / ".code-indexer" / "index" / "temporal"
         temporal_dir.mkdir(parents=True, exist_ok=True)
 
-        with patch(
-            "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-        ) as MockTemporalService:
+        with (
+            patch("src.code_indexer.proxy.config_manager.ConfigManager"),
+            patch("src.code_indexer.backends.backend_factory.BackendFactory"),
+            patch(
+                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+            ),
+            patch("src.code_indexer.server.app._server_hnsw_cache", None),
+            patch(
+                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
+            ) as MockTemporalService,
+        ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
             mock_temporal_service.query_temporal.return_value = Mock(

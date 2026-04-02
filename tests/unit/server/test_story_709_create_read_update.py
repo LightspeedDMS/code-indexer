@@ -66,6 +66,7 @@ def test_client(group_manager, mock_admin_user):
     app.dependency_overrides[get_group_manager] = lambda: group_manager
     yield TestClient(app)
     app.dependency_overrides.clear()
+    set_group_manager(None)
 
 
 class TestAC1CreateCustomGroup:

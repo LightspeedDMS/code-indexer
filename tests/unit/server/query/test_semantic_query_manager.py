@@ -150,7 +150,18 @@ class TestSemanticQueryManager:
 
         # Mock the _search_single_repository method directly
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             from src.code_indexer.server.query.semantic_query_manager import QueryResult
 
@@ -193,7 +204,18 @@ class TestSemanticQueryManager:
 
         # Mock the _search_single_repository method directly
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             from src.code_indexer.server.query.semantic_query_manager import QueryResult
 
@@ -303,7 +325,18 @@ class TestSemanticQueryManager:
 
         # Mock the _search_single_repository method directly
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             from src.code_indexer.server.query.semantic_query_manager import QueryResult
 
@@ -354,7 +387,18 @@ class TestSemanticQueryManager:
 
         # Mock the _search_single_repository method to return results with different scores
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             from src.code_indexer.server.query.semantic_query_manager import QueryResult
 
@@ -433,7 +477,18 @@ class TestSemanticQueryManager:
 
         # Mock the _search_single_repository to return many results per repo
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             # Return 75 results per repo (150 total from 2 repos, should be limited to 100)
             return [
@@ -517,7 +572,18 @@ class TestSemanticQueryManager:
 
         # Mock the _search_single_repository method to return empty results
         def mock_search_single_repo(
-            repo_path, repo_alias, query_text, limit, min_score, file_extensions
+            repo_path,
+            repo_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language=None,
+            exclude_language=None,
+            path_filter=None,
+            exclude_path=None,
+            accuracy=None,
+            **kwargs,
         ):
             return []
 

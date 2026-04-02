@@ -211,7 +211,14 @@ class TestSemanticQueryManagerImplementation:
 
                 # Verify SemanticSearchRequest was created with correct parameters
                 mock_request_class.assert_called_once_with(
-                    query="test query", limit=15, include_source=True
+                    query="test query",
+                    limit=15,
+                    include_source=True,
+                    path_filter=None,
+                    language=None,
+                    exclude_language=None,
+                    exclude_path=None,
+                    accuracy=None,
                 )
 
                 # Verify search_repository_path was called with correct parameters

@@ -371,9 +371,9 @@ class HNSWIndexManager:
                     M=16,
                     ef_construction=200,
                     ids=[],
-                    index_file_size=index_file.stat().st_size
-                    if index_file.exists()
-                    else 0,
+                    index_file_size=(
+                        index_file.stat().st_size if index_file.exists() else 0
+                    ),
                     filtered=True,
                     visible_count=0,
                     total_on_disk=total_files_on_disk,

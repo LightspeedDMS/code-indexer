@@ -385,5 +385,6 @@ class TestHealthEndpointMaintenanceMode:
         assert "maintenance_mode" in data
         assert data["maintenance_mode"] is True
 
-        # Clean up
+        # Clean up — reset singleton so downstream tests don't see maintenance mode
+        _reset_maintenance_state()
         app.dependency_overrides.clear()

@@ -216,6 +216,7 @@ class ApiKeysStatusResponse(BaseModel):
 
     anthropic_configured: bool
     voyageai_configured: bool
+    cohere_configured: bool
 
 
 # Singleton service instances
@@ -536,6 +537,7 @@ def get_api_keys_status(
     return ApiKeysStatusResponse(
         anthropic_configured=bool(config.claude_integration_config.anthropic_api_key),
         voyageai_configured=bool(config.claude_integration_config.voyageai_api_key),
+        cohere_configured=bool(config.claude_integration_config.cohere_api_key),
     )
 
 
@@ -545,6 +547,143 @@ class ClearApiKeyResponse(BaseModel):
     success: bool
     provider: str
     message: str
+
+
+@router.post("/cohere", response_model=SaveApiKeyResponse)
+def save_cohere_key(
+    request: SaveApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> SaveApiKeyResponse:
+    """
+    Save and sync Cohere API key.
+
+    Validates format, then syncs to:
+    - os.environ["CO_API_KEY"]
+    - systemd environment file
+    """
+    # Validate format
+    validation = ApiKeyValidator.validate_cohere_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Sync key
+    sync_service = get_api_key_sync_service()
+    result = sync_service.sync_cohere_key(request.api_key)
+
+    if not result.success:
+        raise HTTPException(status_code=500, detail=result.error)
+
+    # Persist to server config
+    config_service = get_config_service()
+    config = config_service.load_config()
+    assert config.claude_integration_config is not None
+    config.claude_integration_config.cohere_api_key = request.api_key
+    config_service.save_config(config)
+
+    return SaveApiKeyResponse(
+        success=True,
+        provider="cohere",
+        already_synced=result.already_synced,
+    )
+
+
+@router.post("/cohere/test", response_model=TestApiKeyResponse)
+async def test_cohere_key(
+    request: TestApiKeyRequest,
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test Cohere API key connectivity.
+
+    Makes a test embedding API call to verify the key works.
+    """
+    # Validate format first
+    validation = ApiKeyValidator.validate_cohere_format(request.api_key)
+    if not validation.valid:
+        raise HTTPException(status_code=400, detail=validation.error)
+
+    # Test connectivity
+    tester = get_api_key_connectivity_tester()
+    result = await tester.test_cohere_connectivity(request.api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.post("/cohere/test-configured", response_model=TestApiKeyResponse)
+async def test_configured_cohere_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> TestApiKeyResponse:
+    """
+    Test the currently configured Cohere API key connectivity.
+
+    Tests the key stored in server config without requiring a new key input.
+    """
+    config_service = get_config_service()
+    config = config_service.load_config()
+    assert config.claude_integration_config is not None
+
+    api_key = config.claude_integration_config.cohere_api_key
+    if not api_key:
+        return TestApiKeyResponse(
+            success=False,
+            provider="cohere",
+            error="No Cohere API key configured",
+        )
+
+    # Test connectivity
+    tester = get_api_key_connectivity_tester()
+    result = await tester.test_cohere_connectivity(api_key)
+
+    return TestApiKeyResponse(
+        success=result.success,
+        provider=result.provider,
+        error=result.error,
+        response_time_ms=result.response_time_ms,
+    )
+
+
+@router.delete("/cohere", response_model=ClearApiKeyResponse)
+def clear_cohere_key(
+    http_request: Request,
+    _current_user: User = Depends(get_current_admin_user_hybrid),
+) -> ClearApiKeyResponse:
+    """Clear the Cohere API key from config and matching synced locations."""
+    config_service = get_config_service()
+    config = config_service.load_config()
+    assert config.claude_integration_config is not None
+    key_to_clear = config.claude_integration_config.cohere_api_key
+
+    if not key_to_clear:
+        return ClearApiKeyResponse(
+            success=True, provider="cohere", message="No key was configured"
+        )
+
+    cleared = ["server config"]
+
+    # Clear from config
+    config.claude_integration_config.cohere_api_key = ""
+    config_service.save_config(config)
+
+    # Clear from environment only if it matches
+    if os.environ.get("CO_API_KEY") == key_to_clear:
+        del os.environ["CO_API_KEY"]
+        cleared.append("environment")
+
+    # Clear from ~/.bashrc and ~/.profile only if matching
+    cleared.extend(_clear_from_rc_files(key_to_clear, "CO_API_KEY"))
+
+    logger.info(f"Cleared Cohere API key from: {', '.join(cleared)}")
+    return ClearApiKeyResponse(
+        success=True, provider="cohere", message=f"Cleared from: {', '.join(cleared)}"
+    )
 
 
 @router.delete("/anthropic", response_model=ClearApiKeyResponse)

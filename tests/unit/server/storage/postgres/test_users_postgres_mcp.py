@@ -331,6 +331,7 @@ class TestGetUserByEmail:
             "alice@example.com",
             "2024-01-01T00:00:00+00:00",
             None,
+            None,
         )
         cursor.fetchall.return_value = []
         backend = _make_backend(pool)

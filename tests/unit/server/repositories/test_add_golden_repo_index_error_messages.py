@@ -17,7 +17,7 @@ Affected locations in golden_repo_manager.py:
 - cidx scip generate (SCIP) failure (line ~2529)
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -29,6 +29,23 @@ def _make_subprocess_result(returncode, stdout="", stderr=""):
     result.stdout = stdout
     result.stderr = stderr
     return result
+
+
+def _make_popen_mock(returncode, stderr="", stdout_lines=None):
+    """Create a mock subprocess.Popen process for run_with_popen_progress.
+
+    run_with_popen_progress uses:
+    - process.stdout (iterable of lines)
+    - process.stderr.readlines() (drained in a background thread)
+    - process.wait()
+    - process.returncode
+    """
+    mock_process = MagicMock()
+    mock_process.stdout = iter(stdout_lines or [])
+    mock_process.stderr.readlines.return_value = [stderr] if stderr else []
+    mock_process.returncode = returncode
+    mock_process.wait.return_value = None
+    return mock_process
 
 
 def _make_manager_for_add_index():
@@ -150,22 +167,28 @@ class TestInitSubprocessErrorMessages:
 
 
 class TestSemanticIndexErrorMessages:
-    """Tests for cidx index (semantic) failure error message fallback chain."""
+    """Tests for cidx index (semantic) failure error message fallback chain.
+
+    Semantic indexing uses subprocess.Popen (via run_with_popen_progress) for
+    real-time progress streaming. We mock subprocess.run for init (one call)
+    and subprocess.Popen for the semantic indexing step.
+    """
 
     def _run_semantic_worker_with_results(self, init_result, semantic_result):
         """Helper: run semantic worker with controlled subprocess results."""
         manager, GoldenRepoError = _make_manager_for_add_index()
         worker = _extract_background_worker(manager, "semantic")
 
-        call_count = [0]
+        mock_popen = _make_popen_mock(
+            returncode=semantic_result.returncode,
+            stderr=semantic_result.stderr,
+            stdout_lines=[semantic_result.stdout] if semantic_result.stdout else [],
+        )
 
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return init_result
-            return semantic_result
-
-        with patch("subprocess.run", side_effect=side_effect):
+        with (
+            patch("subprocess.run", return_value=init_result),
+            patch("subprocess.Popen", return_value=mock_popen),
+        ):
             with pytest.raises(GoldenRepoError) as exc_info:
                 worker()
 
@@ -259,21 +282,27 @@ class TestFTSIndexErrorMessages:
 
 
 class TestTemporalIndexErrorMessages:
-    """Tests for cidx index --index-commits (temporal) failure error message fallback."""
+    """Tests for cidx index --index-commits (temporal) failure error message fallback.
+
+    Temporal indexing uses subprocess.Popen (via run_with_popen_progress) for
+    real-time progress streaming. We mock subprocess.run for init (one call)
+    and subprocess.Popen for the temporal indexing step.
+    """
 
     def _run_temporal_worker_with_results(self, init_result, temporal_result):
         manager, GoldenRepoError = _make_manager_for_add_index()
         worker = _extract_background_worker(manager, "temporal")
 
-        call_count = [0]
+        mock_popen = _make_popen_mock(
+            returncode=temporal_result.returncode,
+            stderr=temporal_result.stderr,
+            stdout_lines=[temporal_result.stdout] if temporal_result.stdout else [],
+        )
 
-        def side_effect(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return init_result
-            return temporal_result
-
-        with patch("subprocess.run", side_effect=side_effect):
+        with (
+            patch("subprocess.run", return_value=init_result),
+            patch("subprocess.Popen", return_value=mock_popen),
+        ):
             with pytest.raises(GoldenRepoError) as exc_info:
                 worker()
 

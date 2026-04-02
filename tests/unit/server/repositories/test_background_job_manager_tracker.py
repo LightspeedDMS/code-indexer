@@ -28,6 +28,8 @@ from code_indexer.server.services.job_tracker import JobTracker
 from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.utils.config_manager import BackgroundJobsConfig
 
+pytestmark = pytest.mark.slow
+
 
 # ---------------------------------------------------------------------------
 # Fixtures

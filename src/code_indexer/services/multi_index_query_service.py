@@ -73,6 +73,20 @@ class MultiIndexQueryService:
             )
         return self._multimodal_provider
 
+    def will_query_multimodal(self) -> bool:
+        """Check if multimodal index will actually be queried for current provider.
+
+        Returns True only when:
+        1. A voyage-multimodal-3 collection (or legacy path) exists, AND
+        2. The current embedding provider is VoyageAI (model starts with "voyage-")
+
+        Cohere's embed-v4.0 is a unified text+multimodal model — its content goes
+        into the same collection, so there is no separate multimodal collection to
+        query for non-VoyageAI providers.
+        """
+        current_model = self.embedding_provider.get_current_model()
+        return self.has_multimodal_index() and current_model.startswith("voyage-")
+
     def has_multimodal_index(self) -> bool:
         """
         Check if multimodal collection exists.
@@ -268,7 +282,7 @@ class MultiIndexQueryService:
             - results: Merged and deduplicated list of results sorted by score descending
             - timing_dict: Dictionary with timing information and flags
         """
-        has_multimodal = self.has_multimodal_index()
+        has_multimodal = self.will_query_multimodal()
 
         # Initialize timing dict
         timing_dict: Dict[str, Any] = {
@@ -312,7 +326,7 @@ class MultiIndexQueryService:
                 futures[multimodal_future] = "multimodal"
 
             # Collect results and timing as they complete
-            results = {"code": [], "multimodal": []}
+            results: Dict[str, List[Any]] = {"code": [], "multimodal": []}
 
             for future in as_completed(futures, timeout=QUERY_TIMEOUT):
                 index_type = futures[future]

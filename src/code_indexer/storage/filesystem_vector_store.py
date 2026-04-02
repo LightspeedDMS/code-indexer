@@ -2111,7 +2111,7 @@ class FilesystemVectorStore:
                 def hnsw_loader():
                     """Loader function for cache miss."""
                     index = hnsw_manager.load_index(
-                        collection_path, max_elements=1000000
+                        collection_path, max_elements=100000
                     )
                     # Load ID mapping from metadata for cache entry
                     id_mapping = hnsw_manager._load_id_mapping(collection_path)
@@ -2124,7 +2124,7 @@ class FilesystemVectorStore:
             else:
                 # No cache - load directly (original behavior)
                 hnsw_index = hnsw_manager.load_index(
-                    collection_path, max_elements=1000000
+                    collection_path, max_elements=100000
                 )
 
             hnsw_load_ms = (time.time() - t_hnsw) * 1000
@@ -2147,7 +2147,9 @@ class FilesystemVectorStore:
         def generate_embedding():
             """Generate query embedding in parallel thread."""
             t0 = time.time()
-            embedding = embedding_provider.get_embedding(query)
+            embedding = embedding_provider.get_embedding(
+                query, embedding_purpose="query"
+            )
             embedding_time_ms = (time.time() - t0) * 1000
             return embedding, embedding_time_ms
 
@@ -3277,7 +3279,7 @@ class FilesystemVectorStore:
                 if cache_entry.hnsw_index is None:
                     # Cache not loaded - load from disk
                     cache_entry.hnsw_index = hnsw_manager.load_index(
-                        collection_path, max_elements=1000000
+                        collection_path, max_elements=100000
                     )
 
                     from .id_index_manager import IDIndexManager

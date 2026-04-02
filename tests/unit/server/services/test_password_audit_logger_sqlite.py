@@ -29,9 +29,8 @@ class TestPasswordChangeAuditLoggerSQLiteInit:
         audit_service = AuditLogService(db_path)
         logger = PasswordChangeAuditLogger(audit_service=audit_service)
 
-        # No file audit_logger attribute should exist (or must be None)
-        file_logger = getattr(logger, "audit_logger", None)
-        assert file_logger is None
+        # When audit_service is provided, no file path should be set
+        assert logger.log_file_path is None
 
     def test_no_log_file_created_when_audit_service_provided(self, tmp_path):
         """PasswordChangeAuditLogger does not create password_audit.log file when using audit_service."""

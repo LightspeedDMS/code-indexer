@@ -77,11 +77,11 @@ class TestBug200EmptyCollectionFalsePositive:
         )
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
-        ) as mock_config_manager:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_config_svc:
             mock_config = Mock()
             mock_config.server_dir = str(tmp_path)
-            mock_config_manager.return_value.load_config.return_value = mock_config
+            mock_get_config_svc.return_value.get_config.return_value = mock_config
 
             service = DiagnosticsService(db_path=str(db_path))
             result = await service.check_vector_storage()
@@ -141,11 +141,11 @@ class TestBug200EmptyCollectionFalsePositive:
         )
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
-        ) as mock_config_manager:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_config_svc:
             mock_config = Mock()
             mock_config.server_dir = str(tmp_path)
-            mock_config_manager.return_value.load_config.return_value = mock_config
+            mock_get_config_svc.return_value.get_config.return_value = mock_config
 
             service = DiagnosticsService(db_path=str(db_path))
             result = await service.check_vector_storage()
@@ -197,11 +197,11 @@ class TestBug200EmptyCollectionFalsePositive:
         )
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
-        ) as mock_config_manager:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_config_svc:
             mock_config = Mock()
             mock_config.server_dir = str(tmp_path)
-            mock_config_manager.return_value.load_config.return_value = mock_config
+            mock_get_config_svc.return_value.get_config.return_value = mock_config
 
             service = DiagnosticsService(db_path=str(db_path))
             result = await service.check_vector_storage()
@@ -255,11 +255,11 @@ class TestBug200EmptyCollectionFalsePositive:
         )
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
-        ) as mock_config_manager:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_config_svc:
             mock_config = Mock()
             mock_config.server_dir = str(tmp_path)
-            mock_config_manager.return_value.load_config.return_value = mock_config
+            mock_get_config_svc.return_value.get_config.return_value = mock_config
 
             service = DiagnosticsService(db_path=str(db_path))
             result = await service.check_vector_storage()
@@ -292,11 +292,11 @@ class TestBug200EmptyCollectionFalsePositive:
         )
 
         with patch(
-            "code_indexer.server.services.diagnostics_service.ServerConfigManager"
-        ) as mock_config_manager:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_config_svc:
             mock_config = Mock()
             mock_config.server_dir = str(tmp_path)
-            mock_config_manager.return_value.load_config.return_value = mock_config
+            mock_get_config_svc.return_value.get_config.return_value = mock_config
 
             service = DiagnosticsService(db_path=str(db_path))
             result = await service.check_vector_storage()

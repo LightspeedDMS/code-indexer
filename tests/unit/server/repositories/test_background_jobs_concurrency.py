@@ -12,6 +12,7 @@ import time
 import threading
 from pathlib import Path
 
+import pytest
 
 from src.code_indexer.server.repositories.background_jobs import (
     BackgroundJobManager,
@@ -20,6 +21,8 @@ from src.code_indexer.server.repositories.background_jobs import (
 from src.code_indexer.server.utils.config_manager import (
     BackgroundJobsConfig,
 )
+
+pytestmark = pytest.mark.slow
 
 
 class TestBackgroundJobManagerConcurrencyLimit:

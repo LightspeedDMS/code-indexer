@@ -173,6 +173,45 @@ class ApiKeySyncService:
                 )
                 return SyncResult(success=False, error=str(e))
 
+    def sync_cohere_key(self, api_key: str) -> SyncResult:
+        """
+        Sync Cohere API key to all targets.
+
+        Targets:
+        1. os.environ["CO_API_KEY"]
+        2. systemd environment file
+
+        Args:
+            api_key: The Cohere API key to sync
+
+        Returns:
+            SyncResult indicating success/failure and idempotency status
+        """
+        with self._sync_lock:
+            # Check if already synced (idempotent)
+            if self._is_cohere_key_synced(api_key):
+                return SyncResult(success=True, already_synced=True)
+
+            try:
+                # Step 1: Set os.environ (immediate hot-reload)
+                os.environ["CO_API_KEY"] = api_key
+
+                # Step 2: Write to systemd env file
+                self._update_systemd_env_file("CO_API_KEY", api_key)
+
+                # Step 3: Update ~/.bashrc (for shell persistence)
+                self._update_bashrc("CO_API_KEY", api_key)
+
+                return SyncResult(success=True)
+
+            except Exception as e:
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-047", f"Failed to sync Cohere API key: {e}"
+                    )
+                )
+                return SyncResult(success=False, error=str(e))
+
     def _is_subscription_mode(self) -> bool:
         """Return True if the server is in subscription credential mode (Story #366)."""
         try:
@@ -193,6 +232,10 @@ class ApiKeySyncService:
     def _is_voyageai_key_synced(self, api_key: str) -> bool:
         """Check if VoyageAI key is already synced to os.environ."""
         return os.environ.get("VOYAGE_API_KEY") == api_key
+
+    def _is_cohere_key_synced(self, api_key: str) -> bool:
+        """Check if Cohere key is already synced to os.environ."""
+        return os.environ.get("CO_API_KEY") == api_key
 
     def _is_anthropic_key_synced(self, api_key: str) -> bool:
         """Check if Anthropic key is already synced to all targets."""
@@ -471,6 +514,72 @@ class ApiKeyConnectivityTester:
                 error=f"Connectivity test failed: {str(e)}",
             )
 
+    async def test_cohere_connectivity(self, api_key: str) -> ConnectivityTestResult:
+        """
+        Test Cohere API key connectivity via embedding API.
+
+        Makes a minimal embedding request to verify the key works.
+
+        Args:
+            api_key: The Cohere API key to test
+
+        Returns:
+            ConnectivityTestResult with success/failure status
+        """
+        start_time = time.time()
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                response = await client.post(
+                    "https://api.cohere.com/v2/embed",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "texts": ["health check"],
+                        "model": "embed-v4.0",
+                        "input_type": "search_document",
+                        "embedding_types": ["float"],
+                    },
+                )
+
+                elapsed_ms = int((time.time() - start_time) * 1000)
+
+                if response.status_code == 200:
+                    return ConnectivityTestResult(
+                        success=True,
+                        provider="cohere",
+                        response_time_ms=elapsed_ms,
+                    )
+                else:
+                    response.raise_for_status()
+                    # raise_for_status will throw, this is for type checker
+                    return ConnectivityTestResult(
+                        success=False,
+                        provider="cohere",
+                        error=f"HTTP {response.status_code}",
+                    )
+
+        except asyncio.TimeoutError:
+            return ConnectivityTestResult(
+                success=False,
+                provider="cohere",
+                error="Connection timeout - Cohere API did not respond",
+            )
+        except httpx.HTTPStatusError as e:
+            return ConnectivityTestResult(
+                success=False,
+                provider="cohere",
+                error=f"HTTP {e.response.status_code}: {e.response.text}",
+            )
+        except Exception as e:
+            return ConnectivityTestResult(
+                success=False,
+                provider="cohere",
+                error=f"Connectivity test failed: {str(e)}",
+            )
+
 
 @dataclass(frozen=True)
 class ValidationResult:
@@ -572,6 +681,34 @@ class ApiKeyValidator:
 
         return ValidationResult(valid=True)
 
+    @classmethod
+    def validate_cohere_format(cls, api_key: Optional[str]) -> ValidationResult:
+        """
+        Validate Cohere API key format.
+
+        Args:
+            api_key: The API key to validate
+
+        Returns:
+            ValidationResult with valid=True if format is correct,
+            or valid=False with error message if validation fails
+        """
+        # Check for None or empty
+        if api_key is None or not api_key.strip():
+            return ValidationResult(valid=False, error="API key is required")
+
+        # Strip whitespace for validation
+        api_key = api_key.strip()
+
+        # Check minimum length (Cohere keys have no fixed prefix)
+        if len(api_key) < 20:
+            return ValidationResult(
+                valid=False,
+                error="Cohere API key must be at least 20 characters",
+            )
+
+        return ValidationResult(valid=True)
+
 
 class ApiKeyAutoSeeder:
     """
@@ -638,3 +775,15 @@ class ApiKeyAutoSeeder:
             The API key if found, None otherwise
         """
         return os.environ.get("VOYAGE_API_KEY")
+
+    def get_cohere_key(self) -> Optional[str]:
+        """
+        Get Cohere API key from available sources.
+
+        Priority:
+        1. CO_API_KEY environment variable
+
+        Returns:
+            The API key if found, None otherwise
+        """
+        return os.environ.get("CO_API_KEY")

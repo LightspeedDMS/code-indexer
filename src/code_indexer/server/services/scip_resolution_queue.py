@@ -52,13 +52,25 @@ class SCIPResolutionQueue:
                 invoking Claude Code and handling responses
             job_tracker: Optional JobTracker for dashboard visibility (Story #314)
         """
-        self.queue: asyncio.Queue[QueuedProject] = asyncio.Queue()
+        self.__queue: Optional[asyncio.Queue] = None  # lazy — needs event loop
         self.self_healing_service = self_healing_service
         self.worker_task: Optional[asyncio.Task] = None
         self.current_project: Optional[QueuedProject] = None
         self.is_running: bool = False
-        self._lock = asyncio.Lock()
+        self.__lock: Optional[asyncio.Lock] = None
         self._job_tracker = job_tracker  # Story #314: dashboard visibility
+
+    @property
+    def _queue(self) -> "asyncio.Queue[QueuedProject]":
+        if self.__queue is None:
+            self.__queue = asyncio.Queue()
+        return self.__queue
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self.__lock is None:
+            self.__lock = asyncio.Lock()
+        return self.__lock
 
     async def enqueue_project(
         self,
@@ -86,11 +98,11 @@ class SCIPResolutionQueue:
             stderr=stderr,
         )
 
-        await self.queue.put(project)
+        await self._queue.put(project)
 
         logger.info(
             f"Enqueued {language} project at {project_path} for job {job_id} "
-            f"(queue size: {self.queue.qsize()})",
+            f"(queue size: {self._queue.qsize()})",
             extra={"correlation_id": get_correlation_id()},
         )
 
@@ -123,7 +135,7 @@ class SCIPResolutionQueue:
 
         try:
             # Get next project from queue (FIFO order)
-            project = await self.queue.get()
+            project = await self._queue.get()
             item_retrieved = True
 
             async with self._lock:
@@ -188,7 +200,7 @@ class SCIPResolutionQueue:
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                await self.queue.put(project)
+                await self._queue.put(project)
             if tracked_job_id and self._job_tracker is not None:
                 try:
                     self._job_tracker.fail_job(tracked_job_id, error="Worker cancelled")
@@ -229,7 +241,7 @@ class SCIPResolutionQueue:
                 self.current_project = None
             # Only call task_done if item was successfully retrieved
             if item_retrieved:
-                self.queue.task_done()
+                self._queue.task_done()
 
     def get_status(self) -> Dict[str, Any]:
         """
@@ -246,7 +258,7 @@ class SCIPResolutionQueue:
             current = asdict(self.current_project)
 
         return {
-            "pending_count": self.queue.qsize(),
+            "pending_count": self._queue.qsize(),
             "current_project": current,
             "is_running": self.is_running,
         }
@@ -322,7 +334,7 @@ class SCIPResolutionQueue:
                     )
                 except asyncio.TimeoutError:
                     # No projects in queue, continue loop
-                    if self.queue.empty() and self.is_running:
+                    if self._queue.empty() and self.is_running:
                         # Stop worker if queue is empty
                         self.is_running = False
                         break

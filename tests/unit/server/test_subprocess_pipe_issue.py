@@ -10,6 +10,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.mark.e2e
 class TestSubprocessPipeIssue:

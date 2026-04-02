@@ -77,9 +77,9 @@ class TestGetCidxMetaReadPath:
 
             service = _make_service(
                 tmp,
-                get_actual_repo_path_side_effect=lambda alias: versioned_path
-                if alias == "cidx-meta"
-                else None,
+                get_actual_repo_path_side_effect=lambda alias: (
+                    versioned_path if alias == "cidx-meta" else None
+                ),
             )
 
             result = service._get_cidx_meta_read_path()

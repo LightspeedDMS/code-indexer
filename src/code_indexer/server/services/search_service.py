@@ -155,6 +155,48 @@ class SemanticSearchService:
             total=len(search_results),
         )
 
+    def search_repository_path_with_provider(
+        self,
+        repo_path: str,
+        search_request: SemanticSearchRequest,
+        provider_name: Optional[str] = None,
+    ) -> SemanticSearchResponse:
+        """
+        Perform semantic search using an explicitly named embedding provider.
+
+        Used by query_strategy='specific' (Story #593) to route queries to a
+        named provider (e.g. 'cohere', 'voyage-ai') instead of the repo default.
+
+        Args:
+            repo_path: Direct path to repository directory
+            search_request: Search request parameters
+            provider_name: Override embedding provider name (e.g. 'cohere', 'voyage-ai')
+
+        Returns:
+            Semantic search response with ranked results
+        """
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"Repository path {repo_path} not found")
+
+        search_results = self._perform_semantic_search(
+            repo_path,
+            search_request.query,
+            search_request.limit,
+            search_request.include_source,
+            path_filter=search_request.path_filter,
+            language=search_request.language,
+            exclude_language=search_request.exclude_language,
+            exclude_path=search_request.exclude_path,
+            accuracy=search_request.accuracy,
+            provider_name_override=provider_name,
+        )
+
+        return SemanticSearchResponse(
+            query=search_request.query,
+            results=search_results,
+            total=len(search_results),
+        )
+
     def _build_filter_conditions(
         self,
         path_filter: Optional[str],
@@ -221,6 +263,7 @@ class SemanticSearchService:
         exclude_language: Optional[str] = None,
         exclude_path: Optional[str] = None,
         accuracy: Optional[str] = None,
+        provider_name_override: Optional[str] = None,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -271,8 +314,11 @@ class SemanticSearchService:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Create repository-specific embedding service
-            embedding_service = EmbeddingProviderFactory.create(config=config)
+            # Create embedding service — use provider_name_override when set (Story #593)
+            embedding_service = EmbeddingProviderFactory.create(
+                config=config,
+                provider_name=provider_name_override,
+            )
 
             # Resolve correct collection name based on repository configuration
             collection_name = vector_store_client.resolve_collection_name(

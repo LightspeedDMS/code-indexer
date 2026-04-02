@@ -166,7 +166,7 @@ class TestMCPSSHKeyManagerFactory:
             return_value=mock_config_service,
         ):
             with patch(
-                "code_indexer.server.services.ssh_key_manager.SSHKeyManager"
+                "code_indexer.server.mcp.handlers.SSHKeyManager"
             ) as mock_manager_class:
                 # Reset the singleton
                 import code_indexer.server.mcp.handlers as handlers_module

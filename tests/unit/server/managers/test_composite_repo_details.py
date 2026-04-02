@@ -16,7 +16,7 @@ class TestComponentRepoInfoModel:
 
     def test_component_repo_info_creation(self):
         """Test creating ComponentRepoInfo with all fields."""
-        from code_indexer.server.app import ComponentRepoInfo
+        from code_indexer.server.models.repos import ComponentRepoInfo
 
         info = ComponentRepoInfo(
             name="backend-api",
@@ -38,7 +38,7 @@ class TestComponentRepoInfoModel:
 
     def test_component_repo_info_no_index(self):
         """Test ComponentRepoInfo for repo without index."""
-        from code_indexer.server.app import ComponentRepoInfo
+        from code_indexer.server.models.repos import ComponentRepoInfo
 
         info = ComponentRepoInfo(
             name="frontend-app",
@@ -61,7 +61,7 @@ class TestCompositeRepositoryDetailsModel:
 
     def test_composite_details_creation(self):
         """Test creating CompositeRepositoryDetails with components."""
-        from code_indexer.server.app import (
+        from code_indexer.server.models.repos import (
             ComponentRepoInfo,
             CompositeRepositoryDetails,
         )
@@ -113,7 +113,7 @@ class TestAnalyzeComponentRepo:
 
     def test_analyze_repo_with_index(self, tmp_path):
         """Test analyzing a repository with existing index."""
-        from code_indexer.server.app import _analyze_component_repo
+        from code_indexer.server.app_helpers import _analyze_component_repo
 
         # Create mock repository structure
         repo_path = tmp_path / "test-repo"
@@ -143,7 +143,7 @@ class TestAnalyzeComponentRepo:
 
     def test_analyze_repo_without_index(self, tmp_path):
         """Test analyzing a repository without index."""
-        from code_indexer.server.app import _analyze_component_repo
+        from code_indexer.server.app_helpers import _analyze_component_repo
 
         # Create mock repository without .code-indexer
         repo_path = tmp_path / "no-index-repo"
@@ -163,7 +163,7 @@ class TestAnalyzeComponentRepo:
 
     def test_analyze_repo_missing_metadata(self, tmp_path):
         """Test analyzing repo with .code-indexer but missing metadata."""
-        from code_indexer.server.app import _analyze_component_repo
+        from code_indexer.server.app_helpers import _analyze_component_repo
 
         # Create repository with .code-indexer but no metadata
         repo_path = tmp_path / "partial-index-repo"
@@ -182,7 +182,7 @@ class TestGetCompositeDetails:
 
     def test_get_composite_details_aggregates_components(self, tmp_path):
         """Test that composite details aggregates all component repos."""
-        from code_indexer.server.app import _get_composite_details
+        from code_indexer.server.app_helpers import _get_composite_details
 
         # Create mock composite repository structure
         composite_path = tmp_path / "composite-repo"
@@ -239,7 +239,7 @@ class TestGetCompositeDetails:
 
     def test_get_composite_details_empty_components(self, tmp_path):
         """Test composite details with no component repositories."""
-        from code_indexer.server.app import _get_composite_details
+        from code_indexer.server.app_helpers import _get_composite_details
 
         # Create empty composite repository
         composite_path = tmp_path / "empty-composite"
@@ -277,7 +277,7 @@ class TestCompositeDetailsCalculations:
 
     def test_total_files_calculation(self, tmp_path):
         """Test that total files are calculated correctly."""
-        from code_indexer.server.app import _get_composite_details
+        from code_indexer.server.app_helpers import _get_composite_details
 
         composite_path = tmp_path / "calc-test"
         composite_path.mkdir()

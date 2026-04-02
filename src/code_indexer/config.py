@@ -67,13 +67,13 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
                 f"See migration guide at docs/migration-to-v8.md"
             )
 
-    # Check for invalid embedding provider (must be voyage-ai in v8.0+)
+    # Check for invalid embedding provider
     if "embedding_provider" in data:
         provider = data["embedding_provider"]
-        if provider != "voyage-ai":
+        if provider not in ("voyage-ai", "cohere"):
             raise ValueError(
-                f"Embedding provider '{provider}' is not supported in v8.0. "
-                f"Only 'voyage-ai' is supported. "
+                f"Embedding provider '{provider}' is not supported. "
+                f"Supported providers: voyage-ai, cohere. "
                 f"See migration guide at docs/migration-to-v8.md"
             )
 
@@ -128,6 +128,34 @@ class VoyageAIConfig(BaseModel):
 
 # Backward compatibility alias (VoyageConfig was renamed to VoyageAIConfig in v8.0)
 VoyageConfig = VoyageAIConfig
+
+
+class CohereConfig(BaseModel):
+    """Cohere embedding provider configuration."""
+
+    api_key: str = ""
+    api_endpoint: str = "https://api.cohere.com/v2/embed"
+    model: str = "embed-v4.0"
+    default_dimension: int = 1536
+    timeout: int = 30
+    max_retries: int = 3
+    retry_delay: float = 1.0
+
+    # Parallel processing configuration (mirrors VoyageAIConfig)
+    parallel_requests: int = Field(
+        default=8, description="Number of concurrent requests to Cohere API"
+    )
+    batch_size: int = Field(
+        default=96,
+        description="Maximum number of texts to send in a single batch request",
+    )
+    max_concurrent_batches_per_commit: int = Field(
+        default=10,
+        description="Maximum number of batches a single commit can have in-flight simultaneously (prevents monopolization)",
+    )
+    exponential_backoff: bool = Field(
+        default=True, description="Use exponential backoff for retries"
+    )
 
 
 class IndexingConfig(BaseModel):
@@ -481,7 +509,7 @@ class Config(BaseModel):
     )
 
     # Embedding provider selection
-    embedding_provider: Literal["voyage-ai"] = Field(
+    embedding_provider: Literal["voyage-ai", "cohere"] = Field(
         default="voyage-ai",
         description="Embedding provider to use",
     )
@@ -492,8 +520,19 @@ class Config(BaseModel):
         description="Vector storage backend configuration (default: filesystem)",
     )
 
+    # Multi-provider / dual-embed settings
+    secondary_provider: Optional[str] = Field(
+        default=None,
+        description="Secondary embedding provider for dual-embed mode",
+    )
+    dual_embed_enabled: bool = Field(
+        default=False,
+        description="Enable dual embedding in server mode",
+    )
+
     # Provider-specific configurations
     voyage_ai: VoyageAIConfig = Field(default_factory=VoyageAIConfig)
+    cohere: CohereConfig = Field(default_factory=CohereConfig)
 
     # Other service configurations
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
@@ -541,6 +580,13 @@ class Config(BaseModel):
         default_factory=GitServiceConfig,
         description="Git operations service account configuration",
     )
+
+    # Provider health monitoring (Story #491)
+    auto_routing_enabled: bool = False
+    health_window_minutes: int = 60
+    health_error_rate_threshold: float = 0.1
+    health_latency_p95_threshold_ms: float = 5000.0
+    health_availability_threshold: float = 0.95
 
     @field_validator("codebase_dir", mode="before")
     @classmethod

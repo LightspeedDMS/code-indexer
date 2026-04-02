@@ -333,7 +333,10 @@ class StorageFactory:
 
         dsn = config["postgres_dsn"]
         pool_max_size = config.get("postgres_pool_max_size", 20)
-        pool = ConnectionPool(dsn, max_size=pool_max_size, name="general")
+        # min_size=0: don't open connections eagerly at startup.
+        # Under test runs, 200+ TestClient(app) startups each create a pool;
+        # min_size=0 ensures no idle connections are held until work arrives.
+        pool = ConnectionPool(dsn, min_size=0, max_size=pool_max_size, name="general")
 
         # Bug #545: Dedicated critical pool for heartbeat/leader/reconciliation.
         # Separated from general pool to prevent starvation under HTTP load.

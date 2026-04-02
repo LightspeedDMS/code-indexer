@@ -40,7 +40,8 @@ class TestReindexRemovedFromDescriptionRefreshScheduler:
         db_file = tmp_path / "test.db"
         conn_manager = DatabaseConnectionManager(str(db_file))
         conn = conn_manager.get_connection()
-        conn.execute("""
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS description_refresh_tracking (
                 repo_alias TEXT PRIMARY KEY,
                 last_run TEXT,
@@ -53,7 +54,8 @@ class TestReindexRemovedFromDescriptionRefreshScheduler:
                 created_at TEXT,
                 updated_at TEXT
             )
-        """)
+        """
+        )
         conn.commit()
         conn_manager.close_all()
 

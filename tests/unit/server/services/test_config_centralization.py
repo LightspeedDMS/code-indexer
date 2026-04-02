@@ -137,9 +137,9 @@ class TestSaveConfigCluster:
     def test_save_config_writes_to_pg_in_cluster_mode(
         self, config_service, tmp_server_dir
     ):
-        # Finding 2 fix: _save_runtime_to_pg no longer uses dict_row,
-        # so mock must return a tuple instead of a dict.
-        mock_pool, mock_conn = _make_mock_pool(select_row=(2,))
+        # _save_runtime_to_pg sets conn.row_factory = dict_row,
+        # so mock must return a dict.
+        mock_pool, mock_conn = _make_mock_pool(select_row={"version": 2})
         config_service._pool = mock_pool
         config_service._db_config_version = 1
 
@@ -175,7 +175,7 @@ class TestSeedRuntimeToPg:
         # Second execute (SELECT version) returns the seeded version.
         insert_cursor = MagicMock()
         select_cursor = MagicMock()
-        select_cursor.fetchone.return_value = (1,)
+        select_cursor.fetchone.return_value = {"version": 1}
         mock_conn.execute.side_effect = [insert_cursor, select_cursor]
 
         config_service._pool = mock_pool
@@ -479,7 +479,7 @@ class TestSaveConfigSqlite:
         # Re-mock for save (UPDATE + SELECT version)
         update_cursor = MagicMock()
         select_cursor = MagicMock()
-        select_cursor.fetchone.return_value = (11,)
+        select_cursor.fetchone.return_value = {"version": 11}
         mock_conn.execute.side_effect = [update_cursor, select_cursor]
 
         config = svc.get_config()

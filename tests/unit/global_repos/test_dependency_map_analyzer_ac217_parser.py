@@ -9,7 +9,6 @@ Tests cover:
 TDD RED PHASE: Tests written before production code changes exist.
 """
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Test fixtures - structured domain file content
 # ─────────────────────────────────────────────────────────────────────────────

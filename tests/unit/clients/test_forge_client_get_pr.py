@@ -53,9 +53,9 @@ class TestGitHubForgeClientGetPR:
             "created_at": created_at,
             "updated_at": updated_at,
             "labels": labels if labels is not None else [],
-            "requested_reviewers": requested_reviewers
-            if requested_reviewers is not None
-            else [],
+            "requested_reviewers": (
+                requested_reviewers if requested_reviewers is not None else []
+            ),
             "mergeable": mergeable,
             "mergeable_state": mergeable_state,
             "additions": additions,

@@ -32,12 +32,21 @@ class EmbeddingProvider(ABC):
         self.console = console
 
     @abstractmethod
-    def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
+    def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        embedding_purpose: Optional[str] = None,
+    ) -> List[float]:
         """Generate embedding for a single text.
 
         Args:
             text: Text to embed
             model: Optional model override
+            embedding_purpose: Optional purpose hint ("query" or "document").
+                Providers that distinguish query vs document embeddings (e.g. Cohere)
+                use this to select the correct input_type. Defaults to None which
+                preserves existing behavior (treated as document/indexing context).
 
         Returns:
             List of floats representing the embedding vector

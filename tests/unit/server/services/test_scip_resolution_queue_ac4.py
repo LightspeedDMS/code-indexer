@@ -19,6 +19,11 @@ from code_indexer.server.services.scip_resolution_queue import (
     SCIPResolutionQueue,
 )
 
+# Timing constants — generous values to avoid flakiness under CPU contention
+SLOW_INVOKE_DELAY = 0.5  # How long a "slow" invoke takes
+WORKER_START_DELAY = 0.2  # Time to let worker start processing first item
+PROCESSING_DELAY = 0.4  # Time to let worker process at least one item
+
 
 class TestSCIPResolutionQueueAC4:
     """Test AC4: Serialized Execution Queue."""
@@ -83,7 +88,7 @@ class TestSCIPResolutionQueueAC4:
         queue.start_worker()
 
         # Give time for processing
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(PROCESSING_DELAY)
 
         # Verify invoke_claude_code called in FIFO order
         calls = mock_self_healing_service.invoke_claude_code.call_args_list
@@ -103,7 +108,7 @@ class TestSCIPResolutionQueueAC4:
 
         # Make invoke_claude_code take time
         async def slow_invoke(*args, **kwargs):
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(SLOW_INVOKE_DELAY)
             return Mock(status="progress")
 
         mock_self_healing_service.invoke_claude_code.side_effect = slow_invoke
@@ -128,7 +133,9 @@ class TestSCIPResolutionQueueAC4:
         queue.start_worker()
 
         # Check status during processing
-        await asyncio.sleep(0.05)  # Small delay to let first project start
+        await asyncio.sleep(
+            WORKER_START_DELAY
+        )  # Let worker start processing first project
         status = queue.get_status()
 
         # Verify: 1 project currently processing, 1 pending

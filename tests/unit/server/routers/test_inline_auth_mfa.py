@@ -54,6 +54,9 @@ class FakeUserManager:
             return self._user
         return None
 
+    def is_password_expired(self, username: str, config) -> bool:
+        return False
+
 
 class FakeRefreshTokenManager:
     """Returns predetermined token data."""
