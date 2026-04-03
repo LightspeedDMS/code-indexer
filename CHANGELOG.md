@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.13
+
+### Bug Fixes
+
+- fix: remove hardcoded 1-hour timeout from _provider_index_job; the previous _PROVIDER_INDEX_TIMEOUT_SECONDS=3600 constant (added unrequested by a code reviewer in Story #490) sent SIGKILL to the cidx index subprocess after 3600s, silently failing provider indexing on large production repos that take several hours; timeout=None is now passed so the job runs to completion
+
 ## v9.8.12
 
 ### Bug Fixes
