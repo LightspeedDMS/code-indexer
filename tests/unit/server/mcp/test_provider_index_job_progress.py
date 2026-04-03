@@ -132,16 +132,18 @@ class TestProviderIndexJobProgress:
         assert "CO_API_KEY" in env, f"CO_API_KEY missing from Popen env: {env}"
         assert env["CO_API_KEY"] == "my-cohere-key-12345"
 
-    def test_timeout_passed_to_run_with_popen_progress(self, tmp_path):
-        """_PROVIDER_INDEX_TIMEOUT_SECONDS must be forwarded to run_with_popen_progress."""
+    def test_no_timeout_passed_to_run_with_popen_progress(self, tmp_path):
+        """No hard timeout must be forwarded to run_with_popen_progress.
+
+        Production repos can take several hours to build a fresh provider index.
+        A hard timeout (previously 3600s) silently kills legitimate long-running jobs.
+        timeout=None means the subprocess runs until completion or explicit cancellation.
+        """
         repo_dir = self._make_repo(tmp_path)
 
         mock_proc = self._mock_popen_proc()
 
-        from code_indexer.server.mcp.handlers import (
-            _PROVIDER_INDEX_TIMEOUT_SECONDS,
-            _provider_index_job,
-        )
+        from code_indexer.server.mcp.handlers import _provider_index_job
 
         captured_call_args = {}
 
@@ -149,7 +151,6 @@ class TestProviderIndexJobProgress:
 
         def capture_run_with_popen(*args, **kwargs):
             captured_call_args.update(kwargs)
-            # Call the real function but with a mocked Popen
             return original_run_with_popen(*args, **kwargs)
 
         import code_indexer.services.progress_subprocess_runner as runner_module
@@ -181,14 +182,10 @@ class TestProviderIndexJobProgress:
             )
 
         assert result["success"] is True
-        assert "timeout" in captured_call_args, (
-            "timeout must be passed to run_with_popen_progress"
+        assert captured_call_args.get("timeout") is None, (
+            f"timeout must be None (no hard limit); got {captured_call_args.get('timeout')}. "
+            "A hardcoded timeout kills long-running production indexing jobs."
         )
-        assert captured_call_args["timeout"] == _PROVIDER_INDEX_TIMEOUT_SECONDS, (
-            f"Expected timeout={_PROVIDER_INDEX_TIMEOUT_SECONDS}, "
-            f"got {captured_call_args['timeout']}"
-        )
-        assert _PROVIDER_INDEX_TIMEOUT_SECONDS == 3600
 
     def test_non_git_repo_degrades_gracefully(self, tmp_path):
         """When gather_repo_metrics returns (0,0) for a non-git repo, job completes."""

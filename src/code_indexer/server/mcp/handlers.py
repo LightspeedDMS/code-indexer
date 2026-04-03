@@ -16489,9 +16489,6 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         return _mcp_response({"error": str(e)})
 
 
-_PROVIDER_INDEX_TIMEOUT_SECONDS = 3600
-
-
 def _post_provider_index_snapshot(
     repo_alias: str, base_clone_path: str, old_snapshot_path: str
 ) -> None:
@@ -16677,7 +16674,7 @@ def _provider_index_job(
             all_stderr=all_stderr,
             cwd=actual_path,
             env=env,
-            timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
+            timeout=None,  # No hard limit — production repos can take several hours
             error_label="provider index",
         )
         if is_versioned_snapshot and actual_path != repo_path:
