@@ -16569,6 +16569,8 @@ def _provider_index_job(
 
     # Determine the actual path to index.
     # If repo_path is inside .versioned/, use the base clone instead.
+    # Note: repo_alias is passed via submit_job's explicit repo_alias= parameter,
+    # which means it is NOT forwarded to **kwargs. Derive it from the path as fallback.
     repo_alias = kwargs.get("repo_alias", "")
     actual_path = repo_path
     is_versioned_snapshot = ".versioned" in Path(repo_path).parts
@@ -16586,6 +16588,9 @@ def _provider_index_job(
                 actual_path,
                 repo_path,
             )
+        # submit_job consumes repo_alias before forwarding kwargs; derive from path.
+        if not repo_alias:
+            repo_alias = f"{alias_name}-global"
 
     config_path = Path(actual_path) / ".code-indexer" / "config.json"
 
