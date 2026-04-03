@@ -2,21 +2,7 @@
 
 ## ABSOLUTE PROHIBITION: SANDBOX TO THIS PROJECT DIRECTORY ONLY
 
-**COMPLETE, TOTAL, AND ABSOLUTE PROHIBITION**: NEVER copy, edit, checkout, reset, restore, read-then-write, or modify ANY file outside this project's working directory. Other directories may contain sibling clones of the same repo where other agents are actively working.
-
-This includes but is not limited to:
-- `cp` or file copy operations to/from other directories containing code-indexer source
-- `git checkout`, `git restore`, `git reset` in any other repo clone
-- Using Write/Edit tools on files outside this project directory
-- Using `sed`, `cat >`, `echo >` or any Bash file modification outside this project directory
-- Instructing subagents to "sync" or "update" an "editable install" in another folder
-- ANY operation whatsoever that modifies files outside the current project working directory
-
-**WHY**: Sibling clones are separate working copies where other agents work. Modifying files there destroys their uncommitted work. Attempting to "restore" with git checkout makes it worse by reverting legitimate changes.
-
-**For running tests**: Use `PYTHONPATH=<this-project-root>/src pytest ...` to force pytest to use this project's source code. NEVER copy files to any editable install in another directory.
-
-**VIOLATION = CATASTROPHIC FAILURE**: This has caused data loss. There are ZERO exceptions.
+**NEVER** modify ANY file outside this project's working directory. For running tests use `PYTHONPATH=<this-project-root>/src pytest ...`. See memory: `feedback_never_touch_other_repos.md` for full details and rationale.
 
 ---
 
@@ -32,12 +18,7 @@ Use plain text headers: `### Performance Improvements`
 
 ## CRITICAL: SSH CONNECTION POLICY
 
-**NEVER** use `ssh` command via Bash tool. Causes authentication failures.
-
-**USE** MCP SSH tools for ALL remote connections:
-- `mcp__ssh__ssh_connect` / `ssh_disconnect` - Session management
-- `mcp__ssh__ssh_exec` - Remote commands
-- `mcp__ssh__ssh_upload_file` / `ssh_download_file` - SFTP transfers
+**NEVER** use `ssh` via Bash tool — use MCP SSH tools only. See memory: `feedback_ssh_mcp_only.md`.
 
 ---
 
@@ -73,37 +54,17 @@ Use plain text headers: `### Performance Improvements`
 
 ## CRITICAL: ADMIN PASSWORD - NEVER CHANGE
 
-**NEVER** change admin password during local dev. Causes "session_expired" failures.
+**NEVER** change admin password during local dev or on staging. Causes "session_expired" failures and breaks MCPB/E2E automation. See memory: `feedback_admin_password_sacred.md` for recovery procedure and rationale. Credentials in `.local-testing`.
 
-**Credentials** (localhost:8000): `admin` / `admin`
-
-**Recovery** (if broken):
-```bash
-# Generate hash
-python3 -c "from src.code_indexer.server.auth.password_manager import PasswordManager; print(PasswordManager().hash_password('admin'))"
-
-# Update DB (replace HASH)
-sqlite3 ~/.cidx-server/data/cidx_server.db "UPDATE users SET password_hash='HASH' WHERE username='admin';"
-```
 *Recorded 2026-01-26*
 
 ---
 
 ## CRITICAL: STAGING SERVER ADMIN PASSWORD - ABSOLUTELY FORBIDDEN TO CHANGE
 
-**NEVER, UNDER ANY CIRCUMSTANCES**, change the admin password on the staging server (192.168.60.20).
+**NEVER** change the staging server admin password. It is used by MCPB auto-login, E2E automation, REST/MCP testing, and encrypted credentials on client machines. Changing it breaks ALL of the above and requires manual recovery on every client.
 
-**Staging server credentials**: `admin` / `Calatrava123!`
-
-This password is used by:
-- MCPB (MCP Bridge) on the Mac laptop for auto-login
-- E2E test automation
-- All REST/MCP API testing
-- Encrypted credentials stored on client machines
-
-Changing this password breaks ALL of the above and requires manual recovery on every client.
-
-**ABSOLUTE PROHIBITION**: Do not reset, change, update, or modify this password via any method -- not through the Web UI, not through the database, not through any API call, not through any script. EVER.
+For staging credentials, read `.local-testing`. See also memory: `feedback_admin_password_sacred.md`.
 
 *Recorded 2026-02-15*
 
@@ -111,14 +72,8 @@ Changing this password breaks ALL of the above and requires manual recovery on e
 
 ## SSH SERVER RESTART - CRITICAL PROCEDURE
 
-**NEVER** use `kill -15 && nohup ...` for restarts. Causes SSH lockups.
+**NEVER** use `kill -15 && nohup ...` — use systemd only. See memory: `feedback_ssh_systemd_restart.md`.
 
-**Use systemd**:
-```bash
-mcp__ssh__ssh_connect(...)
-echo "PASSWORD" | sudo -S systemctl restart cidx-server
-systemctl status cidx-server --no-pager
-```
 *Recorded 2025-11-29*
 
 ---
@@ -205,14 +160,7 @@ def execute(self) -> bool:
 
 ## CIDX SERVER PORT CONFIGURATION - DO NOT CHANGE
 
-**NEVER** change port config for cidx-server, HAProxy, or firewall.
-
-**Locked config** (verified 2025-11-30):
-- cidx-server systemd: port 8000
-- HAProxy backend: forwards to .30 on port 8000
-- Firewall: allows 8000 from HAProxy
-
-Any port change = HAProxy 503 errors.
+**NEVER** change port config for cidx-server, HAProxy, or firewall. See memory: `feedback_port_config_locked.md`.
 
 ---
 
@@ -474,7 +422,7 @@ development → staging → master
 
 2. **Staging** (merge to `staging`):
    - `git checkout staging && git merge development && git push origin staging`
-   - Auto-deploys to 192.168.60.20 (staging server)
+   - Auto-deploys to staging server (IP in `.local-testing`)
    - **E2E TEST ON STAGING** - verify fix works in production-like environment
 
 3. **Production** (merge to `master` ONLY after staging validation):
@@ -491,14 +439,7 @@ development → staging → master
 
 ## 1. CRITICAL BUSINESS INSIGHT - Query is Everything
 
-**Query capability = core value**. All CLI query features MUST be in MCP/REST APIs.
-
-**Status** (2025-11-18):
-- CLI: 23 params | MCP: 11 params (48% parity)
-- P0 implemented: language, exclude_language, path_filter, exclude_path, file_extensions, accuracy
-- Gap: FTS-specific (8), temporal (4)
-
-**NEVER** remove/break query functionality. Query degradation = product failure.
+**NEVER** remove/break query functionality. Query degradation = product failure. See memory: `project_query_is_everything.md`.
 
 ---
 
@@ -628,19 +569,11 @@ docs/query-guide.md:739,883       # Version references
 
 ### Performance
 
-**NEVER** add `time.sleep()` to production for UI visibility. Fix display logic.
+**NEVER** add `time.sleep()` to production. See memory: `feedback_no_sleep_in_production.md`.
 
 ### Progress Reporting (DELICATE)
 
-**Pattern**:
-- Setup: `progress_callback(0, 0, Path(""), info="Setup")` → scrolling
-- Progress: `progress_callback(current, total, file, info="X/Y files...")` → progress bar
-
-**Rules**:
-- Single line at bottom with progress bar + metrics
-- NO scrolling console feedback EVER
-- Ask confirmation before ANY changes to progress
-- Files: BranchAwareIndexer, SmartIndexer, HighThroughputProcessor
+**Ask confirmation before ANY changes to progress.** See memory: `feedback_progress_reporting_delicate.md`.
 
 ### Git-Awareness (CORE FEATURE)
 
