@@ -1,13 +1,26 @@
-"""Tests for Bug #607: _provider_index_job used --provider flag that doesn't exist in cidx index."""
+"""Tests for Bug #607: _provider_index_job used --provider flag that doesn't exist in cidx index.
+
+Story #613: subprocess.run replaced with run_with_popen_progress (uses Popen internally).
+Mocks must target code_indexer.services.progress_subprocess_runner.subprocess.Popen
+and gather_repo_metrics, NOT subprocess.run.
+"""
 
 import json
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.mcp.handlers import _provider_index_job
+from code_indexer.services.progress_subprocess_runner import IndexingSubprocessError
 
 _TIMEOUT_SECS = 3600
+
+_POPEN_PATH = "code_indexer.services.progress_subprocess_runner.subprocess.Popen"
+_GATHER_METRICS_PATH = (
+    "code_indexer.services.progress_subprocess_runner.gather_repo_metrics"
+)
+_RUN_WITH_POPEN_PATH = (
+    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+)
 
 
 def _make_repo(tmp_path: Path, provider: str = "voyage-ai") -> Path:
@@ -31,14 +44,15 @@ def _make_config_service(
     return mock_service
 
 
-def _successful_run(*args, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(args=[], returncode=0, stdout="done", stderr="")
-
-
-def _failing_run(*args, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=[], returncode=1, stdout="", stderr="failed"
-    )
+def _mock_popen_proc(returncode: int = 0, stderr_lines=None) -> MagicMock:
+    """Return a mock Popen process that exits with the given returncode."""
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter([])
+    mock_proc.stderr.readlines.return_value = stderr_lines or []
+    mock_proc.returncode = returncode
+    mock_proc.wait.return_value = None
+    mock_proc.poll.return_value = returncode
+    return mock_proc
 
 
 class TestProviderIndexJobConfigMutation:
@@ -51,13 +65,14 @@ class TestProviderIndexJobConfigMutation:
 
         observed_provider_during_run = []
 
-        def capture_provider(*args, **kwargs):
+        def capture_provider(cmd, **kwargs):
             config = json.loads(config_path.read_text())
             observed_provider_during_run.append(config.get("embedding_provider"))
-            return _successful_run(*args, **kwargs)
+            return _mock_popen_proc()
 
         with (
-            patch("subprocess.run", side_effect=capture_provider),
+            patch(_POPEN_PATH, side_effect=capture_provider),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
@@ -75,7 +90,8 @@ class TestProviderIndexJobConfigMutation:
         config_path = repo_path / ".code-indexer" / "config.json"
 
         with (
-            patch("subprocess.run", side_effect=_successful_run),
+            patch(_POPEN_PATH, return_value=_mock_popen_proc()),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
@@ -98,7 +114,11 @@ class TestProviderIndexJobConfigMutation:
         config_path = repo_path / ".code-indexer" / "config.json"
 
         with (
-            patch("subprocess.run", side_effect=_failing_run),
+            patch(
+                _POPEN_PATH,
+                return_value=_mock_popen_proc(returncode=1, stderr_lines=["failed"]),
+            ),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
@@ -113,15 +133,17 @@ class TestProviderIndexJobConfigMutation:
         )
 
     def test_restores_original_provider_after_timeout_exception(self, tmp_path):
-        """Verify config.json is restored after TimeoutExpired and timeout message returned in stderr."""
+        """Verify config.json is restored after timeout and timeout message returned in stderr."""
         repo_path = _make_repo(tmp_path, provider="voyage-ai")
         config_path = repo_path / ".code-indexer" / "config.json"
 
         def raise_timeout(*args, **kwargs):
-            raise subprocess.TimeoutExpired(cmd=["cidx"], timeout=_TIMEOUT_SECS)
+            raise IndexingSubprocessError(
+                f"Failed to provider index: Timed out after {_TIMEOUT_SECS}s"
+            )
 
         with (
-            patch("subprocess.run", side_effect=raise_timeout),
+            patch(_RUN_WITH_POPEN_PATH, side_effect=raise_timeout),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
@@ -135,7 +157,7 @@ class TestProviderIndexJobConfigMutation:
         )
         restored_config = json.loads(config_path.read_text())
         assert restored_config["embedding_provider"] == "voyage-ai", (
-            "embedding_provider must be restored after TimeoutExpired"
+            "embedding_provider must be restored after timeout"
         )
 
 
@@ -148,12 +170,13 @@ class TestProviderIndexJobEnvVars:
 
         captured_env = {}
 
-        def capture_env(*args, **kwargs):
-            captured_env.update(kwargs.get("env", {}))
-            return _successful_run(*args, **kwargs)
+        def capture_env(cmd, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _mock_popen_proc()
 
         with (
-            patch("subprocess.run", side_effect=capture_env),
+            patch(_POPEN_PATH, side_effect=capture_env),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(cohere_key="ck-my-cohere-key"),
@@ -172,12 +195,13 @@ class TestProviderIndexJobEnvVars:
 
         captured_env = {}
 
-        def capture_env(*args, **kwargs):
-            captured_env.update(kwargs.get("env", {}))
-            return _successful_run(*args, **kwargs)
+        def capture_env(cmd, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return _mock_popen_proc()
 
         with (
-            patch("subprocess.run", side_effect=capture_env),
+            patch(_POPEN_PATH, side_effect=capture_env),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(voyageai_key="vk-my-voyage-key"),
@@ -196,12 +220,13 @@ class TestProviderIndexJobEnvVars:
 
         captured_cmd = []
 
-        def capture_cmd(*args, **kwargs):
-            captured_cmd.extend(args[0])
-            return _successful_run(*args, **kwargs)
+        def capture_cmd(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return _mock_popen_proc()
 
         with (
-            patch("subprocess.run", side_effect=capture_cmd),
+            patch(_POPEN_PATH, side_effect=capture_cmd),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
@@ -223,12 +248,13 @@ class TestProviderIndexJobEnvVars:
 
         captured_cmd = []
 
-        def capture_cmd(*args, **kwargs):
-            captured_cmd.extend(args[0])
-            return _successful_run(*args, **kwargs)
+        def capture_cmd(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return _mock_popen_proc()
 
         with (
-            patch("subprocess.run", side_effect=capture_cmd),
+            patch(_POPEN_PATH, side_effect=capture_cmd),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),

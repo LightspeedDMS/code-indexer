@@ -999,6 +999,149 @@ class SemanticQueryManager:
                 query_strategy,
                 extra=get_log_extra("QUERY-STRATEGY-001"),
             )
+
+        # Bug #614 fix: Execute parallel query against both providers.
+        # Bug #615 fix: Pass min_score=None to each provider (correct sentinel —
+        # _search_with_provider checks `if min_score is not None`). Apply user
+        # min_score AFTER fusion on the merged output.
+        # Note: The "failover" strategy currently falls through to single-provider
+        # search below (pre-existing no-op gap, tracked separately).
+        if query_strategy == "parallel":
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from code_indexer.services.query_strategy import (
+                fuse_rrf,
+                fuse_multiply,
+                fuse_average,
+                QueryResult as StrategyQueryResult,
+            )
+
+            provider_tasks = {
+                "voyage-ai": lambda: self._search_with_provider(
+                    repo_path=repo_path,
+                    repository_alias=repository_alias,
+                    query_text=query_text,
+                    limit=limit,
+                    min_score=None,  # Bug #615: None is the correct no-filter sentinel
+                    file_extensions=file_extensions,
+                    language=language,
+                    exclude_language=exclude_language,
+                    path_filter=path_filter,
+                    exclude_path=exclude_path,
+                    accuracy=accuracy,
+                    provider_name="voyage-ai",
+                ),
+                "cohere": lambda: self._search_with_provider(
+                    repo_path=repo_path,
+                    repository_alias=repository_alias,
+                    query_text=query_text,
+                    limit=limit,
+                    min_score=None,  # Bug #615: None is the correct no-filter sentinel
+                    file_extensions=file_extensions,
+                    language=language,
+                    exclude_language=exclude_language,
+                    path_filter=path_filter,
+                    exclude_path=exclude_path,
+                    accuracy=accuracy,
+                    provider_name="cohere",
+                ),
+            }
+
+            primary_results: List[QueryResult] = []
+            secondary_results: List[QueryResult] = []
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {
+                    executor.submit(fn): name for name, fn in provider_tasks.items()
+                }
+                for future in as_completed(futures):
+                    provider_name = futures[future]
+                    try:
+                        batch = future.result()
+                        if provider_name == "voyage-ai":
+                            primary_results = batch
+                        else:
+                            secondary_results = batch
+                    except Exception as _e:
+                        logger.warning(
+                            "Parallel query provider '%s' failed: %s",
+                            provider_name,
+                            _e,
+                            extra=get_log_extra("QUERY-STRATEGY-002"),
+                        )
+
+            # Adapter: semantic QueryResult → query_strategy QueryResult.
+            # chunk_id encodes file_path + line_number for deduplication.
+            def _to_strategy(r: QueryResult) -> StrategyQueryResult:
+                return StrategyQueryResult(
+                    file_path=r.file_path,
+                    score=r.similarity_score,
+                    content=r.code_snippet,
+                    chunk_id=f"{r.file_path}:{r.line_number}",
+                    repository_alias=r.repository_alias,
+                    source_provider=r.source_provider,
+                )
+
+            # Build one original_map keyed by the same key fuse_* uses:
+            # f"{repository_alias}:{file_path}:{chunk_id}"
+            original_map: Dict[str, QueryResult] = {}
+            for r in primary_results + secondary_results:
+                chunk_id = f"{r.file_path}:{r.line_number}"
+                key = f"{r.repository_alias}:{r.file_path}:{chunk_id}"
+                if key not in original_map:
+                    original_map[key] = r
+
+            s_primary = [_to_strategy(r) for r in primary_results]
+            s_secondary = [_to_strategy(r) for r in secondary_results]
+
+            # Select fusion function; default to RRF
+            _fusion_methods = {
+                "rrf": fuse_rrf,
+                "multiply": fuse_multiply,
+                "average": fuse_average,
+            }
+            _fuse_fn = _fusion_methods.get(score_fusion or "rrf", fuse_rrf)
+
+            if not s_primary and not s_secondary:
+                fused_strategy: List[StrategyQueryResult] = []
+            elif not s_secondary:
+                fused_strategy = s_primary[:limit]
+            elif not s_primary:
+                fused_strategy = s_secondary[:limit]
+            else:
+                fused_strategy = _fuse_fn(s_primary, s_secondary, limit)
+
+            # Reverse adapter: strategy QueryResult → semantic QueryResult.
+            # Look up original via the same key used in original_map, then
+            # update score and source_provider (fused values).
+            all_results: List[QueryResult] = []
+            for s in fused_strategy:
+                key = f"{s.repository_alias}:{s.file_path}:{s.chunk_id}"
+                original = original_map.get(key)
+                if original is not None:
+                    # Keep original cosine similarity_score intact — min_score filtering
+                    # compares against it. Fused ordering is already reflected in
+                    # fused_strategy order; overwriting with RRF score (~0.016) would
+                    # cause all results to be eliminated by any min_score > 0.016.
+                    original.source_provider = s.source_provider
+                    all_results.append(original)
+                else:
+                    all_results.append(
+                        QueryResult(
+                            file_path=s.file_path,
+                            line_number=1,
+                            code_snippet=s.content,
+                            similarity_score=s.score,
+                            repository_alias=s.repository_alias,
+                            source_provider=s.source_provider,
+                        )
+                    )
+
+            # Bug #615: Apply user min_score AFTER fusion (not per-provider)
+            if min_score is not None:
+                all_results = [
+                    r for r in all_results if r.similarity_score >= min_score
+                ]
+            return all_results[:limit]
+
         try:
             # Check if this is a composite repository
             repo_path_obj = Path(repo_path)

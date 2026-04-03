@@ -16545,7 +16545,11 @@ def _post_provider_index_snapshot(
 
 
 def _provider_index_job(
-    repo_path: str, provider_name: str, clear: bool = False, **kwargs
+    repo_path: str,
+    provider_name: str,
+    clear: bool = False,
+    progress_callback=None,
+    **kwargs,
 ) -> Dict[str, Any]:
     """Background job worker for provider index add/recreate (Story #490, Bug #607).
 
@@ -16561,11 +16565,20 @@ def _provider_index_job(
 
     After successfully indexing the base clone, a new versioned snapshot is created
     and the alias is swapped so queries reflect the new provider index immediately.
+
+    Story #613: Uses run_with_popen_progress for real progress reporting so the UI
+    shows meaningful intermediate values instead of a hardcoded 25% sentinel.
     """
     import json
     import os
-    import subprocess
     from pathlib import Path
+
+    from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+    from code_indexer.services.progress_subprocess_runner import (
+        IndexingSubprocessError,
+        gather_repo_metrics,
+        run_with_popen_progress,
+    )
 
     # Determine the actual path to index.
     # If repo_path is inside .versioned/, use the base clone instead.
@@ -16636,24 +16649,38 @@ def _provider_index_job(
         if api_key:
             env["VOYAGE_API_KEY"] = api_key
 
-    cmd = ["cidx", "index"]
+    cmd = ["cidx", "index", "--progress-json"]
     if clear:
         cmd.append("--clear")
 
+    # Gather repo metrics for progress weight calculation.
+    # Returns (0, 0) for non-git repos — graceful degradation.
+    file_count, commit_count = gather_repo_metrics(actual_path)
+
+    allocator = ProgressPhaseAllocator()
+    allocator.calculate_weights(
+        index_types=["semantic"],
+        file_count=file_count,
+        commit_count=commit_count,
+    )
+
+    all_stdout: list = []
+    all_stderr: list = []
+
     try:
-        result = subprocess.run(
-            cmd,
+        run_with_popen_progress(
+            command=cmd,
+            phase_name="semantic",
+            allocator=allocator,
+            progress_callback=progress_callback,
+            all_stdout=all_stdout,
+            all_stderr=all_stderr,
             cwd=actual_path,
-            capture_output=True,
-            text=True,
-            timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
             env=env,
+            timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
+            error_label="provider index",
         )
-        if (
-            result.returncode == 0
-            and is_versioned_snapshot
-            and actual_path != repo_path
-        ):
+        if is_versioned_snapshot and actual_path != repo_path:
             # Base clone indexed successfully. Create a new versioned snapshot so
             # the alias target reflects the new provider index immediately.
             _post_provider_index_snapshot(
@@ -16661,22 +16688,24 @@ def _provider_index_job(
                 base_clone_path=actual_path,
                 old_snapshot_path=repo_path,
             )
+        stdout_out = "".join(all_stdout)
+        stderr_out = "".join(all_stderr)
         return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout[-500:] if result.stdout else "",
-            "stderr": result.stderr[-500:] if result.stderr else "",
+            "success": True,
+            "stdout": stdout_out[-500:] if stdout_out else "",
+            "stderr": stderr_out[-500:] if stderr_out else "",
         }
-    except subprocess.TimeoutExpired:
+    except IndexingSubprocessError as exc:
         logger.warning(
-            "Provider index timed out after %s s for provider=%s repo=%s",
-            _PROVIDER_INDEX_TIMEOUT_SECONDS,
+            "Provider index failed for provider=%s repo=%s: %s",
             provider_name,
             repo_path,
+            exc,
         )
         return {
             "success": False,
-            "stdout": "",
-            "stderr": f"Index build timed out after {_PROVIDER_INDEX_TIMEOUT_SECONDS} seconds",
+            "stdout": "".join(all_stdout)[-500:],
+            "stderr": str(exc),
         }
     finally:
         # Always restore config.json to its pre-job state.

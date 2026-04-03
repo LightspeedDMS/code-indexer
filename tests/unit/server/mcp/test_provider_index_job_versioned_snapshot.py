@@ -3,13 +3,25 @@
 Verifies that when repo_path points to a versioned snapshot (.versioned/ in path),
 _provider_index_job indexes the BASE CLONE instead, then creates a new snapshot.
 
-subprocess is imported locally inside _provider_index_job, so it must be patched
-at the stdlib level ("subprocess.run"), not at the handlers module level.
+Story #613: subprocess.run replaced with run_with_popen_progress (uses Popen internally).
+Mocks must target code_indexer.services.progress_subprocess_runner.subprocess.Popen
+and gather_repo_metrics, NOT subprocess.run.
 """
 
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+
+def _mock_popen_proc():
+    """Return a mock Popen process that exits successfully with no output."""
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter([])
+    mock_proc.stderr.readlines.return_value = []
+    mock_proc.returncode = 0
+    mock_proc.wait.return_value = None
+    mock_proc.poll.return_value = 0
+    return mock_proc
 
 
 class TestProviderIndexJobVersionedSnapshot:
@@ -40,10 +52,22 @@ class TestProviderIndexJobVersionedSnapshot:
 
         from code_indexer.server.mcp.handlers import _provider_index_job
 
-        completed = MagicMock(returncode=0, stdout="indexed", stderr="")
+        mock_proc = _mock_popen_proc()
+        captured_kwargs = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_proc
 
         with (
-            patch("subprocess.run", return_value=completed) as mock_run,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.subprocess.Popen",
+                side_effect=fake_popen,
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
@@ -59,11 +83,10 @@ class TestProviderIndexJobVersionedSnapshot:
             )
 
         assert result["success"] is True
-        # subprocess must be called with cwd=base_clone, NOT cwd=versioned
-        mock_run.assert_called_once()
-        _, call_kwargs = mock_run.call_args
-        assert call_kwargs["cwd"] == str(base_clone), (
-            f"Expected cwd={base_clone}, got {call_kwargs['cwd']}"
+        # Popen must be called with cwd=base_clone, NOT cwd=versioned
+        assert "cwd" in captured_kwargs, "cwd must be passed to Popen"
+        assert captured_kwargs["cwd"] == str(base_clone), (
+            f"Expected cwd={base_clone}, got {captured_kwargs['cwd']}"
         )
 
     def test_does_not_use_base_clone_for_non_versioned_path(self, tmp_path):
@@ -77,10 +100,22 @@ class TestProviderIndexJobVersionedSnapshot:
 
         from code_indexer.server.mcp.handlers import _provider_index_job
 
-        completed = MagicMock(returncode=0, stdout="indexed", stderr="")
+        mock_proc = _mock_popen_proc()
+        captured_kwargs = {}
+
+        def fake_popen(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_proc
 
         with (
-            patch("subprocess.run", return_value=completed) as mock_run,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.subprocess.Popen",
+                side_effect=fake_popen,
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch(
                 "code_indexer.server.mcp.handlers._post_provider_index_snapshot"
@@ -99,9 +134,7 @@ class TestProviderIndexJobVersionedSnapshot:
 
         assert result["success"] is True
         # Must use the exact repo_dir (no base-clone redirect)
-        mock_run.assert_called_once()
-        _, call_kwargs = mock_run.call_args
-        assert call_kwargs["cwd"] == str(repo_dir)
+        assert captured_kwargs["cwd"] == str(repo_dir)
         # No snapshot creation for non-versioned repos
         mock_snapshot.assert_not_called()
 
@@ -111,10 +144,17 @@ class TestProviderIndexJobVersionedSnapshot:
 
         from code_indexer.server.mcp.handlers import _provider_index_job
 
-        completed = MagicMock(returncode=0, stdout="indexed", stderr="")
+        mock_proc = _mock_popen_proc()
 
         with (
-            patch("subprocess.run", return_value=completed),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.subprocess.Popen",
+                return_value=mock_proc,
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch(
                 "code_indexer.server.mcp.handlers._post_provider_index_snapshot"
@@ -143,10 +183,23 @@ class TestProviderIndexJobVersionedSnapshot:
 
         from code_indexer.server.mcp.handlers import _provider_index_job
 
-        failed = MagicMock(returncode=1, stdout="", stderr="error")
+        # Popen process that exits with returncode=1 (failure)
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.stderr.readlines.return_value = ["error output"]
+        mock_proc.returncode = 1
+        mock_proc.wait.return_value = None
+        mock_proc.poll.return_value = 1
 
         with (
-            patch("subprocess.run", return_value=failed),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.subprocess.Popen",
+                return_value=mock_proc,
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch(
                 "code_indexer.server.mcp.handlers._post_provider_index_snapshot"
@@ -182,10 +235,17 @@ class TestProviderIndexJobVersionedSnapshot:
                 captured_config_writes.append(str(path))
             return f
 
-        completed = MagicMock(returncode=0, stdout="indexed", stderr="")
+        mock_proc = _mock_popen_proc()
 
         with (
-            patch("subprocess.run", return_value=completed),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.subprocess.Popen",
+                return_value=mock_proc,
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
             patch("builtins.open", side_effect=tracking_open),

@@ -139,6 +139,8 @@ def run_with_popen_progress(
     cwd: Optional[str],
     error_label: Optional[str] = None,
     last_reported: Optional[int] = None,
+    env: Optional[dict] = None,
+    timeout: Optional[float] = None,
 ) -> int:
     """
     Run a command with Popen, reading JSON progress lines from stdout.
@@ -148,7 +150,7 @@ def run_with_popen_progress(
     the allocator.  Non-JSON lines are accumulated in all_stdout for error
     reporting but not parsed.  Stderr is captured for error details.
 
-    On non-zero exit, raises GoldenRepoError with captured stderr.
+    On non-zero exit, raises IndexingSubprocessError with captured stderr.
 
     This is the shared implementation extracted from golden_repo_manager.py
     (PATH B) for reuse in all indexing paths (PATH A, C, D, E).
@@ -171,6 +173,10 @@ def run_with_popen_progress(
         last_reported: Optional monotonic high-water mark from previous calls.
                        Any value below this will be suppressed. Defaults to None
                        (no suppression). Returns the highest value reported this call.
+        env: Optional environment dict passed to subprocess.Popen. If None,
+             the subprocess inherits the current process environment.
+        timeout: Optional timeout in seconds. A watchdog thread kills the process
+                 after this many seconds and IndexingSubprocessError is raised.
 
     Returns:
         The highest progress value reported during this call (or last_reported if
@@ -200,6 +206,7 @@ def run_with_popen_progress(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=env,
     )
 
     # Report phase start (coarse marker before any lines arrive)
@@ -223,6 +230,23 @@ def run_with_popen_progress(
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
     stderr_thread.start()
 
+    # Watchdog thread enforces timeout independent of stdout line production.
+    # This ensures the process is killed even if it produces no output.
+    timed_out = threading.Event()
+
+    if timeout is not None:
+
+        def _watchdog() -> None:
+            if not timed_out.wait(timeout=timeout):
+                # Event was not set within timeout — process still running, kill it.
+                timed_out.set()
+                process.kill()
+
+        watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+        watchdog_thread.start()
+    else:
+        watchdog_thread = None
+
     for line in process.stdout:
         all_stdout.append(line)
         parsed = parse_progress_line(line)
@@ -235,10 +259,22 @@ def run_with_popen_progress(
             _emit(global_pct, phase=phase_name, detail=parsed.get("info", ""))
         # Non-JSON lines: already accumulated in all_stdout, skip parsing
 
+    # Signal watchdog that process finished normally (prevents spurious kill).
+    timed_out.set()
+
     process.wait()
     stderr_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+    if watchdog_thread is not None:
+        watchdog_thread.join(timeout=GIT_COMMAND_TIMEOUT_SECONDS)
+
     stderr_output = "".join(stderr_lines)
     all_stderr.append(stderr_output)
+
+    # Check for timeout after process.wait() — the watchdog may have killed it.
+    if timeout is not None and process.returncode == -9:
+        timeout_msg = f"Timed out after {timeout}s"
+        all_stderr.append(timeout_msg)
+        raise IndexingSubprocessError(f"Failed to {error_label}: {timeout_msg}")
 
     if process.returncode != 0:
         stdout_output = "".join(all_stdout)
