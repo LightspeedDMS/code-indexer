@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.12
+
+### Bug Fixes
+
+- fix: lower default min_score from 0.5 to 0.3 in MCP search_code handler; Cohere embed-v4.0 produces cosine similarity scores in the ~0.42-0.48 range so the previous 0.5 default silently eliminated all Cohere results when callers omitted min_score; VoyageAI results (0.5-0.8 range) are unaffected
+
 ## v9.8.11
 
 ### Bug Fixes
