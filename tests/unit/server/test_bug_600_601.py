@@ -206,9 +206,15 @@ class TestBug601CohereNoneValidation:
     def test_cohere_get_embeddings_batch_accepts_valid_embeddings(
         self, cohere_provider
     ):
-        """No error raised for well-formed embeddings (all values are floats)."""
+        """No error raised for well-formed embeddings (all values are floats).
+
+        embed-v4.0 expects 1536 dims — use correct dimensions so _validate_embeddings
+        passes the dimension check added in Story #619 Gap 6.
+        """
+        # embed-v4.0 expects 1536 dimensions
+        valid_embedding = [0.1] * 1536
         good_response = {
-            "embeddings": {"float": [[0.1, 0.2, 0.3]]},
+            "embeddings": {"float": [valid_embedding]},
         }
 
         with patch("httpx.Client") as mock_client_class:
@@ -224,7 +230,7 @@ class TestBug601CohereNoneValidation:
             mock_client.post.return_value = mock_response
 
             result = cohere_provider.get_embeddings_batch(["hello world"])
-        assert result == [[0.1, 0.2, 0.3]]
+        assert result == [valid_embedding]
 
 
 # ---------------------------------------------------------------------------

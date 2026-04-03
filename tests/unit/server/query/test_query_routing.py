@@ -272,21 +272,24 @@ class TestSearchSingleBackwardCompatibility:
 
         manager = SemanticQueryManager()
 
-        # Act: Call search_single (will be implemented)
-        results = manager.search_single(
-            repo_path=repo_path,
-            repository_alias="test-alias",
-            query="test query",
-            limit=10,
-            min_score=None,
-            file_extensions=None,
-        )
+        # Patch _both_providers_configured to ensure primary_only path is tested
+        # regardless of which API keys happen to be set in the test environment.
+        with patch.object(manager, "_both_providers_configured", return_value=False):
+            # Act: Call search_single (will be implemented)
+            results = manager.search_single(
+                repo_path=repo_path,
+                repository_alias="test-alias",
+                query="test query",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+            )
 
-        # Assert: Should return QueryResult objects
-        assert len(results) == 1
-        assert isinstance(results[0], QueryResult)
-        assert results[0].file_path == "test.py"
-        assert results[0].similarity_score == 0.95
+            # Assert: Should return QueryResult objects
+            assert len(results) == 1
+            assert isinstance(results[0], QueryResult)
+            assert results[0].file_path == "test.py"
+            assert results[0].similarity_score == 0.95
 
 
 class TestSearchCompositeStub:

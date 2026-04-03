@@ -55,39 +55,34 @@ def _mock_popen_proc(returncode: int = 0, stderr_lines=None) -> MagicMock:
     return mock_proc
 
 
-class TestProviderIndexJobConfigMutation:
-    """Tests that _provider_index_job correctly mutates and restores config.json."""
+def _setup_repo_and_capture(
+    tmp_path: Path, provider: str = "voyage-ai"
+) -> tuple[Path, Path, bytes, int]:
+    """Create a fake repo and capture config.json initial state.
 
-    def test_sets_embedding_provider_before_running_cidx(self, tmp_path):
-        """Verify config.json has the target provider set while cidx runs."""
-        repo_path = _make_repo(tmp_path, provider="voyage-ai")
-        config_path = repo_path / ".code-indexer" / "config.json"
+    Returns (repo_path, config_path, initial_bytes, initial_mtime_ns).
+    Use initial_bytes and initial_mtime_ns to assert the file was never written.
+    """
+    repo_path = _make_repo(tmp_path, provider=provider)
+    config_path = repo_path / ".code-indexer" / "config.json"
+    initial_bytes = config_path.read_bytes()
+    initial_mtime_ns = config_path.stat().st_mtime_ns
+    return repo_path, config_path, initial_bytes, initial_mtime_ns
 
-        observed_provider_during_run = []
 
-        def capture_provider(cmd, **kwargs):
-            config = json.loads(config_path.read_text())
-            observed_provider_during_run.append(config.get("embedding_provider"))
-            return _mock_popen_proc()
+class TestProviderIndexJobNoConfigMutation:
+    """Story #620: _provider_index_job must NOT write config.json at all.
 
-        with (
-            patch(_POPEN_PATH, side_effect=capture_provider),
-            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
-            patch(
-                "code_indexer.server.mcp.handlers.get_config_service",
-                return_value=_make_config_service(),
-            ),
-        ):
-            _provider_index_job(str(repo_path), "cohere")
+    The old mutation pattern (read provider, write target, run cidx, restore in finally)
+    was fully deleted. config.json must remain byte-identical and have the same mtime
+    before and after _provider_index_job runs, regardless of success or failure.
+    """
 
-        assert observed_provider_during_run == ["cohere"], (
-            "embedding_provider must be set to target provider while cidx runs"
+    def test_config_json_not_written_on_success(self, tmp_path):
+        """config.json must not be written when cidx index succeeds."""
+        repo_path, config_path, initial_bytes, initial_mtime_ns = (
+            _setup_repo_and_capture(tmp_path, provider="voyage-ai")
         )
-
-    def test_restores_original_provider_after_success(self, tmp_path):
-        """Verify config.json is restored to original provider after successful run, preserving other fields."""
-        repo_path = _make_repo(tmp_path, provider="voyage-ai")
-        config_path = repo_path / ".code-indexer" / "config.json"
 
         with (
             patch(_POPEN_PATH, return_value=_mock_popen_proc()),
@@ -100,18 +95,18 @@ class TestProviderIndexJobConfigMutation:
             result = _provider_index_job(str(repo_path), "cohere")
 
         assert result["success"] is True
-        restored_config = json.loads(config_path.read_text())
-        assert restored_config["embedding_provider"] == "voyage-ai", (
-            "embedding_provider must be restored to original value after success"
+        assert config_path.read_bytes() == initial_bytes, (
+            "config.json must not be written on success — mutation pattern deleted"
         )
-        assert restored_config["other_key"] == "preserved", (
-            "Other config keys must be preserved after restore"
+        assert config_path.stat().st_mtime_ns == initial_mtime_ns, (
+            "config.json mtime must not change on success — mutation pattern deleted"
         )
 
-    def test_restores_original_provider_after_failure(self, tmp_path):
-        """Verify config.json is restored to original provider even when cidx fails."""
-        repo_path = _make_repo(tmp_path, provider="voyage-ai")
-        config_path = repo_path / ".code-indexer" / "config.json"
+    def test_config_json_not_written_on_failure(self, tmp_path):
+        """config.json must not be written when cidx index fails."""
+        repo_path, config_path, initial_bytes, initial_mtime_ns = (
+            _setup_repo_and_capture(tmp_path, provider="voyage-ai")
+        )
 
         with (
             patch(
@@ -127,15 +122,18 @@ class TestProviderIndexJobConfigMutation:
             result = _provider_index_job(str(repo_path), "cohere")
 
         assert result["success"] is False
-        restored_config = json.loads(config_path.read_text())
-        assert restored_config["embedding_provider"] == "voyage-ai", (
-            "embedding_provider must be restored to original value even after failure"
+        assert config_path.read_bytes() == initial_bytes, (
+            "config.json must not be written on failure — mutation pattern deleted"
+        )
+        assert config_path.stat().st_mtime_ns == initial_mtime_ns, (
+            "config.json mtime must not change on failure — mutation pattern deleted"
         )
 
-    def test_restores_original_provider_after_timeout_exception(self, tmp_path):
-        """Verify config.json is restored after timeout and timeout message returned in stderr."""
-        repo_path = _make_repo(tmp_path, provider="voyage-ai")
-        config_path = repo_path / ".code-indexer" / "config.json"
+    def test_config_json_not_written_on_timeout(self, tmp_path):
+        """config.json must not be written when cidx index times out."""
+        repo_path, config_path, initial_bytes, initial_mtime_ns = (
+            _setup_repo_and_capture(tmp_path, provider="voyage-ai")
+        )
 
         def raise_timeout(*args, **kwargs):
             raise IndexingSubprocessError(
@@ -155,9 +153,46 @@ class TestProviderIndexJobConfigMutation:
         assert "timed out" in result["stderr"].lower(), (
             "Timeout result must contain 'timed out' in stderr"
         )
-        restored_config = json.loads(config_path.read_text())
-        assert restored_config["embedding_provider"] == "voyage-ai", (
-            "embedding_provider must be restored after timeout"
+        assert config_path.read_bytes() == initial_bytes, (
+            "config.json must not be written on timeout — mutation pattern deleted"
+        )
+        assert config_path.stat().st_mtime_ns == initial_mtime_ns, (
+            "config.json mtime must not change on timeout — mutation pattern deleted"
+        )
+
+    def test_embedding_provider_in_config_json_unchanged_throughout(self, tmp_path):
+        """embedding_provider value in config.json must not change during or after the job."""
+        repo_path, config_path, initial_bytes, initial_mtime_ns = (
+            _setup_repo_and_capture(tmp_path, provider="voyage-ai")
+        )
+
+        observed_provider_during_run: list[str] = []
+
+        def capture_provider(cmd, **kwargs):
+            observed_provider_during_run.append(
+                json.loads(config_path.read_text()).get("embedding_provider")
+            )
+            return _mock_popen_proc()
+
+        with (
+            patch(_POPEN_PATH, side_effect=capture_provider),
+            patch(_GATHER_METRICS_PATH, return_value=(10, 5)),
+            patch(
+                "code_indexer.server.mcp.handlers.get_config_service",
+                return_value=_make_config_service(),
+            ),
+        ):
+            _provider_index_job(str(repo_path), "cohere")
+
+        assert observed_provider_during_run == ["voyage-ai"], (
+            "embedding_provider in config.json must remain 'voyage-ai' during run "
+            "— mutation pattern deleted, provider passed via env var only"
+        )
+        assert config_path.read_bytes() == initial_bytes, (
+            "config.json must be byte-identical after run"
+        )
+        assert config_path.stat().st_mtime_ns == initial_mtime_ns, (
+            "config.json mtime must be unchanged after run"
         )
 
 

@@ -5,6 +5,7 @@ All imports lazy (no module-level imports of cohere SDK).
 """
 
 import logging
+import math
 import os
 import time
 from http import HTTPStatus
@@ -22,6 +23,9 @@ _EMBED_PREVIEW_LEN = 10
 
 # Maximum sleep duration for any retry path to prevent indefinite thread blocking (#602)
 _MAX_RETRY_SLEEP_SECONDS = 300.0
+
+# Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
+_PROBE_TIMEOUT_S: float = 5.0
 
 
 class CohereEmbeddingProvider(EmbeddingProvider):
@@ -50,6 +54,25 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             )
 
         self._load_model_specs()
+
+        # Register lightweight connectivity probe with health monitor (Story #619 HIGH-2)
+        try:
+            from code_indexer.services.provider_health_monitor import (
+                ProviderHealthMonitor,
+            )
+        except ImportError:
+            logger.debug(
+                "Health monitor unavailable; skipping probe registration for cohere."
+            )
+        else:
+            try:
+                ProviderHealthMonitor.get_instance().register_probe(
+                    "cohere", self._health_probe
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Probe registration failed for cohere (non-fatal): %s", exc
+                )
 
     def _load_model_specs(self) -> None:
         """Load model specifications from cohere_models.yaml.
@@ -147,7 +170,14 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         for attempt in range(max_attempts):
             try:
                 _start = time.time()
-                with httpx.Client(timeout=self.config.timeout) as client:
+                with httpx.Client(
+                    timeout=httpx.Timeout(
+                        connect=self.config.connect_timeout,
+                        read=self.config.timeout,
+                        write=self.config.timeout,
+                        pool=self.config.timeout,
+                    )
+                ) as client:
                     response = client.post(
                         self.config.api_endpoint,
                         headers=headers,
@@ -231,6 +261,54 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             f"Cohere API request failed after {max_attempts} attempts: {last_error}"
         )
 
+    def _validate_embeddings(self, embeddings: List[List[float]], model: str) -> None:
+        """Validate embedding dimensions and check for NaN/Inf values (Story #619 Gap 6).
+
+        NaN/Inf validation runs unconditionally. Dimension check runs when model
+        dimensions are known.
+
+        Args:
+            embeddings: List of embedding vectors to validate.
+            model: Model name used to determine expected dimensions.
+
+        Raises:
+            RuntimeError: If any embedding has wrong dimensions or contains NaN/Inf.
+        """
+        specs = self.model_specs.get("cohere_models", {}).get(model, {})
+        expected_dims: Optional[int] = specs.get("default_dimension")
+        for i, emb in enumerate(embeddings):
+            if any(not math.isfinite(v) for v in emb):
+                raise RuntimeError(f"Embedding[{i}] contains NaN or Inf values")
+            if expected_dims is not None and len(emb) != expected_dims:
+                raise RuntimeError(
+                    f"Embedding[{i}]: got {len(emb)} dims, expected {expected_dims} for model {model}"
+                )
+
+    def _health_probe(self) -> bool:
+        """Lightweight connectivity probe for recovery detection (Story #619 HIGH-2).
+
+        Makes an OPTIONS request to the configured API endpoint. Returns True if
+        the server responds with any status below 500 (reachable), False otherwise.
+        """
+        import httpx
+
+        probe_timeout = httpx.Timeout(
+            connect=_PROBE_TIMEOUT_S,
+            read=_PROBE_TIMEOUT_S,
+            write=_PROBE_TIMEOUT_S,
+            pool=_PROBE_TIMEOUT_S,
+        )
+        try:
+            with httpx.Client(timeout=probe_timeout) as client:
+                response = client.options(self.config.api_endpoint)
+                return bool(response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR)
+        except httpx.HTTPError as exc:
+            logger.debug("Cohere health probe HTTP error: %s", exc, exc_info=True)
+            return False
+        except Exception as exc:
+            logger.debug("Cohere health probe failed: %s", exc, exc_info=True)
+            return False
+
     # --- ABC Implementation ---
 
     def get_embedding(
@@ -296,6 +374,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                             f"Cohere returned embedding with None values at index {idx}: "
                             f"{list(emb)[:_EMBED_PREVIEW_LEN]}..."
                         )
+                self._validate_embeddings(embeddings, self.config.model)
                 all_embeddings.extend(embeddings)
                 current_batch = []
                 current_tokens = 0
@@ -323,6 +402,7 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                         f"Cohere returned embedding with None values at index {idx}: "
                         f"{list(emb)[:_EMBED_PREVIEW_LEN]}..."
                     )
+            self._validate_embeddings(embeddings, self.config.model)
             all_embeddings.extend(embeddings)
 
         return all_embeddings

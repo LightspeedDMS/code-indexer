@@ -182,6 +182,27 @@ class EmbeddingProviderFactory:
             raise ValueError(f"Unknown embedding provider: {effective_provider}")
 
     @staticmethod
+    def resolve_api_key(provider_name: str) -> Optional[str]:
+        """Map provider name to environment variable and return its value.
+
+        Args:
+            provider_name: Name of the embedding provider (e.g., 'voyage-ai', 'cohere')
+
+        Returns:
+            The API key value from the environment variable, or None if not set or unknown provider.
+        """
+        import os
+
+        provider_to_env = {
+            "voyage-ai": "VOYAGE_API_KEY",
+            "cohere": "CO_API_KEY",
+        }
+        env_var = provider_to_env.get(provider_name)
+        if env_var is None:
+            return None
+        return os.environ.get(env_var)
+
+    @staticmethod
     def get_available_providers() -> List[str]:
         """Get list of available embedding providers."""
         return ["voyage-ai", "cohere"]

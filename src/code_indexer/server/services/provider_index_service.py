@@ -184,6 +184,18 @@ class ProviderIndexService:
             "message": f"Removed collection '{collection_name}' for {provider_name}",
         }
 
+    def get_additional_configured_providers(self) -> List[str]:
+        """Return non-primary providers with valid API keys configured on the server.
+
+        Returns all configured providers except voyage-ai (the primary provider).
+        Used to determine which additional provider indexes to build automatically.
+        """
+        from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+
+        config = self._get_config()
+        all_configured = EmbeddingProviderFactory.get_configured_providers(config)
+        return [p for p in all_configured if p != "voyage-ai"]
+
     def _get_config(self):
         """Get or create config."""
         if self._config:

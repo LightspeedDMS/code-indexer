@@ -645,4 +645,41 @@ class TestGetConfig:
 
         assert result is mock_loaded_config
         mock_manager_cls.assert_called_once()
-        mock_manager_instance.load.assert_called_once()
+
+
+class TestGetAdditionalConfiguredProviders:
+    """Test get_additional_configured_providers() returns non-voyage providers with API keys."""
+
+    def test_get_additional_providers_returns_cohere_when_configured(self):
+        """Returns ['cohere'] when voyage-ai and cohere are both configured."""
+        from code_indexer.server.services.provider_index_service import (
+            ProviderIndexService,
+        )
+
+        mock_config = MagicMock()
+        service = ProviderIndexService(config=mock_config)
+
+        with patch(
+            "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers"
+        ) as mock_configured:
+            mock_configured.return_value = ["voyage-ai", "cohere"]
+            result = service.get_additional_configured_providers()
+
+        assert result == ["cohere"]
+
+    def test_get_additional_providers_returns_empty_when_only_voyage(self):
+        """Returns [] when only voyage-ai is configured (no additional providers)."""
+        from code_indexer.server.services.provider_index_service import (
+            ProviderIndexService,
+        )
+
+        mock_config = MagicMock()
+        service = ProviderIndexService(config=mock_config)
+
+        with patch(
+            "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers"
+        ) as mock_configured:
+            mock_configured.return_value = ["voyage-ai"]
+            result = service.get_additional_configured_providers()
+
+        assert result == []

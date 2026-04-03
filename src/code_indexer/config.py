@@ -100,6 +100,7 @@ class VoyageAIConfig(BaseModel):
         description="VoyageAI embedding model name (e.g., voyage-code-3, voyage-large-2, voyage-2)",
     )
     timeout: int = Field(default=30, description="Request timeout in seconds")
+    connect_timeout: int = Field(default=5, description="Connect timeout in seconds")
 
     # Parallel processing configuration
     parallel_requests: int = Field(
@@ -138,6 +139,7 @@ class CohereConfig(BaseModel):
     model: str = "embed-v4.0"
     default_dimension: int = 1536
     timeout: int = 30
+    connect_timeout: int = Field(default=5, description="Connect timeout in seconds")
     max_retries: int = 3
     retry_delay: float = 1.0
 
@@ -513,6 +515,16 @@ class Config(BaseModel):
         default="voyage-ai",
         description="Embedding provider to use",
     )
+    embedding_providers: Optional[List[str]] = Field(
+        default=None,
+        description="List of embedding providers to use. If None, falls back to [embedding_provider].",
+    )
+
+    def get_embedding_providers(self) -> List[str]:
+        """Get the list of embedding providers, with backward compat fallback."""
+        if self.embedding_providers is not None:
+            return list(self.embedding_providers)
+        return [self.embedding_provider]
 
     # Vector storage backend selection
     vector_store: Optional[VectorStoreConfig] = Field(

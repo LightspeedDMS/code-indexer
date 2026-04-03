@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ...search.query import SearchResult
@@ -70,6 +73,9 @@ class QueryResult:
     )
     # Embedding provider that served this result (Story #593)
     source_provider: str = ""
+    # Fusion metadata (Story #618 - Score/Provenance Transparency)
+    fusion_score: Optional[float] = None
+    contributing_providers: Optional[List[str]] = None
 
     @classmethod
     def from_search_result(
@@ -105,6 +111,11 @@ class QueryResult:
             result["metadata"] = self.metadata
         if self.temporal_context is not None:
             result["temporal_context"] = self.temporal_context
+        # Include fusion metadata if present (Story #618)
+        if self.fusion_score is not None:
+            result["fusion_score"] = self.fusion_score
+        if self.contributing_providers is not None:
+            result["contributing_providers"] = self.contributing_providers
         return result
 
 
@@ -879,6 +890,43 @@ class SemanticQueryManager:
         effective_limit = min(limit, self.max_results_per_query)
         return all_results[:effective_limit]
 
+    def _both_providers_configured(self, repo_path: str) -> bool:
+        """Check if both VoyageAI and Cohere providers have API keys configured."""
+        try:
+            from code_indexer.services.embedding_factory import (
+                EmbeddingProviderFactory,
+            )
+
+            # Try repo config first; fall back to empty config on failure.
+            # get_configured_providers checks env vars first, so it works
+            # even with an empty config (common for server-managed repos
+            # where versioned snapshots have incomplete local configs).
+            try:
+                from code_indexer.config import ConfigManager
+
+                config = ConfigManager.create_with_backtrack(
+                    Path(repo_path)
+                ).get_config()
+            except Exception as cfg_exc:
+                logger.debug(
+                    "Config load failed for %s, using env-var fallback: %s",
+                    repo_path,
+                    cfg_exc,
+                    extra=get_log_extra("QUERY-STRATEGY-003"),
+                )
+                config = type("EmptyConfig", (), {})()
+
+            configured = EmbeddingProviderFactory.get_configured_providers(config)
+            return "voyage-ai" in configured and "cohere" in configured
+        except Exception as exc:
+            logger.warning(
+                "Provider config check failed for %s: %s",
+                repo_path,
+                exc,
+                extra=get_log_extra("QUERY-STRATEGY-003"),
+            )
+            return False
+
     def _search_single_repository(
         self,
         repo_path: str,
@@ -992,6 +1040,14 @@ class SemanticQueryManager:
                 r.source_provider = preferred_provider
             return results
 
+        # Story #618: Auto-default to parallel when both providers configured
+        if query_strategy is None:
+            if self._both_providers_configured(repo_path):
+                query_strategy = "parallel"
+                score_fusion = score_fusion or "rrf"
+            else:
+                query_strategy = "primary_only"
+
         # Log query strategy if non-default (Story #488 Phase 4)
         if query_strategy is not None and query_strategy != "primary_only":
             logger.info(
@@ -1000,28 +1056,21 @@ class SemanticQueryManager:
                 extra=get_log_extra("QUERY-STRATEGY-001"),
             )
 
-        # Bug #614 fix: Execute parallel query against both providers.
-        # Bug #615 fix: Pass min_score=None to each provider (correct sentinel —
-        # _search_with_provider checks `if min_score is not None`). Apply user
-        # min_score AFTER fusion on the merged output.
-        # Note: The "failover" strategy currently falls through to single-provider
-        # search below (pre-existing no-op gap, tracked separately).
-        if query_strategy == "parallel":
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+        # Story #619: Execute failover query — primary (voyage-ai) with secondary
+        # (cohere) fallback on error.
+        if query_strategy == "failover":
             from code_indexer.services.query_strategy import (
-                fuse_rrf,
-                fuse_multiply,
-                fuse_average,
+                execute_failover_query,
                 QueryResult as StrategyQueryResult,
             )
 
-            provider_tasks = {
-                "voyage-ai": lambda: self._search_with_provider(
+            def _primary() -> List[QueryResult]:
+                return self._search_with_provider(
                     repo_path=repo_path,
                     repository_alias=repository_alias,
                     query_text=query_text,
                     limit=limit,
-                    min_score=None,  # Bug #615: None is the correct no-filter sentinel
+                    min_score=None,
                     file_extensions=file_extensions,
                     language=language,
                     exclude_language=exclude_language,
@@ -1029,13 +1078,15 @@ class SemanticQueryManager:
                     exclude_path=exclude_path,
                     accuracy=accuracy,
                     provider_name="voyage-ai",
-                ),
-                "cohere": lambda: self._search_with_provider(
+                )
+
+            def _secondary() -> List[QueryResult]:
+                return self._search_with_provider(
                     repo_path=repo_path,
                     repository_alias=repository_alias,
                     query_text=query_text,
                     limit=limit,
-                    min_score=None,  # Bug #615: None is the correct no-filter sentinel
+                    min_score=None,
                     file_extensions=file_extensions,
                     language=language,
                     exclude_language=exclude_language,
@@ -1043,30 +1094,152 @@ class SemanticQueryManager:
                     exclude_path=exclude_path,
                     accuracy=accuracy,
                     provider_name="cohere",
+                )
+
+            def _to_strategy_failover(r: QueryResult) -> StrategyQueryResult:
+                return StrategyQueryResult(
+                    file_path=r.file_path,
+                    score=r.similarity_score,
+                    content=r.code_snippet,
+                    chunk_id=f"{r.file_path}:{r.line_number}",
+                    repository_alias=r.repository_alias,
+                    source_provider=r.source_provider,
+                )
+
+            def _primary_strategy() -> List[StrategyQueryResult]:
+                return [_to_strategy_failover(r) for r in _primary()]
+
+            def _secondary_strategy() -> List[StrategyQueryResult]:
+                return [_to_strategy_failover(r) for r in _secondary()]
+
+            failover_strategy_results = execute_failover_query(
+                _primary_strategy, _secondary_strategy, limit=limit
+            )
+
+            all_failover: List[QueryResult] = []
+            for s in failover_strategy_results:
+                all_failover.append(
+                    QueryResult(
+                        file_path=s.file_path,
+                        line_number=1,
+                        code_snippet=s.content,
+                        similarity_score=s.score,
+                        repository_alias=s.repository_alias,
+                        source_provider=s.source_provider,
+                    )
+                )
+
+            if min_score is not None:
+                all_failover = [
+                    r for r in all_failover if r.similarity_score >= min_score
+                ]
+
+            return all_failover[:limit]
+
+        # Bug #614 fix: Execute parallel query against both providers.
+        # Bug #615 fix: Pass min_score=None to each provider (correct sentinel —
+        # _search_with_provider checks `if min_score is not None`). Apply user
+        # min_score AFTER fusion on the merged output.
+        if query_strategy == "parallel":
+            from code_indexer.services.query_strategy import (
+                fuse_rrf,
+                fuse_multiply,
+                fuse_average,
+                QueryResult as StrategyQueryResult,
+            )
+            from code_indexer.services.provider_health_monitor import (
+                ProviderHealthMonitor,
+            )
+
+            # Story #619 Gap 1: health-gated parallel dispatch — skip "down" providers
+            _health_monitor = ProviderHealthMonitor.get_instance()
+            _all_providers = [
+                (
+                    "voyage-ai",
+                    dict(
+                        repo_path=repo_path,
+                        repository_alias=repository_alias,
+                        query_text=query_text,
+                        limit=limit,
+                        min_score=None,
+                        file_extensions=file_extensions,
+                        language=language,
+                        exclude_language=exclude_language,
+                        path_filter=path_filter,
+                        exclude_path=exclude_path,
+                        accuracy=accuracy,
+                        provider_name="voyage-ai",
+                    ),
                 ),
-            }
+                (
+                    "cohere",
+                    dict(
+                        repo_path=repo_path,
+                        repository_alias=repository_alias,
+                        query_text=query_text,
+                        limit=limit,
+                        min_score=None,
+                        file_extensions=file_extensions,
+                        language=language,
+                        exclude_language=exclude_language,
+                        path_filter=path_filter,
+                        exclude_path=exclude_path,
+                        accuracy=accuracy,
+                        provider_name="cohere",
+                    ),
+                ),
+            ]
+            provider_tasks: Dict[str, Any] = {}
+            _degraded_in_query: List[str] = []
+            for _pname, _kwargs in _all_providers:
+                _health_info = _health_monitor.get_health(_pname)
+                _pstatus = _health_info.get(_pname)
+                if _pstatus is not None and _pstatus.status == "down":
+                    logger.warning(
+                        "Skipping provider '%s' (status: down) in parallel dispatch",
+                        _pname,
+                        extra=get_log_extra("QUERY-STRATEGY-003"),
+                    )
+                    _degraded_in_query.append(_pname)
+                    continue
+                _captured_kwargs = _kwargs
+                provider_tasks[_pname] = (
+                    lambda _kw=_captured_kwargs: self._search_with_provider(**_kw)
+                )
 
             primary_results: List[QueryResult] = []
             secondary_results: List[QueryResult] = []
+            _parallel_timeout_seconds = 15
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = {
                     executor.submit(fn): name for name, fn in provider_tasks.items()
                 }
-                for future in as_completed(futures):
-                    provider_name = futures[future]
-                    try:
-                        batch = future.result()
-                        if provider_name == "voyage-ai":
-                            primary_results = batch
-                        else:
-                            secondary_results = batch
-                    except Exception as _e:
-                        logger.warning(
-                            "Parallel query provider '%s' failed: %s",
-                            provider_name,
-                            _e,
-                            extra=get_log_extra("QUERY-STRATEGY-002"),
-                        )
+                try:
+                    for future in as_completed(
+                        futures, timeout=_parallel_timeout_seconds
+                    ):
+                        provider_name = futures[future]
+                        try:
+                            batch = future.result()
+                            if provider_name == "voyage-ai":
+                                primary_results = batch
+                            else:
+                                secondary_results = batch
+                        except Exception as _e:
+                            logger.warning(
+                                "Parallel query provider '%s' failed: %s",
+                                provider_name,
+                                _e,
+                                extra=get_log_extra("QUERY-STRATEGY-002"),
+                            )
+                except concurrent.futures.TimeoutError:
+                    for future in futures:
+                        future.cancel()
+                    logger.warning(
+                        "Parallel query timed out after %ds; some providers did not respond",
+                        _parallel_timeout_seconds,
+                        extra=get_log_extra("QUERY-STRATEGY-004"),
+                    )
 
             # Adapter: semantic QueryResult → query_strategy QueryResult.
             # chunk_id encodes file_path + line_number for deduplication.
@@ -1122,6 +1295,8 @@ class SemanticQueryManager:
                     # fused_strategy order; overwriting with RRF score (~0.016) would
                     # cause all results to be eliminated by any min_score > 0.016.
                     original.source_provider = s.source_provider
+                    original.fusion_score = s.fusion_score
+                    original.contributing_providers = s.contributing_providers
                     all_results.append(original)
                 else:
                     all_results.append(
@@ -1132,6 +1307,8 @@ class SemanticQueryManager:
                             similarity_score=s.score,
                             repository_alias=s.repository_alias,
                             source_provider=s.source_provider,
+                            fusion_score=s.fusion_score,
+                            contributing_providers=s.contributing_providers,
                         )
                     )
 
@@ -1140,6 +1317,12 @@ class SemanticQueryManager:
                 all_results = [
                     r for r in all_results if r.similarity_score >= min_score
                 ]
+
+            # Story #619 Gap 5: record which providers were skipped (down) this query
+            if not hasattr(self, "_last_query_degraded_providers"):
+                self._last_query_degraded_providers = []
+            self._last_query_degraded_providers = _degraded_in_query
+
             return all_results[:limit]
 
         try:

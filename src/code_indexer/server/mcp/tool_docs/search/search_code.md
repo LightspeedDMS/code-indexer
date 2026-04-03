@@ -149,8 +149,9 @@ inputSchema:
       - failover
       - parallel
       - specific
-      description: 'Query strategy: primary_only (default), failover (switch on failure), parallel (score fusion), specific (use
-        specific provider).'
+      description: 'Query strategy: primary_only, failover (switch on failure), parallel (score fusion), specific (use specific
+        provider). When both VoyageAI and Cohere embedding providers are configured, the default strategy is automatically
+        ''parallel'' with ''rrf'' fusion. Pass query_strategy=''primary_only'' to override and use only the primary provider.'
     score_fusion:
       type: string
       enum:
@@ -216,6 +217,21 @@ outputSchema:
                 type: string
                 description: 'Embedding provider that served this result. Values: ''voyage-ai'', ''cohere'',
                   ''fused'' (parallel strategy), ''primary'' (primary_only default). Always present.'
+              fusion_score:
+                type:
+                - number
+                - 'null'
+                description: 'Fused score computed by the score fusion algorithm (e.g., RRF). Present when
+                  query_strategy=''parallel''. Reflects ranking order; do not compare directly to similarity_score.'
+              contributing_providers:
+                type:
+                - array
+                - 'null'
+                description: 'Sorted list of embedding providers that contributed this result (e.g., [''cohere'',
+                  ''voyage-ai'']). Present when query_strategy=''parallel''. A result from only one provider
+                  will list just that provider.'
+                items:
+                  type: string
               match_text:
                 type:
                 - string

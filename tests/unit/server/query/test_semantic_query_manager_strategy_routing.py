@@ -568,6 +568,112 @@ class TestMcpHandlerPreferredProviderExtraction:
 
 
 # ---------------------------------------------------------------------------
+# Tests: FAILOVER strategy routing
+# ---------------------------------------------------------------------------
+
+
+class TestFailoverStrategyRouting:
+    """Tests for query_strategy='failover' routing in SemanticQueryManager.
+
+    Verifies that execute_failover_query() is called (not bypassed as no-op)
+    and that primary/secondary provider callables are wired correctly.
+    """
+
+    def setup_method(self):
+        self.repo_path = _make_temp_repo()
+
+    def teardown_method(self):
+        shutil.rmtree(self.repo_path, ignore_errors=True)
+
+    def test_failover_strategy_uses_execute_failover_query(self):
+        """failover strategy must call execute_failover_query, not fall through to primary_only.
+
+        Observable outcome: execute_failover_query is invoked with two callables.
+        Mocks _search_with_provider (real external dep) so no network calls are made.
+        """
+        manager = _make_manager()
+
+        fake_voyage_result = QueryResult(
+            file_path="src/auth.py",
+            line_number=5,
+            code_snippet="def auth(): pass",
+            similarity_score=0.88,
+            repository_alias="test-repo",
+            source_provider="voyage-ai",
+        )
+
+        with patch(
+            "code_indexer.server.query.semantic_query_manager.SemanticQueryManager"
+            "._search_with_provider",
+            return_value=[fake_voyage_result],
+        ):
+            with patch(
+                "code_indexer.services.query_strategy.execute_failover_query",
+                wraps=lambda primary_fn, secondary_fn, limit=10: primary_fn()[:limit],
+            ) as mock_failover:
+                results = manager._search_single_repository(
+                    repo_path=self.repo_path,
+                    repository_alias="test-repo",
+                    query_text="auth",
+                    limit=5,
+                    min_score=None,
+                    file_extensions=None,
+                    query_strategy="failover",
+                    preferred_provider=None,
+                )
+
+        assert mock_failover.call_count == 1, (
+            "execute_failover_query must be called for failover strategy"
+        )
+        assert len(results) == 1
+        assert results[0].file_path == "src/auth.py"
+
+    def test_failover_strategy_falls_back_to_secondary_on_primary_error(self):
+        """failover strategy must use secondary provider when primary raises.
+
+        When the primary (_search_with_provider with voyage-ai) raises an exception,
+        execute_failover_query must try the secondary (cohere) and return its results.
+        """
+        manager = _make_manager()
+
+        fake_cohere_result = QueryResult(
+            file_path="src/auth.py",
+            line_number=5,
+            code_snippet="def auth(): pass",
+            similarity_score=0.75,
+            repository_alias="test-repo",
+            source_provider="cohere",
+        )
+
+        def _side_effect(**kwargs):
+            provider = kwargs.get("provider_name", "")
+            if provider == "voyage-ai":
+                raise RuntimeError("voyage-ai unavailable")
+            return [fake_cohere_result]
+
+        with patch(
+            "code_indexer.server.query.semantic_query_manager.SemanticQueryManager"
+            "._search_with_provider",
+            side_effect=_side_effect,
+        ):
+            results = manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=5,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="failover",
+                preferred_provider=None,
+            )
+
+        assert len(results) == 1
+        assert results[0].source_provider == "cohere", (
+            "failover must return secondary provider results when primary fails"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Tests: error response content for missing preferred_provider
 # ---------------------------------------------------------------------------
 
@@ -614,3 +720,702 @@ class TestSpecificStrategyErrorResponses:
                 preferred_provider=None,
             )
         assert "required" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Story #618 - Score/Provenance Transparency
+# ---------------------------------------------------------------------------
+
+
+class TestBothProvidersConfigured:
+    """Tests for _both_providers_configured method (Story #618)."""
+
+    def test_returns_true_when_both_providers_configured(self):
+        """_both_providers_configured returns True when voyage-ai and cohere both present."""
+        manager = _make_manager()
+
+        with patch(
+            "code_indexer.server.query.semantic_query_manager.EmbeddingProviderFactory",
+            create=True,
+        ):
+            with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
+                mock_config = MagicMock()
+                mock_cm = MagicMock()
+                mock_cm.get_config.return_value = mock_config
+                mock_cm_cls.create_with_backtrack.return_value = mock_cm
+
+                with patch(
+                    "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
+                    return_value=["voyage-ai", "cohere"],
+                ):
+                    result = manager._both_providers_configured("/some/repo")
+
+        assert result is True
+
+    def test_returns_false_when_only_voyage_configured(self):
+        """_both_providers_configured returns False when only voyage-ai is configured."""
+        manager = _make_manager()
+
+        with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
+            mock_config = MagicMock()
+            mock_cm = MagicMock()
+            mock_cm.get_config.return_value = mock_config
+            mock_cm_cls.create_with_backtrack.return_value = mock_cm
+
+            with patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
+                return_value=["voyage-ai"],
+            ):
+                result = manager._both_providers_configured("/some/repo")
+
+        assert result is False
+
+    def test_returns_false_when_only_cohere_configured(self):
+        """_both_providers_configured returns False when only cohere is configured."""
+        manager = _make_manager()
+
+        with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
+            mock_config = MagicMock()
+            mock_cm = MagicMock()
+            mock_cm.get_config.return_value = mock_config
+            mock_cm_cls.create_with_backtrack.return_value = mock_cm
+
+            with patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
+                return_value=["cohere"],
+            ):
+                result = manager._both_providers_configured("/some/repo")
+
+        assert result is False
+
+    def test_returns_false_when_config_fails_and_no_env_vars(self):
+        """_both_providers_configured returns False when config fails and no env vars set."""
+        manager = _make_manager()
+
+        with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
+            mock_cm_cls.create_with_backtrack.side_effect = RuntimeError(
+                "no config found"
+            )
+            with patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=[],
+            ):
+                result = manager._both_providers_configured("/nonexistent/repo")
+
+        assert result is False
+
+    def test_returns_true_when_config_fails_but_env_vars_set(self):
+        """_both_providers_configured returns True when config fails but env vars provide both keys."""
+        manager = _make_manager()
+
+        with patch("code_indexer.config.ConfigManager") as mock_cm_cls:
+            mock_cm_cls.create_with_backtrack.side_effect = RuntimeError(
+                "no config found"
+            )
+            with patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai", "cohere"],
+            ):
+                result = manager._both_providers_configured("/nonexistent/repo")
+
+        assert result is True
+
+
+class TestAutoParallelDefault:
+    """Tests for automatic parallel strategy default when both providers configured (Story #618)."""
+
+    def setup_method(self):
+        self.repo_path = _make_temp_repo()
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def teardown_method(self):
+        shutil.rmtree(self.repo_path, ignore_errors=True)
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def test_auto_parallel_when_both_providers_configured(self):
+        """When query_strategy=None and both providers configured, uses parallel+rrf."""
+        manager = _make_manager()
+
+        manager._both_providers_configured = MagicMock(return_value=True)
+
+        # Create a mock result that _search_with_provider returns
+        mock_result = QueryResult(
+            file_path="src/auth.py",
+            line_number=10,
+            code_snippet="def auth(): pass",
+            similarity_score=0.85,
+            repository_alias="test-repo",
+            source_provider="voyage-ai",
+        )
+
+        manager._search_with_provider = MagicMock(return_value=[mock_result])
+
+        manager._search_single_repository(
+            repo_path=self.repo_path,
+            repository_alias="test-repo",
+            query_text="auth",
+            limit=10,
+            min_score=None,
+            file_extensions=None,
+            query_strategy=None,
+            preferred_provider=None,
+        )
+
+        # _search_with_provider called — only happens in the parallel branch
+        assert manager._search_with_provider.call_count >= 1, (
+            "_search_with_provider must be called in parallel path"
+        )
+
+    def test_primary_only_fallback_when_single_provider(self):
+        """When query_strategy=None and only one provider configured, uses primary_only."""
+        manager = _make_manager()
+
+        def mock_one_provider(repo_path):
+            return False
+
+        manager._both_providers_configured = mock_one_provider
+
+        with patch(
+            "code_indexer.server.services.search_service.SemanticSearchService"
+        ) as mock_svc_cls:
+            mock_svc = MagicMock()
+            mock_svc.search_repository_path.return_value = _fake_search_response()
+            mock_svc_cls.return_value = mock_svc
+
+            results = manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy=None,
+                preferred_provider=None,
+            )
+
+        # search_repository_path (not with_provider) called — primary_only path
+        mock_svc.search_repository_path.assert_called_once()
+        assert len(results) == 1
+
+    def test_explicit_primary_only_overrides_auto_parallel(self):
+        """Explicit query_strategy='primary_only' skips auto-parallel even when both configured."""
+        manager = _make_manager()
+
+        def mock_both_providers(repo_path):
+            return True  # Both configured, but explicit primary_only overrides
+
+        manager._both_providers_configured = mock_both_providers
+
+        with patch(
+            "code_indexer.server.services.search_service.SemanticSearchService"
+        ) as mock_svc_cls:
+            mock_svc = MagicMock()
+            mock_svc.search_repository_path.return_value = _fake_search_response()
+            mock_svc_cls.return_value = mock_svc
+
+            results = manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="primary_only",
+                preferred_provider=None,
+            )
+
+        # primary_only path: search_repository_path, not with_provider
+        mock_svc.search_repository_path.assert_called_once()
+        assert len(results) == 1
+
+
+class TestQueryResultFusionFields:
+    """Tests for fusion_score and contributing_providers in QueryResult (Story #618)."""
+
+    def test_query_result_has_fusion_score_field(self):
+        """QueryResult must have fusion_score field defaulting to None."""
+        result = QueryResult(
+            file_path="src/foo.py",
+            line_number=1,
+            code_snippet="def foo(): pass",
+            similarity_score=0.9,
+            repository_alias="my-repo",
+        )
+        assert hasattr(result, "fusion_score")
+        assert result.fusion_score is None
+
+    def test_query_result_has_contributing_providers_field(self):
+        """QueryResult must have contributing_providers field defaulting to None."""
+        result = QueryResult(
+            file_path="src/foo.py",
+            line_number=1,
+            code_snippet="def foo(): pass",
+            similarity_score=0.9,
+            repository_alias="my-repo",
+        )
+        assert hasattr(result, "contributing_providers")
+        assert result.contributing_providers is None
+
+    def test_to_dict_omits_fusion_score_when_none(self):
+        """to_dict() must NOT include fusion_score key when fusion_score is None."""
+        result = QueryResult(
+            file_path="src/foo.py",
+            line_number=1,
+            code_snippet="def foo(): pass",
+            similarity_score=0.9,
+            repository_alias="my-repo",
+        )
+        d = result.to_dict()
+        assert "fusion_score" not in d
+
+    def test_to_dict_omits_contributing_providers_when_none(self):
+        """to_dict() must NOT include contributing_providers key when it is None."""
+        result = QueryResult(
+            file_path="src/foo.py",
+            line_number=1,
+            code_snippet="def foo(): pass",
+            similarity_score=0.9,
+            repository_alias="my-repo",
+        )
+        d = result.to_dict()
+        assert "contributing_providers" not in d
+
+    def test_to_dict_includes_fusion_score_when_set(self):
+        """to_dict() must include fusion_score when it has a value."""
+        result = QueryResult(
+            file_path="src/foo.py",
+            line_number=1,
+            code_snippet="def foo(): pass",
+            similarity_score=0.9,
+            repository_alias="my-repo",
+            fusion_score=0.032,
+        )
+        d = result.to_dict()
+        assert "fusion_score" in d
+        assert abs(d["fusion_score"] - 0.032) < 1e-10
+
+    def test_to_dict_includes_contributing_providers_when_set(self):
+        """to_dict() must include contributing_providers when it has a value."""
+        result = QueryResult(
+            file_path="src/foo.py",
+            line_number=1,
+            code_snippet="def foo(): pass",
+            similarity_score=0.9,
+            repository_alias="my-repo",
+            contributing_providers=["cohere", "voyage-ai"],
+        )
+        d = result.to_dict()
+        assert "contributing_providers" in d
+        assert d["contributing_providers"] == ["cohere", "voyage-ai"]
+
+
+# ---------------------------------------------------------------------------
+# Story #619 Gap 1: Health-gated parallel dispatch tests
+# ---------------------------------------------------------------------------
+
+
+class TestHealthGatedParallelDispatch:
+    """Tests that 'down' providers are skipped in parallel dispatch (Story #619 Gap 1)."""
+
+    def setup_method(self):
+        self.repo_path = _make_temp_repo()
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def teardown_method(self):
+        shutil.rmtree(self.repo_path, ignore_errors=True)
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def test_parallel_skips_down_provider(self):
+        """When cohere is 'down', parallel dispatch must NOT call _search_with_provider for cohere."""
+        from code_indexer.services.provider_health_monitor import (
+            ProviderHealthStatus,
+        )
+
+        manager = _make_manager()
+        dispatched_providers = []
+
+        def fake_search(
+            repo_path,
+            repository_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language,
+            exclude_language,
+            path_filter,
+            exclude_path,
+            accuracy,
+            provider_name,
+        ):
+            dispatched_providers.append(provider_name)
+            return []
+
+        down_status = ProviderHealthStatus(
+            provider="cohere",
+            status="down",
+            health_score=0.0,
+            p50_latency_ms=0.0,
+            p95_latency_ms=0.0,
+            p99_latency_ms=0.0,
+            error_rate=1.0,
+            availability=0.0,
+            total_requests=10,
+            successful_requests=0,
+            failed_requests=10,
+            window_minutes=60,
+        )
+        healthy_status = ProviderHealthStatus(
+            provider="voyage-ai",
+            status="healthy",
+            health_score=1.0,
+            p50_latency_ms=100.0,
+            p95_latency_ms=200.0,
+            p99_latency_ms=300.0,
+            error_rate=0.0,
+            availability=1.0,
+            total_requests=10,
+            successful_requests=10,
+            failed_requests=0,
+            window_minutes=60,
+        )
+
+        def fake_get_health(provider=None):
+            if provider == "cohere":
+                return {"cohere": down_status}
+            if provider == "voyage-ai":
+                return {"voyage-ai": healthy_status}
+            return {"voyage-ai": healthy_status, "cohere": down_status}
+
+        mock_monitor = MagicMock()
+        mock_monitor.get_health.side_effect = fake_get_health
+
+        with (
+            patch.object(manager, "_search_with_provider", side_effect=fake_search),
+            patch.object(manager, "_both_providers_configured", return_value=True),
+            patch(
+                "code_indexer.services.provider_health_monitor.ProviderHealthMonitor.get_instance",
+                return_value=mock_monitor,
+            ),
+        ):
+            manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="parallel",
+            )
+
+        assert "cohere" not in dispatched_providers, (
+            "cohere is 'down' and must NOT be dispatched in parallel query"
+        )
+        assert "voyage-ai" in dispatched_providers, (
+            "voyage-ai is healthy and must be dispatched"
+        )
+
+    def test_parallel_dispatches_all_when_healthy(self):
+        """When both providers are healthy, both must be dispatched."""
+        from code_indexer.services.provider_health_monitor import (
+            ProviderHealthStatus,
+        )
+
+        manager = _make_manager()
+        dispatched_providers = []
+
+        def fake_search(
+            repo_path,
+            repository_alias,
+            query_text,
+            limit,
+            min_score,
+            file_extensions,
+            language,
+            exclude_language,
+            path_filter,
+            exclude_path,
+            accuracy,
+            provider_name,
+        ):
+            dispatched_providers.append(provider_name)
+            return []
+
+        healthy_status_voyage = ProviderHealthStatus(
+            provider="voyage-ai",
+            status="healthy",
+            health_score=1.0,
+            p50_latency_ms=100.0,
+            p95_latency_ms=200.0,
+            p99_latency_ms=300.0,
+            error_rate=0.0,
+            availability=1.0,
+            total_requests=10,
+            successful_requests=10,
+            failed_requests=0,
+            window_minutes=60,
+        )
+        healthy_status_cohere = ProviderHealthStatus(
+            provider="cohere",
+            status="healthy",
+            health_score=1.0,
+            p50_latency_ms=100.0,
+            p95_latency_ms=200.0,
+            p99_latency_ms=300.0,
+            error_rate=0.0,
+            availability=1.0,
+            total_requests=10,
+            successful_requests=10,
+            failed_requests=0,
+            window_minutes=60,
+        )
+
+        def fake_get_health(provider=None):
+            if provider == "cohere":
+                return {"cohere": healthy_status_cohere}
+            if provider == "voyage-ai":
+                return {"voyage-ai": healthy_status_voyage}
+            return {"voyage-ai": healthy_status_voyage, "cohere": healthy_status_cohere}
+
+        mock_monitor = MagicMock()
+        mock_monitor.get_health.side_effect = fake_get_health
+
+        with (
+            patch.object(manager, "_search_with_provider", side_effect=fake_search),
+            patch.object(manager, "_both_providers_configured", return_value=True),
+            patch(
+                "code_indexer.services.provider_health_monitor.ProviderHealthMonitor.get_instance",
+                return_value=mock_monitor,
+            ),
+        ):
+            manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="parallel",
+            )
+
+        assert "voyage-ai" in dispatched_providers, "voyage-ai must be dispatched"
+        assert "cohere" in dispatched_providers, "cohere must be dispatched"
+
+
+# ---------------------------------------------------------------------------
+# Story #619 Gap 3: as_completed timeout handling tests
+# ---------------------------------------------------------------------------
+
+
+class TestAsCompletedTimeout:
+    """Tests that TimeoutError from as_completed is handled gracefully (Story #619 Gap 3)."""
+
+    def setup_method(self):
+        self.repo_path = _make_temp_repo()
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def teardown_method(self):
+        shutil.rmtree(self.repo_path, ignore_errors=True)
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def test_as_completed_timeout_returns_fast_provider_results(self):
+        """TimeoutError from as_completed must not propagate — returns empty list gracefully."""
+        import concurrent.futures
+
+        manager = _make_manager()
+
+        def fake_search(**kwargs):
+            return []
+
+        def raising_as_completed(futures, timeout=None):
+            raise concurrent.futures.TimeoutError("simulated timeout")
+
+        with (
+            patch.object(manager, "_search_with_provider", side_effect=fake_search),
+            patch.object(manager, "_both_providers_configured", return_value=True),
+            patch(
+                "code_indexer.server.query.semantic_query_manager.as_completed",
+                side_effect=raising_as_completed,
+            ),
+        ):
+            results = manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="parallel",
+            )
+
+        assert isinstance(results, list), (
+            "TimeoutError from as_completed must be handled; result must be a list"
+        )
+        assert len(results) == 0, "With all futures timed out, result must be empty"
+
+
+# ---------------------------------------------------------------------------
+# Story #619 Gap 5: Surface degraded_providers to API consumers
+# ---------------------------------------------------------------------------
+
+
+class TestDegradedProviders:
+    """Tests that skipped providers are recorded in _last_query_degraded_providers (Story #619 Gap 5)."""
+
+    def setup_method(self):
+        self.repo_path = _make_temp_repo()
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def teardown_method(self):
+        shutil.rmtree(self.repo_path, ignore_errors=True)
+        from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+        ProviderHealthMonitor.reset_instance()
+
+    def test_degraded_providers_populated_when_provider_skipped(self):
+        """When cohere is 'down' and skipped, _last_query_degraded_providers must contain 'cohere'."""
+        from code_indexer.services.provider_health_monitor import (
+            ProviderHealthStatus,
+        )
+
+        manager = _make_manager()
+
+        def fake_search(**kwargs):
+            return []
+
+        down_status = ProviderHealthStatus(
+            provider="cohere",
+            status="down",
+            health_score=0.0,
+            p50_latency_ms=0.0,
+            p95_latency_ms=0.0,
+            p99_latency_ms=0.0,
+            error_rate=1.0,
+            availability=0.0,
+            total_requests=10,
+            successful_requests=0,
+            failed_requests=10,
+            window_minutes=60,
+        )
+        healthy_status = ProviderHealthStatus(
+            provider="voyage-ai",
+            status="healthy",
+            health_score=1.0,
+            p50_latency_ms=100.0,
+            p95_latency_ms=200.0,
+            p99_latency_ms=300.0,
+            error_rate=0.0,
+            availability=1.0,
+            total_requests=10,
+            successful_requests=10,
+            failed_requests=0,
+            window_minutes=60,
+        )
+
+        def fake_get_health(provider=None):
+            if provider == "cohere":
+                return {"cohere": down_status}
+            if provider == "voyage-ai":
+                return {"voyage-ai": healthy_status}
+            return {"voyage-ai": healthy_status, "cohere": down_status}
+
+        mock_monitor = MagicMock()
+        mock_monitor.get_health.side_effect = fake_get_health
+
+        with (
+            patch.object(manager, "_search_with_provider", side_effect=fake_search),
+            patch.object(manager, "_both_providers_configured", return_value=True),
+            patch(
+                "code_indexer.services.provider_health_monitor.ProviderHealthMonitor.get_instance",
+                return_value=mock_monitor,
+            ),
+        ):
+            manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="parallel",
+            )
+
+        assert hasattr(manager, "_last_query_degraded_providers"), (
+            "_last_query_degraded_providers must exist on manager"
+        )
+        assert "cohere" in manager._last_query_degraded_providers, (
+            "Skipped 'down' provider must appear in _last_query_degraded_providers"
+        )
+
+    def test_degraded_providers_empty_when_all_healthy(self):
+        """When all providers are healthy, _last_query_degraded_providers must be empty."""
+        from code_indexer.services.provider_health_monitor import (
+            ProviderHealthStatus,
+        )
+
+        manager = _make_manager()
+
+        def fake_search(**kwargs):
+            return []
+
+        def fake_get_health(provider=None):
+            healthy = ProviderHealthStatus(
+                provider=provider or "voyage-ai",
+                status="healthy",
+                health_score=1.0,
+                p50_latency_ms=100.0,
+                p95_latency_ms=200.0,
+                p99_latency_ms=300.0,
+                error_rate=0.0,
+                availability=1.0,
+                total_requests=10,
+                successful_requests=10,
+                failed_requests=0,
+                window_minutes=60,
+            )
+            key = provider or "voyage-ai"
+            return {key: healthy}
+
+        mock_monitor = MagicMock()
+        mock_monitor.get_health.side_effect = fake_get_health
+
+        with (
+            patch.object(manager, "_search_with_provider", side_effect=fake_search),
+            patch.object(manager, "_both_providers_configured", return_value=True),
+            patch(
+                "code_indexer.services.provider_health_monitor.ProviderHealthMonitor.get_instance",
+                return_value=mock_monitor,
+            ),
+        ):
+            manager._search_single_repository(
+                repo_path=self.repo_path,
+                repository_alias="test-repo",
+                query_text="auth",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                query_strategy="parallel",
+            )
+
+        assert hasattr(manager, "_last_query_degraded_providers"), (
+            "_last_query_degraded_providers must exist on manager"
+        )
+        assert len(manager._last_query_degraded_providers) == 0, (
+            "_last_query_degraded_providers must be empty when all providers are healthy"
+        )

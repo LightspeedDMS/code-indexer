@@ -1394,6 +1394,9 @@ class GoldenRepoManager:
                         "Could not seed extensions for %s: %s", clone_path, e
                     )
 
+                # Story #620: Write embedding_providers list so cidx index loops all providers.
+                self._write_embedding_providers_to_config(clone_path)
+
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
             logging.info(f"Executing cidx index --fts for {clone_path}")
             _run_popen(
@@ -1434,6 +1437,42 @@ class GoldenRepoManager:
         except OSError as e:
             raise GitOperationError(
                 f"Post-clone workflow failed: System error: {str(e)}"
+            )
+
+    def _write_embedding_providers_to_config(self, clone_path: str) -> None:
+        """Write the embedding_providers list to .code-indexer/config.json (Story #620).
+
+        Reads the server config to determine which providers have API keys configured.
+        Always includes 'voyage-ai'. Adds 'cohere' only if cohere_api_key is set and
+        non-empty. Preserves all existing keys in config.json.
+        """
+        from ..services.config_service import get_config_service
+
+        config_path = Path(clone_path) / ".code-indexer" / "config.json"
+        if not config_path.exists():
+            logging.warning(
+                "_write_embedding_providers_to_config: config.json not found at %s",
+                config_path,
+            )
+            return
+
+        try:
+            server_cfg = get_config_service().get_config()
+            providers: List[str] = ["voyage-ai"]
+            cohere_key = getattr(server_cfg, "cohere_api_key", None)
+            if cohere_key:
+                providers.append("cohere")
+
+            with open(config_path) as f:
+                config_data = json.load(f)
+            config_data["embedding_providers"] = providers
+            with open(config_path, "w") as f:
+                json.dump(config_data, f)
+
+            logging.info("Wrote embedding_providers=%s to %s", providers, config_path)
+        except Exception as exc:
+            logging.warning(
+                "Could not write embedding_providers to %s: %s", config_path, exc
             )
 
     def _is_recoverable_init_error(self, error_output: str) -> bool:

@@ -219,8 +219,8 @@ class TestProviderIndexJobVersionedSnapshot:
         assert result["success"] is False
         mock_snapshot.assert_not_called()
 
-    def test_config_json_mutated_in_base_clone_not_snapshot(self, tmp_path):
-        """The config.json that gets mutated must be in the base clone, not the snapshot."""
+    def test_config_json_not_written_during_provider_index_job(self, tmp_path):
+        """Story #620: _provider_index_job must NOT write config.json at all (mutation pattern deleted)."""
         base_clone, versioned = self._make_versioned_path(tmp_path)
 
         from code_indexer.server.mcp.handlers import _provider_index_job
@@ -261,13 +261,7 @@ class TestProviderIndexJobVersionedSnapshot:
                 repo_alias="claude-server-global",
             )
 
-        # Writes must have occurred (config.json was mutated)
-        assert captured_config_writes, "Expected config.json writes in base clone"
-        # All config writes must be in base_clone, never in versioned snapshot
-        for write_path in captured_config_writes:
-            assert str(write_path).startswith(str(base_clone)), (
-                f"config.json was written outside base clone: {write_path}"
-            )
-            assert ".versioned" not in write_path, (
-                f"config.json was written inside .versioned/: {write_path}"
-            )
+        # No config.json writes must occur — mutation pattern fully deleted (Story #620)
+        assert not captured_config_writes, (
+            f"Expected zero config.json writes but got: {captured_config_writes}"
+        )

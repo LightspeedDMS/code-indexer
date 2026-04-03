@@ -16541,6 +16541,46 @@ def _post_provider_index_snapshot(
         )
 
 
+# Maximum characters to include from stdout/stderr tail in provider index job results.
+_PROVIDER_JOB_OUTPUT_TAIL_CHARS = 500
+
+
+def _append_provider_to_config(repo_path: str, provider_name: str) -> None:
+    """Permanently append provider_name to embedding_providers in .code-indexer/config.json.
+
+    Idempotent: if provider_name is already in the list, no duplicate is added.
+    If embedding_providers key is absent, it is initialised as ['voyage-ai', provider_name]
+    (preserving voyage-ai as the primary provider).
+
+    Args:
+        repo_path: Path to the repository root containing .code-indexer/config.json
+        provider_name: Provider name to add (e.g. 'cohere')
+    """
+    import json
+    from pathlib import Path
+
+    config_path = Path(repo_path) / ".code-indexer" / "config.json"
+    if not config_path.exists():
+        logger.warning(
+            "_append_provider_to_config: config.json not found at %s", config_path
+        )
+        return
+    try:
+        with open(config_path) as f:
+            config_data = json.load(f)
+        existing = config_data.get(
+            "embedding_providers",
+            [config_data.get("embedding_provider", "voyage-ai")],
+        )
+        if provider_name not in existing:
+            existing.append(provider_name)
+        config_data["embedding_providers"] = existing
+        with open(config_path, "w") as f:
+            json.dump(config_data, f)
+    except Exception as exc:
+        logger.warning("_append_provider_to_config failed for %s: %s", config_path, exc)
+
+
 def _provider_index_job(
     repo_path: str,
     provider_name: str,
@@ -16548,11 +16588,10 @@ def _provider_index_job(
     progress_callback=None,
     **kwargs,
 ) -> Dict[str, Any]:
-    """Background job worker for provider index add/recreate (Story #490, Bug #607).
+    """Background job worker for provider index add/recreate (Story #490, Bug #607, Story #620).
 
-    Temporarily sets embedding_provider in .code-indexer/config.json, runs
-    cidx index (no --provider flag -- it does not exist), then restores the
-    original value in a finally block.
+    Runs cidx index which reads embedding_providers from .code-indexer/config.json
+    and indexes each configured provider in sequence. No config.json mutation occurs.
 
     If repo_path points to a versioned snapshot (.versioned/ in the path), the
     index is built on the BASE CLONE instead (Bug #604). This is required because:
@@ -16566,7 +16605,6 @@ def _provider_index_job(
     Story #613: Uses run_with_popen_progress for real progress reporting so the UI
     shows meaningful intermediate values instead of a hardcoded 25% sentinel.
     """
-    import json
     import os
     from pathlib import Path
 
@@ -16601,38 +16639,6 @@ def _provider_index_job(
         # submit_job consumes repo_alias before forwarding kwargs; derive from path.
         if not repo_alias:
             repo_alias = f"{alias_name}-global"
-
-    config_path = Path(actual_path) / ".code-indexer" / "config.json"
-
-    # --- Read current config and record state before any mutation ---
-    config_data: Dict[str, Any] = {}
-    had_embedding_key: bool = False
-    original_provider: str = ""
-
-    try:
-        if config_path.exists():
-            with open(config_path) as f:
-                config_data = json.load(f)
-            had_embedding_key = "embedding_provider" in config_data
-            original_provider = config_data.get("embedding_provider", "")
-
-        # Temporarily write the target provider so cidx index picks it up.
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_data["embedding_provider"] = provider_name
-        with open(config_path, "w") as f:
-            json.dump(config_data, f)
-    except Exception as exc:
-        logger.error(
-            "Failed to prepare provider config for provider=%s repo=%s: %s",
-            provider_name,
-            repo_path,
-            exc,
-        )
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": f"Failed to prepare provider config: {exc}",
-        }
 
     # Build subprocess env with the appropriate API key for this provider.
     env = os.environ.copy()
@@ -16689,8 +16695,12 @@ def _provider_index_job(
         stderr_out = "".join(all_stderr)
         return {
             "success": True,
-            "stdout": stdout_out[-500:] if stdout_out else "",
-            "stderr": stderr_out[-500:] if stderr_out else "",
+            "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
+            if stdout_out
+            else "",
+            "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
+            if stderr_out
+            else "",
         }
     except IndexingSubprocessError as exc:
         logger.warning(
@@ -16701,26 +16711,9 @@ def _provider_index_job(
         )
         return {
             "success": False,
-            "stdout": "".join(all_stdout)[-500:],
+            "stdout": "".join(all_stdout)[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:],
             "stderr": str(exc),
         }
-    finally:
-        # Always restore config.json to its pre-job state.
-        try:
-            if config_path.exists():
-                with open(config_path) as f:
-                    current = json.load(f)
-                if had_embedding_key:
-                    current["embedding_provider"] = original_provider
-                else:
-                    current.pop("embedding_provider", None)
-                with open(config_path, "w") as f:
-                    json.dump(current, f)
-        except Exception:
-            logger.warning(
-                "Failed to restore embedding_provider in %s after provider index job",
-                config_path,
-            )
 
 
 def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -16779,6 +16772,9 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
             if provider_status.get("exists"):
                 skipped.append(alias)
                 continue
+
+            # Persist provider to config.json before submitting job so cidx index picks it up
+            _append_provider_to_config(repo_path, provider_name)
 
             # Submit job
             job_id = app_module.background_job_manager.submit_job(

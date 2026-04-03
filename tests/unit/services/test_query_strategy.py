@@ -6,6 +6,7 @@ from code_indexer.services.query_strategy import (
     QueryStrategy,
     ScoreFusion,
     QueryResult,
+    RRF_K,
     fuse_rrf,
     fuse_multiply,
     fuse_average,
@@ -128,6 +129,105 @@ class TestEnums:
         assert ScoreFusion.RRF.value == "rrf"
         assert ScoreFusion.MULTIPLY.value == "multiply"
         assert ScoreFusion.AVERAGE.value == "average"
+
+
+class TestRRFFusionScoreProvenance:
+    """Tests for fusion_score and contributing_providers fields on fuse_rrf output."""
+
+    def test_rrf_both_providers_result_has_fusion_score(self):
+        """fuse_rrf result found in both providers must have non-None fusion_score."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_rrf(primary, secondary, limit=10)
+        assert fused[0].fusion_score is not None
+
+    def test_rrf_both_providers_result_has_contributing_providers(self):
+        """fuse_rrf result found in both providers must list both providers."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_rrf(primary, secondary, limit=10)
+        assert set(fused[0].contributing_providers) == {"cohere", "voyage-ai"}
+
+    def test_rrf_primary_only_result_has_single_contributing_provider(self):
+        """fuse_rrf result found only in primary must list only primary provider."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("b.py", 0.8, provider="cohere")]
+        fused = fuse_rrf(primary, secondary, limit=10)
+        a_result = next(r for r in fused if r.file_path == "a.py")
+        assert a_result.contributing_providers == ["voyage-ai"]
+        assert a_result.fusion_score is not None
+        expected = 1.0 / (RRF_K + 1)
+        assert abs(a_result.fusion_score - expected) < 1e-10
+
+    def test_rrf_secondary_only_result_has_single_contributing_provider(self):
+        """fuse_rrf result found only in secondary must list only secondary provider."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("b.py", 0.8, provider="cohere")]
+        fused = fuse_rrf(primary, secondary, limit=10)
+        b_result = next(r for r in fused if r.file_path == "b.py")
+        assert b_result.contributing_providers == ["cohere"]
+        assert b_result.fusion_score is not None
+        expected = 1.0 / (RRF_K + 1)
+        assert abs(b_result.fusion_score - expected) < 1e-10
+
+    def test_rrf_fusion_score_matches_rrf_formula_both_providers(self):
+        """fuse_rrf result in both providers has fusion_score = 2 * 1/(RRF_K+1)."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_rrf(primary, secondary, limit=10)
+        expected = 1.0 / (RRF_K + 1) + 1.0 / (RRF_K + 1)
+        assert abs(fused[0].fusion_score - expected) < 1e-10
+
+    def test_rrf_source_provider_remains_fused(self):
+        """fuse_rrf source_provider is 'fused' even with contributing_providers set."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_rrf(primary, secondary, limit=10)
+        assert fused[0].source_provider == "fused"
+
+
+@pytest.mark.parametrize("fuse_fn", [fuse_multiply, fuse_average])
+class TestNonRRFFusionScoreProvenance:
+    """Tests for fusion_score, contributing_providers, and source_provider on fuse_multiply and fuse_average."""
+
+    def test_result_has_fusion_score(self, fuse_fn):
+        """Result must have non-None fusion_score."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_fn(primary, secondary, limit=10)
+        assert fused[0].fusion_score is not None
+
+    def test_both_providers_result_has_contributing_providers(self, fuse_fn):
+        """Result found in both providers must list both providers."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_fn(primary, secondary, limit=10)
+        assert set(fused[0].contributing_providers) == {"cohere", "voyage-ai"}
+
+    def test_primary_only_result_has_single_contributing_provider(self, fuse_fn):
+        """Result found only in primary must list only primary provider."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("b.py", 0.8, provider="cohere")]
+        fused = fuse_fn(primary, secondary, limit=10)
+        a_result = next(r for r in fused if r.file_path == "a.py")
+        assert a_result.contributing_providers == ["voyage-ai"]
+        assert a_result.fusion_score is not None
+
+    def test_secondary_only_result_has_single_contributing_provider(self, fuse_fn):
+        """Result found only in secondary must list only secondary provider."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("b.py", 0.8, provider="cohere")]
+        fused = fuse_fn(primary, secondary, limit=10)
+        b_result = next(r for r in fused if r.file_path == "b.py")
+        assert b_result.contributing_providers == ["cohere"]
+        assert b_result.fusion_score is not None
+
+    def test_source_provider_remains_fused(self, fuse_fn):
+        """source_provider is 'fused' even with contributing_providers set."""
+        primary = [_make_result("a.py", 0.9, provider="voyage-ai")]
+        secondary = [_make_result("a.py", 0.8, provider="cohere")]
+        fused = fuse_fn(primary, secondary, limit=10)
+        assert fused[0].source_provider == "fused"
 
 
 class TestEdgeCases:

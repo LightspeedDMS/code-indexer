@@ -14,10 +14,11 @@ Score fusion methods (for parallel strategy):
 """
 
 import logging
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,8 @@ class QueryResult:
     repository_alias: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     source_provider: str = ""
+    fusion_score: Optional[float] = None
+    contributing_providers: Optional[List[str]] = None
 
 
 def fuse_rrf(
@@ -72,16 +75,19 @@ def fuse_rrf(
     """
     scores: Dict[str, float] = {}
     result_map: Dict[str, QueryResult] = {}
+    contributing: Dict[str, set] = defaultdict(set)
 
     for rank, r in enumerate(primary_results):
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
         scores[key] = scores.get(key, 0) + 1.0 / (RRF_K + rank + 1)
+        contributing[key].add(r.source_provider)
         if key not in result_map:
             result_map[key] = r
 
     for rank, r in enumerate(secondary_results):
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
         scores[key] = scores.get(key, 0) + 1.0 / (RRF_K + rank + 1)
+        contributing[key].add(r.source_provider)
         if key not in result_map:
             result_map[key] = r
 
@@ -91,7 +97,13 @@ def fuse_rrf(
     fused = []
     for key in sorted_keys[:limit]:
         fused.append(
-            replace(result_map[key], score=scores[key], source_provider="fused")
+            replace(
+                result_map[key],
+                score=scores[key],
+                source_provider="fused",
+                fusion_score=scores[key],
+                contributing_providers=sorted(contributing[key]),
+            )
         )
 
     return fused
@@ -124,15 +136,18 @@ def fuse_multiply(
     secondary_norm = _normalize_scores(list(secondary_results))
 
     result_map: Dict[str, QueryResult] = {}
+    contributing: Dict[str, set] = defaultdict(set)
 
     for r in primary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
         result_map[key] = r
+        contributing[key].add(r.source_provider)
 
     for r in secondary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
         if key not in result_map:
             result_map[key] = r
+        contributing[key].add(r.source_provider)
 
     all_keys = set(primary_norm.keys()) | set(secondary_norm.keys())
     scores: Dict[str, float] = {}
@@ -146,7 +161,13 @@ def fuse_multiply(
     fused = []
     for key in sorted_keys[:limit]:
         fused.append(
-            replace(result_map[key], score=scores[key], source_provider="fused")
+            replace(
+                result_map[key],
+                score=scores[key],
+                source_provider="fused",
+                fusion_score=scores[key],
+                contributing_providers=sorted(contributing[key]),
+            )
         )
 
     return fused
@@ -162,15 +183,18 @@ def fuse_average(
     secondary_norm = _normalize_scores(list(secondary_results))
 
     result_map: Dict[str, QueryResult] = {}
+    contributing: Dict[str, set] = defaultdict(set)
 
     for r in primary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
         result_map[key] = r
+        contributing[key].add(r.source_provider)
 
     for r in secondary_results:
         key = f"{r.repository_alias}:{r.file_path}:{r.chunk_id}"
         if key not in result_map:
             result_map[key] = r
+        contributing[key].add(r.source_provider)
 
     all_keys = set(primary_norm.keys()) | set(secondary_norm.keys())
     scores: Dict[str, float] = {}
@@ -189,7 +213,13 @@ def fuse_average(
     fused = []
     for key in sorted_keys[:limit]:
         fused.append(
-            replace(result_map[key], score=scores[key], source_provider="fused")
+            replace(
+                result_map[key],
+                score=scores[key],
+                source_provider="fused",
+                fusion_score=scores[key],
+                contributing_providers=sorted(contributing[key]),
+            )
         )
 
     return fused

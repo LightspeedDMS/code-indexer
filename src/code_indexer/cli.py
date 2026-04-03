@@ -160,6 +160,17 @@ def _get_credential_client_and_config(json_output: bool = False):
 
 logger = logging.getLogger(__name__)
 
+# Indexing safety buffer: time (seconds) reserved before token/rate-limit cutoff.
+_INDEX_SAFETY_BUFFER_SECONDS = 60
+
+
+def _log_skipped_provider_warning(provider_name: str) -> None:
+    """Log a warning that a provider was skipped due to missing API key."""
+    logger.warning(
+        "Skipping provider '%s': no API key found in environment",
+        provider_name,
+    )
+
 
 def _generate_language_help_text() -> str:
     """Generate dynamic help text for language option based on LanguageMapper."""
@@ -3473,6 +3484,19 @@ def index(
     try:
         config = config_manager.load()
 
+        # Multi-provider loop (Story #620): read embedding_providers, check API keys.
+        # config.json is never mutated on disk — only in-memory override is used.
+        _all_providers = config.get_embedding_providers()
+        _providers_with_keys = []
+        for _p in _all_providers:
+            if EmbeddingProviderFactory.resolve_api_key(_p) is None:
+                _log_skipped_provider_warning(_p)
+            else:
+                _providers_with_keys.append(_p)
+        if _providers_with_keys:
+            config.embedding_provider = _providers_with_keys[0]  # type: ignore[assignment]
+        _additional_providers = _providers_with_keys[1:]
+
         # Initialize services - lazy imports for index path
         from .services.smart_indexer import SmartIndexer
 
@@ -3825,7 +3849,7 @@ def index(
                     reconcile_with_database=reconcile,
                     batch_size=batch_size,
                     progress_callback=progress_callback,
-                    safety_buffer_seconds=60,  # 1-minute safety buffer
+                    safety_buffer_seconds=_INDEX_SAFETY_BUFFER_SECONDS,
                     files_count_to_process=files_count_to_process,
                     vector_thread_count=config.voyage_ai.parallel_requests,
                     detect_deletions=detect_deletions,
@@ -3891,6 +3915,49 @@ def index(
             console.print(
                 "💾 Progress saved for future incremental updates", style="dim"
             )
+
+        # Additional providers loop (Story #620): index remaining providers in sequence.
+        # Each provider gets a fresh embedding service and SmartIndexer; FTS is skipped
+        # because it is provider-agnostic and already built in the primary pass.
+        for _extra_provider in _additional_providers:
+            console.print(f"\n🔄 Indexing additional provider: {_extra_provider}")
+            config.embedding_provider = _extra_provider  # type: ignore[assignment]
+            _extra_embedding = EmbeddingProviderFactory.create(config, console)
+            if not _extra_embedding.health_check():
+                console.print(
+                    f"⚠️  {_extra_provider} health check failed — skipping",
+                    style="yellow",
+                )
+                continue
+            _extra_backend = BackendFactory.create(
+                config=config, project_root=Path(config.codebase_dir)
+            )
+            _extra_client = _extra_backend.get_vector_store_client()
+            _extra_metadata = config_manager.config_path.parent / "metadata.json"
+            _extra_indexer = SmartIndexer(
+                config, _extra_embedding, _extra_client, _extra_metadata
+            )
+            _extra_stats = _extra_indexer.smart_index(
+                force_full=clear,
+                reconcile_with_database=reconcile,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                safety_buffer_seconds=_INDEX_SAFETY_BUFFER_SECONDS,
+                files_count_to_process=files_count_to_process,
+                vector_thread_count=(
+                    config.cohere.parallel_requests
+                    if _extra_provider == "cohere"
+                    else config.voyage_ai.parallel_requests
+                ),
+                detect_deletions=detect_deletions,
+                enable_fts=False,
+            )
+            if _extra_stats is not None:
+                console.print(
+                    f"✅ {_extra_provider}: {_extra_stats.files_processed} files, "
+                    f"{_extra_stats.chunks_created} chunks",
+                    style="green",
+                )
 
     except Exception as e:
         console.print(f"❌ Indexing failed: {e}", style="red")

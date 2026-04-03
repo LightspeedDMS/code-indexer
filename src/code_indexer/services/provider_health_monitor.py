@@ -71,6 +71,13 @@ class ProviderHealthMonitor:
         self._latency_p95_threshold_ms = latency_p95_threshold_ms
         self._availability_threshold = availability_threshold
         self._data_lock = threading.Lock()
+        # Story #619 Gap 4: recovery probe state
+        self._probe_lock = threading.Lock()
+        self._probe_threads: Dict[str, threading.Thread] = {}
+        self._probe_stop_events: Dict[str, threading.Event] = {}
+        self._last_known_status: Dict[str, str] = {}
+        # Story #619 HIGH-2: registered probe functions per provider
+        self._probe_functions: Dict[str, object] = {}
 
     @classmethod
     def get_instance(cls, **kwargs: object) -> "ProviderHealthMonitor":
@@ -85,6 +92,25 @@ class ProviderHealthMonitor:
         """Reset singleton (for testing)."""
         with cls._lock:
             cls._instance = None
+
+    def register_probe(self, provider_name: str, probe_fn: object) -> None:
+        """Register a lightweight probe function for a provider (Story #619 HIGH-2).
+
+        The probe_fn is called by _probe_loop during recovery to test real
+        connectivity instead of recording a synthetic success.
+
+        Args:
+            provider_name: Provider identifier (e.g. "voyage-ai", "cohere").
+            probe_fn: Callable with signature () -> bool. Must return True if
+                      the provider is reachable, False otherwise. May raise; the
+                      probe loop treats any exception as failure.
+        """
+        self._probe_functions[provider_name] = probe_fn
+
+    # Recovery probe constants (Story #619 Gap 4)
+    PROBE_INTERVAL_SEC: int = 30
+    PROBE_JOIN_TIMEOUT_SEC: int = 5
+    SYNTHETIC_PROBE_LATENCY_MS: float = 0.0
 
     def record_call(self, provider: str, latency_ms: float, success: bool) -> None:
         """Record an API call metric. Thread-safe."""
@@ -110,6 +136,91 @@ class ProviderHealthMonitor:
 
             # Prune old entries
             self._prune_old_metrics(provider)
+
+            # Story #619 Gap 4: detect status transitions and manage recovery probe
+            old_status = self._last_known_status.get(provider, "healthy")
+            new_status = self._compute_status(provider).status
+            self._last_known_status[provider] = new_status
+
+        if old_status != "down" and new_status == "down":
+            self._start_recovery_probe(provider)
+        elif old_status == "down" and new_status != "down":
+            self._stop_recovery_probe(provider)
+
+    def _start_recovery_probe(self, provider_name: str) -> None:
+        """Start background probe for a down provider (Story #619 Gap 4)."""
+        with self._probe_lock:
+            if provider_name in self._probe_threads:
+                return  # already probing — idempotent
+            stop_event = threading.Event()
+            self._probe_stop_events[provider_name] = stop_event
+            thread = threading.Thread(
+                target=self._probe_loop,
+                args=(provider_name, stop_event),
+                daemon=True,
+                name=f"recovery-probe-{provider_name}",
+            )
+            self._probe_threads[provider_name] = thread
+        thread.start()
+        logger.info("Started recovery probe for provider '%s'", provider_name)
+
+    def _stop_recovery_probe(self, provider_name: str) -> None:
+        """Stop background probe for a provider (Story #619 Gap 4)."""
+        with self._probe_lock:
+            stop_event = self._probe_stop_events.pop(provider_name, None)
+            thread = self._probe_threads.pop(provider_name, None)
+
+        if stop_event:
+            stop_event.set()
+        else:
+            return  # no probe was active — skip logging
+
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=self.PROBE_JOIN_TIMEOUT_SEC)
+        logger.info("Stopped recovery probe for provider '%s'", provider_name)
+
+    def _probe_loop(self, provider_name: str, stop_event: threading.Event) -> None:
+        """Probe loop: wait PROBE_INTERVAL_SEC then test real connectivity (Story #619 HIGH-2).
+
+        If a probe function is registered for provider_name, call it to determine
+        success. Otherwise fall back to recording a synthetic success=True so the
+        provider can recover from 'down' state even without a registered probe.
+        """
+        while not stop_event.is_set():
+            stop_event.wait(timeout=self.PROBE_INTERVAL_SEC)
+            if stop_event.is_set():
+                break
+            try:
+                probe_fn = self._probe_functions.get(provider_name)
+                if probe_fn:
+                    try:
+                        success = bool(probe_fn())  # type: ignore[operator]
+                        logger.debug(
+                            "Recovery probe for '%s': probe_fn returned %s",
+                            provider_name,
+                            success,
+                        )
+                    except Exception as probe_exc:
+                        success = False
+                        logger.debug(
+                            "Recovery probe for '%s': probe_fn raised: %s",
+                            provider_name,
+                            probe_exc,
+                            exc_info=True,
+                        )
+                else:
+                    success = True  # synthetic fallback: no probe registered
+                    logger.debug(
+                        "Recovery probe for '%s': no probe registered, recorded synthetic success",
+                        provider_name,
+                    )
+                self.record_call(
+                    provider_name,
+                    latency_ms=self.SYNTHETIC_PROBE_LATENCY_MS,
+                    success=success,
+                )
+            except Exception as exc:
+                logger.debug("Recovery probe for '%s' failed: %s", provider_name, exc)
 
     def get_health(
         self, provider: Optional[str] = None

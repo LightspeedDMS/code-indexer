@@ -93,15 +93,20 @@ class TestSemanticQueryManagerImplementation:
 
         query_manager = SemanticQueryManager()
 
-        # This will fail because the method is not implemented
-        results = query_manager._search_single_repository(
-            repo_path=self.test_repo_path,
-            repository_alias="test-repo",
-            query_text="test function",
-            limit=10,
-            min_score=0.7,
-            file_extensions=[".py"],
-        )
+        # Patch _both_providers_configured to ensure primary_only path is tested
+        # regardless of which API keys happen to be set in the test environment.
+        with patch.object(
+            query_manager, "_both_providers_configured", return_value=False
+        ):
+            # This will fail because the method is not implemented
+            results = query_manager._search_single_repository(
+                repo_path=self.test_repo_path,
+                repository_alias="test-repo",
+                query_text="test function",
+                limit=10,
+                min_score=0.7,
+                file_extensions=[".py"],
+            )
 
         # Verify the integration
         assert len(results) == 1
@@ -129,16 +134,21 @@ class TestSemanticQueryManagerImplementation:
 
             query_manager = SemanticQueryManager()
 
-            # This should handle the error gracefully
-            with pytest.raises(Exception) as exc_info:
-                query_manager._search_single_repository(
-                    repo_path=self.test_repo_path,
-                    repository_alias="test-repo",
-                    query_text="test function",
-                    limit=10,
-                    min_score=None,
-                    file_extensions=None,
-                )
+            # Patch _both_providers_configured to ensure primary_only path is tested
+            # regardless of which API keys happen to be set in the test environment.
+            with patch.object(
+                query_manager, "_both_providers_configured", return_value=False
+            ):
+                # This should handle the error gracefully
+                with pytest.raises(Exception) as exc_info:
+                    query_manager._search_single_repository(
+                        repo_path=self.test_repo_path,
+                        repository_alias="test-repo",
+                        query_text="test function",
+                        limit=10,
+                        min_score=None,
+                        file_extensions=None,
+                    )
 
             # Error should be properly propagated with context
             assert "Search failed" in str(exc_info.value)
@@ -199,15 +209,20 @@ class TestSemanticQueryManagerImplementation:
 
                 query_manager = SemanticQueryManager()
 
-                # This will fail because the request creation doesn't exist yet
-                query_manager._search_single_repository(
-                    repo_path=self.test_repo_path,
-                    repository_alias="test-repo",
-                    query_text="test query",
-                    limit=15,
-                    min_score=0.8,
-                    file_extensions=[".py", ".js"],
-                )
+                # Patch _both_providers_configured to ensure primary_only path is tested
+                # regardless of which API keys happen to be set in the test environment.
+                with patch.object(
+                    query_manager, "_both_providers_configured", return_value=False
+                ):
+                    # This will fail because the request creation doesn't exist yet
+                    query_manager._search_single_repository(
+                        repo_path=self.test_repo_path,
+                        repository_alias="test-repo",
+                        query_text="test query",
+                        limit=15,
+                        min_score=0.8,
+                        file_extensions=[".py", ".js"],
+                    )
 
                 # Verify SemanticSearchRequest was created with correct parameters
                 mock_request_class.assert_called_once_with(

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.9.0
+
+### Features
+
+- feat: Auto-parallel fusion default -- when both VoyageAI and Cohere embedding providers are configured, the default query strategy is automatically "parallel" with "rrf" fusion; pass query_strategy="primary_only" to override (Story #618, resolves #616 and #617)
+- feat: Fusion score and provider provenance transparency -- fused search results now include "fusion_score" (the RRF/multiply/average rank score used for ordering) and "contributing_providers" (list of which providers found each result) fields; search_code MCP tool doc updated (Story #618)
+- feat: Embedding provider circuit breaker -- health-gated parallel dispatch skips "down" providers to avoid 30s+ latency penalties; as_completed() timeout guard (15s) cancels hanging providers; background recovery probe restores providers to rotation; connect/read timeout split for httpx; embedding dimension and NaN/Inf validation; failover strategy wired (was a no-op) (Story #619)
+- feat: Multi-provider awareness -- automatic index build and refresh for all configured providers; config.json gains "embedding_providers" list; cidx index loops all providers without config mutation; bulk_add_provider_index permanently writes provider to config; backward compatible with single-provider repos (Story #620)
+
 ## v9.8.13
 
 ### Bug Fixes

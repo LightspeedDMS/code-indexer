@@ -38,8 +38,10 @@ class TestABCEmbeddingPurposeParam:
         self, voyage_client
     ):
         """VoyageAI.get_embedding must accept embedding_purpose='document' kwarg."""
+        # voyage-code-3 expects 1024 dims — use correct dimensions so _validate_embeddings passes
+        stub_emb = [0.1] * 1024
         with patch.object(voyage_client, "_make_sync_request") as mock_req:
-            mock_req.return_value = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+            mock_req.return_value = {"data": [{"embedding": stub_emb}]}
             result = voyage_client.get_embedding("hello", embedding_purpose="document")
         assert isinstance(result, list)
 
@@ -47,8 +49,9 @@ class TestABCEmbeddingPurposeParam:
         self, voyage_client
     ):
         """VoyageAI.get_embedding must accept embedding_purpose='query' kwarg."""
+        stub_emb = [0.1] * 1024
         with patch.object(voyage_client, "_make_sync_request") as mock_req:
-            mock_req.return_value = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+            mock_req.return_value = {"data": [{"embedding": stub_emb}]}
             result = voyage_client.get_embedding("hello", embedding_purpose="query")
         assert isinstance(result, list)
 
@@ -56,9 +59,10 @@ class TestABCEmbeddingPurposeParam:
         self, voyage_client
     ):
         """VoyageAI.get_embeddings_batch must accept embedding_purpose kwarg."""
+        stub_emb = [0.1] * 1024
         with patch.object(voyage_client, "_make_sync_request") as mock_req:
             mock_req.return_value = {
-                "data": [{"embedding": [0.1, 0.2]}, {"embedding": [0.3, 0.4]}]
+                "data": [{"embedding": stub_emb}, {"embedding": stub_emb}]
             }
             result = voyage_client.get_embeddings_batch(
                 ["hello", "world"], embedding_purpose="document"
@@ -69,19 +73,21 @@ class TestABCEmbeddingPurposeParam:
         self, voyage_client
     ):
         """VoyageAI.get_embedding_with_metadata must accept embedding_purpose kwarg."""
+        stub_emb = [0.1] * 1024
         with patch.object(voyage_client, "_make_sync_request") as mock_req:
-            mock_req.return_value = {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+            mock_req.return_value = {"data": [{"embedding": stub_emb}]}
             result = voyage_client.get_embedding_with_metadata(
                 "hello", embedding_purpose="document"
             )
-        assert result.embedding == [0.1, 0.2, 0.3]
+        assert result.embedding == stub_emb
 
     def test_voyage_ai_get_embeddings_batch_with_metadata_accepts_embedding_purpose(
         self, voyage_client
     ):
         """VoyageAI.get_embeddings_batch_with_metadata must accept embedding_purpose."""
+        stub_emb = [0.1] * 1024
         with patch.object(voyage_client, "_make_sync_request") as mock_req:
-            mock_req.return_value = {"data": [{"embedding": [0.1, 0.2]}]}
+            mock_req.return_value = {"data": [{"embedding": stub_emb}]}
             result = voyage_client.get_embeddings_batch_with_metadata(
                 ["hello"], embedding_purpose="document"
             )
@@ -98,8 +104,9 @@ class TestABCEmbeddingPurposeParam:
         self, voyage_client
     ):
         """VoyageAI ignores embedding_purpose; payload sent to API must be unchanged."""
+        stub_emb = [0.1] * 1024  # voyage-code-3 expects 1024 dims
         with patch.object(voyage_client, "_make_sync_request") as mock_req:
-            mock_req.return_value = {"data": [{"embedding": [0.1]}]}
+            mock_req.return_value = {"data": [{"embedding": stub_emb}]}
             voyage_client.get_embedding("test", embedding_purpose="query")
             call_args = mock_req.call_args
             positional_args = call_args[0]
@@ -298,10 +305,16 @@ class TestCohereBatchSplitting:
     def test_batch_respects_texts_per_request_limit(self, cohere_provider):
         """Sending 200 texts must produce multiple batches of <=96 each."""
         captured_batches = []
+        # embed-v4.0 expects 1536 dims — use correct dimensions so _validate_embeddings passes
+        _COHERE_EMBED_V4_DIMS = 1536
 
         def capture_request(texts, input_type="search_document"):
             captured_batches.append(len(texts))
-            return {"embeddings": {"float": [[0.1, 0.2] for _ in range(len(texts))]}}
+            return {
+                "embeddings": {
+                    "float": [[0.1] * _COHERE_EMBED_V4_DIMS for _ in range(len(texts))]
+                }
+            }
 
         with patch.object(
             cohere_provider, "_make_sync_request", side_effect=capture_request
@@ -1024,4 +1037,79 @@ class TestCohereExponentialBackoffFlagBug603:
         assert sleep_calls[1] > sleep_calls[0], (
             f"Bug #603: with exponential_backoff=True, delays must increase. "
             f"Got: {sleep_calls}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Story #619 Gap 6: Embedding dimension validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestEmbeddingDimensionValidation:
+    """Tests for _validate_embeddings dimension and NaN/Inf checks (Story #619 Gap 6)."""
+
+    def test_cohere_validate_embeddings_wrong_dimensions(self, cohere_provider):
+        """_validate_embeddings must raise RuntimeError when dims don't match model."""
+        expected_dims = cohere_provider.get_model_info()["dimensions"]
+        wrong_dim = expected_dims + 1  # force mismatch
+        with pytest.raises(RuntimeError, match="dims"):
+            cohere_provider._validate_embeddings(
+                [[0.1] * wrong_dim], cohere_provider.config.model
+            )
+
+    def test_cohere_validate_embeddings_nan_values(self, cohere_provider):
+        """_validate_embeddings must raise RuntimeError when embedding contains NaN."""
+        expected_dims = cohere_provider.get_model_info()["dimensions"]
+        nan_embedding = [float("nan")] + [0.1] * (expected_dims - 1)
+        with pytest.raises(RuntimeError, match="NaN or Inf"):
+            cohere_provider._validate_embeddings(
+                [nan_embedding], cohere_provider.config.model
+            )
+
+    def test_cohere_validate_embeddings_inf_values(self, cohere_provider):
+        """_validate_embeddings must raise RuntimeError when embedding contains Inf."""
+        expected_dims = cohere_provider.get_model_info()["dimensions"]
+        inf_embedding = [float("inf")] + [0.1] * (expected_dims - 1)
+        with pytest.raises(RuntimeError, match="NaN or Inf"):
+            cohere_provider._validate_embeddings(
+                [inf_embedding], cohere_provider.config.model
+            )
+
+
+# ---------------------------------------------------------------------------
+# Story #619 Gap 2: Connect vs Read timeout split tests
+# ---------------------------------------------------------------------------
+
+
+class TestConnectReadTimeoutSplit:
+    """Tests for connect vs read timeout split in Cohere provider (Story #619 Gap 2)."""
+
+    def test_cohere_uses_split_timeout(self, cohere_provider):
+        """_make_sync_request must pass httpx.Timeout with distinct connect vs read values."""
+        import httpx
+
+        captured_timeouts = []
+
+        class CapturingClient:
+            def __init__(self, **kwargs):
+                captured_timeouts.append(kwargs.get("timeout"))
+                raise ConnectionError("test-abort")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+        with patch("httpx.Client", CapturingClient):
+            with pytest.raises(RuntimeError):
+                cohere_provider._make_sync_request(["test"])
+
+        assert len(captured_timeouts) >= 1, "httpx.Client must be called at least once"
+        timeout_arg = captured_timeouts[0]
+        assert isinstance(timeout_arg, httpx.Timeout), (
+            f"Expected httpx.Timeout instance, got {type(timeout_arg)}"
+        )
+        assert timeout_arg.connect != timeout_arg.read, (
+            f"connect={timeout_arg.connect} must differ from read={timeout_arg.read}"
         )

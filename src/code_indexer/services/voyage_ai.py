@@ -1,21 +1,39 @@
 """VoyageAI API client for embeddings generation."""
 
+import logging
+import math
 import os
 import time
+from http import HTTPStatus
 from typing import List, Dict, Any, Optional
 import httpx
 from rich.console import Console
 import yaml  # type: ignore[import-untyped]
 from pathlib import Path
 
-# Suppress tokenizers parallelism warning
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
 from ..config import VoyageAIConfig
 from .embedding_provider import EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult
 
+logger = logging.getLogger(__name__)
+
+# Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
+_PROBE_TIMEOUT_S: float = 5.0
+
+# Suppress tokenizers parallelism warning
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # NOTE: VoyageTokenizer is imported lazily inside _count_tokens_accurately()
 # to avoid triggering the import chain at module load time
+
+# Dimensions per model (Story #619 Gap 6 — used for embedding validation)
+_VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
+    "voyage-code-3": 1024,
+    "voyage-multimodal-3": 1024,
+    "voyage-large-2": 1536,
+    "voyage-2": 1024,
+    "voyage-code-2": 1536,
+    "voyage-law-2": 1024,
+}
 
 
 class VoyageAIClient(EmbeddingProvider):
@@ -39,6 +57,45 @@ class VoyageAIClient(EmbeddingProvider):
 
         # HTTP client will be created per request to avoid threading issues
         # ThreadPoolExecutor removed - parallel processing handled by VectorCalculationManager
+
+        # Register lightweight connectivity probe with health monitor (Story #619 HIGH-2)
+        try:
+            from .provider_health_monitor import ProviderHealthMonitor
+        except ImportError:
+            logger.debug(
+                "Health monitor unavailable; skipping probe registration for voyage-ai."
+            )
+        else:
+            try:
+                ProviderHealthMonitor.get_instance().register_probe(
+                    "voyage-ai", self._health_probe
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Probe registration failed for voyage-ai (non-fatal): %s", exc
+                )
+
+    def _validate_embeddings(self, embeddings: List[List[float]], model: str) -> None:
+        """Validate embedding dimensions and check for NaN/Inf values (Story #619 Gap 6).
+
+        NaN/Inf validation runs unconditionally. Dimension check runs when model
+        dimensions are known.
+
+        Args:
+            embeddings: List of embedding vectors to validate.
+            model: Model name used to determine expected dimensions.
+
+        Raises:
+            RuntimeError: If any embedding has wrong dimensions or contains NaN/Inf.
+        """
+        expected_dims = _VOYAGE_MODEL_DIMENSIONS.get(model)
+        for i, emb in enumerate(embeddings):
+            if any(not math.isfinite(v) for v in emb):
+                raise RuntimeError(f"Embedding[{i}] contains NaN or Inf values")
+            if expected_dims is not None and len(emb) != expected_dims:
+                raise RuntimeError(
+                    f"Embedding[{i}]: got {len(emb)} dims, expected {expected_dims} for model {model}"
+                )
 
     def _load_model_specs(self):
         """Load model specifications from YAML file."""
@@ -78,6 +135,29 @@ class VoyageAIClient(EmbeddingProvider):
         except (KeyError, TypeError):
             # Fallback for unknown models
             return 120000  # Conservative default
+
+    def _health_probe(self) -> bool:
+        """Lightweight connectivity probe for recovery detection (Story #619 HIGH-2).
+
+        Makes an OPTIONS request to the configured API endpoint. Returns True if
+        the server responds with any status below 500 (reachable), False otherwise.
+        """
+        probe_timeout = httpx.Timeout(
+            connect=_PROBE_TIMEOUT_S,
+            read=_PROBE_TIMEOUT_S,
+            write=_PROBE_TIMEOUT_S,
+            pool=_PROBE_TIMEOUT_S,
+        )
+        try:
+            with httpx.Client(timeout=probe_timeout) as client:
+                response = client.options(self.config.api_endpoint)
+                return bool(response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR)
+        except httpx.HTTPError as exc:
+            logger.debug("VoyageAI health probe HTTP error: %s", exc, exc_info=True)
+            return False
+        except Exception as exc:
+            logger.debug("VoyageAI health probe failed: %s", exc, exc_info=True)
+            return False
 
     def health_check(self, *, test_api: bool = False) -> bool:
         """Check if VoyageAI service is configured correctly.
@@ -134,7 +214,12 @@ class VoyageAIClient(EmbeddingProvider):
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    timeout=self.config.timeout,
+                    timeout=httpx.Timeout(
+                        connect=self.config.connect_timeout,
+                        read=self.config.timeout,
+                        write=self.config.timeout,
+                        pool=self.config.timeout,
+                    ),
                 ) as client:
                     response = client.post(self.config.api_endpoint, json=payload)
                 response.raise_for_status()
@@ -288,6 +373,8 @@ class VoyageAIClient(EmbeddingProvider):
                             f"but expected {len(current_batch)}. Partial response detected."
                         )
 
+                    model_to_use = model or self.config.model
+                    self._validate_embeddings(batch_embeddings, model_to_use)
                     all_embeddings.extend(batch_embeddings)
                 except Exception as e:
                     raise RuntimeError(f"Batch embedding request failed: {e}")
@@ -332,6 +419,8 @@ class VoyageAIClient(EmbeddingProvider):
                         f"but expected {len(current_batch)}. Partial response detected."
                     )
 
+                model_to_use = model or self.config.model
+                self._validate_embeddings(batch_embeddings, model_to_use)
                 all_embeddings.extend(batch_embeddings)
             except Exception as e:
                 raise RuntimeError(f"Batch embedding request failed: {e}")
@@ -390,20 +479,12 @@ class VoyageAIClient(EmbeddingProvider):
         """Get information about the current model."""
         model_name = self.config.model
 
-        # VoyageAI model dimensions (as of API documentation)
-        model_dimensions = {
-            "voyage-code-3": 1024,
-            "voyage-multimodal-3": 1024,
-            "voyage-large-2": 1536,
-            "voyage-2": 1024,
-            "voyage-code-2": 1536,
-            "voyage-law-2": 1024,
-        }
-
         return {
             "name": model_name,
             "provider": "voyage-ai",
-            "dimensions": model_dimensions.get(model_name, 1024),  # Default to 1024
+            "dimensions": _VOYAGE_MODEL_DIMENSIONS.get(
+                model_name, 1024
+            ),  # Default to 1024
             "max_tokens": 16000,  # VoyageAI typical context limit
             "supports_batch": True,
             "api_endpoint": self.config.api_endpoint,

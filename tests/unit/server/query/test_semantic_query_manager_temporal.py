@@ -194,6 +194,11 @@ class TestTemporalServiceIntegration:
             patch(
                 "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai"],
+            ),
         ):
             # Mock temporal service
             mock_temporal_service = Mock()
@@ -270,6 +275,11 @@ class TestTemporalMetadata:
             patch(
                 "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai"],
+            ),
         ):
             # Mock temporal result with full context
             mock_temporal_result = Mock(
@@ -341,6 +351,11 @@ class TestTemporalErrorHandling:
             patch(
                 "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai"],
+            ),
         ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
@@ -374,6 +389,11 @@ class TestTemporalErrorHandling:
             patch(
                 "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai"],
+            ),
         ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
@@ -405,6 +425,11 @@ class TestTemporalErrorHandling:
             patch(
                 "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
             ) as MockTemporalService,
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory"
+                ".get_configured_providers",
+                return_value=["voyage-ai"],
+            ),
         ):
             mock_temporal_service = Mock()
             mock_temporal_service.has_temporal_index.return_value = True
