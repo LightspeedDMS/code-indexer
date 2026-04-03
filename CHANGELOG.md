@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.10
+
+### Bug Fixes
+
+- fix: provider index job for versioned golden repos (e.g. claude-server-global) now indexes the base clone instead of the versioned snapshot; the versioned snapshot is immutable per architecture, so indexing it caused the cohere index to be invisible to the health check and lost on next refresh; after indexing the base clone, a new versioned snapshot is created and the alias is swapped so queries reflect the new provider index immediately (Bug #604)
+
 ## v9.8.9
 
 ### Bug Fixes

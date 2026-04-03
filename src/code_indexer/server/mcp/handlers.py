@@ -16492,6 +16492,58 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
 _PROVIDER_INDEX_TIMEOUT_SECONDS = 3600
 
 
+def _post_provider_index_snapshot(
+    repo_alias: str, base_clone_path: str, old_snapshot_path: str
+) -> None:
+    """Create a new versioned snapshot after indexing the base clone.
+
+    Called by _provider_index_job when the original repo_path was a versioned
+    snapshot. After indexing the base clone, we create a new snapshot so that
+    the alias target is updated and queries reflect the new provider index
+    immediately (Bug #604).
+
+    Args:
+        repo_alias: Global alias name (e.g. "claude-server-global")
+        base_clone_path: Path to the base clone that was indexed
+        old_snapshot_path: Old versioned snapshot path to replace
+    """
+    scheduler = _get_app_refresh_scheduler()
+    if scheduler is None:
+        logger.warning(
+            "No refresh scheduler available — skipping snapshot creation after "
+            "provider index for %s. Index will be visible after next scheduled refresh.",
+            repo_alias,
+        )
+        return
+
+    try:
+        new_snapshot = scheduler._create_snapshot(
+            alias_name=repo_alias,
+            source_path=base_clone_path,
+        )
+        scheduler.alias_manager.swap_alias(
+            alias_name=repo_alias,
+            new_target=new_snapshot,
+            old_target=old_snapshot_path,
+        )
+        # Schedule old snapshot for cleanup (it was a versioned dir)
+        cleanup_manager = getattr(scheduler, "cleanup_manager", None)
+        if cleanup_manager is not None:
+            cleanup_manager.schedule_cleanup(old_snapshot_path)
+        logger.info(
+            "Provider index: alias %s now points to new snapshot %s",
+            repo_alias,
+            new_snapshot,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to create new snapshot after provider index for %s: %s. "
+            "Index is in base clone and will be visible after next scheduled refresh.",
+            repo_alias,
+            exc,
+        )
+
+
 def _provider_index_job(
     repo_path: str, provider_name: str, clear: bool = False, **kwargs
 ) -> Dict[str, Any]:
@@ -16500,13 +16552,42 @@ def _provider_index_job(
     Temporarily sets embedding_provider in .code-indexer/config.json, runs
     cidx index (no --provider flag -- it does not exist), then restores the
     original value in a finally block.
+
+    If repo_path points to a versioned snapshot (.versioned/ in the path), the
+    index is built on the BASE CLONE instead (Bug #604). This is required because:
+    - CLAUDE.md mandates that .versioned/ directories are IMMUTABLE
+    - The health check uses get_actual_repo_path() which returns the base clone
+    - Indexing the versioned snapshot means the index is lost on next refresh
+
+    After successfully indexing the base clone, a new versioned snapshot is created
+    and the alias is swapped so queries reflect the new provider index immediately.
     """
     import json
     import os
     import subprocess
     from pathlib import Path
 
-    config_path = Path(repo_path) / ".code-indexer" / "config.json"
+    # Determine the actual path to index.
+    # If repo_path is inside .versioned/, use the base clone instead.
+    repo_alias = kwargs.get("repo_alias", "")
+    actual_path = repo_path
+    is_versioned_snapshot = ".versioned" in Path(repo_path).parts
+    if is_versioned_snapshot:
+        parts = Path(repo_path).parts
+        versioned_idx = parts.index(".versioned")
+        alias_name = parts[versioned_idx + 1]  # e.g. "claude-server"
+        golden_repos_dir = str(Path(*parts[:versioned_idx]))
+        base_clone = Path(golden_repos_dir) / alias_name
+        if base_clone.exists():
+            actual_path = str(base_clone)
+            logger.info(
+                "Provider index: using base clone %s instead of versioned snapshot %s "
+                "(versioned snapshots are immutable per architecture)",
+                actual_path,
+                repo_path,
+            )
+
+    config_path = Path(actual_path) / ".code-indexer" / "config.json"
 
     # --- Read current config and record state before any mutation ---
     config_data: Dict[str, Any] = {}
@@ -16557,12 +16638,24 @@ def _provider_index_job(
     try:
         result = subprocess.run(
             cmd,
-            cwd=repo_path,
+            cwd=actual_path,
             capture_output=True,
             text=True,
             timeout=_PROVIDER_INDEX_TIMEOUT_SECONDS,
             env=env,
         )
+        if (
+            result.returncode == 0
+            and is_versioned_snapshot
+            and actual_path != repo_path
+        ):
+            # Base clone indexed successfully. Create a new versioned snapshot so
+            # the alias target reflects the new provider index immediately.
+            _post_provider_index_snapshot(
+                repo_alias=repo_alias,
+                base_clone_path=actual_path,
+                old_snapshot_path=repo_path,
+            )
         return {
             "success": result.returncode == 0,
             "stdout": result.stdout[-500:] if result.stdout else "",
