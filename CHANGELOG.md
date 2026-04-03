@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.8.11
+
+### Bug Fixes
+
+- fix: parallel query strategy (query_strategy="parallel") now actually queries both voyage-ai and cohere providers concurrently via ThreadPoolExecutor; previously the implementation was never committed so staging returned primary_only results with source_provider="primary" on every result (Bug #614)
+- fix: min_score is now applied after fusion in parallel query mode instead of per-provider before fusion; previously Cohere results (scores ~0.42-0.48) were silently eliminated when min_score=0.5 (the default), making parallel mode appear to return only VoyageAI results (Bug #615)
+- fix: _provider_index_job now uses run_with_popen_progress (Popen-based) with --progress-json flag, enabling real-time progress forwarding to BackgroundJobManager progress_callback; previously used subprocess.run which blocked until completion with no intermediate progress (Story #613)
+
 ## v9.8.10
 
 ### Bug Fixes
