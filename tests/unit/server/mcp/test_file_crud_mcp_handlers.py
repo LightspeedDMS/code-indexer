@@ -40,6 +40,7 @@ def mock_file_crud_service():
     with patch(
         "code_indexer.server.services.file_crud_service.file_crud_service"
     ) as mock_service:
+        mock_service.is_write_exception.return_value = False
         yield mock_service
 
 
