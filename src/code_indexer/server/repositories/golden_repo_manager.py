@@ -1442,12 +1442,10 @@ class GoldenRepoManager:
     def _write_embedding_providers_to_config(self, clone_path: str) -> None:
         """Write the embedding_providers list to .code-indexer/config.json (Story #620).
 
-        Reads the server config to determine which providers have API keys configured.
-        Always includes 'voyage-ai'. Adds 'cohere' only if cohere_api_key is set and
-        non-empty. Preserves all existing keys in config.json.
+        Uses EmbeddingProviderFactory.get_configured_providers() to determine which
+        providers have valid API keys (checks env vars, CLI config, and server DB config).
+        Preserves all existing keys in config.json.
         """
-        from ..services.config_service import get_config_service
-
         config_path = Path(clone_path) / ".code-indexer" / "config.json"
         if not config_path.exists():
             logging.warning(
@@ -1457,11 +1455,12 @@ class GoldenRepoManager:
             return
 
         try:
-            server_cfg = get_config_service().get_config()
-            providers: List[str] = ["voyage-ai"]
-            cohere_key = getattr(server_cfg, "cohere_api_key", None)
-            if cohere_key:
-                providers.append("cohere")
+            from code_indexer.services.embedding_factory import EmbeddingProviderFactory
+            from code_indexer.config import Config
+
+            providers = EmbeddingProviderFactory.get_configured_providers(Config())
+            if "voyage-ai" not in providers:
+                providers.insert(0, "voyage-ai")
 
             with open(config_path) as f:
                 config_data = json.load(f)

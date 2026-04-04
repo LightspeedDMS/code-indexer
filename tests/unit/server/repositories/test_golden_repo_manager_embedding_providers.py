@@ -25,16 +25,18 @@ def _setup_repo_config(tmp_dir: str, base: dict) -> Path:
 
 
 def _exercise_write(manager, tmp_dir: str, cohere_key) -> dict:
-    """Seed config, patch get_config_service, invoke, return parsed config."""
+    """Seed config, patch get_configured_providers, invoke, return parsed config."""
     _setup_repo_config(tmp_dir, {"embedding_provider": "voyage-ai", "sentinel": 42})
 
-    with patch(
-        "code_indexer.server.services.config_service.get_config_service"
-    ) as mock_svc:
-        server_config = MagicMock()
-        server_config.cohere_api_key = cohere_key
-        mock_svc.return_value.get_config.return_value = server_config
+    # Build expected provider list based on cohere_key
+    providers = ["voyage-ai"]
+    if cohere_key:
+        providers.append("cohere")
 
+    with patch(
+        "code_indexer.services.embedding_factory.EmbeddingProviderFactory.get_configured_providers",
+        return_value=list(providers),
+    ):
         manager._write_embedding_providers_to_config(tmp_dir)
 
     config_file = Path(tmp_dir) / ".code-indexer" / "config.json"
