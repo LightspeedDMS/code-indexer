@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.11.0
+
+### Features
+
+- feat: Dual-provider fusion quality improvements (Story #638) -- over-fetch dispatch (2x multiplier, cap 40) provides larger candidate pool for fusion; symmetric score-gated filtering removes low-confidence results from weaker provider (ratio 0.80, floor 0.70); global normalization for multiply/average fusion preserves cross-provider calibration gap; parallel timeout increased from 15s to 20s. RRF unchanged, single-provider fallback unaffected.
+
 ## v9.10.0
 
 ### Features

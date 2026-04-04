@@ -21,6 +21,14 @@ from dataclasses import dataclass
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from code_indexer.services.query_strategy import (
+    apply_score_gate,
+    PARALLEL_FETCH_MULTIPLIER,
+    MAX_PARALLEL_FETCH,
+    PARALLEL_TIMEOUT_SECONDS,
+)
+from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
 from ..repositories.activated_repo_manager import ActivatedRepoManager
 from ..repositories.background_jobs import BackgroundJobManager
 from ...search.query import SearchResult
@@ -1147,8 +1155,11 @@ class SemanticQueryManager:
                 fuse_average,
                 QueryResult as StrategyQueryResult,
             )
-            from code_indexer.services.provider_health_monitor import (
-                ProviderHealthMonitor,
+
+            # Story #638: Over-fetch each provider to widen the candidate pool
+            # before score-gated filtering and fusion.
+            _provider_fetch_limit = min(
+                limit * PARALLEL_FETCH_MULTIPLIER, MAX_PARALLEL_FETCH
             )
 
             # Story #619 Gap 1: health-gated parallel dispatch — skip "down" providers
@@ -1160,7 +1171,7 @@ class SemanticQueryManager:
                         repo_path=repo_path,
                         repository_alias=repository_alias,
                         query_text=query_text,
-                        limit=limit,
+                        limit=_provider_fetch_limit,
                         min_score=None,
                         file_extensions=file_extensions,
                         language=language,
@@ -1177,7 +1188,7 @@ class SemanticQueryManager:
                         repo_path=repo_path,
                         repository_alias=repository_alias,
                         query_text=query_text,
-                        limit=limit,
+                        limit=_provider_fetch_limit,
                         min_score=None,
                         file_extensions=file_extensions,
                         language=language,
@@ -1209,14 +1220,13 @@ class SemanticQueryManager:
 
             primary_results: List[QueryResult] = []
             secondary_results: List[QueryResult] = []
-            _parallel_timeout_seconds = 15
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = {
                     executor.submit(fn): name for name, fn in provider_tasks.items()
                 }
                 try:
                     for future in as_completed(
-                        futures, timeout=_parallel_timeout_seconds
+                        futures, timeout=PARALLEL_TIMEOUT_SECONDS
                     ):
                         provider_name = futures[future]
                         try:
@@ -1237,9 +1247,17 @@ class SemanticQueryManager:
                         future.cancel()
                     logger.warning(
                         "Parallel query timed out after %ds; some providers did not respond",
-                        _parallel_timeout_seconds,
+                        PARALLEL_TIMEOUT_SECONDS,
                         extra=get_log_extra("QUERY-STRATEGY-004"),
                     )
+
+            # Story #638: Symmetric score-gated filtering — cull weak provider
+            # results before fusion to prevent low-quality candidates from diluting
+            # high-quality results. Operates on raw similarity_score values
+            # (semantic QueryResult, not StrategyQueryResult).
+            primary_results, secondary_results = apply_score_gate(
+                primary_results, secondary_results, score_attr="similarity_score"
+            )
 
             # Adapter: semantic QueryResult → query_strategy QueryResult.
             # chunk_id encodes file_path + line_number for deduplication.
