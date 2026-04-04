@@ -63,8 +63,9 @@ class ApiKeySyncService:
     Thread-safe service for synchronizing API keys to various targets.
 
     Syncs:
-    - Anthropic key: ~/.claude.json, os.environ, systemd env file
-    - VoyageAI key: os.environ, systemd env file
+    - Anthropic key: ~/.claude.json, os.environ
+    - VoyageAI key: os.environ
+    - Cohere key: os.environ
 
     All operations are idempotent - calling with same key is a no-op.
     """
@@ -72,20 +73,17 @@ class ApiKeySyncService:
     def __init__(
         self,
         claude_config_path: Optional[str] = None,
-        systemd_env_path: Optional[str] = None,
     ):
         """
         Initialize ApiKeySyncService.
 
         Args:
             claude_config_path: Path to ~/.claude.json (default: ~/.claude.json)
-            systemd_env_path: Path to systemd env file (default: /etc/cidx-server/env)
         """
         self._sync_lock = threading.Lock()
         self._claude_config_path = Path(
             claude_config_path or Path.home() / ".claude.json"
         )
-        self._systemd_env_path = Path(systemd_env_path or "/etc/cidx-server/env")
 
     def sync_anthropic_key(self, api_key: str) -> SyncResult:
         """
@@ -94,7 +92,7 @@ class ApiKeySyncService:
         Targets:
         1. ~/.claude.json (apiKey field)
         2. os.environ["ANTHROPIC_API_KEY"]
-        3. systemd environment file
+        3. ~/.bashrc (for shell persistence)
 
         Args:
             api_key: The Anthropic API key to sync
@@ -118,10 +116,7 @@ class ApiKeySyncService:
                 # Step 2: Set os.environ
                 os.environ["ANTHROPIC_API_KEY"] = api_key
 
-                # Step 3: Write to systemd env file
-                self._update_systemd_env_file("ANTHROPIC_API_KEY", api_key)
-
-                # Step 4: Update ~/.bashrc (for shell persistence)
+                # Step 3: Update ~/.bashrc (for shell persistence)
                 self._update_bashrc("ANTHROPIC_API_KEY", api_key)
 
                 return SyncResult(success=True)
@@ -140,7 +135,7 @@ class ApiKeySyncService:
 
         Targets:
         1. os.environ["VOYAGE_API_KEY"]
-        2. systemd environment file
+        2. ~/.bashrc (for shell persistence)
 
         Args:
             api_key: The VoyageAI API key to sync
@@ -157,10 +152,7 @@ class ApiKeySyncService:
                 # Step 1: Set os.environ (immediate hot-reload)
                 os.environ["VOYAGE_API_KEY"] = api_key
 
-                # Step 2: Write to systemd env file
-                self._update_systemd_env_file("VOYAGE_API_KEY", api_key)
-
-                # Step 3: Update ~/.bashrc (for shell persistence)
+                # Step 2: Update ~/.bashrc (for shell persistence)
                 self._update_bashrc("VOYAGE_API_KEY", api_key)
 
                 return SyncResult(success=True)
@@ -179,7 +171,7 @@ class ApiKeySyncService:
 
         Targets:
         1. os.environ["CO_API_KEY"]
-        2. systemd environment file
+        2. ~/.bashrc (for shell persistence)
 
         Args:
             api_key: The Cohere API key to sync
@@ -196,10 +188,7 @@ class ApiKeySyncService:
                 # Step 1: Set os.environ (immediate hot-reload)
                 os.environ["CO_API_KEY"] = api_key
 
-                # Step 2: Write to systemd env file
-                self._update_systemd_env_file("CO_API_KEY", api_key)
-
-                # Step 3: Update ~/.bashrc (for shell persistence)
+                # Step 2: Update ~/.bashrc (for shell persistence)
                 self._update_bashrc("CO_API_KEY", api_key)
 
                 return SyncResult(success=True)
@@ -279,47 +268,6 @@ class ApiKeySyncService:
         # Write back
         self._claude_config_path.parent.mkdir(parents=True, exist_ok=True)
         self._claude_config_path.write_text(json.dumps(config, indent=2))
-
-    def _update_systemd_env_file(self, key: str, value: str) -> None:
-        """Update or add a key in the systemd environment file."""
-        try:
-            lines = []
-
-            # Read existing file if present
-            if self._systemd_env_path.exists():
-                lines = self._systemd_env_path.read_text().strip().split("\n")
-                if lines == [""]:
-                    lines = []
-
-            # Update or add the key
-            updated = False
-            for i, line in enumerate(lines):
-                if line.startswith(f"{key}="):
-                    lines[i] = f"{key}={value}"
-                    updated = True
-                    break
-
-            if not updated:
-                lines.append(f"{key}={value}")
-
-            # Write atomically
-            self._systemd_env_path.parent.mkdir(parents=True, exist_ok=True)
-            self._systemd_env_path.write_text("\n".join(lines) + "\n")
-
-        except PermissionError:
-            logger.warning(
-                format_error_log(
-                    "APP-GENERAL-043",
-                    f"Cannot write to systemd env file {self._systemd_env_path}: "
-                    "permission denied",
-                )
-            )
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "APP-GENERAL-044", f"Failed to update systemd env file: {e}"
-                )
-            )
 
     def _update_bashrc(self, env_var_name: str, value: str) -> None:
         """Update or add an export line in ~/.bashrc (idempotent - skips if value matches)."""

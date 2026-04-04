@@ -16358,10 +16358,17 @@ HANDLER_REGISTRY["wiki_article_analytics"] = handle_wiki_article_analytics
 
 
 def _resolve_golden_repo_path(alias: str) -> Optional[str]:
-    """Resolve golden repo alias to filesystem path via AliasManager.
+    """Resolve golden repo alias to the READ-ONLY versioned snapshot path.
 
-    Uses the same pattern as search_code (line ~1276) to get the current
-    target path, which remains correct after refreshes (registry path becomes stale).
+    WARNING: The returned path points to an immutable versioned snapshot
+    (.versioned/{alias}/v_{timestamp}/). NEVER write to this path — config
+    changes, index builds, and metadata updates will be lost on next refresh.
+
+    For WRITE operations, use _resolve_golden_repo_base_clone(alias) instead,
+    which returns the mutable base clone path (golden-repos/{alias_name}/).
+
+    Uses the same pattern as search_code to get the current target path,
+    which remains correct after refreshes (registry path becomes stale).
 
     Returns:
         Resolved filesystem path string, or None if alias not found.
@@ -16372,6 +16379,43 @@ def _resolve_golden_repo_path(alias: str) -> Optional[str]:
     if resolved is None and not alias.endswith("-global"):
         resolved = alias_manager.read_alias(alias + "-global")
     return resolved
+
+
+def _resolve_golden_repo_base_clone(alias: str) -> Optional[str]:
+    """Resolve golden repo alias to the WRITABLE base clone path.
+
+    WARNING: This returns the base clone (golden-repos/{alias_name}/), NOT
+    the versioned snapshot. Use this for ALL write operations (config changes,
+    index builds, metadata updates). For read-only operations (queries,
+    browsing), use _resolve_golden_repo_path() instead.
+
+    The base clone is the mutable working copy where git pull, cidx init,
+    and cidx index operate. Versioned snapshots (.versioned/) are immutable
+    CoW copies served to queries.
+
+    Returns:
+        Resolved base clone path string, or None if alias not found or base
+        clone directory does not exist on disk.
+    """
+    from pathlib import Path
+
+    versioned_path = _resolve_golden_repo_path(alias)
+    if versioned_path is None:
+        return None
+
+    parts = Path(versioned_path).parts
+    if ".versioned" in parts:
+        versioned_idx = parts.index(".versioned")
+        alias_name = parts[versioned_idx + 1]
+        golden_repos_dir = str(Path(*parts[:versioned_idx]))
+        base_clone = Path(golden_repos_dir) / alias_name
+        if base_clone.exists():
+            return str(base_clone)
+        # Base clone might not exist (first clone not yet created)
+        return None
+
+    # Not a versioned path — return as-is (legacy flat structure)
+    return versioned_path
 
 
 def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -16404,10 +16448,15 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
                     {"error": "Missing required parameter: repository_alias"}
                 )
 
-            # Resolve repo path
-            repo_path = _resolve_golden_repo_path(repo_alias)
+            # Resolve repo path — prefer base clone (authoritative for index state),
+            # fall back to versioned snapshot if base clone is not available.
+            repo_path = _resolve_golden_repo_base_clone(repo_alias)
             if not repo_path:
-                return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
+                repo_path = _resolve_golden_repo_path(repo_alias)
+                if not repo_path:
+                    return _mcp_response(
+                        {"error": f"Repository '{repo_alias}' not found"}
+                    )
 
             status = service.get_provider_index_status(repo_path, repo_alias)
             return _mcp_response(
@@ -16446,7 +16495,17 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
             return _mcp_response({"error": f"Repository '{repo_alias}' not found"})
 
         if action == "remove":
-            result = service.remove_provider_index(repo_path, provider_name)
+            # Remove provider from config AND index on base clone (write path must use base clone)
+            base_clone_path = _resolve_golden_repo_base_clone(repo_alias)
+            if not base_clone_path:
+                return _mcp_response(
+                    {
+                        "error": f"Cannot resolve base clone for '{repo_alias}'. "
+                        "Remove requires a writable base clone path."
+                    }
+                )
+            _remove_provider_from_config(base_clone_path, provider_name)
+            result = service.remove_provider_index(base_clone_path, provider_name)
             return _mcp_response(
                 {
                     "success": result["removed"],
@@ -16460,6 +16519,27 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
 
             if app_module.background_job_manager is None:
                 return _mcp_response({"error": "Background job manager not available"})
+
+            # Persist provider to config.json on BASE CLONE before submitting job
+            # so cidx index picks it up. Write operations must target base clone,
+            # not versioned snapshot (Bug #625, Fix 3).
+            base_clone_path = _resolve_golden_repo_base_clone(repo_alias)
+            if not base_clone_path:
+                return _mcp_response(
+                    {
+                        "error": (
+                            f"Cannot resolve base clone for '{repo_alias}'. "
+                            "Write operations require a writable base clone path, "
+                            "not a versioned snapshot."
+                        )
+                    }
+                )
+            if not _append_provider_to_config(base_clone_path, provider_name):
+                return _mcp_response(
+                    {
+                        "error": f"Failed to write provider '{provider_name}' to config at {base_clone_path}"
+                    }
+                )
 
             job_id = app_module.background_job_manager.submit_job(
                 operation_type=f"provider_index_{action}",
@@ -16545,7 +16625,7 @@ def _post_provider_index_snapshot(
 _PROVIDER_JOB_OUTPUT_TAIL_CHARS = 500
 
 
-def _append_provider_to_config(repo_path: str, provider_name: str) -> None:
+def _append_provider_to_config(repo_path: str, provider_name: str) -> bool:
     """Permanently append provider_name to embedding_providers in .code-indexer/config.json.
 
     Idempotent: if provider_name is already in the list, no duplicate is added.
@@ -16555,16 +16635,27 @@ def _append_provider_to_config(repo_path: str, provider_name: str) -> None:
     Args:
         repo_path: Path to the repository root containing .code-indexer/config.json
         provider_name: Provider name to add (e.g. 'cohere')
+
+    Returns:
+        True if config was updated (or provider already present), False on any failure.
     """
     import json
     from pathlib import Path
+
+    if ".versioned" in Path(repo_path).parts:
+        logger.error(
+            "_append_provider_to_config called with versioned snapshot path %s — "
+            "refusing to write (immutable). Use _resolve_golden_repo_base_clone() instead.",
+            repo_path,
+        )
+        return False
 
     config_path = Path(repo_path) / ".code-indexer" / "config.json"
     if not config_path.exists():
         logger.warning(
             "_append_provider_to_config: config.json not found at %s", config_path
         )
-        return
+        return False
     try:
         with open(config_path) as f:
             config_data = json.load(f)
@@ -16577,8 +16668,53 @@ def _append_provider_to_config(repo_path: str, provider_name: str) -> None:
         config_data["embedding_providers"] = existing
         with open(config_path, "w") as f:
             json.dump(config_data, f)
+        return True
     except Exception as exc:
         logger.warning("_append_provider_to_config failed for %s: %s", config_path, exc)
+        return False
+
+
+def _remove_provider_from_config(repo_path: str, provider_name: str) -> None:
+    """Remove provider_name from embedding_providers in .code-indexer/config.json.
+
+    Idempotent: if provider_name is not in the list, no change is made.
+    The primary provider (voyage-ai) cannot be removed.
+
+    Args:
+        repo_path: Path to the repository root containing .code-indexer/config.json
+        provider_name: Provider name to remove (e.g. 'cohere')
+    """
+    import json
+    from pathlib import Path
+
+    if provider_name == "voyage-ai":
+        logger.warning("Cannot remove primary provider 'voyage-ai' from config")
+        return
+
+    if ".versioned" in Path(repo_path).parts:
+        logger.error(
+            "_remove_provider_from_config called with versioned snapshot path %s — "
+            "refusing to write (immutable). Use _resolve_golden_repo_base_clone() instead.",
+            repo_path,
+        )
+        return  # Anti-Fallback: refuse, don't degrade
+
+    config_path = Path(repo_path) / ".code-indexer" / "config.json"
+    if not config_path.exists():
+        return
+    try:
+        with open(config_path) as f:
+            config_data = json.load(f)
+        existing = config_data.get("embedding_providers", [])
+        if provider_name in existing:
+            existing.remove(provider_name)
+            config_data["embedding_providers"] = existing
+            with open(config_path, "w") as f:
+                json.dump(config_data, f)
+    except Exception as exc:
+        logger.warning(
+            "_remove_provider_from_config failed for %s: %s", config_path, exc
+        )
 
 
 def _provider_index_job(
@@ -16619,6 +16755,9 @@ def _provider_index_job(
     # If repo_path is inside .versioned/, use the base clone instead.
     # Note: repo_alias is passed via submit_job's explicit repo_alias= parameter,
     # which means it is NOT forwarded to **kwargs. Derive it from the path as fallback.
+    # NOTE: We use direct path arithmetic here (not _resolve_golden_repo_base_clone)
+    # because _provider_index_job runs as a background worker and does not have access
+    # to server app state (required by _resolve_golden_repo_base_clone → _get_golden_repos_dir).
     repo_alias = kwargs.get("repo_alias", "")
     actual_path = repo_path
     is_versioned_snapshot = ".versioned" in Path(repo_path).parts
@@ -16628,6 +16767,9 @@ def _provider_index_job(
         alias_name = parts[versioned_idx + 1]  # e.g. "claude-server"
         golden_repos_dir = str(Path(*parts[:versioned_idx]))
         base_clone = Path(golden_repos_dir) / alias_name
+        # submit_job consumes repo_alias before forwarding kwargs; derive from path.
+        if not repo_alias:
+            repo_alias = f"{alias_name}-global"
         if base_clone.exists():
             actual_path = str(base_clone)
             logger.info(
@@ -16636,9 +16778,13 @@ def _provider_index_job(
                 actual_path,
                 repo_path,
             )
-        # submit_job consumes repo_alias before forwarding kwargs; derive from path.
-        if not repo_alias:
-            repo_alias = f"{alias_name}-global"
+        else:
+            error_msg = (
+                f"Base clone not found at {base_clone} for versioned snapshot {repo_path}. "
+                "Cannot index versioned snapshot (immutable)."
+            )
+            logger.error(error_msg)
+            return {"success": False, "error": error_msg, "provider": provider_name}
 
     # Build subprocess env with the appropriate API key for this provider.
     env = os.environ.copy()
@@ -16773,8 +16919,26 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
                 skipped.append(alias)
                 continue
 
-            # Persist provider to config.json before submitting job so cidx index picks it up
-            _append_provider_to_config(repo_path, provider_name)
+            # Write operations must target the base clone, never the versioned
+            # snapshot (Bug #625, Fix 3/W1). If the base clone cannot be resolved,
+            # skip this alias — writing to the versioned path would be incorrect.
+            base_clone_path = _resolve_golden_repo_base_clone(alias)
+            if not base_clone_path:
+                logger.warning(
+                    "bulk_add_provider_index: cannot resolve base clone for alias %s"
+                    " — skipping config write and job submission",
+                    alias,
+                )
+                skipped.append(alias)
+                continue
+
+            if not _append_provider_to_config(base_clone_path, provider_name):
+                logger.warning(
+                    "bulk_add_provider_index: config write failed for %s — skipping",
+                    alias,
+                )
+                skipped.append(alias)
+                continue
 
             # Submit job
             job_id = app_module.background_job_manager.submit_job(

@@ -12,6 +12,7 @@ the in-memory config object returned by get_config_service().
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,7 +29,6 @@ def _make_sync_service(tmp_path: Path) -> ApiKeySyncService:
     """Create ApiKeySyncService with tmp_path to avoid writing real files."""
     return ApiKeySyncService(
         claude_config_path=str(tmp_path / "claude.json"),
-        systemd_env_path=str(tmp_path / "env"),
     )
 
 
@@ -115,9 +115,12 @@ class TestApiKeyModeNormalBehavior:
         mock_config_svc = MagicMock()
         mock_config_svc.get_config.return_value = _make_api_key_config()
 
-        with patch(
-            "code_indexer.server.services.config_service.get_config_service",
-            return_value=mock_config_svc,
+        with (
+            patch(
+                "code_indexer.server.services.config_service.get_config_service",
+                return_value=mock_config_svc,
+            ),
+            patch.dict(os.environ, {}, clear=False),
         ):
             result = svc.sync_anthropic_key("sk-ant-api03-valid-key")
 
@@ -130,9 +133,12 @@ class TestApiKeyModeNormalBehavior:
         mock_config_svc = MagicMock()
         mock_config_svc.get_config.return_value = _make_api_key_config()
 
-        with patch(
-            "code_indexer.server.services.config_service.get_config_service",
-            return_value=mock_config_svc,
+        with (
+            patch(
+                "code_indexer.server.services.config_service.get_config_service",
+                return_value=mock_config_svc,
+            ),
+            patch.dict(os.environ, {}, clear=False),
         ):
             svc.sync_anthropic_key("sk-ant-api03-valid-key")
 

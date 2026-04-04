@@ -310,7 +310,6 @@ def save_anthropic_key(
     Validates format, then syncs to:
     - ~/.claude.json
     - os.environ["ANTHROPIC_API_KEY"]
-    - systemd environment file
     """
     # 409 guard: block manual key save when subscription mode is active
     _cfg = get_config_service().load_config()
@@ -368,7 +367,6 @@ def save_voyageai_key(
 
     Validates format, then syncs to:
     - os.environ["VOYAGE_API_KEY"]
-    - systemd environment file
     """
     # Validate format
     validation = ApiKeyValidator.validate_voyageai_format(request.api_key)
@@ -560,7 +558,6 @@ def save_cohere_key(
 
     Validates format, then syncs to:
     - os.environ["CO_API_KEY"]
-    - systemd environment file
     """
     # Validate format
     validation = ApiKeyValidator.validate_cohere_format(request.api_key)

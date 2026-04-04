@@ -2697,6 +2697,42 @@ def show_global_config():
     console.print()
 
 
+def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
+    """Return per-provider metadata path with backward-compat migration.
+
+    Returns config_dir / f"metadata-{provider_name}.json".
+
+    Migration for voyage-ai: if metadata-voyage-ai.json does not exist but
+    metadata.json does, a symlink is created so existing incremental state is
+    preserved. If the filesystem does not support symlinks (PermissionError,
+    NotImplementedError, AttributeError), the file is copied instead and a
+    warning is logged. New providers always receive a fresh metadata file,
+    which forces a full index on first use.
+    """
+    provider_metadata = config_dir / f"metadata-{provider_name}.json"
+    if provider_metadata.exists():
+        return provider_metadata
+
+    legacy_metadata = config_dir / "metadata.json"
+    if provider_name == "voyage-ai" and legacy_metadata.exists():
+        try:
+            provider_metadata.symlink_to(legacy_metadata.name)
+        except OSError as exc:
+            import shutil
+
+            logger.warning(
+                "_get_provider_metadata_path: symlink not supported for %s"
+                " (reason: %s) — copying legacy metadata.json to %s",
+                provider_name,
+                exc,
+                provider_metadata,
+            )
+            shutil.copy2(str(legacy_metadata), str(provider_metadata))
+        return provider_metadata
+
+    return provider_metadata
+
+
 @cli.command()
 @click.option(
     "--clear", "-c", is_flag=True, help="Clear existing index and perform full reindex"
@@ -3523,8 +3559,13 @@ def index(
             console.print(error_message, style="red")
             sys.exit(1)
 
-        # Initialize smart indexer with progressive metadata
-        metadata_path = config_manager.config_path.parent / "metadata.json"
+        # Initialize smart indexer with per-provider metadata (Bug #625, Fix 4/M1).
+        # Each provider gets its own metadata-{provider}.json so incremental state
+        # is not shared across providers.
+        _primary_provider = config.embedding_provider
+        metadata_path = _get_provider_metadata_path(
+            config_manager.config_path.parent, _primary_provider
+        )
         smart_indexer = SmartIndexer(
             config, embedding_provider, vector_store_client, metadata_path
         )
@@ -3933,7 +3974,9 @@ def index(
                 config=config, project_root=Path(config.codebase_dir)
             )
             _extra_client = _extra_backend.get_vector_store_client()
-            _extra_metadata = config_manager.config_path.parent / "metadata.json"
+            _extra_metadata = _get_provider_metadata_path(
+                config_manager.config_path.parent, _extra_provider
+            )
             _extra_indexer = SmartIndexer(
                 config, _extra_embedding, _extra_client, _extra_metadata
             )
@@ -4088,8 +4131,10 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
                 )
                 sys.exit(1)
 
-            # Initialize SmartIndexer (same as index command)
-            metadata_path = config_manager.config_path.parent / "metadata.json"
+            # Initialize SmartIndexer with per-provider metadata (Bug #625, Fix 4/M1).
+            metadata_path = _get_provider_metadata_path(
+                config_manager.config_path.parent, config.embedding_provider
+            )
             smart_indexer = SmartIndexer(
                 config, embedding_provider, vector_store_client, metadata_path
             )

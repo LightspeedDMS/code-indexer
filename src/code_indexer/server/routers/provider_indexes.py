@@ -3,7 +3,7 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from ..auth.dependencies import get_current_admin_user_hybrid
@@ -111,7 +111,11 @@ async def remove_provider_index(
     """Remove a provider's collection from a repository."""
     from code_indexer.server.services.provider_index_service import ProviderIndexService
     from code_indexer.server.services.config_service import get_config_service
-    from code_indexer.server.mcp.handlers import _resolve_golden_repo_path
+    from code_indexer.server.mcp.handlers import (
+        _resolve_golden_repo_path,
+        _resolve_golden_repo_base_clone,
+        _remove_provider_from_config,
+    )
 
     config = get_config_service().get_config()
     service = ProviderIndexService(config=config)
@@ -123,10 +127,20 @@ async def remove_provider_index(
     repo_path = _resolve_golden_repo_path(body.alias)
     if not repo_path:
         raise HTTPException(
-            status_code=404, detail=f"Repository '{body.alias}' not found"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository '{body.alias}' not found",
         )
 
-    result = service.remove_provider_index(repo_path, body.provider)
+    # Bug #625 W6: Write operations require the mutable base clone path.
+    base_clone = _resolve_golden_repo_base_clone(body.alias)
+    if not base_clone:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Cannot resolve base clone for '{body.alias}'. "
+            "Remove requires a writable base clone path.",
+        )
+    _remove_provider_from_config(base_clone, body.provider)
+    result = service.remove_provider_index(base_clone, body.provider)
     return {
         "success": result["removed"],
         "collection_name": result["collection_name"],
@@ -215,16 +229,16 @@ async def get_provider_health_rest(
     health = monitor.get_health(provider)
 
     result = {}
-    for pname, status in health.items():
+    for pname, health_status in health.items():
         result[pname] = {
-            "status": status.status,
-            "health_score": status.health_score,
-            "p50_latency_ms": status.p50_latency_ms,
-            "p95_latency_ms": status.p95_latency_ms,
-            "p99_latency_ms": status.p99_latency_ms,
-            "error_rate": status.error_rate,
-            "availability": status.availability,
-            "total_requests": status.total_requests,
+            "status": health_status.status,
+            "health_score": health_status.health_score,
+            "p50_latency_ms": health_status.p50_latency_ms,
+            "p95_latency_ms": health_status.p95_latency_ms,
+            "p99_latency_ms": health_status.p99_latency_ms,
+            "error_rate": health_status.error_rate,
+            "availability": health_status.availability,
+            "total_requests": health_status.total_requests,
         }
 
     return {"provider_health": result}

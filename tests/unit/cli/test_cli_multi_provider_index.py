@@ -222,3 +222,59 @@ class TestCliMultiProviderIndex:
             f"Expected smart_index called exactly once (backward compat singular provider), "
             f"got {mock_indexer.smart_index.call_count} call(s).\n{result.output}"
         )
+
+
+class TestGetProviderMetadataPath:
+    """Tests for _get_provider_metadata_path helper (Bug #625, Fix 4/M1)."""
+
+    def test_get_provider_metadata_path_returns_provider_specific(self, tmp_path):
+        """Returns config_dir/metadata-{provider}.json, not generic metadata.json."""
+        from code_indexer.cli import _get_provider_metadata_path
+
+        config_dir = tmp_path / ".code-indexer"
+        config_dir.mkdir()
+
+        result = _get_provider_metadata_path(config_dir, "cohere")
+
+        assert result == config_dir / "metadata-cohere.json", (
+            f"Expected provider-specific path, got: {result}"
+        )
+        # Must not return the legacy path
+        assert result.name != "metadata.json", "Must not return generic metadata.json"
+
+    def test_get_provider_metadata_path_migrates_voyage_ai_symlink(self, tmp_path):
+        """When voyage-ai requested and legacy metadata.json exists, creates symlink."""
+        from code_indexer.cli import _get_provider_metadata_path
+
+        config_dir = tmp_path / ".code-indexer"
+        config_dir.mkdir()
+        legacy = config_dir / "metadata.json"
+        legacy.write_text('{"files": 42}')
+
+        result = _get_provider_metadata_path(config_dir, "voyage-ai")
+
+        expected = config_dir / "metadata-voyage-ai.json"
+        assert result == expected, f"Expected {expected}, got {result}"
+        # The returned path must exist and resolve to same content as legacy
+        assert result.exists(), "Migration result path must exist"
+        assert result.read_text() == '{"files": 42}', (
+            "Migrated file must have same content as legacy metadata.json"
+        )
+
+    def test_get_provider_metadata_path_no_migration_for_cohere(self, tmp_path):
+        """When cohere requested and only legacy metadata.json exists, returns fresh path (no migration)."""
+        from code_indexer.cli import _get_provider_metadata_path
+
+        config_dir = tmp_path / ".code-indexer"
+        config_dir.mkdir()
+        # Legacy file exists but cohere is a new provider — should NOT be migrated
+        (config_dir / "metadata.json").write_text('{"files": 99}')
+
+        result = _get_provider_metadata_path(config_dir, "cohere")
+
+        expected = config_dir / "metadata-cohere.json"
+        assert result == expected, f"Expected {expected}, got {result}"
+        # The cohere metadata file should not exist yet (fresh start forces full index)
+        assert not result.exists(), (
+            "New provider metadata file must not exist yet — fresh index required"
+        )

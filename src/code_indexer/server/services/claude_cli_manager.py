@@ -163,7 +163,6 @@ class ClaudeCliManager:
         Uses ApiKeySyncService for proper sync to all targets:
         - ~/.claude.json (apiKey field)
         - os.environ["ANTHROPIC_API_KEY"]
-        - systemd environment file
 
         Legacy file locking approach preserved as fallback.
         """

@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 def seed_api_keys_on_startup(
     config_service: Any,
     claude_config_path: Optional[str] = None,
-    systemd_env_path: Optional[str] = None,
 ) -> Dict[str, bool]:
     """
     Sync API keys from server config to process environment on startup.
@@ -31,12 +30,12 @@ def seed_api_keys_on_startup(
     Args:
         config_service: The ConfigService instance for accessing server config
         claude_config_path: Optional path to ~/.claude.json (for testing)
-        systemd_env_path: Optional path to systemd env file (for testing)
 
     Returns:
         Dict with keys:
         - anthropic_seeded: Always False (nothing is seeded into config)
         - voyageai_seeded: Always False (nothing is seeded into config)
+        - cohere_seeded: True if Cohere key was synced, False otherwise
     """
     from code_indexer.server.services.api_key_management import ApiKeySyncService
 
@@ -53,8 +52,6 @@ def seed_api_keys_on_startup(
         sync_kwargs: Dict[str, str] = {}
         if claude_config_path:
             sync_kwargs["claude_config_path"] = claude_config_path
-        if systemd_env_path:
-            sync_kwargs["systemd_env_path"] = systemd_env_path
         sync_service = ApiKeySyncService(**sync_kwargs)
 
         # Anthropic: config → env (unidirectional)

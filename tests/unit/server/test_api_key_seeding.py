@@ -75,7 +75,6 @@ class TestBlankConfigClearsEnv:
             seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
             )
 
         assert "ANTHROPIC_API_KEY" not in os.environ
@@ -98,7 +97,6 @@ class TestBlankConfigClearsEnv:
             seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
             )
             # Assert inside the scope: production code must have popped the key
             assert "VOYAGE_API_KEY" not in os.environ
@@ -118,7 +116,6 @@ class TestBlankConfigClearsEnv:
             result = seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
             )
 
         # Nothing seeded into config
@@ -153,7 +150,6 @@ class TestBlankConfigClearsEnv:
             result = seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
             )
 
         assert result["anthropic_seeded"] is False
@@ -183,7 +179,6 @@ class TestConfigKeysSyncedToEnv:
                 seed_api_keys_on_startup(
                     config_service=config_service,
                     claude_config_path=str(tmp_path / "claude.json"),
-                    systemd_env_path=str(tmp_path / "env"),
                 )
 
             mock_sync_svc.sync_anthropic_key.assert_called_once_with(existing_key)
@@ -208,7 +203,6 @@ class TestConfigKeysSyncedToEnv:
                 seed_api_keys_on_startup(
                     config_service=config_service,
                     claude_config_path=str(tmp_path / "claude.json"),
-                    systemd_env_path=str(tmp_path / "env"),
                 )
 
             assert os.environ.get("VOYAGE_API_KEY") == voyage_key
@@ -233,7 +227,6 @@ class TestConfigKeysSyncedToEnv:
             seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
             )
 
         config_service.config_manager.save_config.assert_not_called()
@@ -253,7 +246,6 @@ class TestConfigKeysSyncedToEnv:
             result = seed_api_keys_on_startup(
                 config_service=config_service,
                 claude_config_path=str(tmp_path / "claude.json"),
-                systemd_env_path=str(tmp_path / "env"),
             )
 
         assert result["anthropic_seeded"] is False

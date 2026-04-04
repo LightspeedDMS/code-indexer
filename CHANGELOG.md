@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.9.1
+
+### Bug Fixes
+
+- fix: Multi-provider indexing broken -- 14 bugs fixed (Bug #625). Write operations (bulk_add, manage add/remove, REST add/remove) now use base clone path instead of immutable versioned snapshot. Per-provider metadata files (metadata-{provider}.json) prevent cross-provider watermark contamination. _remove_provider_from_config cleans up embedding_providers on remove. All write paths hard-fail when base clone unresolvable (anti-fallback).
+
 ## v9.9.0
 
 ### Features

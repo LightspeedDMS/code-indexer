@@ -2654,18 +2654,6 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
-    "APP-GENERAL-043": ErrorDefinition(
-        code="APP-GENERAL-043",
-        description="TODO",
-        severity=Severity.WARNING,
-        action="TODO",
-    ),
-    "APP-GENERAL-044": ErrorDefinition(
-        code="APP-GENERAL-044",
-        description="TODO",
-        severity=Severity.WARNING,
-        action="TODO",
-    ),
     "APP-GENERAL-045": ErrorDefinition(
         code="APP-GENERAL-045",
         description="TODO",
