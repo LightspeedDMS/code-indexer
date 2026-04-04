@@ -149,16 +149,22 @@ inputSchema:
       - failover
       - parallel
       - specific
-      description: 'Query strategy: primary_only, failover (switch on failure), parallel (score fusion), specific (use specific
-        provider). When both VoyageAI and Cohere embedding providers are configured, the default strategy is automatically
-        ''parallel'' with ''rrf'' fusion. Pass query_strategy=''primary_only'' to override and use only the primary provider.'
+      description: 'Query strategy: primary_only, failover (switch on failure — API error or timeout, not empty results),
+        parallel (score fusion across both providers), specific (use one named provider). When both VoyageAI and Cohere
+        embedding providers are configured, the default strategy is automatically ''parallel'' with ''rrf'' fusion. Pass
+        query_strategy=''primary_only'' to override and use only the primary provider. With parallel strategy, each result
+        includes contributing_providers (which providers ranked it) and fusion_score (rank-derived combined score) alongside
+        the raw similarity_score.'
     score_fusion:
       type: string
       enum:
       - rrf
       - multiply
       - average
-      description: 'Score fusion method for parallel strategy (default: rrf).'
+      description: "Score fusion method for parallel strategy (default: rrf). 'rrf' (Reciprocal Rank Fusion): rank-position-based,\
+        \ immune to score-scale differences between providers — recommended default since VoyageAI and Cohere calibrate scores\
+        \ differently. 'multiply'/'average': raw score arithmetic, only meaningful when both providers produce comparably\
+        \ calibrated scores on the same corpus."
     preferred_provider:
       type: string
       enum:

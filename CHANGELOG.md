@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.9.5
+
+### Documentation
+
+- docs: Improve search_code MCP tool documentation -- score_fusion now explains RRF as rank-position-based (immune to score-scale differences between providers) vs multiply/average as raw arithmetic; query_strategy now documents contributing_providers and fusion_score output fields; failover clarified as API error or timeout (not empty results)
+
+## v9.9.4
+
+### Bug Fixes
+
+- fix: Replace metadata-voyage-ai.json symlink with independent copy (Bug #625 Fix 4/M1) -- symlink caused Cohere's clear() to wipe VoyageAI watermarks through shared file; shutil.copy2 creates true independent copy; existing symlinks on servers need manual conversion
+
+## v9.9.3
+
+### Bug Fixes
+
+- fix: Wire _append_provider_to_config into inline_admin_ops.py Web UI path (Bug #625 Fix 3/M1) -- the Web UI "Add Provider Index" button routes through inline_admin_ops.py which was missing the config write, causing the provider to never appear in embedding_providers
+
+## v9.9.2
+
+### Bug Fixes
+
+- fix: Wire _append_provider_to_config into REST provider_indexes.py paths (Bug #625 Fix 2/M1) -- _submit_index_job and bulk_add were missing the base clone resolution and config write, resulting in 3-second jobs with no actual index
+
 ## v9.9.1
 
 ### Bug Fixes
