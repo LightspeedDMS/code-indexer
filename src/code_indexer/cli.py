@@ -2715,19 +2715,9 @@ def _get_provider_metadata_path(config_dir: Path, provider_name: str) -> Path:
 
     legacy_metadata = config_dir / "metadata.json"
     if provider_name == "voyage-ai" and legacy_metadata.exists():
-        try:
-            provider_metadata.symlink_to(legacy_metadata.name)
-        except OSError as exc:
-            import shutil
+        import shutil
 
-            logger.warning(
-                "_get_provider_metadata_path: symlink not supported for %s"
-                " (reason: %s) — copying legacy metadata.json to %s",
-                provider_name,
-                exc,
-                provider_metadata,
-            )
-            shutil.copy2(str(legacy_metadata), str(provider_metadata))
+        shutil.copy2(str(legacy_metadata), str(provider_metadata))
         return provider_metadata
 
     return provider_metadata

@@ -242,8 +242,8 @@ class TestGetProviderMetadataPath:
         # Must not return the legacy path
         assert result.name != "metadata.json", "Must not return generic metadata.json"
 
-    def test_get_provider_metadata_path_migrates_voyage_ai_symlink(self, tmp_path):
-        """When voyage-ai requested and legacy metadata.json exists, creates symlink."""
+    def test_get_provider_metadata_path_migrates_voyage_ai_copy(self, tmp_path):
+        """When voyage-ai requested and legacy metadata.json exists, creates independent copy."""
         from code_indexer.cli import _get_provider_metadata_path
 
         config_dir = tmp_path / ".code-indexer"
@@ -255,10 +255,19 @@ class TestGetProviderMetadataPath:
 
         expected = config_dir / "metadata-voyage-ai.json"
         assert result == expected, f"Expected {expected}, got {result}"
-        # The returned path must exist and resolve to same content as legacy
         assert result.exists(), "Migration result path must exist"
         assert result.read_text() == '{"files": 42}', (
             "Migrated file must have same content as legacy metadata.json"
+        )
+        # CRITICAL: must be an independent copy, NOT a symlink.
+        # A symlink causes shared state corruption when Cohere clears metadata.
+        assert not result.is_symlink(), (
+            "Must be a copy, NOT a symlink — symlinks cause cross-provider corruption"
+        )
+        # Verify independence: modifying the copy must NOT affect the legacy file
+        result.write_text('{"files": 99}')
+        assert legacy.read_text() == '{"files": 42}', (
+            "Modifying metadata-voyage-ai.json must NOT affect legacy metadata.json"
         )
 
     def test_get_provider_metadata_path_no_migration_for_cohere(self, tmp_path):
