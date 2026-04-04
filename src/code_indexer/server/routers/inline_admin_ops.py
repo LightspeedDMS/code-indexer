@@ -350,6 +350,8 @@ def register_admin_ops_routes(
                 from ..mcp.handlers import (
                     _provider_index_job,
                     _resolve_golden_repo_path,
+                    _resolve_golden_repo_base_clone,
+                    _append_provider_to_config,
                 )
 
                 remaining_index_types = [
@@ -362,7 +364,12 @@ def register_admin_ops_routes(
                         detail=f"Golden repository '{alias}' not found or path not resolvable",
                     )
 
+                # Bug #625: Write provider to base clone config before submitting job
+                base_clone = _resolve_golden_repo_base_clone(alias)
+
                 for provider_name in request.providers:
+                    if base_clone:
+                        _append_provider_to_config(base_clone, provider_name)
                     provider_job_id = background_job_manager.submit_job(
                         operation_type="provider_index_add",
                         func=_provider_index_job,
