@@ -159,6 +159,8 @@ async def bulk_add(
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.mcp.handlers import (
         _resolve_golden_repo_path,
+        _resolve_golden_repo_base_clone,
+        _append_provider_to_config,
         _list_global_repos,
         _provider_index_job,
     )
@@ -192,6 +194,15 @@ async def bulk_add(
 
         status = service.get_provider_index_status(repo_path, alias)
         if status.get(body.provider, {}).get("exists"):
+            skipped.append(alias)
+            continue
+
+        # Bug #625 W3: Write provider to base clone config before submitting job
+        base_clone = _resolve_golden_repo_base_clone(alias)
+        if not base_clone:
+            skipped.append(alias)
+            continue
+        if not _append_provider_to_config(base_clone, body.provider):
             skipped.append(alias)
             continue
 
@@ -252,6 +263,8 @@ def _submit_index_job(
     from code_indexer.server.services.config_service import get_config_service
     from code_indexer.server.mcp.handlers import (
         _resolve_golden_repo_path,
+        _resolve_golden_repo_base_clone,
+        _append_provider_to_config,
         _provider_index_job,
     )
 
@@ -260,11 +273,29 @@ def _submit_index_job(
 
     error = service.validate_provider(provider)
     if error:
-        raise HTTPException(status_code=400, detail=error)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
 
     repo_path = _resolve_golden_repo_path(alias)
     if not repo_path:
-        raise HTTPException(status_code=404, detail=f"Repository '{alias}' not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Repository '{alias}' not found",
+        )
+
+    # Bug #625 W4: Write provider to config on base clone before submitting job
+    if not clear:  # "add" action — write provider to config
+        base_clone = _resolve_golden_repo_base_clone(alias)
+        if not base_clone:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Cannot resolve base clone for '{alias}'. "
+                "Add requires a writable base clone path.",
+            )
+        if not _append_provider_to_config(base_clone, provider):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to write provider '{provider}' to config at {base_clone}",
+            )
 
     action = "recreate" if clear else "add"
     app = request.app
