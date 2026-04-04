@@ -358,11 +358,13 @@ class GoldenRepoManager:
                     temporal_options=temporal_options,
                 )
 
-                # Auto-assign category (Story #181 AC1)
+                # Auto-assign category (Story #181 AC1, Story #622 URL matching)
                 # Non-blocking: log error but don't fail registration
                 if self._repo_category_service is not None:
                     try:
-                        category_id = self._repo_category_service.auto_assign(alias)
+                        category_id = self._repo_category_service.auto_assign(
+                            alias, repo_url=repo_url
+                        )
                         if category_id is not None:
                             self._sqlite_backend.update_category(
                                 alias, category_id, auto_assigned=True
@@ -546,11 +548,14 @@ class GoldenRepoManager:
                 temporal_options=None,
             )
 
-            # Auto-assign category (Story #181 AC1)
+            # Auto-assign category (Story #181 AC1, Story #622 URL matching)
             # Non-blocking: log error but don't fail registration
             if self._repo_category_service is not None:
                 try:
-                    category_id = self._repo_category_service.auto_assign(alias)
+                    local_repo_url = f"local://{alias}"
+                    category_id = self._repo_category_service.auto_assign(
+                        alias, repo_url=local_repo_url
+                    )
                     if category_id is not None:
                         self._sqlite_backend.update_category(
                             alias, category_id, auto_assigned=True

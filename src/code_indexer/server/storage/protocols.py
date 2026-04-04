@@ -994,7 +994,7 @@ class OAuthBackend(Protocol):
         user_id: str,
         code_challenge: str,
         redirect_uri: str,
-        state: str,
+        state: Optional[str] = None,
     ) -> str:
         """Generate a one-time PKCE authorization code.
 

@@ -29,7 +29,7 @@
             <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
             <input type="hidden" name="code_challenge" value="{{ code_challenge }}">
             <input type="hidden" name="response_type" value="{{ response_type }}">
-            <input type="hidden" name="state" value="{{ state }}">
+            {% if state %}<input type="hidden" name="state" value="{{ state }}">{% endif %}
             <input type="hidden" name="consent" value="allow">
 
             <div class="grid">
@@ -48,11 +48,14 @@
     function denyAccess() {
         // Redirect to client's redirect_uri with error
         const redirectUri = "{{ redirect_uri }}";
-        const state = "{{ state }}";
-        const errorUrl = redirectUri +
+        const state = "{{ state or '' }}";
+        let errorUrl = redirectUri +
             "?error=access_denied" +
-            "&error_description=" + encodeURIComponent("User denied authorization") +
-            "&state=" + encodeURIComponent(state);
+            "&error_description=" + encodeURIComponent("User denied authorization");
+        // Only include state when it was provided (Bug #624: state is optional)
+        if (state) {
+            errorUrl += "&state=" + encodeURIComponent(state);
+        }
         window.location.href = errorUrl;
     }
 </script>

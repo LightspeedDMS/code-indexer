@@ -3644,6 +3644,8 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
             context_lines=int(args.get("context_lines", 0)),
             max_results=args.get("max_results", 100),
             timeout_seconds=search_limits.timeout_seconds,
+            multiline=args.get("multiline", False),
+            pcre2=args.get("pcre2", False),
         )
 
         # Convert dataclass to dict for JSON serialization

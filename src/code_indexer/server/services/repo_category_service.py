@@ -129,16 +129,19 @@ class RepoCategoryService:
             )
         self._backend.reorder_categories(ordered_ids)
 
-    def auto_assign(self, alias: str) -> Optional[int]:
+    def auto_assign(self, alias: str, repo_url: Optional[str] = None) -> Optional[int]:
         """
         Auto-assign a category to a repository based on pattern matching.
 
         Evaluates category regex patterns in priority order (ascending).
-        Uses re.match() which anchors at the start of the string.
-        First matching pattern wins.
+        Uses re.match() against alias (anchored at start) and re.search()
+        against repo_url (patterns match anywhere in the URL string).
+        First category whose pattern matches either alias OR repo_url wins.
 
         Args:
-            alias: Repository alias to match against patterns.
+            alias: Repository alias to match against patterns using re.match().
+            repo_url: Optional repository URL to match against patterns using re.search().
+                      When provided, a match on either alias or URL assigns the category.
 
         Returns:
             Category ID if match found, None otherwise (Unassigned).
@@ -150,10 +153,13 @@ class RepoCategoryService:
         for category in categories:
             pattern = category["pattern"]
             try:
-                if re.match(pattern, alias):
+                alias_match = bool(re.match(pattern, alias))
+                url_match = bool(repo_url and re.search(pattern, repo_url))
+                if alias_match or url_match:
                     logger.debug(
                         f"Auto-assigned alias '{alias}' to category '{category['name']}' "
-                        f"(id={category['id']}, priority={category['priority']})"
+                        f"(id={category['id']}, priority={category['priority']}, "
+                        f"alias_match={alias_match}, url_match={url_match})"
                     )
                     return category["id"]  # type: ignore[no-any-return]
             except re.error as e:
@@ -186,7 +192,8 @@ class RepoCategoryService:
         """
         # Get all repos with category information
         if self._golden_repo_backend is not None:
-            repos = self._golden_repo_backend.list_repos_with_categories()
+            repo_backend = self._golden_repo_backend
+            repos = repo_backend.list_repos_with_categories()
         else:
             from ..storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 
@@ -217,9 +224,10 @@ class RepoCategoryService:
                 )
                 continue
 
-            # Re-evaluate assignment
+            # Re-evaluate assignment (pass repo_url for URL-based pattern matching)
+            repo_url = repo.get("repo_url")
             try:
-                new_category_id = self.auto_assign(alias)
+                new_category_id = self.auto_assign(alias, repo_url=repo_url)
 
                 # Update if category changed
                 if new_category_id != current_category_id:

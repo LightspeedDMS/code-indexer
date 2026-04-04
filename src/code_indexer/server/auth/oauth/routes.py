@@ -108,7 +108,7 @@ class AuthorizeRequest(BaseModel):
     redirect_uri: str
     response_type: str  # must be 'code'
     code_challenge: str  # PKCE required
-    state: str
+    state: Optional[str] = None  # optional per OAuth 2.1 PKCE
     username: str  # for authentication
     password: str  # for authentication
 
@@ -195,7 +195,7 @@ def get_authorize_form(
     redirect_uri: str,
     code_challenge: str,
     response_type: str,
-    state: str,
+    state: Optional[str] = None,
     manager: OAuthManager = Depends(get_oauth_manager),
 ):
     """GET /oauth/authorize - OAuth authorization endpoint (Phase 5: Login Consolidation).
@@ -229,16 +229,16 @@ def get_authorize_form(
         # Not authenticated - redirect to unified login
         from urllib.parse import urlencode, quote
 
-        # Preserve OAuth parameters in redirect_to
-        oauth_params = urlencode(
-            {
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "code_challenge": code_challenge,
-                "response_type": response_type,
-                "state": state,
-            }
-        )
+        # Preserve OAuth parameters in redirect_to (state is optional per OAuth 2.1 PKCE)
+        params: dict = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "response_type": response_type,
+        }
+        if state is not None:
+            params["state"] = state
+        oauth_params = urlencode(params)
         oauth_authorize_url = f"/oauth/authorize?{oauth_params}"
 
         # Redirect to unified login with OAuth authorize URL as redirect_to
@@ -248,18 +248,20 @@ def get_authorize_form(
     # Authenticated - show consent screen (Phase 5: Separate authorization from authentication)
     from code_indexer.server.web.routes import templates
 
+    # state is optional per OAuth 2.1 PKCE — only include in template context when present
+    template_context: dict = {
+        "request": request,
+        "username": session.username,
+        "client_id": client_id,
+        "client_name": client.get("client_name", "Unknown Application"),
+        "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "response_type": response_type,
+        "state": state,  # None is a valid value; template handles empty state gracefully
+    }
     return templates.TemplateResponse(
         "oauth_authorize_consent.html",
-        {
-            "request": request,
-            "username": session.username,
-            "client_id": client_id,
-            "client_name": client.get("client_name", "Unknown Application"),
-            "redirect_uri": redirect_uri,
-            "code_challenge": code_challenge,
-            "response_type": response_type,
-            "state": state,
-        },
+        template_context,
     )
 
 
@@ -270,7 +272,7 @@ def authorize_consent(
     redirect_uri: str = Form(...),
     code_challenge: str = Form(...),
     response_type: str = Form(...),
-    state: str = Form(...),
+    state: Optional[str] = Form(None),
     consent: str = Form(...),
     manager: OAuthManager = Depends(get_oauth_manager),
 ):
@@ -278,27 +280,27 @@ def authorize_consent(
 
     User is already authenticated via unified login. This endpoint only handles authorization (consent).
     Generates OAuth authorization code and redirects back to client.
+    state is optional per OAuth 2.1 with PKCE (Bug #624).
     """
     # Check for existing session (required)
     from code_indexer.server.web import get_session_manager
+    from urllib.parse import urlencode, quote
 
     session_manager = get_session_manager()
     session = session_manager.get_session(request)
 
     if not session:
         # Not authenticated - redirect to unified login
-        from urllib.parse import urlencode, quote
-
-        oauth_params = urlencode(
-            {
-                "client_id": client_id,
-                "redirect_uri": redirect_uri,
-                "code_challenge": code_challenge,
-                "response_type": response_type,
-                "state": state,
-            }
-        )
-        oauth_authorize_url = f"/oauth/authorize?{oauth_params}"
+        # state is optional per OAuth 2.1 PKCE — only include when present
+        params: dict = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "response_type": response_type,
+        }
+        if state is not None:
+            params["state"] = state
+        oauth_authorize_url = f"/oauth/authorize?{urlencode(params)}"
         redirect_url = f"/login?redirect_to={quote(oauth_authorize_url)}"
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
 
@@ -342,8 +344,10 @@ def authorize_consent(
             user_agent=user_agent,
         )
 
-        # Redirect back to client with authorization code
-        redirect_url = f"{redirect_uri}?code={code}&state={state}"
+        # Redirect back to client — include state only when provided (Bug #624)
+        redirect_url = f"{redirect_uri}?code={code}"
+        if state is not None:
+            redirect_url = f"{redirect_url}&state={state}"
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:
@@ -425,11 +429,8 @@ async def authorize_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="redirect_uri required",
         )
-    if not state:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="state required",
-        )
+    # Note: state is intentionally NOT validated as required here.
+    # Per OAuth 2.1 with PKCE, state is optional (Bug #624).
 
     # Authenticate user
     user = user_manager.authenticate_user(username, password)
@@ -479,12 +480,19 @@ async def authorize_endpoint(
 
         # Return redirect for Form requests, JSON for API requests
         if is_form_request:
-            # Browser-based flow: redirect to callback URL with code and state
-            redirect_url = f"{redirect_uri}?code={code}&state={state}"
+            # Browser-based flow: redirect to callback URL with code
+            # Include state only when provided (Bug #624: state is optional)
+            redirect_url = f"{redirect_uri}?code={code}"
+            if state is not None:
+                redirect_url = f"{redirect_url}&state={state}"
             return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
         else:
             # Programmatic flow: return JSON response
-            return {"code": code, "state": state}
+            # Include state only when provided (Bug #624: state is optional)
+            result: dict = {"code": code}
+            if state is not None:
+                result["state"] = state
+            return result
 
     except OAuthError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -530,8 +538,9 @@ def oauth_mfa_verify(
             detail="MFA challenge expired or invalid. Please re-authenticate.",
         )
 
-    # Verify that this is an OAuth challenge (has OAuth context)
-    if not challenge.oauth_client_id or not challenge.oauth_state:
+    # Verify that this is an OAuth challenge (has OAuth context).
+    # Note: oauth_state is NOT checked here — state is optional per OAuth 2.1 PKCE (Bug #624).
+    if not challenge.oauth_client_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid challenge type for OAuth flow.",
@@ -572,9 +581,10 @@ def oauth_mfa_verify(
             user_agent=user_agent,
         )
 
-        redirect_url = (
-            f"{challenge.oauth_redirect_uri}?code={code}&state={challenge.oauth_state}"
-        )
+        # Include state only when provided (Bug #624: state is optional per OAuth 2.1 PKCE)
+        redirect_url = f"{challenge.oauth_redirect_uri}?code={code}"
+        if challenge.oauth_state is not None:
+            redirect_url = f"{redirect_url}&state={challenge.oauth_state}"
         return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
 
     except OAuthError as e:

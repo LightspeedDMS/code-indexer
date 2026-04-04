@@ -46,6 +46,20 @@ inputSchema:
       default: 100
       minimum: 1
       maximum: 1000
+    multiline:
+      type: boolean
+      description: "Enable multi-line matching. Patterns can span multiple lines using \\n or . (which matches\
+        \ newlines with dotall). Uses ripgrep --multiline --multiline-dotall when available, falls back to Python\
+        \ re.DOTALL. line_number in results reflects the first line of each match. Example: 'class Foo.*def bar'\
+        \ with multiline=true finds class definitions followed by a method on a subsequent line."
+      default: false
+    pcre2:
+      type: boolean
+      description: "Enable PCRE2 regex engine for advanced features like lookahead/lookbehind. Requires ripgrep\
+        \ built with PCRE2 support (check via rg --pcre2-version). Returns a clear error if PCRE2 is unavailable.\
+        \ Example: '(?<=def )\\w+' with pcre2=true finds function names via lookbehind. Combine with multiline=true\
+        \ for cross-line lookahead patterns."
+      default: false
     response_format:
       type: string
       description: 'Response format for multi-repo queries: flat (default) or grouped by repository'

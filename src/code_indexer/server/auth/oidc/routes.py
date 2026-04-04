@@ -90,7 +90,10 @@ async def sso_callback(code: str, state: str, request: Request):
         )
 
         # Redirect back to OAuth client (Claude Code) with authorization code
-        redirect_url = f"{state_data['redirect_uri']}?code={oauth_code}&state={state_data['oauth_state']}"
+        # Include state only when provided (Bug #624: state is optional per OAuth 2.1 PKCE)
+        redirect_url = f"{state_data['redirect_uri']}?code={oauth_code}"
+        if state_data["oauth_state"] is not None:
+            redirect_url = f"{redirect_url}&state={state_data['oauth_state']}"
         return RedirectResponse(url=redirect_url, status_code=302)
 
     else:

@@ -123,3 +123,32 @@ class TestBulkReEvaluateBasic:
         repos = repo_backend.list_repos_with_categories()
         assert repos[0]["category_id"] == cat2_id
         assert not repos[0]["category_auto_assigned"]
+
+
+class TestBulkReEvaluateUrlMatching:
+    """Test Story #622 AC4: bulk_re_evaluate passes repo_url to auto_assign."""
+
+    def test_bulk_re_evaluate_uses_repo_url_for_matching(self, service, repo_backend):
+        """bulk_re_evaluate assigns category when pattern matches URL but not alias (Story #622 AC4)."""
+        # Pattern only matches URL, not alias
+        cat_id = service.create_category(
+            "Backend Team", r".*github\.com:backend-team/.*"
+        )
+
+        # Add repo whose alias does NOT match but URL does
+        repo_backend.add_repo(
+            "my-api",
+            "git@github.com:backend-team/my-api.git",
+            "main",
+            "/path/1",
+            "2024-01-01T00:00:00Z",
+        )
+
+        result = service.bulk_re_evaluate()
+
+        # Repo should be assigned via URL match
+        assert result["updated"] == 1
+
+        repos = repo_backend.list_repos_with_categories()
+        assert repos[0]["category_id"] == cat_id
+        assert repos[0]["category_auto_assigned"]

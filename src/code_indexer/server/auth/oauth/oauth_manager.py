@@ -212,7 +212,7 @@ class OAuthManager:
         user_id: str,
         code_challenge: str,
         redirect_uri: str,
-        state: str,
+        state: Optional[str] = None,
     ) -> str:
         if self._backend:
             return self._backend.generate_authorization_code(  # type: ignore[no-any-return]

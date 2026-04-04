@@ -10,16 +10,25 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from code_indexer.server.services.subprocess_executor import (
+    SubprocessExecutor,
+    ExecutionStatus,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default timeout for search operations (5 minutes)
 DEFAULT_SEARCH_TIMEOUT_SECONDS = 300
+
+# Timeout for PCRE2 availability check subprocess
+_PCRE2_CHECK_TIMEOUT_SEC = 5
 
 
 @dataclass
@@ -62,6 +71,7 @@ class RegexSearchService:
         self.repo_path = repo_path
         self._subprocess_max_workers = subprocess_max_workers
         self._search_engine = self._detect_search_engine()
+        self._pcre2_supported: Optional[bool] = None  # Lazy-detected, cached
 
     def _detect_search_engine(self) -> str:
         """Detect available search engine (ripgrep preferred).
@@ -79,6 +89,22 @@ class RegexSearchService:
         else:
             raise RuntimeError("Neither ripgrep nor grep found on system")
 
+    def _detect_pcre2_support(self) -> bool:
+        """Detect whether ripgrep has PCRE2 support. Result is cached."""
+        if self._pcre2_supported is not None:
+            return self._pcre2_supported
+        try:
+            result = subprocess.run(
+                ["rg", "--pcre2-version"],
+                capture_output=True,
+                text=True,
+                timeout=_PCRE2_CHECK_TIMEOUT_SEC,
+            )
+            self._pcre2_supported = result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            self._pcre2_supported = False
+        return self._pcre2_supported
+
     async def search(
         self,
         pattern: str,
@@ -89,6 +115,8 @@ class RegexSearchService:
         context_lines: int = 0,
         max_results: int = 100,
         timeout_seconds: Optional[int] = None,
+        multiline: bool = False,
+        pcre2: bool = False,
     ) -> RegexSearchResult:
         """Execute regex search and return structured results.
 
@@ -101,12 +129,14 @@ class RegexSearchService:
             context_lines: Number of context lines before/after match
             max_results: Maximum number of matches to return
             timeout_seconds: Maximum execution time in seconds (optional)
+            multiline: Enable multi-line matching (pattern spans lines)
+            pcre2: Enable PCRE2 engine for lookahead/lookbehind
 
         Returns:
             RegexSearchResult with matches and metadata
 
         Raises:
-            ValueError: If path doesn't exist
+            ValueError: If path doesn't exist or PCRE2 unavailable
             TimeoutError: If search exceeds timeout_seconds
         """
         # Story #4 AC2: Track regex search at service layer
@@ -114,6 +144,12 @@ class RegexSearchService:
         from code_indexer.server.services.api_metrics_service import api_metrics_service
 
         api_metrics_service.increment_regex_search()
+
+        if pcre2 and not self._detect_pcre2_support():
+            raise ValueError(
+                "PCRE2 not available. Install libpcre2 and ensure ripgrep "
+                "is built with PCRE2 support (rg --pcre2-version)."
+            )
 
         start_time = time.time()
 
@@ -131,6 +167,8 @@ class RegexSearchService:
                 context_lines,
                 max_results,
                 timeout_seconds,
+                multiline=multiline,
+                pcre2=pcre2,
             )
         else:
             matches, total = await self._search_grep(
@@ -142,6 +180,8 @@ class RegexSearchService:
                 context_lines,
                 max_results,
                 timeout_seconds,
+                multiline=multiline,
+                pcre2=pcre2,
             )
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -248,14 +288,16 @@ class RegexSearchService:
         context_lines: int,
         max_results: int,
         timeout_seconds: Optional[int],
+        multiline: bool = False,
+        pcre2: bool = False,
     ) -> tuple:
         """Search using ripgrep with JSON output and timeout protection."""
-        from code_indexer.server.services.subprocess_executor import (
-            SubprocessExecutor,
-            ExecutionStatus,
-        )
-
         cmd = ["rg", "--json", pattern]
+
+        if multiline:
+            cmd.extend(["--multiline", "--multiline-dotall"])
+        if pcre2:
+            cmd.append("--pcre2")
 
         if not case_sensitive:
             cmd.append("-i")
@@ -352,11 +394,6 @@ class RegexSearchService:
             ValueError: If search_path doesn't exist.
             TimeoutError: If file discovery exceeds timeout_seconds.
         """
-        from code_indexer.server.services.subprocess_executor import (
-            SubprocessExecutor,
-            ExecutionStatus,
-        )
-
         # Validate search path exists
         if not search_path.exists():
             raise ValueError(f"Search path does not exist: {search_path}")
@@ -557,6 +594,80 @@ class RegexSearchService:
 
         return matches, total
 
+    def _search_python_multiline(
+        self,
+        pattern: str,
+        search_path: Path,
+        include_patterns: Optional[List[str]],
+        exclude_patterns: Optional[List[str]],
+        case_sensitive: bool,
+        max_results: int,
+    ) -> tuple:
+        """Python re.DOTALL search for multiline patterns.
+
+        Used when multiline=True on the grep engine path, or as a fallback
+        when ripgrep is unavailable.
+        """
+        from fnmatch import fnmatch
+
+        flags = re.DOTALL
+        if not case_sensitive:
+            flags |= re.IGNORECASE
+        try:
+            compiled = re.compile(pattern, flags)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern: {e}") from e
+
+        matches: List[RegexMatch] = []
+        total = 0
+
+        for root, _dirs, files in os.walk(search_path):
+            # Skip internal directories
+            rel_root = os.path.relpath(root, search_path)
+            if rel_root.startswith(".code-indexer") or rel_root.startswith(".git"):
+                continue
+
+            for fname in files:
+                file_path = os.path.join(root, fname)
+                try:
+                    rel_path = str(Path(file_path).relative_to(self.repo_path))
+                except ValueError:
+                    rel_path = file_path
+
+                if include_patterns and not any(
+                    fnmatch(fname, p) for p in include_patterns
+                ):
+                    continue
+                if exclude_patterns and any(
+                    fnmatch(fname, p) for p in exclude_patterns
+                ):
+                    continue
+
+                try:
+                    with open(file_path, "r", errors="replace") as f:
+                        content = f.read()
+                except (OSError, UnicodeDecodeError):
+                    logger.debug("Skipping unreadable file: %s", file_path)
+                    continue
+
+                for m in compiled.finditer(content):
+                    total += 1
+                    if len(matches) < max_results:
+                        start_line = content[: m.start()].count("\n") + 1
+                        col = m.start() - content.rfind("\n", 0, m.start())
+                        matches.append(
+                            RegexMatch(
+                                file_path=rel_path,
+                                line_number=start_line,
+                                column=col,
+                                line_content=m.group(0),
+                                context_before=[],
+                                context_after=[],
+                            )
+                        )
+
+        return matches, total
+
     async def _search_grep(
         self,
         pattern: str,
@@ -567,12 +678,20 @@ class RegexSearchService:
         context_lines: int,
         max_results: int,
         timeout_seconds: Optional[int],
+        multiline: bool = False,
+        pcre2: bool = False,
     ) -> tuple:
         """Fallback search using grep with timeout protection."""
-        from code_indexer.server.services.subprocess_executor import (
-            SubprocessExecutor,
-            ExecutionStatus,
-        )
+        # For multiline searches, use Python re.DOTALL fallback
+        if multiline:
+            return self._search_python_multiline(
+                pattern,
+                search_path,
+                include_patterns,
+                exclude_patterns,
+                case_sensitive,
+                max_results,
+            )
 
         timeout = timeout_seconds or DEFAULT_SEARCH_TIMEOUT_SECONDS
         has_path_patterns = include_patterns and any(

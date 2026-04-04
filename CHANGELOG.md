@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.10.0
+
+### Features
+
+- feat: Multi-line regex search (Story #621) -- added multiline and pcre2 parameters to regex_search MCP tool and RegexSearchService. Patterns can span multiple lines using ripgrep --multiline --multiline-dotall flags. PCRE2 engine enables lookahead/lookbehind with --pcre2 flag. Python re.DOTALL fallback when ripgrep unavailable. PCRE2 availability detection with caching. Fully backward-compatible (defaults: multiline=false, pcre2=false).
+- feat: Repo category regex match against URL (Story #622) -- auto_assign() now matches category patterns against both repository alias (re.match) and repository URL (re.search). bulk_re_evaluate passes repo_url. Web UI hint text and MCP docs updated. Also fixed pre-existing repo_backend unbound variable bug in bulk_re_evaluate.
+
+### Bug Fixes
+
+- fix: OAuth /authorize accepts PKCE requests without state parameter (Bug #624) -- state made Optional[str] on all OAuth endpoints (GET/POST authorize, consent, MFA verify, OIDC callback). Redirect URLs conditionally include state only when provided. Consent template conditionally renders state hidden field.
+- fix: Remove dead ApiKeySyncService systemd env file writes (Bug #626) -- added 10 regression tests to lock in prior removal of _update_systemd_env_file(), APP-GENERAL-043/044 error codes, and /etc/cidx-server/env references.
+
 ## v9.9.5
 
 ### Documentation
