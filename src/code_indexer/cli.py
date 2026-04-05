@@ -3110,8 +3110,15 @@ def index(
                         )
                     console.print("✅ Temporal index cleared", style="green")
 
-                # Initialize temporal indexer
-                temporal_indexer = TemporalIndexer(config_manager, vector_store)
+                # Initialize temporal indexer with provider-aware collection name
+                from code_indexer.services.temporal.temporal_collection_naming import (
+                    resolve_temporal_collection_from_config,
+                )
+
+                _temporal_coll_name = resolve_temporal_collection_from_config(config)
+                temporal_indexer = TemporalIndexer(
+                    config_manager, vector_store, collection_name=_temporal_coll_name
+                )
 
                 # Cost estimation warning for all-branches (no confirmation prompt)
                 if all_branches:
@@ -4228,8 +4235,15 @@ def watch(ctx, debounce: float, batch_size: int, initial_sync: bool, fts: bool):
                 base_path=index_dir, project_root=project_root
             )
 
-            # Create temporal indexer (using new API)
-            temporal_indexer = TemporalIndexer(config_manager, vector_store)
+            # Create temporal indexer with provider-aware collection name
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                resolve_temporal_collection_from_config as _resolve_tcoll,
+            )
+
+            _tcoll_name = _resolve_tcoll(config)
+            temporal_indexer = TemporalIndexer(
+                config_manager, vector_store, collection_name=_tcoll_name
+            )
 
             # Create progressive metadata using temporal_indexer's consolidated dir
             progressive_metadata = TemporalProgressiveMetadata(
