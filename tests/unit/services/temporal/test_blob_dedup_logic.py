@@ -61,8 +61,11 @@ class TestBlobDeduplicationLogic:
                 temporal_indexer = TemporalIndexer(config_manager, vector_store)
 
                 # Pre-populate the blob registry with a known blob hash
+                # indexed_blobs is now dict[collection_name, set[blob_hash]] (Story #631)
                 test_blob_hash = "abc123def456"
-                temporal_indexer.indexed_blobs.add(test_blob_hash)
+                temporal_indexer.indexed_blobs.setdefault(
+                    temporal_indexer.collection_name, set()
+                ).add(test_blob_hash)
 
                 # Mock the diff scanner to return a diff with that blob hash
                 with patch.object(

@@ -154,10 +154,14 @@ class TemporalIndexer:
         self.chunker = FixedSizeChunker(self.config)
 
         # Initialize blob registry for tracking indexed content
-        self.indexed_blobs: set[str] = set()
+        # Keyed by collection_name to support dual-provider indexing (Story #631)
+        self.indexed_blobs: dict[str, set[str]] = {}
 
-        # Initialize progressive metadata tracker for resume capability
+        # Initialize progressive metadata tracker for resume capability (primary collection)
         self.progressive_metadata = TemporalProgressiveMetadata(self.temporal_dir)
+
+        # Per-collection progress trackers (Story #631 dual indexing)
+        self._progress_by_collection: dict[str, TemporalProgressiveMetadata] = {}
 
         # Ensure temporal vector collection exists
         self._ensure_temporal_collection()
@@ -197,6 +201,66 @@ class TemporalIndexer:
             return "transient"
 
         return "permanent"
+
+    def _get_progress(self, collection_name: str) -> "TemporalProgressiveMetadata":
+        """Return (or create) per-collection TemporalProgressiveMetadata instance.
+
+        Creates the collection directory on demand if it does not yet exist.
+
+        Args:
+            collection_name: Logical collection identifier
+
+        Returns:
+            TemporalProgressiveMetadata instance for the given collection
+        """
+        if collection_name not in self._progress_by_collection:
+            coll_dir = self.vector_store.base_path / collection_name
+            coll_dir.mkdir(parents=True, exist_ok=True)
+            self._progress_by_collection[collection_name] = TemporalProgressiveMetadata(
+                coll_dir
+            )
+        return self._progress_by_collection[collection_name]
+
+    def _get_all_provider_configs(self):
+        """Get all configured provider collections for dual indexing.
+
+        Returns a list of (collection_name, embedding_provider, model_name) tuples
+        for every provider that has a valid API key. If no providers are configured,
+        falls back to the primary collection so single-provider behaviour is unchanged.
+
+        Returns:
+            List of (collection_name, embedding_provider_instance, model_name) tuples
+        """
+        from .temporal_collection_naming import (
+            resolve_temporal_collection_name,
+            get_model_name_for_provider,
+        )
+        from ..embedding_factory import EmbeddingProviderFactory
+
+        providers = []
+        configured = EmbeddingProviderFactory.get_configured_providers(self.config)
+
+        for provider_name in configured:
+            try:
+                model_name = get_model_name_for_provider(provider_name, self.config)
+                coll_name = resolve_temporal_collection_name(model_name)
+                provider = EmbeddingProviderFactory.create(
+                    self.config, provider_name=provider_name
+                )
+                providers.append((coll_name, provider, model_name))
+            except Exception as e:
+                logger.warning(
+                    "Failed to create provider %s for temporal indexing: %s",
+                    provider_name,
+                    e,
+                )
+
+        # Fallback: if no providers configured, use primary collection
+        if not providers:
+            fallback_provider = EmbeddingProviderFactory.create(config=self.config)
+            providers.append((self.collection_name, fallback_provider, "unknown"))
+
+        return providers
 
     def _ensure_temporal_collection(self):
         """Ensure temporal vector collection exists.
@@ -685,9 +749,11 @@ class TemporalIndexer:
                                 continue
 
                             # Skip if blob already indexed (avoid duplicate processing)
+                            # indexed_blobs is dict[collection_name, set[blob_hash]] (Story #631)
                             if (
                                 diff_info.blob_hash
-                                and diff_info.blob_hash in self.indexed_blobs
+                                and diff_info.blob_hash
+                                in self.indexed_blobs.get(self.collection_name, set())
                             ):
                                 continue
 
@@ -1031,9 +1097,12 @@ class TemporalIndexer:
 
                                     # Add blob hashes to registry after successful indexing
                                     # Collect unique blob hashes from all processed diffs
+                                    coll_blob_set = self.indexed_blobs.setdefault(
+                                        self.collection_name, set()
+                                    )
                                     for chunk_data in all_chunks_data:
                                         if chunk_data["diff_info"].blob_hash:
-                                            self.indexed_blobs.add(
+                                            coll_blob_set.add(
                                                 chunk_data["diff_info"].blob_hash
                                             )
 

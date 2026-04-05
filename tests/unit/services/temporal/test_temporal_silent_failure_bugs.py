@@ -70,7 +70,7 @@ class TestBug2NoExceptionHandling:
         worker_start_line = None
         for i, line in enumerate(source_lines):
             # More flexible search - look for def worker() near expected location
-            if "def worker():" in line and i > 500 and i < 600:
+            if "def worker():" in line and i > 500 and i < 700:
                 # Verify next few lines have worker-related content
                 next_lines = "".join(source_lines[i : i + 10])
                 if (

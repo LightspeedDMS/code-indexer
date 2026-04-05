@@ -121,6 +121,10 @@ class TestBlobRegistryAdd:
                             )
 
                         # Verify: After indexing, the blob hash should be in the registry
-                        assert test_blob_hash in temporal_indexer.indexed_blobs, (
+                        # indexed_blobs is now dict[collection_name, set[blob_hash]] (Story #631)
+                        coll_blobs = temporal_indexer.indexed_blobs.get(
+                            temporal_indexer.collection_name, set()
+                        )
+                        assert test_blob_hash in coll_blobs, (
                             f"Blob hash '{test_blob_hash}' should be added to registry after indexing"
                         )
