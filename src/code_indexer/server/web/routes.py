@@ -61,16 +61,16 @@ RESTART_REQUIRED_FIELDS = [
 
 
 def _get_token_manager() -> CITokenManager:
-    """Create CITokenManager with SQLite backend (Story #702 migration)."""
+    """Create CITokenManager using shared factory (Bug #639)."""
     from ..services.config_service import get_config_service
+    from ..services.ci_token_manager import create_token_manager
 
     config_service = get_config_service()
     server_dir = config_service.config_manager.server_dir
     db_path = server_dir / "data" / "cidx_server.db"
 
-    return CITokenManager(
-        server_dir_path=str(server_dir),
-        use_sqlite=True,
+    return create_token_manager(
+        server_dir=str(server_dir),
         db_path=str(db_path),
     )
 

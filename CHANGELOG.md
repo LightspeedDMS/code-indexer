@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.12.1
+
+### Fixes
+
+- fix: GitHub token no longer deleted on server restart (Bug #639). Root cause: CITokenManager instantiated with different encryption keys across 5 code sites (Web UI used hostname key, lifespan used jwt_secret key). Created single `create_token_manager()` factory used by all sites. Removed destructive `delete_token` on decrypt failure — tokens preserved in DB for recovery.
+
 ## v9.12.0
 
 ### Features

@@ -51,15 +51,14 @@ def _get_github_token() -> Optional[str]:
 
     # Cache miss or expired - fetch from CITokenManager
     try:
-        from code_indexer.server.services.ci_token_manager import CITokenManager
+        from code_indexer.server.services.ci_token_manager import create_token_manager
 
         server_data_dir = os.environ.get(
             "CIDX_SERVER_DATA_DIR", str(Path.home() / ".cidx-server")
         )
         db_path = str(Path(server_data_dir) / "data" / "cidx_server.db")
-        token_manager = CITokenManager(
-            server_dir_path=server_data_dir,
-            use_sqlite=True,
+        token_manager = create_token_manager(
+            server_dir=server_data_dir,
             db_path=db_path,
         )
         token_data = token_manager.get_token("github")

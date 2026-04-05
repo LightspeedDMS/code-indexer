@@ -333,12 +333,11 @@ class CITokenManager:
                 logger.warning(
                     format_error_log(
                         "APP-GENERAL-061",
-                        f"Failed to decrypt {platform} token, treating as unconfigured: {e}",
+                        f"Failed to decrypt {platform} token, treating as unconfigured "
+                        f"(token preserved in DB for recovery): {e}",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
-                # Delete the corrupted token from storage
-                self._sqlite_backend.delete_token(platform)
                 return None
             return TokenData(
                 platform=platform,
@@ -445,3 +444,46 @@ class CITokenManager:
                     result[platform] = TokenStatus(platform=platform, configured=False)
 
             return result
+
+
+_VALID_STORAGE_MODES = {"sqlite", "postgres"}
+
+
+def create_token_manager(
+    server_dir: str,
+    db_path: str,
+    storage_backend: Any = None,
+    storage_mode: str = "sqlite",
+) -> CITokenManager:
+    """Single factory for CITokenManager — ensures consistent encryption key.
+
+    All code paths that need a CITokenManager MUST use this factory to avoid
+    encryption key mismatch bugs (Bug #639).
+
+    Args:
+        server_dir: Path to server directory (e.g., ~/.cidx-server)
+        db_path: Path to SQLite database file
+        storage_backend: Optional CITokensBackend for PG/cluster mode
+        storage_mode: "sqlite" (standalone) or "postgres" (cluster)
+
+    Raises:
+        ValueError: If storage_mode is not "sqlite" or "postgres"
+    """
+    if storage_mode not in _VALID_STORAGE_MODES:
+        raise ValueError(
+            f"Invalid storage_mode {storage_mode!r}. Must be one of: {_VALID_STORAGE_MODES}"
+        )
+
+    cluster_secret = None
+    if storage_mode == "postgres":
+        jwt_file = Path(server_dir) / ".jwt_secret"
+        if jwt_file.exists():
+            cluster_secret = jwt_file.read_text().strip()
+
+    return CITokenManager(
+        server_dir_path=server_dir,
+        use_sqlite=True,
+        db_path=db_path,
+        storage_backend=storage_backend,
+        cluster_secret=cluster_secret,
+    )

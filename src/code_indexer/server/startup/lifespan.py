@@ -993,28 +993,21 @@ def make_lifespan(
                     app.state.self_monitoring_github_repo = None
                 else:
                     # Get GitHub token for authentication (Bug #87)
+
+                    # Bug #639: Use shared factory to ensure consistent encryption key
                     from code_indexer.server.services.ci_token_manager import (
-                        CITokenManager,
+                        create_token_manager,
                     )
 
-                    # Bug #533: In cluster mode, read JWT secret for shared
-                    # encryption key so CI tokens are readable across all nodes.
-                    _cluster_secret = None
-                    if backend_registry is not None:
-                        _jwt_file = Path(server_data_dir) / ".jwt_secret"
-                        if _jwt_file.exists():
-                            _cluster_secret = _jwt_file.read_text().strip()
-
-                    token_manager = CITokenManager(
-                        server_dir_path=server_data_dir,
-                        use_sqlite=True,
+                    token_manager = create_token_manager(
+                        server_dir=server_data_dir,
                         db_path=db_path,
                         storage_backend=(
                             backend_registry.ci_tokens
                             if backend_registry is not None
                             else None
                         ),
-                        cluster_secret=_cluster_secret,
+                        storage_mode=storage_mode,
                     )
                     github_token_data = token_manager.get_token("github")
                     github_token = (

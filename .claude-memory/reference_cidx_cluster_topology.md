@@ -1,17 +1,24 @@
 ---
-name: CIDX Cluster Testing Topology
-description: Network topology for Epic #408 cluster testing — staging is STANDALONE, NEVER cluster. Read .local-testing section 9 for IPs.
+name: CIDX Deployment Topology
+description: Staging and production are SOLO/SQLite. Local dev VM is clusterized/PostgreSQL. There is NO .30 server.
 type: reference
 ---
 
-CIDX cluster test environment topology (Epic #408).
+CIDX deployment topology.
 
-For all IPs, credentials, and connection details, read `.local-testing` section 9.
+For all IPs, credentials, and connection details, read `.local-testing`.
 
-Key roles: Dev machine (Node 1), CIDX Node 2, CIDX Node 3, HAProxy, PostgreSQL, Staging, Langfuse.
+**Environments:**
+- **Local dev VM (this machine)**: Cluster mode / PostgreSQL
+- **Staging (.20)**: SOLO / SQLite — NEVER cluster
+- **Production**: SOLO / SQLite — NOT clusterized (for now)
+
+**CRITICAL: There is NO .30 server. Do NOT reference .30 as production.**
 
 **CRITICAL: Staging is STANDALONE. NEVER configure it for cluster mode.**
 
-**Why:** Previous session catastrophically confused staging with cluster node 2, resulting in staging being configured with postgres/cluster settings and crashing. This wasted significant time and required manual recovery.
+**Why:** Previous sessions confused staging with cluster nodes, causing crashes. Staging and production both run solo/SQLite.
 
-**How to apply:** Before ANY SSH connection for cluster testing, verify the target IP from `.local-testing` section 9. Staging and node 2 are on different subnets — never confuse them.
+**How to apply:** Before ANY deployment or testing, verify target environment from `.local-testing`. Only the local dev VM runs cluster/PostgreSQL.
+
+*Updated 2026-04-04*

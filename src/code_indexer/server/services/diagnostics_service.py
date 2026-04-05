@@ -801,7 +801,13 @@ class DiagnosticsService:
             CITokenManager instance configured with SQLite backend using
             the same database path as the diagnostics service.
         """
-        return CITokenManager(use_sqlite=True, db_path=self._db_path)
+        from code_indexer.server.services.ci_token_manager import create_token_manager
+
+        server_dir = str(Path(self._db_path).parent.parent)
+        return create_token_manager(
+            server_dir=server_dir,
+            db_path=self._db_path,
+        )
 
     async def check_vector_storage(self) -> DiagnosticResult:
         """

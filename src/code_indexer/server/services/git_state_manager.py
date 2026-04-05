@@ -607,7 +607,9 @@ class TokenAuthenticator:
 
         # Priority 2: File-based token storage (with decryption)
         try:
-            from .ci_token_manager import CITokenManager
+            from code_indexer.server.services.ci_token_manager import (
+                create_token_manager,
+            )
 
             server_dir = Path.home() / ".cidx-server"
             db_path = server_dir / "data" / "cidx_server.db"
@@ -615,9 +617,8 @@ class TokenAuthenticator:
             # Ensure database directory exists before opening SQLite
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
-            token_manager = CITokenManager(
-                server_dir_path=str(server_dir),
-                use_sqlite=True,
+            token_manager = create_token_manager(
+                server_dir=str(server_dir),
                 db_path=str(db_path),
             )
             token_data = token_manager.get_token(platform)
@@ -627,7 +628,7 @@ class TokenAuthenticator:
                     f"Resolved {platform} token from encrypted file storage",
                     extra={"correlation_id": get_correlation_id()},
                 )
-                return token_data.token
+                return str(token_data.token)
         except Exception as e:
             logger.warning(
                 format_error_log(
