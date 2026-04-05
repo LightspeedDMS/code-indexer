@@ -621,15 +621,27 @@ class FileChunkingManager:
                     f"Processing {len(multimodal_chunks)} multimodal chunks for {file_path}"
                 )
 
-                # Ensure multimodal collection exists using model name as collection name
-                # This creates .code-indexer/index/voyage-multimodal-3/ (NOT subdirectory)
-                multimodal_collection_name = self.multimodal_client.config.model
+                # Ensure multimodal collection exists using collection name
+                # Cohere: collection_name property returns "embed-v4.0-multimodal"
+                # VoyageAI: falls back to config.model ("voyage-multimodal-3")
+                multimodal_collection_name = getattr(
+                    self.multimodal_client,
+                    "collection_name",
+                    self.multimodal_client.config.model,
+                )
                 if not self.vector_store_client.collection_exists(
                     multimodal_collection_name
                 ):
-                    # voyage-multimodal-3 produces 1024-dimensional embeddings
+                    # Use configured dimension from multimodal client
+                    if hasattr(self.multimodal_client, "config") and hasattr(
+                        self.multimodal_client.config, "default_dimension"
+                    ):
+                        vector_size = self.multimodal_client.config.default_dimension
+                    else:
+                        vector_size = 1024  # VoyageAI default
                     self.vector_store_client.create_collection(
-                        collection_name=multimodal_collection_name, vector_size=1024
+                        collection_name=multimodal_collection_name,
+                        vector_size=vector_size,
                     )
                     logger.info(
                         f"Created multimodal collection '{multimodal_collection_name}' at same level as code embeddings"
@@ -710,8 +722,14 @@ class FileChunkingManager:
                             chunk_data, embedding, metadata, file_path
                         )
 
-                        # Store in voyage-multimodal-3 collection (NOT subdirectory - same level as voyage-code-3)
-                        multimodal_collection_name = self.multimodal_client.config.model
+                        # Store in multimodal collection (same level as text collection)
+                        # Cohere: collection_name property ("embed-v4.0-multimodal")
+                        # VoyageAI: falls back to config.model ("voyage-multimodal-3")
+                        multimodal_collection_name = getattr(
+                            self.multimodal_client,
+                            "collection_name",
+                            self.multimodal_client.config.model,
+                        )
                         if not multimodal_collection_name:
                             logger.warning(
                                 f"No model name in multimodal client config, skipping storage for chunk "

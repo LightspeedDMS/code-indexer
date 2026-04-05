@@ -288,9 +288,11 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
         # Initialize file processing rate tracking for files/s metric
         self._initialize_file_rate_tracking()
 
-        # Create multimodal client for image+text embedding support (only when VoyageAI is configured)
-        multimodal_client = None
-        if os.getenv("VOYAGE_API_KEY"):
+        # Create multimodal client for image+text embedding support
+        multimodal_client: Optional[Any] = None
+        provider_name = self.embedding_provider.get_provider_name()
+
+        if provider_name == "voyage-ai" and os.getenv("VOYAGE_API_KEY"):
             from ..config import VoyageAIConfig, VOYAGE_MULTIMODAL_MODEL
             from .voyage_multimodal import VoyageMultimodalClient
 
@@ -299,6 +301,16 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 api_endpoint="https://api.voyageai.com/v1/multimodalembeddings",
             )
             multimodal_client = VoyageMultimodalClient(voyage_config)
+        elif provider_name == "cohere":
+            from ..config import CohereConfig
+            from .cohere_multimodal import CohereMultimodalClient
+
+            cohere_config = CohereConfig(
+                model="embed-v4.0",  # API model name (supports multimodal natively)
+                api_key=self.embedding_provider.api_key,
+                default_dimension=self.embedding_provider.config.default_dimension,
+            )
+            multimodal_client = CohereMultimodalClient(cohere_config)
 
         # PARALLEL FILE PROCESSING: Replace sequential chunking with parallel submission
         with VectorCalculationManager(
@@ -1040,21 +1052,24 @@ class HighThroughputProcessor(GitAwareDocumentProcessor):
                 )
 
             # CRITICAL: Also finalize multimodal collection if it exists
-            # Multimodal embeddings are stored in voyage-multimodal-3 collection
+            # Multimodal embeddings may be in voyage-multimodal-3 or embed-v4.0-multimodal
             # Without this, multimodal HNSW index is never built and queries fail
-            from ..config import VOYAGE_MULTIMODAL_MODEL as _multimodal_model
+            from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL
 
-            multimodal_collection = _multimodal_model
-            if self.vector_store_client.collection_exists(multimodal_collection):
-                multimodal_result = self.vector_store_client.end_indexing(
-                    multimodal_collection,
-                    progress_callback,
-                    skip_hnsw_rebuild=watch_mode,
-                )
-                logger.info(
-                    f"Multimodal index finalization complete: "
-                    f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
-                )
+            for multimodal_collection in [
+                VOYAGE_MULTIMODAL_MODEL,
+                COHERE_MULTIMODAL_MODEL,
+            ]:
+                if self.vector_store_client.collection_exists(multimodal_collection):
+                    multimodal_result = self.vector_store_client.end_indexing(
+                        multimodal_collection,
+                        progress_callback,
+                        skip_hnsw_rebuild=watch_mode,
+                    )
+                    logger.info(
+                        f"Multimodal index finalization complete ({multimodal_collection}): "
+                        f"{multimodal_result.get('vectors_indexed', 0)} vectors indexed"
+                    )
 
     # =============================================================================
     # THREAD-SAFE GIT-AWARE METHODS

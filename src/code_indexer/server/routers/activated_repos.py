@@ -20,6 +20,36 @@ from code_indexer.services.hnsw_health_service import HNSWHealthService
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_semantic_index_path(index_dir: Path) -> Path:
+    """Resolve the path to the semantic hnsw_index.bin for any embedding provider.
+
+    Scans deterministically for any collection with hnsw_index.bin that is not
+    a multimodal, temporal, or tantivy collection, excluding voyage-code-3 as a
+    special candidate (used only as fallback when no other provider is found).
+
+    Args:
+        index_dir: Path to .code-indexer/index directory.
+
+    Returns:
+        Path to the semantic hnsw_index.bin (may not exist if not yet indexed).
+    """
+    fallback = index_dir / "voyage-code-3" / "hnsw_index.bin"
+    if not (index_dir.exists() and index_dir.is_dir()):
+        return fallback
+    for subdir in sorted(index_dir.iterdir(), key=lambda p: p.name):
+        if not subdir.is_dir():
+            continue
+        name = subdir.name
+        if "multimodal" in name or "temporal" in name or "tantivy" in name:
+            continue
+        if name == "voyage-code-3":
+            continue  # treat as fallback only
+        if (subdir / "hnsw_index.bin").exists():
+            return subdir / "hnsw_index.bin"
+    return fallback
+
+
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/activated-repos", tags=["activated-repos"])
 
@@ -267,8 +297,8 @@ async def get_indexes_status(
         # Check each index type
         indexes = []
 
-        # Semantic index (voyage-code-3 collection)
-        semantic_path = index_dir / "voyage-code-3" / "hnsw_index.bin"
+        # Semantic index: dynamic detection across all embedding providers
+        semantic_path = resolve_semantic_index_path(index_dir)
         indexes.append(_check_index_status(semantic_path, "semantic"))
 
         # FTS index (tantivy)

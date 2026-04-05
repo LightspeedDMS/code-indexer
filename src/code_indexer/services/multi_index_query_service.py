@@ -2,8 +2,8 @@
 Multi-Index Query Service.
 
 Provides parallel multi-index query capability that:
-1. Detects if voyage-multimodal-3 collection exists in .code-indexer/index/
-2. Queries voyage-code-3 and voyage-multimodal-3 collections concurrently (if both exist)
+1. Detects if a multimodal collection exists in .code-indexer/index/ (VoyageAI or Cohere)
+2. Queries code and multimodal collections concurrently (if both exist)
 3. Merges results from both collections with order-independent deduplication
 4. Handles timeouts and partial results gracefully
 5. Deduplicates by (file_path, chunk_offset), keeping highest score
@@ -15,12 +15,11 @@ embeddings while maintaining backward compatibility when multimodal collection
 doesn't exist.
 
 Architecture:
-- voyage-code-3 collection: .code-indexer/index/voyage-code-3/
-- voyage-multimodal-3 collection: .code-indexer/index/voyage-multimodal-3/ (same level)
+- Code collection: .code-indexer/index/{code-model}/ (e.g. voyage-code-3)
+- Multimodal collection: .code-indexer/index/{multimodal-model}/ (same level)
+  Supported multimodal providers: VoyageAI (voyage-multimodal-3), Cohere (embed-v4.0-multimodal)
 
-CRITICAL: Query vectorization must use the SAME model as indexing:
-- Code collection queries: Use voyage-code-3 embedding provider
-- Multimodal collection queries: Use voyage-multimodal-3 embedding provider
+CRITICAL: Query vectorization must use the SAME model as indexing.
 Using mismatched models produces incorrect similarity scores.
 """
 
@@ -30,9 +29,12 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 
-from ..config import VOYAGE_MULTIMODAL_MODEL, VoyageAIConfig
+from ..config import VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL, VoyageAIConfig
 
 logger = logging.getLogger(__name__)
+
+# All known multimodal model collection names (for provider-agnostic detection)
+MULTIMODAL_MODELS = [VOYAGE_MULTIMODAL_MODEL, COHERE_MULTIMODAL_MODEL]
 
 # Query timeout per index (seconds)
 QUERY_TIMEOUT = 30
@@ -59,52 +61,58 @@ class MultiIndexQueryService:
     def _get_multimodal_provider(self):
         """Get or create the multimodal embedding provider (lazy initialization).
 
-        Returns:
-            VoyageMultimodalClient instance for multimodal query embedding
+        Detects provider by checking which multimodal collection exists on disk.
+        Cohere takes precedence when its collection is found; falls back to VoyageAI.
         """
-        if self._multimodal_provider is None:
-            from .voyage_multimodal import VoyageMultimodalClient
+        if self._multimodal_provider is not None:
+            return self._multimodal_provider
 
-            # Create config for multimodal model
-            multimodal_config = VoyageAIConfig(model=VOYAGE_MULTIMODAL_MODEL)
-            self._multimodal_provider = VoyageMultimodalClient(multimodal_config)
+        # Check for Cohere multimodal collection first
+        cohere_path = (
+            self.project_root / ".code-indexer" / "index" / COHERE_MULTIMODAL_MODEL
+        )
+        if cohere_path.exists() and cohere_path.is_dir():
+            from ..config import CohereConfig
+            from .cohere_multimodal import CohereMultimodalClient
+
+            cohere_config = CohereConfig(model="embed-v4.0")
+            self._multimodal_provider = CohereMultimodalClient(cohere_config)
             logger.debug(
-                f"Initialized multimodal embedding provider: {VOYAGE_MULTIMODAL_MODEL}"
+                "Initialized Cohere multimodal embedding provider: %s",
+                COHERE_MULTIMODAL_MODEL,
             )
+            return self._multimodal_provider
+
+        # Default to VoyageAI multimodal
+        from .voyage_multimodal import VoyageMultimodalClient
+
+        multimodal_config = VoyageAIConfig(model=VOYAGE_MULTIMODAL_MODEL)
+        self._multimodal_provider = VoyageMultimodalClient(multimodal_config)
+        logger.debug(
+            "Initialized VoyageAI multimodal embedding provider: %s",
+            VOYAGE_MULTIMODAL_MODEL,
+        )
         return self._multimodal_provider
 
     def will_query_multimodal(self) -> bool:
-        """Check if multimodal index will actually be queried for current provider.
+        """Check if multimodal index will actually be queried.
 
-        Returns True only when:
-        1. A voyage-multimodal-3 collection (or legacy path) exists, AND
-        2. The current embedding provider is VoyageAI (model starts with "voyage-")
-
-        Cohere's embed-v4.0 is a unified text+multimodal model — its content goes
-        into the same collection, so there is no separate multimodal collection to
-        query for non-VoyageAI providers.
+        Returns True when a multimodal collection (VoyageAI or Cohere) exists.
         """
-        current_model = self.embedding_provider.get_current_model()
-        return self.has_multimodal_index() and current_model.startswith("voyage-")
+        return self.has_multimodal_index()
 
     def has_multimodal_index(self) -> bool:
+        """Check if any multimodal collection exists.
+
+        Checks for known multimodal collections in .code-indexer/index/
+        and legacy multimodal_index/ subdirectory.
         """
-        Check if multimodal collection exists.
+        for model_name in MULTIMODAL_MODELS:
+            collection_path = self.project_root / ".code-indexer" / "index" / model_name
+            if collection_path.exists() and collection_path.is_dir():
+                return True
 
-        Checks for voyage-multimodal-3 collection in .code-indexer/index/
-        (NEW architecture) or multimodal_index/ subdirectory (LEGACY fallback).
-
-        Returns:
-            True if voyage-multimodal-3 collection OR legacy multimodal_index/ exists
-        """
-        # NEW: Check for voyage-multimodal-3 collection (primary approach)
-        multimodal_collection = (
-            self.project_root / ".code-indexer" / "index" / VOYAGE_MULTIMODAL_MODEL
-        )
-        if multimodal_collection.exists() and multimodal_collection.is_dir():
-            return True
-
-        # LEGACY: Check for old multimodal_index/ subdirectory (backward compatibility)
+        # LEGACY: Check for old multimodal_index/ subdirectory
         legacy_multimodal_path = (
             self.project_root / ".code-indexer" / "multimodal_index"
         )
@@ -157,36 +165,46 @@ class MultiIndexQueryService:
         **kwargs,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
-        Query voyage-multimodal-3 collection.
+        Query multimodal collection (VoyageAI or Cohere).
 
-        CRITICAL: Uses VoyageMultimodalClient (voyage-multimodal-3) for query embedding
-        to match the model used during indexing. Using voyage-code-3 would produce
+        CRITICAL: Uses the matching multimodal provider for query embedding
+        to match the model used during indexing. Mismatched models produce
         incorrect similarity scores due to different vector spaces.
 
         Args:
             query_text: Query string
             limit: Maximum number of results
-            collection_name: Collection name (used for legacy path only; new path uses VOYAGE_MULTIMODAL_MODEL)
+            collection_name: Collection name (used for legacy path only)
             filter_conditions: Optional filter conditions
             **kwargs: Additional query parameters
 
         Returns:
-            Tuple of (results, timing_dict) from voyage-multimodal-3 collection
+            Tuple of (results, timing_dict) from multimodal collection
         """
-        logger.debug(f"Querying {VOYAGE_MULTIMODAL_MODEL} collection for: {query_text}")
+        logger.debug("Querying multimodal collection for: %s", query_text)
 
-        # Get multimodal embedding provider (voyage-multimodal-3)
+        # Get multimodal embedding provider
         multimodal_provider = self._get_multimodal_provider()
 
-        # Measure wall-clock time for this index query
+        # Find which multimodal collection exists
+        actual_collection = None
+        for model_name in MULTIMODAL_MODELS:
+            coll_path = self.project_root / ".code-indexer" / "index" / model_name
+            if coll_path.exists() and coll_path.is_dir():
+                actual_collection = model_name
+                break
+
         query_start = time.time()
 
         # Check if legacy subdirectory exists, use it for backward compatibility
         legacy_multimodal_path = (
             self.project_root / ".code-indexer" / "multimodal_index"
         )
-        if legacy_multimodal_path.exists() and legacy_multimodal_path.is_dir():
-            # LEGACY: Use subdirectory approach
+        if (
+            actual_collection is None
+            and legacy_multimodal_path.exists()
+            and legacy_multimodal_path.is_dir()
+        ):
             logger.debug("Using legacy multimodal_index subdirectory")
             results, timing = self.vector_store.search(
                 query=query_text,
@@ -198,20 +216,22 @@ class MultiIndexQueryService:
                 return_timing=True,
                 **kwargs,
             )
-        else:
-            # NEW: Query voyage-multimodal-3 collection directly
-            logger.debug(f"Querying {VOYAGE_MULTIMODAL_MODEL} collection directly")
+        elif actual_collection is not None:
+            logger.debug("Querying %s collection directly", actual_collection)
             results, timing = self.vector_store.search(
                 query=query_text,
                 embedding_provider=multimodal_provider,
-                collection_name=VOYAGE_MULTIMODAL_MODEL,  # Use multimodal collection name
+                collection_name=actual_collection,
                 limit=limit * 2,
                 filter_conditions=filter_conditions,
-                subdirectory=None,  # No subdirectory - same level as voyage-code-3
+                subdirectory=None,
                 return_timing=True,
                 **kwargs,
             )
-        # Add actual wall-clock elapsed time (this is what we display)
+        else:
+            logger.debug("No multimodal collection found, returning empty results")
+            return [], {"elapsed_ms": 0}
+
         timing["elapsed_ms"] = (time.time() - query_start) * 1000
         return results, timing
 

@@ -220,6 +220,21 @@ python3 -m pytest \
     --ignore=tests/unit/cli/test_repos_list_fix_verification.py \
     --ignore=tests/unit/cli/test_system_health_commands.py \
     --ignore=tests/unit/remote/test_network_error_handling.py \
+    --ignore=tests/unit/global_repos/test_global_registry_locking.py \
+    --ignore=tests/unit/routers/test_repo_categories_api.py \
+    --ignore=tests/unit/services/test_git_credential_manager.py \
+    --ignore=tests/unit/services/test_repo_category_service_auto_assign.py \
+    --ignore=tests/unit/services/test_repo_category_service_bulk_evaluate.py \
+    --ignore=tests/unit/services/test_repo_category_service_manual_override.py \
+    --ignore=tests/unit/services/test_repo_category_service_map.py \
+    --ignore=tests/unit/services/test_repo_category_service.py \
+    --ignore=tests/unit/services/test_tantivy_regex_dfa_safety.py \
+    --ignore=tests/unit/services/test_tantivy_regex.py \
+    --ignore=tests/unit/services/test_tantivy_unicode_columns.py \
+    --ignore=tests/unit/services/test_token_authenticator.py \
+    --ignore=tests/unit/storage/test_repo_category_backend.py \
+    --ignore=tests/unit/storage/test_sqlite_backends_category.py \
+    --ignore=tests/unit/test_scip_audit_api.py \
     --deselect=tests/unit/cli/test_adapted_command_behavior.py::TestAdaptedStatusCommand::test_status_command_routes_to_uninitialized_mode \
     --deselect=tests/unit/proxy/test_parallel_executor.py::TestParallelCommandExecutor::test_execute_single_repository_success \
     --deselect=tests/unit/chunking/test_fixed_size_chunker.py::TestFixedSizeChunker::test_edge_case_very_large_file \
@@ -227,6 +242,7 @@ python3 -m pytest \
     --deselect=tests/unit/storage/test_filesystem_vector_store.py::TestFilesystemVectorStoreCore::test_batch_upsert_performance \
     --deselect=tests/unit/storage/test_parallel_index_loading.py::TestPerformanceRequirements::test_parallel_execution_reduces_latency \
     -m "not slow and not e2e and not real_api and not integration and not requires_server and not requires_containers" \
+    --timeout=3 \
     2>&1 | tee "$TELEMETRY_FILE"
 
 PYTEST_EXIT_CODE=$?

@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 from src.code_indexer.services.voyage_multimodal import VoyageMultimodalClient
+from src.code_indexer.services.multimodal_utils import encode_image_to_base64
 from src.code_indexer.config import VoyageAIConfig
 
 
@@ -101,11 +102,16 @@ class TestVoyageMultimodalClientInitialization:
 
 
 class TestImageEncoding:
-    """Test image encoding to base64 data URLs."""
+    """Test image encoding to base64 data URLs.
+
+    After refactoring, VoyageMultimodalClient delegates encoding to
+    the shared encode_image_to_base64 from multimodal_utils.
+    These tests verify the shared utility works correctly.
+    """
 
     def test_encode_image_to_base64_png(self, client, sample_image_path):
-        """Test encoding PNG image to base64 data URL."""
-        data_url = client._encode_image_to_base64(sample_image_path)
+        """Test encoding PNG image to base64 data URL via shared utility."""
+        data_url = encode_image_to_base64(sample_image_path)
 
         assert data_url.startswith("data:image/png;base64,")
         # Verify it's valid base64
@@ -114,39 +120,39 @@ class TestImageEncoding:
         assert len(decoded) > 0
 
     def test_encode_image_to_base64_jpeg(self, client, tmp_path):
-        """Test encoding JPEG image with correct media type."""
+        """Test encoding JPEG image with correct media type via shared utility."""
         jpeg_path = tmp_path / "test.jpg"
         # Minimal JPEG header
         jpeg_data = b"\xff\xd8\xff\xe0\x00\x10JFIF"
         jpeg_path.write_bytes(jpeg_data)
 
-        data_url = client._encode_image_to_base64(jpeg_path)
+        data_url = encode_image_to_base64(jpeg_path)
         assert data_url.startswith("data:image/jpeg;base64,")
 
     def test_encode_image_to_base64_webp(self, client, tmp_path):
-        """Test encoding WebP image with correct media type."""
+        """Test encoding WebP image with correct media type via shared utility."""
         webp_path = tmp_path / "test.webp"
         # Minimal WebP header
         webp_data = b"RIFF\x00\x00\x00\x00WEBP"
         webp_path.write_bytes(webp_data)
 
-        data_url = client._encode_image_to_base64(webp_path)
+        data_url = encode_image_to_base64(webp_path)
         assert data_url.startswith("data:image/webp;base64,")
 
     def test_encode_image_nonexistent_file(self, client, tmp_path):
-        """Test encoding raises error for non-existent file."""
+        """Test encoding raises error for non-existent file via shared utility."""
         fake_path = tmp_path / "nonexistent.png"
 
         with pytest.raises(FileNotFoundError):
-            client._encode_image_to_base64(fake_path)
+            encode_image_to_base64(fake_path)
 
     def test_encode_image_unsupported_format(self, client, tmp_path):
-        """Test encoding raises error for unsupported image format."""
+        """Test encoding raises error for unsupported image format via shared utility."""
         unsupported_path = tmp_path / "test.bmp"
         unsupported_path.write_bytes(b"BM")  # BMP header
 
         with pytest.raises(ValueError, match="Unsupported image format"):
-            client._encode_image_to_base64(unsupported_path)
+            encode_image_to_base64(unsupported_path)
 
 
 class TestMultimodalEmbeddingGeneration:

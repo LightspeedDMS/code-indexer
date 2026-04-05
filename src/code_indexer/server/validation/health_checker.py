@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_VOYAGE_DIM = 1024
 DEFAULT_COHERE_DIM = 1536
 
-# Per-model dimension table for VoyageAI (as documented by VoyageAI API).
-VOYAGE_MODEL_DIMENSIONS = {
+# Per-model dimension table (VoyageAI and Cohere models).
+MODEL_DIMENSIONS = {
+    # VoyageAI models
     "voyage-code-3": DEFAULT_VOYAGE_DIM,
     "voyage-multimodal-3": DEFAULT_VOYAGE_DIM,
     "voyage-3": DEFAULT_VOYAGE_DIM,
@@ -35,6 +36,9 @@ VOYAGE_MODEL_DIMENSIONS = {
     "voyage-large-2": DEFAULT_COHERE_DIM,
     "voyage-code-2": DEFAULT_COHERE_DIM,
     "voyage-3-large": DEFAULT_COHERE_DIM,
+    # Cohere models
+    "embed-v4.0": DEFAULT_COHERE_DIM,
+    "embed-v4.0-multimodal": DEFAULT_COHERE_DIM,
 }
 
 
@@ -95,7 +99,7 @@ class IndexHealthChecker:
 
         Raises:
             ValueError: If embedding_provider is unrecognized, or the VoyageAI model
-                        is not in VOYAGE_MODEL_DIMENSIONS.
+                        is not in MODEL_DIMENSIONS.
         """
         provider = getattr(config, "embedding_provider", None)
 
@@ -106,12 +110,12 @@ class IndexHealthChecker:
                     "embedding_provider is 'voyage-ai' but config.voyage_ai is missing"
                 )
             model = getattr(voyage_config, "model", None)
-            if model not in VOYAGE_MODEL_DIMENSIONS:
+            if model not in MODEL_DIMENSIONS:
                 raise ValueError(
-                    f"Unknown VoyageAI model '{model}': not in VOYAGE_MODEL_DIMENSIONS. "
-                    f"Known models: {sorted(VOYAGE_MODEL_DIMENSIONS)}"
+                    f"Unknown VoyageAI model '{model}': not in MODEL_DIMENSIONS. "
+                    f"Known models: {sorted(MODEL_DIMENSIONS)}"
                 )
-            return VOYAGE_MODEL_DIMENSIONS[model]
+            return MODEL_DIMENSIONS[model]
 
         if provider == "cohere":
             cohere_config = getattr(config, "cohere", None)

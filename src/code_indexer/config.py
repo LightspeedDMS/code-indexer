@@ -82,6 +82,9 @@ def _validate_no_legacy_config(data: Dict[str, Any]) -> None:
 VOYAGE_CODE_MODEL = "voyage-code-3"
 VOYAGE_MULTIMODAL_MODEL = "voyage-multimodal-3"
 
+# Cohere model constants
+COHERE_MULTIMODAL_MODEL = "embed-v4.0-multimodal"
+
 
 class VoyageAIConfig(BaseModel):
     """Configuration for VoyageAI embedding service.

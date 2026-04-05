@@ -125,7 +125,7 @@ echo "  Chunk 5: mcp/ + telemetry/ + handlers/"
 echo "  Chunk 6: all remaining subdirs + root test files"
 
 # Tuning knobs — override via environment for CI or local profiling
-PYTEST_TIMEOUT="${PYTEST_TIMEOUT:-30}"
+PYTEST_TIMEOUT="${PYTEST_TIMEOUT:-3}"
 PYTEST_DURATIONS="${PYTEST_DURATIONS:-10}"
 
 # Create telemetry directory

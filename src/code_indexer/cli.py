@@ -592,7 +592,7 @@ def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None
 
     multi_index_breakdown_labels = {
         "code_index_ms": "    ├─ voyage-code-3 index",
-        "multimodal_index_ms": "    ├─ voyage-multimodal-3 index",
+        "multimodal_index_ms": "    ├─ multimodal index",
         "merge_deduplicate_ms": "    └─ Merge & deduplicate",
     }
 

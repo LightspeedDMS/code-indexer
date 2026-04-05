@@ -18,6 +18,32 @@ from code_indexer.services.hnsw_health_service import HNSWHealthService
 logger = logging.getLogger(__name__)
 
 
+def detect_semantic_index(index_base_path: Path) -> bool:
+    """Detect whether a semantic index exists in the given index directory.
+
+    Scans deterministically for any collection with hnsw_index.bin that is not
+    a multimodal, temporal, or tantivy collection. Supports any embedding provider
+    (e.g., voyage-code-3, embed-v4.0).
+
+    Args:
+        index_base_path: Path to .code-indexer/index directory.
+
+    Returns:
+        True if at least one qualifying semantic collection is found.
+    """
+    if not (index_base_path.exists() and index_base_path.is_dir()):
+        return False
+    for subdir in sorted(index_base_path.iterdir(), key=lambda p: p.name):
+        if not subdir.is_dir():
+            continue
+        name = subdir.name
+        if "multimodal" in name or "temporal" in name or "tantivy" in name:
+            continue
+        if (subdir / "hnsw_index.bin").exists():
+            return True
+    return False
+
+
 class CollectionHealthResult(BaseModel):
     """Health result for a single collection/index."""
 
@@ -473,9 +499,8 @@ async def get_repository_indexes(
         # Check for each index type
         index_base_path = clone_path / ".code-indexer" / "index"
 
-        # Semantic index: voyage-code-3/hnsw_index.bin
-        semantic_path = index_base_path / "voyage-code-3" / "hnsw_index.bin"
-        has_semantic = semantic_path.exists() and semantic_path.is_file()
+        # Semantic index: dynamic detection across all embedding providers
+        has_semantic = detect_semantic_index(index_base_path)
 
         # FTS index: tantivy/ directory
         fts_path = index_base_path / "tantivy"

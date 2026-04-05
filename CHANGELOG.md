@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.12.0
+
+### Features
+
+- feat: Cohere multimodal embedding support (Story #637) -- CohereMultimodalClient embeds text+image chunks via Cohere embed-v4.0 `inputs` parameter into separate `embed-v4.0-multimodal` collection. Provider-agnostic routing in high_throughput_processor detects Cohere vs VoyageAI. Query service detects multimodal collection on disk and creates matching provider. Shared multimodal_utils.py eliminates image encoding duplication. Dynamic semantic index detection in server endpoints replaces hard-coded `voyage-code-3`. Dual-constraint batch splitting (128K tokens + 96 images). 5MB per-image size enforcement. Configurable output dimensions via CohereConfig.
+
+### Fixes
+
+- fix: Server endpoint index status badges now detect Cohere collections (not just VoyageAI) via dynamic collection scanning in repository_health.py and activated_repos.py.
+- fix: HNSW finalization for multimodal collections in all 5 finalization sites (4 in smart_indexer.py, 1 in high_throughput_processor.py) now iterates over both VoyageAI and Cohere multimodal models.
+- fix: fast-automation.sh added --timeout=3 per-test guard and excluded 15 tests with heavy fixtures (DB init, tantivy, crypto) that don't belong in the fast suite. Prevents indefinite hangs.
+- fix: server-fast-automation.sh reduced per-test timeout from 30s to 3s.
+
 ## v9.11.0
 
 ### Features
