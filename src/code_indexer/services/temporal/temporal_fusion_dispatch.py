@@ -205,9 +205,12 @@ def _query_single_provider(
         record_temporal_failure(coll_name, (_time.time() - _t0) * 1000)
         raise
 
+    from .temporal_collection_naming import collection_display_name
+
+    _display = collection_display_name(coll_name)
     for r in results.results:
-        r.source_provider = coll_name
-        r.contributing_providers = [coll_name]
+        r.source_provider = _display
+        r.contributing_providers = [_display]
         r.fusion_score = r.score
 
     return results
@@ -259,6 +262,7 @@ def _query_multi_provider_fusion(
         )
 
     from .temporal_search_service import TemporalSearchService
+    from .temporal_collection_naming import collection_display_name
 
     with ThreadPoolExecutor(max_workers=len(collections)) as executor:
         future_to_coll: Dict[Future, str] = {}
@@ -270,10 +274,11 @@ def _query_multi_provider_fusion(
             future_to_coll, timeout=TEMPORAL_QUERY_TIMEOUT_SECONDS
         ):
             coll_name = future_to_coll[future]
+            _display = collection_display_name(coll_name)
             try:
                 result = future.result()
                 if result.results:
-                    results_by_provider[coll_name] = result.results
+                    results_by_provider[_display] = result.results
                 record_temporal_success(coll_name, _UNKNOWN_LATENCY_MS)
             except Exception as e:
                 record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)

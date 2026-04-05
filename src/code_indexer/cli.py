@@ -4466,10 +4466,18 @@ def _display_file_chunk_match(result, index, temporal_service):
     }
     marker = diff_markers.get(diff_type, "")
 
+    # Provider attribution (Story #640)
+    _providers = getattr(result, "contributing_providers", None)
+    _prov_tag = (
+        f" [{'+'.join(_providers)}]" if _providers and len(_providers) > 0 else ""
+    )
+
     if marker:
-        console.print(f"\n[bold cyan]{index}. {file_location}[/bold cyan] {marker}")
+        console.print(
+            f"\n[bold cyan]{index}. {file_location}{_prov_tag}[/bold cyan] {marker}"
+        )
     else:
-        console.print(f"\n[bold cyan]{index}. {file_location}[/bold cyan]")
+        console.print(f"\n[bold cyan]{index}. {file_location}{_prov_tag}[/bold cyan]")
     console.print(f"   Score: {result.score:.3f}")
     console.print(f"   Commit: {commit_hash[:7]} ({commit_date})")
     console.print(f"   Author: {author_name} <{author_email}>")
@@ -4523,8 +4531,16 @@ def _display_commit_message_match(result, index, temporal_service):
     )
     author_email = result.metadata.get("author_email", "unknown@example.com")
 
+    # Provider attribution (Story #640)
+    _providers = getattr(result, "contributing_providers", None)
+    _prov_tag = (
+        f" [{'+'.join(_providers)}]" if _providers and len(_providers) > 0 else ""
+    )
+
     # Display header
-    console.print(f"\n[bold cyan]{index}. [COMMIT MESSAGE MATCH][/bold cyan]")
+    console.print(
+        f"\n[bold cyan]{index}. [COMMIT MESSAGE MATCH]{_prov_tag}[/bold cyan]"
+    )
     console.print(f"   Score: {result.score:.3f}")
     console.print(f"   Commit: {commit_hash[:7]} ({commit_date})")
     console.print(f"   Author: {author_name} <{author_email}>")
@@ -5237,9 +5253,19 @@ def query(
                             "author_email", "unknown@example.com"
                         )
 
+                        # Provider attribution (Story #640)
+                        _providers = getattr(
+                            temporal_result, "contributing_providers", None
+                        )
+                        _prov_tag = (
+                            f"[{'+'.join(_providers)}] "
+                            if _providers and len(_providers) > 0
+                            else ""
+                        )
+
                         # Header line with ALL metadata
                         console.print(
-                            f"{index}. {temporal_result.score:.3f} [Commit {commit_hash[:7]}] ({commit_date}) {author_name} <{author_email}>",
+                            f"{index}. {temporal_result.score:.3f} {_prov_tag}[Commit {commit_hash[:7]}] ({commit_date}) {author_name} <{author_email}>",
                             markup=False,
                         )
 
@@ -5250,9 +5276,19 @@ def query(
                         # Blank line between results
                         console.print()
                     else:
+                        # Provider attribution (Story #640)
+                        _providers = getattr(
+                            temporal_result, "contributing_providers", None
+                        )
+                        _prov_tag = (
+                            f"[{'+'.join(_providers)}] "
+                            if _providers and len(_providers) > 0
+                            else ""
+                        )
+
                         # For commit_diff, use the file_path attribute (populated from "path" field)
                         console.print(
-                            f"{index}. {temporal_result.score:.3f} {temporal_result.file_path}",
+                            f"{index}. {temporal_result.score:.3f} {_prov_tag}{temporal_result.file_path}",
                             markup=False,
                         )
 

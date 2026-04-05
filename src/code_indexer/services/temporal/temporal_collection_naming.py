@@ -68,6 +68,21 @@ def is_temporal_collection(collection_name: str) -> bool:
     )
 
 
+def collection_display_name(collection_name: str) -> str:
+    """Extract a short display name from a temporal collection name.
+
+    Examples:
+        "code-indexer-temporal-voyage_code_3" -> "voyage_code_3"
+        "code-indexer-temporal-embed_v4_0" -> "embed_v4_0"
+        "code-indexer-temporal" -> "temporal"
+    """
+    if collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
+        return collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
+    if collection_name == LEGACY_TEMPORAL_COLLECTION:
+        return "temporal"
+    return collection_name
+
+
 def get_model_name_for_provider(provider_name: str, config) -> str:
     """Read the embedding model name from config for the given provider.
 
