@@ -3098,28 +3098,16 @@ def index(
                 if clear:
                     console.print("🧹 Clearing temporal index...", style="cyan")
                     from .services.temporal.temporal_collection_naming import (
-                        resolve_temporal_collection_from_config as _resolve_temporal,
+                        clear_all_temporal_collections,
                     )
 
-                    collection_name = _resolve_temporal(config)
-                    vector_store.clear_collection(
-                        collection_name=collection_name,
-                        remove_projection_matrix=False,
+                    cleared_count = clear_all_temporal_collections(
+                        index_dir, vector_store
                     )
-                    # Also remove temporal metadata so indexing starts fresh
-                    # Use collection path to consolidate all temporal data
-                    collection_path = (
-                        config.codebase_dir / ".code-indexer/index" / collection_name
-                    )
-                    temporal_meta_path = collection_path / "temporal_meta.json"
-                    if temporal_meta_path.exists():
-                        temporal_meta_path.unlink()
-
-                    # Also remove progressive tracking file (Bug #8 fix)
-                    temporal_progress_path = collection_path / "temporal_progress.json"
-                    if temporal_progress_path.exists():
-                        temporal_progress_path.unlink()
-
+                    if cleared_count == 0:
+                        console.print(
+                            "No existing temporal collections found. Starting fresh index."
+                        )
                     console.print("✅ Temporal index cleared", style="green")
 
                 # Initialize temporal indexer

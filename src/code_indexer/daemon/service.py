@@ -521,13 +521,10 @@ class CIDXDaemonService(Service):
                 # Handle --clear flag for temporal collection
                 if kwargs.get("force_full", False):
                     from code_indexer.services.temporal.temporal_collection_naming import (
-                        resolve_temporal_collection_from_config as _resolve_temporal_coll,
+                        clear_all_temporal_collections,
                     )
 
-                    assert self.config_manager is not None
-                    vector_store.clear_collection(
-                        _resolve_temporal_coll(self.config_manager.get_config())
-                    )
+                    clear_all_temporal_collections(index_dir, vector_store)
 
                 # Setup callback infrastructure for temporal progress
                 import threading

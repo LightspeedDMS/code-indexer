@@ -8,9 +8,12 @@ Collection name format: code-indexer-temporal-{model_slug}
 Legacy format (backward compat): code-indexer-temporal
 """
 
+import logging
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 TEMPORAL_COLLECTION_PREFIX = "code-indexer-temporal-"
 LEGACY_TEMPORAL_COLLECTION = "code-indexer-temporal"
@@ -112,3 +115,35 @@ def get_temporal_collections(config, index_path: Path) -> List[Tuple[str, Path]]
         if entry.is_dir() and is_temporal_collection(entry.name):
             results.append((entry.name, entry))
     return results
+
+
+def clear_all_temporal_collections(index_path: Path, vector_store: Any) -> int:
+    """Clear all temporal collections (configured + orphaned) for --force re-index.
+
+    Uses glob enumeration as primary strategy to catch orphaned collections
+    that may no longer match the current provider configuration.
+
+    Args:
+        index_path: Path to .code-indexer/index/ directory
+        vector_store: FilesystemVectorStore instance
+
+    Returns:
+        Number of collections cleared
+    """
+    index_path = Path(index_path)
+    if not index_path.is_dir():
+        return 0
+
+    cleared = 0
+    for subdir in sorted(index_path.iterdir()):
+        if not subdir.is_dir() or not is_temporal_collection(subdir.name):
+            continue
+        logger.info("Clearing temporal collection: %s", subdir.name)
+        vector_store.clear_collection(collection_name=subdir.name)
+        for fname in ("temporal_progress.json", "temporal_meta.json"):
+            fpath = subdir / fname
+            if fpath.exists():
+                fpath.unlink()
+        cleared += 1
+
+    return cleared
