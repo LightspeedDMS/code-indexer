@@ -5057,23 +5057,15 @@ def query(
                     )
                     sys.exit(1)
 
-            # Initialize vector store and embedding provider for temporal queries
+            # Initialize vector store for temporal queries
             # Use the same pattern as regular query command
             config = config_manager.load()
-            embedding_provider = EmbeddingProviderFactory.create(config, console)
             backend = BackendFactory.create(
                 config=config, project_root=Path(config.codebase_dir)
             )
             vector_store_client = backend.get_vector_store_client()
 
-            # Health checks
-            if not embedding_provider.health_check():
-                if not quiet:
-                    console.print(
-                        f"[yellow]⚠️  {embedding_provider.get_provider_name().title()} service not available[/yellow]"
-                    )
-                sys.exit(1)
-
+            # Health check for vector store
             if not vector_store_client.health_check():
                 if not quiet:
                     console.print(
@@ -5081,23 +5073,14 @@ def query(
                     )
                 sys.exit(1)
 
-            # Use TEMPORAL collection name (not HEAD collection)
-            from .services.temporal.temporal_collection_naming import (
-                resolve_temporal_collection_from_config as _resolve_temporal,
+            # Execute temporal query via fusion dispatch (Story #636 wiring)
+            # Routes through parallel multi-provider execution with RRF fusion
+            from .services.temporal.temporal_fusion_dispatch import (
+                execute_temporal_query_with_fusion as _execute_temporal_fusion,
             )
 
-            collection_name = _resolve_temporal(config_manager.get_config())
+            index_dir = config.codebase_dir / ".code-indexer" / "index"
 
-            # Re-initialize temporal service with vector store dependencies
-            temporal_service = TemporalSearchService(
-                config_manager=config_manager,
-                project_root=Path(project_root),
-                vector_store_client=vector_store_client,
-                embedding_provider=embedding_provider,
-                collection_name=collection_name,
-            )
-
-            # Execute temporal query
             if not quiet:
                 if time_range != "all":
                     console.print(
@@ -5106,19 +5089,24 @@ def query(
                 # Story 2: All temporal results are changes now
                 console.print("   Showing changed chunks only (diff-based indexing)")
 
-            temporal_results = temporal_service.query_temporal(
-                query=query,
-                time_range=(start_date, end_date),
+            # file_path_filter: use first path_filter entry when only one provided
+            _path_filter_str = list(path_filter)[0] if len(path_filter) == 1 else None
+
+            temporal_results = _execute_temporal_fusion(
+                config=config_manager.get_config(),
+                index_path=index_dir,
+                vector_store=vector_store_client,
+                query_text=query,
                 limit=limit,
-                min_score=min_score,
-                # show_unchanged removed: Story 2
-                language=list(languages) if languages else None,
-                exclude_language=list(exclude_languages) if exclude_languages else None,
-                path_filter=list(path_filter) if path_filter else None,
-                exclude_path=list(exclude_paths) if exclude_paths else None,
-                diff_types=list(diff_types) if diff_types else None,
-                author=author,
-                chunk_type=chunk_type,  # AC3/AC4: Filter by chunk type (Story #476)
+                time_range=(start_date, end_date),
+                file_path_filter=_path_filter_str,
+            )
+
+            # Keep a reference for display helpers that expect a temporal_service param
+            temporal_service = TemporalSearchService(
+                config_manager=config_manager,
+                project_root=Path(project_root),
+                vector_store_client=vector_store_client,
             )
 
             # Display results
@@ -7119,124 +7107,156 @@ def _status_impl(ctx):
                     # Multimodal collection doesn't exist or error checking - skip silently
                     logger.debug(f"Multimodal collection check: {e}")
 
-                # Check for temporal index and display if exists
+                # Check for temporal indexes and display per-provider stats (Story #636)
                 try:
+                    import json
+                    import subprocess
+
                     from .services.temporal.temporal_collection_naming import (
-                        resolve_temporal_collection_from_config as _resolve_temporal,
+                        get_temporal_collections as _get_temporal_collections,
+                    )
+                    from .services.temporal.temporal_progressive_metadata import (
+                        TemporalProgressiveMetadata as _TempMeta,
                     )
 
-                    temporal_collection_name = _resolve_temporal(config)
-                    if fs_store.collection_exists(temporal_collection_name):
-                        # Read temporal metadata
-                        temporal_dir = index_path / temporal_collection_name
-                        temporal_meta_path = temporal_dir / "temporal_meta.json"
+                    temporal_collections = _get_temporal_collections(config, index_path)
 
-                        if temporal_meta_path.exists():
-                            import json
+                    if not temporal_collections:
+                        # No temporal collections found — show "not configured" row
+                        table.add_row(
+                            "Temporal Index",
+                            "⚪ Not configured",
+                            "Run cidx index --index-commits to build temporal index",
+                        )
+                    else:
+                        for coll_name, coll_path in temporal_collections:
+                            try:
+                                # Read progress metadata (commit count, state)
+                                progress = _TempMeta(coll_path)
+                                data = progress.load_progress()
+                                commit_count = len(data.get("completed_commits", []))
+                                state = data.get("state", "idle")
 
-                            with open(temporal_meta_path) as f:
-                                temporal_meta = json.load(f)
-
-                            # Extract metadata
-                            total_commits = temporal_meta.get("total_commits", 0)
-                            files_processed = temporal_meta.get("files_processed", 0)
-                            indexed_branches = temporal_meta.get("indexed_branches", [])
-                            indexed_at = temporal_meta.get("indexed_at", "")
-
-                            # Get vector count from collection
-                            vector_count = fs_store.count_points(
-                                temporal_collection_name
-                            )
-
-                            # Calculate storage size - include ALL files in temporal directory
-                            # Use du command for performance (30x faster than iterating files)
-                            import subprocess
-
-                            total_size_bytes = 0
-                            if temporal_dir.exists():
-                                try:
-                                    # Try GNU du first (Linux) with -sb for bytes
-                                    result = subprocess.run(
-                                        ["du", "-sb", str(temporal_dir)],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=5,
+                                # Read legacy temporal_meta.json if present
+                                temporal_meta_path = coll_path / "temporal_meta.json"
+                                total_commits = commit_count
+                                files_processed = 0
+                                indexed_branches: list = []
+                                indexed_at = ""
+                                if temporal_meta_path.exists():
+                                    with open(temporal_meta_path) as f:
+                                        temporal_meta = json.load(f)
+                                    total_commits = temporal_meta.get(
+                                        "total_commits", commit_count
                                     )
+                                    files_processed = temporal_meta.get(
+                                        "files_processed", 0
+                                    )
+                                    indexed_branches = temporal_meta.get(
+                                        "indexed_branches", []
+                                    )
+                                    indexed_at = temporal_meta.get("indexed_at", "")
 
-                                    # Check if command succeeded and has output
-                                    if result.returncode == 0 and result.stdout.strip():
-                                        stdout_parts = result.stdout.split()
-                                        if stdout_parts:
-                                            total_size_bytes = int(stdout_parts[0])
-                                    else:
-                                        # BSD du (macOS) doesn't support -b, use -k for kilobytes
-                                        result = subprocess.run(
-                                            ["du", "-sk", str(temporal_dir)],
+                                # Get vector count from collection
+                                vector_count = (
+                                    fs_store.count_points(coll_name)
+                                    if fs_store.collection_exists(coll_name)
+                                    else 0
+                                )
+
+                                # Calculate storage size via du
+                                total_size_bytes = 0
+                                if coll_path.exists():
+                                    try:
+                                        du_result = subprocess.run(
+                                            ["du", "-sb", str(coll_path)],
                                             capture_output=True,
                                             text=True,
                                             timeout=5,
                                         )
                                         if (
-                                            result.returncode == 0
-                                            and result.stdout.strip()
+                                            du_result.returncode == 0
+                                            and du_result.stdout.strip()
                                         ):
-                                            stdout_parts = result.stdout.split()
+                                            stdout_parts = du_result.stdout.split()
                                             if stdout_parts:
-                                                total_size_kb = int(stdout_parts[0])
-                                                total_size_bytes = total_size_kb * 1024
+                                                total_size_bytes = int(stdout_parts[0])
                                         else:
-                                            # If du command failed, fall back to Python iteration
-                                            raise subprocess.CalledProcessError(
-                                                result.returncode, result.args
+                                            du_result = subprocess.run(
+                                                ["du", "-sk", str(coll_path)],
+                                                capture_output=True,
+                                                text=True,
+                                                timeout=5,
                                             )
+                                            if (
+                                                du_result.returncode == 0
+                                                and du_result.stdout.strip()
+                                            ):
+                                                stdout_parts = du_result.stdout.split()
+                                                if stdout_parts:
+                                                    total_size_bytes = (
+                                                        int(stdout_parts[0]) * 1024
+                                                    )
+                                            else:
+                                                raise subprocess.CalledProcessError(
+                                                    du_result.returncode,
+                                                    du_result.args,
+                                                )
+                                    except (
+                                        FileNotFoundError,
+                                        subprocess.CalledProcessError,
+                                        ValueError,
+                                        IndexError,
+                                    ):
+                                        for fp in coll_path.rglob("*"):
+                                            if fp.is_file():
+                                                total_size_bytes += fp.stat().st_size
 
-                                except (
-                                    FileNotFoundError,
-                                    subprocess.CalledProcessError,
-                                    ValueError,
-                                    IndexError,
-                                ):
-                                    # Fallback to iteration if du command unavailable or fails
-                                    for file_path in temporal_dir.rglob("*"):
-                                        if file_path.is_file():
-                                            total_size_bytes += file_path.stat().st_size
-                            total_size_mb = total_size_bytes / (1024 * 1024)
+                                total_size_mb = total_size_bytes / (1024 * 1024)
 
-                            # Format date
-                            if indexed_at:
-                                from datetime import datetime
+                                # Format date
+                                if indexed_at:
+                                    from datetime import datetime
 
-                                dt = datetime.fromisoformat(
-                                    indexed_at.replace("Z", "+00:00")
+                                    dt = datetime.fromisoformat(
+                                        indexed_at.replace("Z", "+00:00")
+                                    )
+                                    formatted_date = dt.strftime("%Y-%m-%d %H:%M")
+                                else:
+                                    formatted_date = "Unknown"
+
+                                branch_list = (
+                                    ", ".join(indexed_branches)
+                                    if indexed_branches
+                                    else "None"
                                 )
-                                formatted_date = dt.strftime("%Y-%m-%d %H:%M")
-                            else:
-                                formatted_date = "Unknown"
 
-                            # Format branch list
-                            branch_list = (
-                                ", ".join(indexed_branches)
-                                if indexed_branches
-                                else "None"
-                            )
-
-                            # Build details string
-                            temporal_status = "✅ Available"
-                            temporal_details = (
-                                f"{total_commits} commits | {files_processed:,} files changed | {vector_count:,} vectors\n"
-                                f"Branches: {branch_list}\n"
-                                f"Storage: {total_size_mb:.1f} MB | Last indexed: {formatted_date}"
-                            )
-                            table.add_row(
-                                "Temporal Index", temporal_status, temporal_details
-                            )
-                        else:
-                            # Temporal collection exists but no metadata file
-                            temporal_status = "⚠️ Incomplete"
-                            temporal_details = "Collection exists but missing metadata"
-                            table.add_row(
-                                "Temporal Index", temporal_status, temporal_details
-                            )
+                                state_icon = (
+                                    "✅"
+                                    if state == "idle"
+                                    else ("🔄" if state == "building" else "⚠️")
+                                )
+                                temporal_status = f"{state_icon} {state.title()}"
+                                temporal_details = (
+                                    f"Provider: {coll_name}\n"
+                                    f"{total_commits} commits | {files_processed:,} files changed | {vector_count:,} vectors\n"
+                                    f"Branches: {branch_list}\n"
+                                    f"Storage: {total_size_mb:.1f} MB | Last indexed: {formatted_date}"
+                                )
+                                table.add_row(
+                                    "Temporal Index",
+                                    temporal_status,
+                                    temporal_details,
+                                )
+                            except Exception as e_coll:
+                                logger.warning(
+                                    f"Failed to read temporal collection {coll_name}: {e_coll}"
+                                )
+                                table.add_row(
+                                    "Temporal Index",
+                                    "⚠️ Error",
+                                    f"{coll_name}: {str(e_coll)[:80]}",
+                                )
                 except Exception as e:
                     # Don't fail status command if temporal check fails, but log the error
                     logger.warning(f"Failed to check temporal index status: {e}")
