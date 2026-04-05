@@ -183,7 +183,8 @@ class DashboardService:
     def _get_health_data(self) -> HealthCheckResponse:
         """Get system health data."""
         try:
-            return health_service.get_system_health()
+            result: HealthCheckResponse = health_service.get_system_health()
+            return result
         except Exception as e:
             logger.error(
                 format_error_log(
@@ -688,10 +689,20 @@ class DashboardService:
 
             # Check if temporal collection exists
             index_dir = Path(activated_manager.data_dir) / "index"
-        temporal_collection_name = "code-indexer-temporal"
-        temporal_collection_path = index_dir / temporal_collection_name
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal,
+        )
 
-        if not temporal_collection_path.exists():
+        temporal_collection_path = next(
+            (
+                d
+                for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
+                if d.is_dir() and _is_temporal(d.name)
+            ),
+            None,
+        )
+
+        if temporal_collection_path is None or not temporal_collection_path.exists():
             return {
                 "format": "none",
                 "file_count": 0,
@@ -708,7 +719,7 @@ class DashboardService:
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
         store = FilesystemVectorStore(base_path=index_dir)
-        file_count = store.get_indexed_file_count_fast(temporal_collection_name)
+        file_count = store.get_indexed_file_count_fast(temporal_collection_path.name)
 
         # Return appropriate status based on format
         if format_version == "v2":

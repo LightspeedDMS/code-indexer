@@ -312,8 +312,14 @@ class CIDXDaemonService(Service):
             assert self.cache_entry is not None  # Guaranteed by _ensure_cache_loaded
 
             # Load temporal cache if not loaded
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                resolve_temporal_collection_from_config as _resolve_temporal,
+            )
+
+            assert self.config_manager is not None
+            _temporal_coll = _resolve_temporal(self.config_manager.get_config())
             temporal_collection_path = (
-                project_root / ".code-indexer/index/code-indexer-temporal"
+                project_root / ".code-indexer" / "index" / _temporal_coll
             )
 
             if not temporal_collection_path.exists():
@@ -339,7 +345,6 @@ class CIDXDaemonService(Service):
             from code_indexer.services.temporal.temporal_search_service import (
                 TemporalSearchService,
             )
-            from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
             from code_indexer.config import ConfigManager
             from code_indexer.backends.backend_factory import BackendFactory
             from code_indexer.services.embedding_factory import EmbeddingProviderFactory
@@ -365,7 +370,7 @@ class CIDXDaemonService(Service):
                 project_root=project_root,
                 vector_store_client=self.vector_store,
                 embedding_provider=self.embedding_provider,
-                collection_name=TemporalIndexer.TEMPORAL_COLLECTION_NAME,
+                collection_name=_resolve_temporal(self.config_manager.get_config()),
             )
 
             # Convert time_range string to tuple (same logic as cli.py:4819-4840)
@@ -515,7 +520,14 @@ class CIDXDaemonService(Service):
 
                 # Handle --clear flag for temporal collection
                 if kwargs.get("force_full", False):
-                    vector_store.clear_collection("code-indexer-temporal")
+                    from code_indexer.services.temporal.temporal_collection_naming import (
+                        resolve_temporal_collection_from_config as _resolve_temporal_coll,
+                    )
+
+                    assert self.config_manager is not None
+                    vector_store.clear_collection(
+                        _resolve_temporal_coll(self.config_manager.get_config())
+                    )
 
                 # Setup callback infrastructure for temporal progress
                 import threading

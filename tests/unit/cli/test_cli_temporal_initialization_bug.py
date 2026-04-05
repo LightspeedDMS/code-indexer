@@ -34,7 +34,7 @@ def test_temporal_service_initialization_includes_vector_store_client():
         config_file.write_text(json.dumps(config_data))
 
         # Create a temporal index file to simulate existing temporal index
-        # Use the correct collection name from TemporalSearchService.TEMPORAL_COLLECTION_NAME
+        # Use the correct collection name from LEGACY_TEMPORAL_COLLECTION (temporal_collection_naming)
         temporal_index_dir = index_dir / "code-indexer-temporal"
         temporal_index_dir.mkdir(parents=True, exist_ok=True)
         collection_meta = temporal_index_dir / "collection_meta.json"
@@ -168,7 +168,7 @@ def test_temporal_query_e2e_with_real_initialization():
         config_file.write_text(json.dumps(config_data))
 
         # Create temporal index with test data
-        # Use the correct collection name from TemporalSearchService.TEMPORAL_COLLECTION_NAME
+        # Use the correct collection name from LEGACY_TEMPORAL_COLLECTION (temporal_collection_naming)
         temporal_dir = index_dir / "code-indexer-temporal"
         temporal_dir.mkdir(parents=True, exist_ok=True)
 

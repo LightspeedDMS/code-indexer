@@ -2256,17 +2256,24 @@ def _get_golden_repos_list(backend_registry=None):
                     if tantivy_dir.exists() and any(tantivy_dir.iterdir()):
                         repo["has_fts"] = True
 
-                    # Check temporal index (code-indexer-temporal collection)
-                    temporal_dir = (
-                        index_dir / "code-indexer-temporal"
-                        if index_dir.exists()
-                        else None
+                    # Check temporal index (any provider-aware or legacy temporal collection)
+                    from code_indexer.services.temporal.temporal_collection_naming import (
+                        is_temporal_collection as _is_temporal,
                     )
-                    if (
-                        temporal_dir
-                        and temporal_dir.exists()
-                        and (temporal_dir / "hnsw_index.bin").exists()
-                    ):
+
+                    temporal_dir = next(
+                        (
+                            d
+                            for d in sorted(
+                                index_dir.iterdir() if index_dir.is_dir() else []
+                            )
+                            if d.is_dir()
+                            and _is_temporal(d.name)
+                            and (d / "hnsw_index.bin").exists()
+                        ),
+                        None,
+                    )
+                    if temporal_dir is not None:
                         repo["has_temporal"] = True
 
                     # Check SCIP index (.code-indexer/scip/ with .scip.db files)

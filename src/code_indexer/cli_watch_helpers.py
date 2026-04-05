@@ -17,6 +17,18 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def _any_temporal_collection_exists(index_base: Path) -> bool:
+    """Return True if any temporal collection directory exists under index_base."""
+    from .services.temporal.temporal_collection_naming import is_temporal_collection
+
+    if not index_base.exists():
+        return False
+    return any(
+        entry.is_dir() and is_temporal_collection(entry.name)
+        for entry in index_base.iterdir()
+    )
+
+
 def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
     """Detect which indexes exist and should be watched.
 
@@ -43,7 +55,7 @@ def detect_existing_indexes(project_root: Path) -> Dict[str, bool]:
     return {
         "semantic": (index_base / "code-indexer-HEAD").exists(),
         "fts": (index_base / "tantivy-fts").exists(),
-        "temporal": (index_base / "code-indexer-temporal").exists(),
+        "temporal": _any_temporal_collection_exists(index_base),
     }
 
 

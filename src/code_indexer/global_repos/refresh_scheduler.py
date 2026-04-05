@@ -1759,16 +1759,20 @@ class RefreshScheduler:
             - temporal: True if temporal index exists
             - scip: True if SCIP code intelligence indexes exist
         """
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal,
+        )
+
         code_indexer_dir = repo_path / ".code-indexer"
 
         # Check semantic index: .code-indexer/index/ directory with collections
         semantic_index_dir = code_indexer_dir / "index"
         if semantic_index_dir.exists() and semantic_index_dir.is_dir():
-            # Check for collection subdirectories with vector data (exclude temporal collection)
+            # Check for collection subdirectories with vector data (exclude temporal collections)
             collections = [
                 d
                 for d in semantic_index_dir.iterdir()
-                if d.is_dir() and d.name != "code-indexer-temporal"
+                if d.is_dir() and not _is_temporal(d.name)
             ]
             semantic_exists = len(collections) > 0
         else:
@@ -1778,9 +1782,15 @@ class RefreshScheduler:
         fts_index_dir = code_indexer_dir / "tantivy_index"
         fts_exists = fts_index_dir.exists() and fts_index_dir.is_dir()
 
-        # Check temporal index: .code-indexer/index/code-indexer-temporal/ directory (production path)
-        temporal_index_dir = semantic_index_dir / "code-indexer-temporal"
-        temporal_exists = temporal_index_dir.exists() and temporal_index_dir.is_dir()
+        # Check temporal index: any temporal collection directory under index (production path)
+        temporal_exists = (
+            semantic_index_dir.exists()
+            and semantic_index_dir.is_dir()
+            and any(
+                d.is_dir() and _is_temporal(d.name)
+                for d in semantic_index_dir.iterdir()
+            )
+        )
 
         # Check SCIP indexes: delegate to _has_scip_indexes()
         scip_exists = self._has_scip_indexes(repo_path)

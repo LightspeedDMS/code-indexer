@@ -506,17 +506,23 @@ async def get_repository_indexes(
         fts_path = index_base_path / "tantivy"
         has_fts = fts_path.exists() and fts_path.is_dir()
 
-        # Temporal index: temporal/ OR code-indexer-temporal/ directory with hnsw_index.bin
-        temporal_path1 = index_base_path / "temporal"
-        temporal_path2 = index_base_path / "code-indexer-temporal"
-        has_temporal = False
+        # Temporal index: temporal/ (legacy) OR any code-indexer-temporal* directory
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal,
+        )
 
-        if temporal_path1.exists() and temporal_path1.is_dir():
-            temporal_bin = temporal_path1 / "hnsw_index.bin"
-            has_temporal = temporal_bin.exists() and temporal_bin.is_file()
-        elif temporal_path2.exists() and temporal_path2.is_dir():
-            temporal_bin = temporal_path2 / "hnsw_index.bin"
-            has_temporal = temporal_bin.exists() and temporal_bin.is_file()
+        has_temporal = False
+        # Check legacy "temporal" directory first
+        legacy_temporal = index_base_path / "temporal"
+        if legacy_temporal.is_dir():
+            has_temporal = (legacy_temporal / "hnsw_index.bin").is_file()
+        # Scan for provider-aware or legacy code-indexer-temporal* directories
+        if not has_temporal and index_base_path.is_dir():
+            has_temporal = any(
+                (d / "hnsw_index.bin").is_file()
+                for d in sorted(index_base_path.iterdir())
+                if d.is_dir() and _is_temporal(d.name)
+            )
 
         # SCIP index: scip/ directory with .scip.db files
         scip_path = clone_path / ".code-indexer" / "scip"

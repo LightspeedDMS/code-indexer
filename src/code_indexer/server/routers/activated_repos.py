@@ -305,9 +305,23 @@ async def get_indexes_status(
         fts_path = index_dir / "tantivy"
         indexes.append(_check_index_status(fts_path, "fts"))
 
-        # Temporal index (collection name is code-indexer-temporal)
-        temporal_path = index_dir / "code-indexer-temporal" / "hnsw_index.bin"
-        indexes.append(_check_index_status(temporal_path, "temporal"))
+        # Temporal index (any provider-aware or legacy temporal collection)
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            LEGACY_TEMPORAL_COLLECTION,
+            is_temporal_collection as _is_temporal,
+        )
+
+        temporal_hnsw = next(
+            (
+                d / "hnsw_index.bin"
+                for d in sorted(index_dir.iterdir() if index_dir.exists() else [])
+                if d.is_dir()
+                and _is_temporal(d.name)
+                and (d / "hnsw_index.bin").exists()
+            ),
+            index_dir / LEGACY_TEMPORAL_COLLECTION / "hnsw_index.bin",
+        )
+        indexes.append(_check_index_status(temporal_hnsw, "temporal"))
 
         # SCIP index
         scip_path = repo_path_obj / ".code-indexer" / "scip"

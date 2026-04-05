@@ -9,6 +9,9 @@ import subprocess
 from unittest.mock import MagicMock, patch
 import pytest
 
+from code_indexer.services.temporal.temporal_collection_naming import (
+    LEGACY_TEMPORAL_COLLECTION,
+)
 from code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
@@ -148,7 +151,7 @@ class TestBeginIndexingCall:
                 # Verify begin_indexing was called BEFORE processing
                 # This will FAIL initially as begin_indexing is not called
                 vector_store.begin_indexing.assert_called_once_with(
-                    TemporalIndexer.TEMPORAL_COLLECTION_NAME
+                    LEGACY_TEMPORAL_COLLECTION
                 )
 
 
@@ -249,7 +252,7 @@ class TestPointExistenceFiltering:
                     # This simulates what _process_commits_parallel does
                     # Load existing IDs (the fix adds this)
                     existing_ids = indexer.vector_store.load_id_index(
-                        indexer.TEMPORAL_COLLECTION_NAME
+                        indexer.collection_name
                     )
 
                     # Filter and upsert only new points (the fix adds this logic)
@@ -261,7 +264,7 @@ class TestPointExistenceFiltering:
 
                     if new_points:
                         indexer.vector_store.upsert_points(
-                            indexer.TEMPORAL_COLLECTION_NAME, new_points
+                            indexer.collection_name, new_points
                         )
                     return (1, 4, 12)  # 1 commit processed, 4 files, 12 vectors
 

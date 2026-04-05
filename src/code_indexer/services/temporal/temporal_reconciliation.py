@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 from typing import Set, Tuple, List
 
+from .temporal_collection_naming import LEGACY_TEMPORAL_COLLECTION
+
 from .models import CommitInfo
 from ...storage.temporal_metadata_store import TemporalMetadataStore
 
@@ -143,7 +145,7 @@ def discover_indexed_commits_from_disk(collection_path: Path) -> Tuple[Set[str],
 def reconcile_temporal_index(
     vector_store,
     all_commits: List[CommitInfo],
-    temporal_collection: str = "code-indexer-temporal",
+    temporal_collection: str = LEGACY_TEMPORAL_COLLECTION,
 ) -> List[CommitInfo]:
     """Reconcile git history with indexed commits to find missing commits.
 

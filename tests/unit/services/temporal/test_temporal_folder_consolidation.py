@@ -16,6 +16,9 @@ from pathlib import Path
 import pytest
 
 from src.code_indexer.config import ConfigManager
+from src.code_indexer.services.temporal.temporal_collection_naming import (
+    LEGACY_TEMPORAL_COLLECTION,
+)
 from src.code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
@@ -73,7 +76,7 @@ def test_temporal_directory_consolidation(temp_git_repo):
     temporal_indexer = TemporalIndexer(config_manager, vector_store)
 
     # Expected paths
-    collection_name = TemporalIndexer.TEMPORAL_COLLECTION_NAME
+    collection_name = LEGACY_TEMPORAL_COLLECTION
     expected_temporal_dir = index_dir / collection_name
     wrong_temporal_dir = index_dir / "temporal"
 
@@ -118,7 +121,7 @@ def test_watch_command_vector_store_initialization(temp_git_repo):
     # With the old way, temporal_dir would be nested incorrectly
     # The bug: old_vector_store.base_path is the collection dir, so
     # temporal_dir becomes collection_dir/TEMPORAL_COLLECTION_NAME (nested!)
-    collection_name = TemporalIndexer.TEMPORAL_COLLECTION_NAME
+    collection_name = LEGACY_TEMPORAL_COLLECTION
 
     # This demonstrates the BUG with the old way
     # The old way creates double-nesting: collection_dir/TEMPORAL_COLLECTION_NAME
@@ -155,14 +158,13 @@ def test_reconciliation_uses_collection_path(temp_git_repo):
     file paths should use collection_path, not vector_store.base_path / "temporal"
     """
     from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
-    from src.code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 
     project_root = temp_git_repo
     index_dir = project_root / ".code-indexer" / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
 
     FilesystemVectorStore(base_path=index_dir, project_root=project_root)
-    collection_name = TemporalIndexer.TEMPORAL_COLLECTION_NAME
+    collection_name = LEGACY_TEMPORAL_COLLECTION
     collection_path = index_dir / collection_name
 
     # Create some fake metadata files in the collection directory
@@ -191,11 +193,10 @@ def test_clear_command_metadata_paths(temp_git_repo):
     This verifies that the clear command in cli.py uses the collection
     directory for temporal metadata files, not the old temporal/ directory.
     """
-    from src.code_indexer.services.temporal.temporal_indexer import TemporalIndexer
 
     project_root = temp_git_repo
     index_dir = project_root / ".code-indexer" / "index"
-    collection_name = TemporalIndexer.TEMPORAL_COLLECTION_NAME
+    collection_name = LEGACY_TEMPORAL_COLLECTION
 
     # The CORRECT paths (what clear command should use after fix)
     correct_meta_path = index_dir / collection_name / "temporal_meta.json"

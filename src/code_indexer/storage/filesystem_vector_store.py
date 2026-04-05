@@ -714,9 +714,11 @@ class FilesystemVectorStore:
         """
         with self._temporal_metadata_lock:
             if self._temporal_metadata_store is None:
-                temporal_collection_path = (
-                    self.base_path / TemporalMetadataStore.TEMPORAL_COLLECTION_NAME
+                from code_indexer.services.temporal.temporal_collection_naming import (
+                    LEGACY_TEMPORAL_COLLECTION,
                 )
+
+                temporal_collection_path = self.base_path / LEGACY_TEMPORAL_COLLECTION
                 self._temporal_metadata_store = TemporalMetadataStore(
                     temporal_collection_path
                 )
@@ -796,10 +798,14 @@ class FilesystemVectorStore:
         uncommitted_files = set()
 
         # Skip blob hash lookup for temporal collection (FIX 1: Avoid Errno 7 on large temporal indexes)
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal_collection,
+        )
+
         if (
             repo_root is not None
             and file_paths
-            and collection_name != "code-indexer-temporal"
+            and not _is_temporal_collection(collection_name)
         ):
             blob_hashes = self._get_blob_hashes_batch(file_paths, repo_root)
             uncommitted_files = self._check_uncommitted_batch(file_paths, repo_root)

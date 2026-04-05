@@ -52,9 +52,6 @@ class TemporalSearchResults:
 class TemporalSearchService:
     """Service for temporal semantic search with date filtering."""
 
-    # Temporal collection name - must match TemporalIndexer
-    TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
-
     def __init__(
         self,
         config_manager,
@@ -107,9 +104,7 @@ class TemporalSearchService:
         # Story 2: Check for temporal collection instead of commits.db
         if self.vector_store_client:
             return bool(
-                self.vector_store_client.collection_exists(
-                    self.TEMPORAL_COLLECTION_NAME
-                )
+                self.vector_store_client.collection_exists(self.collection_name)
             )
         return False
 

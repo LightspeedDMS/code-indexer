@@ -3097,7 +3097,11 @@ def index(
                 # Check if --clear flag is set for temporal collection
                 if clear:
                     console.print("🧹 Clearing temporal index...", style="cyan")
-                    collection_name = "code-indexer-temporal"
+                    from .services.temporal.temporal_collection_naming import (
+                        resolve_temporal_collection_from_config as _resolve_temporal,
+                    )
+
+                    collection_name = _resolve_temporal(config)
                     vector_store.clear_collection(
                         collection_name=collection_name,
                         remove_projection_matrix=False,
@@ -5090,12 +5094,11 @@ def query(
                 sys.exit(1)
 
             # Use TEMPORAL collection name (not HEAD collection)
-            # Import here to get constant
-            from .services.temporal.temporal_search_service import (
-                TemporalSearchService as TSS,
+            from .services.temporal.temporal_collection_naming import (
+                resolve_temporal_collection_from_config as _resolve_temporal,
             )
 
-            collection_name = TSS.TEMPORAL_COLLECTION_NAME
+            collection_name = _resolve_temporal(config_manager.get_config())
 
             # Re-initialize temporal service with vector store dependencies
             temporal_service = TemporalSearchService(
@@ -7130,7 +7133,11 @@ def _status_impl(ctx):
 
                 # Check for temporal index and display if exists
                 try:
-                    temporal_collection_name = "code-indexer-temporal"
+                    from .services.temporal.temporal_collection_naming import (
+                        resolve_temporal_collection_from_config as _resolve_temporal,
+                    )
+
+                    temporal_collection_name = _resolve_temporal(config)
                     if fs_store.collection_exists(temporal_collection_name):
                         # Read temporal metadata
                         temporal_dir = index_path / temporal_collection_name

@@ -287,6 +287,8 @@ class TestExecuteTemporalQueryMetadataExtraction:
         ):
             # Setup config manager mock
             mock_config = MagicMock()
+            mock_config.embedding_provider = "voyage-ai"
+            mock_config.voyage_ai.model = "voyage-code-3"
             mock_config_manager = MagicMock()
             mock_config_manager.get_config.return_value = mock_config
             MockConfigManager.create_with_backtrack.return_value = mock_config_manager
@@ -310,7 +312,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
             )
             mock_temporal_service.query_temporal.return_value = temporal_results
             MockTemporalService.return_value = mock_temporal_service
-            MockTemporalService.TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
 
             # Execute temporal query
             results = semantic_query_manager._execute_temporal_query(
@@ -415,7 +416,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
             )
             mock_temporal_service.query_temporal.return_value = temporal_results
             MockTemporalService.return_value = mock_temporal_service
-            MockTemporalService.TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
+
+            mock_config.embedding_provider = "voyage-ai"
+            mock_config.voyage_ai.model = "voyage-code-3"
 
             results = semantic_query_manager._execute_temporal_query(
                 repo_path=repo_path,
@@ -520,7 +523,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
             )
             mock_temporal_service.query_temporal.return_value = temporal_results
             MockTemporalService.return_value = mock_temporal_service
-            MockTemporalService.TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
+
+            mock_config.embedding_provider = "voyage-ai"
+            mock_config.voyage_ai.model = "voyage-code-3"
 
             results = semantic_query_manager._execute_temporal_query(
                 repo_path=repo_path,
@@ -638,7 +643,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
             )
             mock_temporal_service.query_temporal.return_value = temporal_results
             MockTemporalService.return_value = mock_temporal_service
-            MockTemporalService.TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
+
+            mock_config.embedding_provider = "voyage-ai"
+            mock_config.voyage_ai.model = "voyage-code-3"
 
             # Should not raise exception with missing fields
             results = semantic_query_manager._execute_temporal_query(

@@ -24,6 +24,7 @@ from ...services.file_identifier import FileIdentifier
 from ...storage.filesystem_vector_store import FilesystemVectorStore
 
 from .models import CommitInfo
+from .temporal_collection_naming import LEGACY_TEMPORAL_COLLECTION
 from .temporal_diff_scanner import TemporalDiffScanner
 from .temporal_progressive_metadata import TemporalProgressiveMetadata
 
@@ -61,25 +62,48 @@ class TemporalIndexer:
     4. Track processed commits and store vectors with commit metadata
     """
 
-    # Temporal collection name - must match TemporalSearchService
-    TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
-
     # Batch retry configuration
     MAX_RETRIES = 5
     RETRY_DELAYS = [2, 5, 10, 30, 60]  # Exponential backoff delays in seconds
 
     def __init__(
-        self, config_manager: ConfigManager, vector_store: FilesystemVectorStore
+        self,
+        config_manager: ConfigManager,
+        vector_store: FilesystemVectorStore,
+        collection_name: str = LEGACY_TEMPORAL_COLLECTION,
     ):
         """Initialize temporal indexer.
 
         Args:
             config_manager: Configuration manager
             vector_store: Filesystem vector store for storage
+            collection_name: Logical collection identifier (not a filesystem path).
+                Must be non-empty, contain no path separators (/ or \\),
+                no parent-directory segments (. or ..), and not be an absolute path.
+                Default: 'code-indexer-temporal' (legacy backward-compat).
         """
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        name = collection_name.strip() if isinstance(collection_name, str) else ""
+        if not name:
+            raise ValueError("collection_name must not be empty")
+        if name in {".", ".."}:
+            raise ValueError(
+                f"collection_name cannot be '.' or '..': {collection_name!r}"
+            )
+        if any(sep in name for sep in ("/", "\\")):
+            raise ValueError(
+                f"collection_name must be a plain name with no path separators: {collection_name!r}"
+            )
+        if PurePosixPath(name).is_absolute() or PureWindowsPath(name).is_absolute():
+            raise ValueError(
+                f"collection_name must be a plain name, not an absolute path: {collection_name!r}"
+            )
+
         self.config_manager = config_manager
         self.config = config_manager.get_config()
         self.vector_store = vector_store
+        self.collection_name = name
 
         # Use vector store's project_root as the codebase directory
         self.codebase_dir = vector_store.project_root
@@ -89,7 +113,7 @@ class TemporalIndexer:
 
         # Initialize temporal directory using collection path to consolidate all data
         # This ensures metadata and vectors are in the same location
-        self.temporal_dir = self.vector_store.base_path / self.TEMPORAL_COLLECTION_NAME
+        self.temporal_dir = self.vector_store.base_path / self.collection_name
         self.temporal_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize override filter service if override config exists
@@ -187,13 +211,11 @@ class TemporalIndexer:
         )  # Default to voyage-code-3 dims
 
         # Check if collection exists, create if not
-        if not self.vector_store.collection_exists(self.TEMPORAL_COLLECTION_NAME):
+        if not self.vector_store.collection_exists(self.collection_name):
             logger.info(
-                f"Creating temporal collection '{self.TEMPORAL_COLLECTION_NAME}' with dimension={vector_size}"
+                f"Creating temporal collection '{self.collection_name}' with dimension={vector_size}"
             )
-            self.vector_store.create_collection(
-                self.TEMPORAL_COLLECTION_NAME, vector_size
-            )
+            self.vector_store.create_collection(self.collection_name, vector_size)
 
     def _count_tokens(self, text: str, vector_manager) -> int:
         """Count tokens using provider-specific token counting.
@@ -262,7 +284,7 @@ class TemporalIndexer:
 
             logger.info("Reconciling disk state with git history...")
             missing_commits = reconcile_temporal_index(
-                self.vector_store, commits_from_git, self.TEMPORAL_COLLECTION_NAME
+                self.vector_store, commits_from_git, self.collection_name
             )
 
             # Log reconciliation summary
@@ -279,9 +301,7 @@ class TemporalIndexer:
             if not commits_from_git:
                 logger.info("All commits already indexed, rebuilding indexes only...")
                 # Still rebuild indexes (AC4)
-                self.vector_store.end_indexing(
-                    collection_name=self.TEMPORAL_COLLECTION_NAME
-                )
+                self.vector_store.end_indexing(collection_name=self.collection_name)
                 return IndexingResult(
                     total_commits=0,
                     files_processed=0,
@@ -300,7 +320,7 @@ class TemporalIndexer:
 
         # Initialize incremental HNSW tracking for the temporal collection
         # This enables change tracking for efficient HNSW index updates
-        self.vector_store.begin_indexing(self.TEMPORAL_COLLECTION_NAME)
+        self.vector_store.begin_indexing(self.collection_name)
 
         current_branch = self._get_current_branch()
 
@@ -511,9 +531,7 @@ class TemporalIndexer:
 
         # Load existing point IDs to avoid duplicate processing
         # Create a copy to avoid mutating the store's data structure
-        existing_ids = set(
-            self.vector_store.load_id_index(self.TEMPORAL_COLLECTION_NAME)
-        )
+        existing_ids = set(self.vector_store.load_id_index(self.collection_name))
         logger.info(
             f"Loaded {len(existing_ids)} existing temporal points to avoid re-indexing"
         )
@@ -998,7 +1016,7 @@ class TemporalIndexer:
                                 # Only upsert new points
                                 if new_points:
                                     self.vector_store.upsert_points(
-                                        collection_name=self.TEMPORAL_COLLECTION_NAME,
+                                        collection_name=self.collection_name,
                                         points=new_points,
                                     )
 
@@ -1229,7 +1247,7 @@ class TemporalIndexer:
 
                 # Store in temporal collection (NOT default collection)
                 self.vector_store.upsert_points(
-                    collection_name=self.TEMPORAL_COLLECTION_NAME, points=points
+                    collection_name=self.collection_name, points=points
                 )
 
         except Exception as e:
@@ -1263,6 +1281,6 @@ class TemporalIndexer:
         """Clean up resources and finalize HNSW index."""
         # Build HNSW index for temporal collection
         logger.info("Building HNSW index for temporal collection...")
-        self.vector_store.end_indexing(collection_name=self.TEMPORAL_COLLECTION_NAME)
+        self.vector_store.end_indexing(collection_name=self.collection_name)
 
         # Temporal indexing cleanup complete

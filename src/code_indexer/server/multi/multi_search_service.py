@@ -429,12 +429,16 @@ class MultiSearchService:
             embedding_provider = EmbeddingProviderFactory.create(config, console=None)
 
             # Create temporal service
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                resolve_temporal_collection_from_config,
+            )
+
             temporal_service = TemporalSearchService(
                 config_manager=config_manager,
                 project_root=repo_path,
                 vector_store_client=vector_store_client,
                 embedding_provider=embedding_provider,
-                collection_name=TemporalSearchService.TEMPORAL_COLLECTION_NAME,
+                collection_name=resolve_temporal_collection_from_config(config),
             )
 
             # Check if temporal index exists

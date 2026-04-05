@@ -676,9 +676,21 @@ class ActivatedRepoIndexManager:
 
     def _get_temporal_status(self, repo_path: Path) -> Dict[str, Any]:
         """Get temporal index status."""
-        temporal_dir = repo_path / ".code-indexer" / "index" / "code-indexer-temporal"
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal,
+        )
 
-        if not temporal_dir.exists():
+        index_dir = repo_path / ".code-indexer" / "index"
+        temporal_dir = next(
+            (
+                d
+                for d in sorted(index_dir.iterdir() if index_dir.is_dir() else [])
+                if d.is_dir() and _is_temporal(d.name)
+            ),
+            None,
+        )
+
+        if temporal_dir is None or not temporal_dir.exists():
             return {"status": "not_indexed"}
 
         metadata_file = temporal_dir / "metadata.json"

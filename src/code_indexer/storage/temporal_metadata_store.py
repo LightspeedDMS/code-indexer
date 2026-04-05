@@ -57,7 +57,6 @@ class TemporalMetadataStore:
         );
     """
 
-    TEMPORAL_COLLECTION_NAME = "code-indexer-temporal"
     METADATA_DB_NAME = "temporal_metadata.db"
     HASH_PREFIX_LENGTH = 16  # 16-char SHA256 prefix for v2 format filenames
 
@@ -381,12 +380,16 @@ class TemporalMetadataStore:
 
     @classmethod
     def is_temporal_collection(cls, collection_name: str) -> bool:
-        """Check if collection name is the temporal collection.
+        """Check if collection name is a temporal collection (legacy or provider-aware).
 
         Args:
             collection_name: Collection name to check
 
         Returns:
-            True if this is the temporal collection
+            True if this is a temporal collection
         """
-        return collection_name == cls.TEMPORAL_COLLECTION_NAME
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection as _is_temporal,
+        )
+
+        return bool(_is_temporal(collection_name))

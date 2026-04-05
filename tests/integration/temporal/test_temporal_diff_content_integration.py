@@ -99,7 +99,7 @@ class TestTemporalDiffContentIntegration:
             )
 
             # Get the collection name from the indexer
-            collection_name = temporal_indexer.TEMPORAL_COLLECTION_NAME
+            collection_name = temporal_indexer.collection_name
 
             # Index the temporal diffs (index all commits)
             temporal_indexer.index_commits()
