@@ -202,13 +202,22 @@ def start_watch_mode(
             TemporalProgressiveMetadata,
         )
 
-        temporal_index_dir = project_root / ".code-indexer/index/code-indexer-temporal"
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            resolve_temporal_collection_from_config,
+        )
 
-        # Initialize vector store (FilesystemVectorStore)
-        vector_store = FilesystemVectorStore(temporal_index_dir)
+        _config = config_manager.get_config()
+        _temporal_coll = resolve_temporal_collection_from_config(_config)
+        index_root = project_root / ".code-indexer" / "index"
+        temporal_index_dir = index_root / _temporal_coll
 
-        # Create temporal indexer (using new API)
-        temporal_indexer = TemporalIndexer(config_manager, vector_store)
+        # Initialize vector store (FilesystemVectorStore) at index root, not collection subdir
+        vector_store = FilesystemVectorStore(index_root)
+
+        # Create temporal indexer with provider-aware collection name
+        temporal_indexer = TemporalIndexer(
+            config_manager, vector_store, collection_name=_temporal_coll
+        )
 
         # Create progressive metadata
         progressive_metadata = TemporalProgressiveMetadata(temporal_index_dir)

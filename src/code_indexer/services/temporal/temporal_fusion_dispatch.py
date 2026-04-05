@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 TEMPORAL_QUERY_TIMEOUT_SECONDS = 15
 
+# Latency placeholder when per-future timing is not available
+_UNKNOWN_LATENCY_MS = 0.0
+
 
 def execute_temporal_query_with_fusion(
     config: Any,
@@ -42,13 +45,15 @@ def execute_temporal_query_with_fusion(
     file_path_filter: Optional[str] = None,
     show_evolution: bool = False,
     provider_filter: Optional[str] = None,
-    # Server params (Story #640)
+    # Server params (Story #640, audit fix B2)
     at_commit: Optional[str] = None,
     include_removed: Optional[bool] = None,
     language: Optional[str] = None,
     exclude_language: Optional[str] = None,
     evolution_limit: Optional[int] = None,
     exclude_path: Optional[str] = None,
+    diff_types: Optional[List[str]] = None,
+    author: Optional[str] = None,
 ) -> Any:
     """Execute temporal query with multi-provider fusion.
 
@@ -73,6 +78,11 @@ def execute_temporal_query_with_fusion(
         TemporalSearchResults with fused results
     """
     from .temporal_search_service import TemporalSearchResults
+
+    # Auto-migrate legacy collection if present (Story #629, wired by audit fix F2)
+    from .temporal_migration import migrate_legacy_temporal_collection
+
+    migrate_legacy_temporal_collection(index_path, config)
 
     collections = _discover_queryable_collections(config, index_path, provider_filter)
 
@@ -105,6 +115,8 @@ def execute_temporal_query_with_fusion(
             language=language,
             exclude_language=exclude_language,
             exclude_path=exclude_path,
+            diff_types=diff_types,
+            author=author,
         )
 
     return _query_multi_provider_fusion(
@@ -118,6 +130,8 @@ def execute_temporal_query_with_fusion(
         language=language,
         exclude_language=exclude_language,
         exclude_path=exclude_path,
+        diff_types=diff_types,
+        author=author,
     )
 
 
@@ -152,6 +166,8 @@ def _query_single_provider(
     language: Optional[str] = None,
     exclude_language: Optional[str] = None,
     exclude_path: Optional[str] = None,
+    diff_types: Optional[List[str]] = None,
+    author: Optional[str] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     import time as _time
@@ -181,6 +197,8 @@ def _query_single_provider(
             language=[language] if language else None,
             exclude_language=[exclude_language] if exclude_language else None,
             exclude_path=[exclude_path] if exclude_path else None,
+            diff_types=diff_types,
+            author=author,
         )
         record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
     except Exception:
@@ -206,6 +224,8 @@ def _query_multi_provider_fusion(
     language: Optional[str] = None,
     exclude_language: Optional[str] = None,
     exclude_path: Optional[str] = None,
+    diff_types: Optional[List[str]] = None,
+    author: Optional[str] = None,
 ) -> Any:
     """Query multiple providers in parallel and fuse results."""
     from .temporal_search_service import TemporalSearchResults, ALL_TIME_RANGE
@@ -234,6 +254,8 @@ def _query_multi_provider_fusion(
             language=[language] if language else None,
             exclude_language=[exclude_language] if exclude_language else None,
             exclude_path=[exclude_path] if exclude_path else None,
+            diff_types=diff_types,
+            author=author,
         )
 
     from .temporal_search_service import TemporalSearchService
@@ -252,7 +274,9 @@ def _query_multi_provider_fusion(
                 result = future.result()
                 if result.results:
                     results_by_provider[coll_name] = result.results
+                record_temporal_success(coll_name, _UNKNOWN_LATENCY_MS)
             except Exception as e:
+                record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)
                 logger.warning("Temporal query failed for %s: %s", coll_name, e)
                 warnings.append(f"Provider {coll_name} failed: {e}")
 

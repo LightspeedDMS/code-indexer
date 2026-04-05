@@ -3359,6 +3359,17 @@ def index(
                     _orig_provider = config.embedding_provider
                     _extra_temporal_indexer = None
                     try:
+                        # Health check before indexing (audit fix A1)
+                        _extra_embedding = _EPF.create(
+                            config, provider_name=_extra_provider
+                        )
+                        if not _extra_embedding.health_check():
+                            console.print(
+                                f"⚠️  {_extra_provider} health check failed — skipping temporal",
+                                style="yellow",
+                            )
+                            continue
+
                         config.embedding_provider = _extra_provider  # type: ignore[assignment]
                         config_manager._config = config
                         _extra_coll_name = _resolve_temporal_coll(config)
