@@ -34,6 +34,11 @@ class TemporalSearchResult:
     score: float
     metadata: Dict[str, Any]
     temporal_context: Dict[str, Any]
+    # Fusion fields (Story #633) — Optional with defaults to avoid breaking existing callers
+    temporal_chunk_id: Optional[str] = None
+    source_provider: Optional[str] = None
+    fusion_score: Optional[float] = None
+    contributing_providers: Optional[List[str]] = None
 
 
 @dataclass
