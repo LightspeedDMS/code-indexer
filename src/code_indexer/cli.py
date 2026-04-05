@@ -5027,14 +5027,26 @@ def query(
             base_path=index_dir, project_root=config.codebase_dir
         )
 
+        from code_indexer.services.temporal.temporal_collection_naming import (
+            is_temporal_collection,
+            resolve_temporal_collection_from_config as _resolve_tcn,
+        )
+
+        _temporal_coll = _resolve_tcn(config)
         temporal_service = TemporalSearchService(
             config_manager=config_manager,
             project_root=Path(project_root),
             vector_store_client=vector_store_client,
+            collection_name=_temporal_coll,
         )
 
-        # Check if temporal index exists
-        if not temporal_service.has_temporal_index():
+        # Check if ANY temporal index exists (legacy or provider-aware)
+        _has_temporal = temporal_service.has_temporal_index() or any(
+            d.is_dir() and is_temporal_collection(d.name)
+            for d in index_dir.iterdir()
+            if d.is_dir()
+        )
+        if not _has_temporal:
             console.print("[yellow]⚠️  Temporal index not found[/yellow]")
             console.print()
             console.print("Time-range filtering requires a temporal index.")
