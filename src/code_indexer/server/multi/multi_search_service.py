@@ -403,13 +403,11 @@ class MultiSearchService:
             Exception: If temporal search fails
         """
         from pathlib import Path as PathLib
-        from ...services.temporal.temporal_search_service import (
-            TemporalSearchService,
-            ALL_TIME_RANGE,
-        )
         from ...config import ConfigManager
         from ...storage.filesystem_vector_store import FilesystemVectorStore
-        from ...services.embedding_factory import EmbeddingProviderFactory
+        from ...services.temporal.temporal_fusion_dispatch import (
+            execute_temporal_query_with_fusion,
+        )
 
         try:
             # Get repository path
@@ -425,37 +423,22 @@ class MultiSearchService:
                 base_path=index_dir, project_root=repo_path
             )
 
-            # Create embedding provider for temporal search
-            embedding_provider = EmbeddingProviderFactory.create(config, console=None)
-
-            # Create temporal service
-            from code_indexer.services.temporal.temporal_collection_naming import (
-                resolve_temporal_collection_from_config,
+            # Execute temporal query via fusion dispatch (Story #640)
+            temporal_results = execute_temporal_query_with_fusion(
+                config=config,
+                index_path=index_dir,
+                vector_store=vector_store_client,
+                query_text=request.query,
+                limit=min(request.limit, self.config.max_results_per_repo),
+                language=request.language,
+                file_path_filter=request.path_filter,
             )
 
-            temporal_service = TemporalSearchService(
-                config_manager=config_manager,
-                project_root=repo_path,
-                vector_store_client=vector_store_client,
-                embedding_provider=embedding_provider,
-                collection_name=resolve_temporal_collection_from_config(config),
-            )
-
-            # Check if temporal index exists
-            if not temporal_service.has_temporal_index():
+            # If no temporal index found, raise to match original behavior
+            if temporal_results.warning and not temporal_results.results:
                 raise FileNotFoundError(
                     f"Temporal index not found for repository {repo_id}"
                 )
-
-            # Execute temporal query with all-time range (default)
-            temporal_results = temporal_service.query_temporal(
-                query=request.query,
-                time_range=ALL_TIME_RANGE,
-                limit=min(request.limit, self.config.max_results_per_repo),
-                min_score=request.min_score,
-                language=[request.language] if request.language else None,
-                path_filter=[request.path_filter] if request.path_filter else None,
-            )
 
             # Convert temporal results to standardized format
             results = []

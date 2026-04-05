@@ -398,11 +398,14 @@ class TemporalIndexer:
         embedding_provider = EmbeddingProviderFactory.create(config=self.config)
 
         # Use VectorCalculationManager for parallel processing
-        vector_thread_count = (
-            self.config.voyage_ai.parallel_requests
-            if hasattr(self.config, "voyage_ai")
-            else 4
-        )
+        # Select thread count based on the active embedding provider
+        _provider = getattr(self.config, "embedding_provider", None)
+        if _provider == "cohere" and hasattr(self.config, "cohere"):
+            vector_thread_count = self.config.cohere.parallel_requests
+        elif _provider == "voyage-ai" and hasattr(self.config, "voyage_ai"):
+            vector_thread_count = self.config.voyage_ai.parallel_requests
+        else:
+            vector_thread_count = 4
 
         # Get config_dir for debug logging
         config_dir = self.config_manager.config_path.parent

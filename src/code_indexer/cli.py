@@ -3339,6 +3339,52 @@ def index(
                 console.print()
 
                 temporal_indexer.close()
+
+                # Multi-provider temporal loop (Story #640): index remaining providers.
+                from .services.embedding_factory import EmbeddingProviderFactory as _EPF
+                from .services.temporal.temporal_collection_naming import (
+                    resolve_temporal_collection_from_config as _resolve_temporal_coll,
+                )
+
+                _primary_provider = config.embedding_provider
+                _all_temporal_providers = _EPF.get_configured_providers(config)
+                _extra_temporal_providers = [
+                    p for p in _all_temporal_providers if p != _primary_provider
+                ]
+                for _extra_provider in _extra_temporal_providers:
+                    console.print(
+                        f"\n🔄 Temporal indexing additional provider: {_extra_provider}",
+                        style="cyan",
+                    )
+                    _orig_provider = config.embedding_provider
+                    _extra_temporal_indexer = None
+                    try:
+                        config.embedding_provider = _extra_provider  # type: ignore[assignment]
+                        config_manager._config = config
+                        _extra_coll_name = _resolve_temporal_coll(config)
+                        _extra_temporal_indexer = TemporalIndexer(
+                            config_manager,
+                            vector_store,
+                            collection_name=_extra_coll_name,
+                        )
+                        _extra_indexing_result = _extra_temporal_indexer.index_commits(
+                            all_branches=all_branches,
+                            max_commits=max_commits,
+                            since_date=since_date,
+                            progress_callback=progress_callback,
+                            reconcile=reconcile,
+                        )
+                        console.print(
+                            f"✅ {_extra_provider}: "
+                            f"{_extra_indexing_result.total_commits} commits",
+                            style="green",
+                        )
+                    finally:
+                        if _extra_temporal_indexer is not None:
+                            _extra_temporal_indexer.close()
+                        config.embedding_provider = _orig_provider  # type: ignore[assignment]
+                        config_manager._config = config
+
                 sys.exit(0)
 
             except Exception as e:

@@ -21,6 +21,21 @@ LEGACY_TEMPORAL_COLLECTION = "code-indexer-temporal"
 _SUPPORTED_PROVIDERS = {"voyage-ai", "cohere"}
 
 
+def sanitize_model_name(model_name: str) -> str:
+    """Sanitize model name for use in collection names and filesystem paths.
+
+    Lowercases the model name and replaces all characters outside [a-zA-Z0-9_]
+    with underscores.
+
+    Args:
+        model_name: Embedding model name, e.g. 'voyage-code-3' or 'embed-v4.0'
+
+    Returns:
+        Sanitized slug, e.g. 'voyage_code_3' or 'embed_v4_0'
+    """
+    return re.sub(r"[^a-zA-Z0-9_]", "_", model_name.lower())
+
+
 def resolve_temporal_collection_name(model_name: str) -> str:
     """Build a provider-aware temporal collection name from a model name.
 
@@ -33,7 +48,7 @@ def resolve_temporal_collection_name(model_name: str) -> str:
     Returns:
         Collection name, e.g. 'code-indexer-temporal-voyage_code_3'
     """
-    slug = re.sub(r"[^a-zA-Z0-9_]", "_", model_name.lower())
+    slug = sanitize_model_name(model_name)
     return f"{TEMPORAL_COLLECTION_PREFIX}{slug}"
 
 

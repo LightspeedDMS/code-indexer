@@ -15,7 +15,17 @@ from .temporal_fusion import (
     fuse_rrf_multi,
     make_temporal_dedup_key,
 )
-from .temporal_collection_naming import get_temporal_collections
+from .temporal_collection_naming import (
+    get_temporal_collections,
+    TEMPORAL_COLLECTION_PREFIX,
+    sanitize_model_name,
+    get_model_name_for_provider,
+)
+from .temporal_health import (
+    filter_healthy_temporal_providers,
+    record_temporal_success,
+    record_temporal_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +42,13 @@ def execute_temporal_query_with_fusion(
     file_path_filter: Optional[str] = None,
     show_evolution: bool = False,
     provider_filter: Optional[str] = None,
+    # Server params (Story #640)
+    at_commit: Optional[str] = None,
+    include_removed: Optional[bool] = None,
+    language: Optional[str] = None,
+    exclude_language: Optional[str] = None,
+    evolution_limit: Optional[int] = None,
+    exclude_path: Optional[str] = None,
 ) -> Any:
     """Execute temporal query with multi-provider fusion.
 
@@ -45,6 +62,12 @@ def execute_temporal_query_with_fusion(
         file_path_filter: Optional file path filter
         show_evolution: Whether to show file evolution timeline
         provider_filter: Optional specific provider to query (bypasses fusion)
+        at_commit: Query at specific commit (server param, resolved by caller)
+        include_removed: Include removed files (server param, converted to diff_types by caller)
+        language: Filter by language (server param)
+        exclude_language: Exclude language (server param)
+        evolution_limit: Limit evolution entries (server param, applied by caller)
+        exclude_path: Exclude path pattern (server param)
 
     Returns:
         TemporalSearchResults with fused results
@@ -52,6 +75,9 @@ def execute_temporal_query_with_fusion(
     from .temporal_search_service import TemporalSearchResults
 
     collections = _discover_queryable_collections(config, index_path, provider_filter)
+
+    # Health-gate: filter to healthy providers only
+    collections, _skipped = filter_healthy_temporal_providers(collections)
 
     if not collections:
         logger.warning("No temporal indexes available for query")
@@ -76,6 +102,9 @@ def execute_temporal_query_with_fusion(
             limit,
             time_range,
             file_path_filter,
+            language=language,
+            exclude_language=exclude_language,
+            exclude_path=exclude_path,
         )
 
     return _query_multi_provider_fusion(
@@ -86,6 +115,9 @@ def execute_temporal_query_with_fusion(
         limit,
         time_range,
         file_path_filter,
+        language=language,
+        exclude_language=exclude_language,
+        exclude_path=exclude_path,
     )
 
 
@@ -117,12 +149,16 @@ def _query_single_provider(
     limit: int,
     time_range: Optional[Tuple[str, str]],
     file_path_filter: Optional[str],
+    language: Optional[str] = None,
+    exclude_language: Optional[str] = None,
+    exclude_path: Optional[str] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
+    import time as _time
     from .temporal_search_service import TemporalSearchService
     from .temporal_search_service import ALL_TIME_RANGE
 
-    embedding_provider = _create_embedding_provider(config)
+    embedding_provider = _create_embedding_provider_for_collection(config, coll_name)
 
     service = TemporalSearchService(
         config_manager=_make_config_manager(config),
@@ -133,15 +169,23 @@ def _query_single_provider(
     )
 
     resolved_range = time_range if time_range is not None else ALL_TIME_RANGE
-
     path_filter = [file_path_filter] if file_path_filter else None
 
-    results = service.query_temporal(
-        query=query_text,
-        time_range=resolved_range,
-        limit=limit,
-        path_filter=path_filter,
-    )
+    _t0 = _time.time()
+    try:
+        results = service.query_temporal(
+            query=query_text,
+            time_range=resolved_range,
+            limit=limit,
+            path_filter=path_filter,
+            language=[language] if language else None,
+            exclude_language=[exclude_language] if exclude_language else None,
+            exclude_path=[exclude_path] if exclude_path else None,
+        )
+        record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
+    except Exception:
+        record_temporal_failure(coll_name, (_time.time() - _t0) * 1000)
+        raise
 
     for r in results.results:
         r.source_provider = coll_name
@@ -159,6 +203,9 @@ def _query_multi_provider_fusion(
     limit: int,
     time_range: Optional[Tuple[str, str]],
     file_path_filter: Optional[str],
+    language: Optional[str] = None,
+    exclude_language: Optional[str] = None,
+    exclude_path: Optional[str] = None,
 ) -> Any:
     """Query multiple providers in parallel and fuse results."""
     from .temporal_search_service import TemporalSearchResults, ALL_TIME_RANGE
@@ -171,7 +218,7 @@ def _query_multi_provider_fusion(
     path_filter = [file_path_filter] if file_path_filter else None
 
     def query_provider(coll_name: str) -> Any:
-        provider = _create_embedding_provider(config)
+        provider = _create_embedding_provider_for_collection(config, coll_name)
         service = TemporalSearchService(
             config_manager=_make_config_manager(config),
             project_root=vector_store.project_root,
@@ -184,6 +231,9 @@ def _query_multi_provider_fusion(
             time_range=resolved_range,
             limit=overfetch_limit,
             path_filter=path_filter,
+            language=[language] if language else None,
+            exclude_language=[exclude_language] if exclude_language else None,
+            exclude_path=[exclude_path] if exclude_path else None,
         )
 
     from .temporal_search_service import TemporalSearchService
@@ -239,12 +289,46 @@ def _query_multi_provider_fusion(
     )
 
 
-def _create_embedding_provider(config: Any) -> Any:
-    """Create embedding provider from config."""
+def _create_embedding_provider_for_collection(config: Any, collection_name: str) -> Any:
+    """Create the correct embedding provider for a temporal collection.
+
+    Reverse-maps the collection name to the provider name by matching the
+    model slug against each configured provider. Falls back to the primary
+    provider for legacy collections or unknown slugs.
+
+    Args:
+        config: CIDX Config object
+        collection_name: Temporal collection name, e.g. 'code-indexer-temporal-voyage_code_3'
+
+    Returns:
+        Configured EmbeddingProvider instance for the matching provider
+    """
     from ..embedding_factory import EmbeddingProviderFactory
 
-    provider_name = getattr(config, "embedding_provider", "voyage-ai")
-    return EmbeddingProviderFactory.create(config, provider_name=provider_name)
+    slug = ""
+    if collection_name.startswith(TEMPORAL_COLLECTION_PREFIX):
+        slug = collection_name[len(TEMPORAL_COLLECTION_PREFIX) :]
+
+    configured = EmbeddingProviderFactory.get_configured_providers(config)
+    for provider_name in configured:
+        try:
+            model_name = get_model_name_for_provider(provider_name, config)
+            model_slug = sanitize_model_name(model_name)
+            if model_slug == slug:
+                return EmbeddingProviderFactory.create(
+                    config, provider_name=provider_name
+                )
+        except (KeyError, ValueError) as e:
+            logger.debug(
+                "Skipping provider %s while resolving collection: %s", provider_name, e
+            )
+            continue
+
+    logger.warning(
+        "Could not determine provider for collection '%s', using primary provider",
+        collection_name,
+    )
+    return EmbeddingProviderFactory.create(config)
 
 
 def _make_config_manager(config: Any) -> Any:

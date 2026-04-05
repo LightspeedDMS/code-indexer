@@ -1939,42 +1939,57 @@ class SemanticQueryManager:
         Returns:
             List of QueryResult objects with temporal context
         """
-        from ...services.temporal.temporal_search_service import TemporalSearchService
         from ...proxy.config_manager import ConfigManager
         from ...backends.backend_factory import BackendFactory
-        from ...services.embedding_factory import EmbeddingProviderFactory
+        from ...services.temporal.temporal_fusion_dispatch import (
+            execute_temporal_query_with_fusion,
+        )
+        from ...services.temporal.temporal_search_service import (
+            ALL_TIME_RANGE,
+            parse_date_range,
+        )
 
         try:
             # Load repository configuration
             config_manager = ConfigManager.create_with_backtrack(repo_path)
             config = config_manager.get_config()
 
-            # Create vector store and embedding provider (Story #526: pass server cache)
-            # Import here to avoid circular dependency
+            # Create vector store (Story #526: pass server cache)
             from ..app import _server_hnsw_cache
 
             backend = BackendFactory.create(
                 config=config, project_root=repo_path, hnsw_cache=_server_hnsw_cache
             )
             vector_store = backend.get_vector_store_client()
-            embedding_provider = EmbeddingProviderFactory.create(config, console=None)
+            index_path = repo_path / ".code-indexer" / "index"
 
-            # Create temporal service with correct collection name
-            from code_indexer.services.temporal.temporal_collection_naming import (
-                resolve_temporal_collection_from_config,
+            # Resolve time range tuple before calling fusion dispatch
+            if time_range:
+                time_range_tuple = parse_date_range(time_range)
+            else:
+                # time_range_all, at_commit, or default: query entire git history
+                time_range_tuple = ALL_TIME_RANGE
+
+            # Execute temporal query via fusion dispatch (Story #640)
+            temporal_results = execute_temporal_query_with_fusion(
+                config=config,
+                index_path=index_path,
+                vector_store=vector_store,
+                query_text=query_text,
+                limit=limit,
+                time_range=time_range_tuple,
+                file_path_filter=path_filter,
+                show_evolution=show_evolution,
+                at_commit=at_commit,
+                include_removed=include_removed,
+                language=language,
+                exclude_language=exclude_language,
+                evolution_limit=evolution_limit,
+                exclude_path=exclude_path,
             )
 
-            temporal_service = TemporalSearchService(
-                config_manager=config_manager,
-                project_root=repo_path,
-                vector_store_client=vector_store,
-                embedding_provider=embedding_provider,
-                collection_name=resolve_temporal_collection_from_config(config),
-            )
-
-            # Check if temporal index exists
-            if not temporal_service.has_temporal_index():
-                # GRACEFUL FALLBACK (Acceptance Criterion 9)
+            # If fusion dispatch found no temporal index, fall back gracefully
+            if temporal_results.warning and not temporal_results.results:
                 logger.warning(
                     format_error_log(
                         "QUERY-MIGRATE-009",
@@ -1983,46 +1998,7 @@ class SemanticQueryManager:
                     ),
                     extra=get_log_extra("QUERY-MIGRATE-009"),
                 )
-                # Fall back to regular search - return empty list with warning
-                # The warning will be added to query response by caller
                 return []
-
-            # Validate and parse temporal parameters
-            if time_range:
-                time_range_tuple = temporal_service._validate_date_range(time_range)
-            elif time_range_all or at_commit:
-                # For time_range_all or at_commit, use entire git history
-                # This allows searching across all commits without date filtering
-                time_range_tuple = ("1970-01-01", "2100-12-31")
-            else:
-                time_range_tuple = ("1970-01-01", "2100-12-31")
-
-            # Determine diff_types based on include_removed
-            diff_types = None
-            if not include_removed:
-                # Exclude deleted files
-                diff_types = ["added", "modified"]
-
-            # Build language filters
-            language_list = [language] if language else None
-            exclude_language_list = [exclude_language] if exclude_language else None
-
-            # Build path filters
-            path_filter_list = [path_filter] if path_filter else None
-            exclude_path_list = [exclude_path] if exclude_path else None
-
-            # Execute temporal query (Acceptance Criterion 8: Internal service calls)
-            temporal_results = temporal_service.query_temporal(
-                query=query_text,
-                time_range=time_range_tuple,
-                diff_types=diff_types,
-                limit=limit,
-                min_score=min_score,
-                language=language_list,
-                exclude_language=exclude_language_list,
-                path_filter=path_filter_list,
-                exclude_path=exclude_path_list,
-            )
 
             # Convert temporal results to QueryResult objects
             query_results = []

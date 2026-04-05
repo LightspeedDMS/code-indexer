@@ -24,6 +24,50 @@ logger = logging.getLogger(__name__)
 ALL_TIME_RANGE = ("1970-01-01", "2100-12-31")
 
 
+def parse_date_range(date_range: str) -> Tuple[str, str]:
+    """Parse and validate a date range string.
+
+    Args:
+        date_range: Date range string in format YYYY-MM-DD..YYYY-MM-DD
+
+    Returns:
+        Tuple of (start_date, end_date) as validated strings
+
+    Raises:
+        ValueError: If date range format or dates are invalid
+    """
+    if ".." not in date_range:
+        raise ValueError(
+            "Time range must use '..' separator (format: YYYY-MM-DD..YYYY-MM-DD)"
+        )
+
+    parts = date_range.split("..")
+    if len(parts) != 2:
+        raise ValueError(
+            "Time range must use '..' separator (format: YYYY-MM-DD..YYYY-MM-DD)"
+        )
+
+    start_date, end_date = parts
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Invalid date format. Use YYYY-MM-DD (e.g., 2023-01-01)")
+
+    if start_date != start_dt.strftime("%Y-%m-%d") or end_date != end_dt.strftime(
+        "%Y-%m-%d"
+    ):
+        raise ValueError(
+            "Invalid date format. Use YYYY-MM-DD with zero-padded month/day (e.g., 2023-01-01)"
+        )
+
+    if end_dt < start_dt:
+        raise ValueError("End date must be after start date")
+
+    return start_date, end_date
+
+
 @dataclass
 class TemporalSearchResult:
     """Single temporal search result with temporal context."""
@@ -114,50 +158,8 @@ class TemporalSearchService:
         return False
 
     def _validate_date_range(self, date_range: str) -> Tuple[str, str]:
-        """Validate and parse date range format.
-
-        Args:
-            date_range: Date range string in format YYYY-MM-DD..YYYY-MM-DD
-
-        Returns:
-            Tuple of (start_date, end_date)
-
-        Raises:
-            ValueError: If date range format is invalid
-        """
-        if ".." not in date_range:
-            raise ValueError(
-                "Time range must use '..' separator (format: YYYY-MM-DD..YYYY-MM-DD)"
-            )
-
-        parts = date_range.split("..")
-        if len(parts) != 2:
-            raise ValueError(
-                "Time range must use '..' separator (format: YYYY-MM-DD..YYYY-MM-DD)"
-            )
-
-        start_date, end_date = parts
-
-        # Validate date formats
-        try:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-        except ValueError:
-            raise ValueError("Invalid date format. Use YYYY-MM-DD (e.g., 2023-01-01)")
-
-        # Ensure dates match strict format (YYYY-MM-DD with zero padding)
-        if start_date != start_dt.strftime("%Y-%m-%d") or end_date != end_dt.strftime(
-            "%Y-%m-%d"
-        ):
-            raise ValueError(
-                "Invalid date format. Use YYYY-MM-DD with zero-padded month/day (e.g., 2023-01-01)"
-            )
-
-        # Validate end date is after start date
-        if end_dt < start_dt:
-            raise ValueError("End date must be after start date")
-
-        return start_date, end_date
+        """Validate and parse date range format. Delegates to module-level parse_date_range."""
+        return parse_date_range(date_range)
 
     def _calculate_over_fetch_multiplier(self, limit: int) -> int:
         """Calculate smart over-fetch multiplier based on limit size.
