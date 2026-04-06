@@ -28,7 +28,7 @@ class AddIndexRequest(BaseModel):
     )
     providers: Optional[List[str]] = Field(
         None,
-        description="List of embedding provider names to use when semantic indexing is selected (Story #489)",
+        description="List of embedding provider names to use when semantic or temporal indexing is selected (Story #489, #641)",
     )
 
     @model_validator(mode="after")

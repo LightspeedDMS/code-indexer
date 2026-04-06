@@ -91,8 +91,8 @@ async function submitAddIndex(alias) {
             ? { index_type: indexTypes[0] }
             : { index_types: indexTypes };
 
-        // Story #489: Include selected providers when Semantic is selected
-        if (indexTypes.includes('semantic')) {
+        // Story #489 + #641: Include selected providers when Semantic or Temporal is selected
+        if (indexTypes.includes('semantic') || indexTypes.includes('temporal')) {
             const providerCheckboxes = document.querySelectorAll(`input[name="providers-${alias}"]:checked`);
             const providers = Array.from(providerCheckboxes).map(cb => cb.value);
             if (providers.length > 0) {
@@ -309,16 +309,17 @@ function showSuccessMessage(message) {
 }
 
 /**
- * Toggle provider checkboxes visibility based on Semantic checkbox state (Story #489)
+ * Toggle provider checkboxes visibility based on Semantic or Temporal checkbox state (Story #489, #641)
  * @param {string} alias - Repository alias
  */
 function toggleProviderCheckboxes(alias) {
     const semanticCheckbox = document.getElementById(`index-type-semantic-${alias}`);
+    const temporalCheckbox = document.getElementById(`index-type-temporal-${alias}`);
     const providerDiv = document.getElementById(`provider-checkboxes-${alias}`);
 
-    if (!semanticCheckbox || !providerDiv) return;
+    if (!providerDiv) return;
 
-    if (semanticCheckbox.checked) {
+    if ((semanticCheckbox && semanticCheckbox.checked) || (temporalCheckbox && temporalCheckbox.checked)) {
         providerDiv.style.display = 'block';
         loadProviderCheckboxes(alias);
     } else {

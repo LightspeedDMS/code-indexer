@@ -342,6 +342,7 @@ def register_admin_ops_routes(
 
         try:
             job_ids = []
+            repo_path: Optional[str] = None  # resolved lazily by provider blocks below
 
             # Story #489: When providers are specified and semantic is requested,
             # submit per-provider jobs instead of the generic semantic job.
@@ -378,6 +379,50 @@ def register_admin_ops_routes(
                         repo_path=repo_path,
                         provider_name=provider_name,
                         clear=False,
+                    )
+                    job_ids.append(provider_job_id)
+
+            # Story #641: Per-provider temporal jobs (same pattern as semantic).
+            if request.providers and "temporal" in remaining_index_types:
+                from ..mcp.handlers import (
+                    _provider_temporal_index_job,
+                    _resolve_golden_repo_path,
+                    _resolve_golden_repo_base_clone,
+                    _append_provider_to_config,
+                )
+
+                remaining_index_types = [
+                    t for t in remaining_index_types if t != "temporal"
+                ]
+                if repo_path is None:
+                    repo_path = _resolve_golden_repo_path(alias)
+                if repo_path is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Golden repository '{alias}' not found",
+                    )
+
+                base_clone = _resolve_golden_repo_base_clone(alias)
+
+                # Read temporal_options here — golden_repo_manager is accessible in the
+                # route handler but NOT inside background job workers (Story #641).
+                _temporal_opts: dict = {}
+                _repo_meta = golden_repo_manager.golden_repos.get(alias)
+                if _repo_meta and getattr(_repo_meta, "temporal_options", None):
+                    _temporal_opts = _repo_meta.temporal_options
+
+                for provider_name in request.providers:
+                    if base_clone:
+                        _append_provider_to_config(base_clone, provider_name)
+                    provider_job_id = background_job_manager.submit_job(
+                        operation_type="provider_temporal_index_add",
+                        func=_provider_temporal_index_job,
+                        submitter_username=current_user.username,
+                        repo_alias=alias,
+                        repo_path=repo_path,
+                        provider_name=provider_name,
+                        clear=False,
+                        temporal_options=_temporal_opts,
                     )
                     job_ids.append(provider_job_id)
 

@@ -16719,6 +16719,73 @@ def _remove_provider_from_config(repo_path: str, provider_name: str) -> None:
         )
 
 
+def _resolve_provider_job_repo_path(repo_path: str, repo_alias: str) -> tuple:
+    """Resolve the actual indexing path for a provider background job.
+
+    When repo_path is inside a .versioned/ directory (immutable), return the
+    base clone path instead. Returns (actual_path, resolved_alias, is_versioned).
+
+    Cannot use _resolve_golden_repo_base_clone here because background workers
+    have no access to server app state.
+    """
+    is_versioned = ".versioned" in Path(repo_path).parts
+    if not is_versioned:
+        return repo_path, repo_alias, False
+
+    parts = Path(repo_path).parts
+    versioned_idx = parts.index(".versioned")
+    alias_name = parts[versioned_idx + 1]
+    golden_repos_dir = str(Path(*parts[:versioned_idx]))
+    base_clone = Path(golden_repos_dir) / alias_name
+    resolved_alias = repo_alias or f"{alias_name}-global"
+
+    if not base_clone.exists():
+        return repo_path, resolved_alias, True  # caller must handle missing base clone
+
+    logger.info(
+        "Provider job: using base clone %s instead of versioned snapshot %s",
+        base_clone,
+        repo_path,
+    )
+    return str(base_clone), resolved_alias, True
+
+
+def _build_provider_api_key_env(provider_name: str) -> dict:
+    """Build a subprocess env dict with the correct API key for a provider."""
+    import os
+
+    env = os.environ.copy()
+    server_config = get_config_service().get_config()
+    if provider_name == "cohere":
+        api_key = getattr(server_config, "cohere_api_key", None)
+        if api_key:
+            env["CO_API_KEY"] = api_key
+    elif provider_name == "voyage-ai":
+        api_key = getattr(server_config, "voyageai_api_key", None)
+        if api_key:
+            env["VOYAGE_API_KEY"] = api_key
+    return env
+
+
+def _build_temporal_index_cmd(clear: bool, temporal_options: dict) -> list:
+    """Build the cidx index --index-commits command with optional temporal flags."""
+    cmd = ["cidx", "index", "--index-commits", "--progress-json"]
+    if clear:
+        cmd.append("--clear")
+    diff_context = temporal_options.get("diff_context")
+    if diff_context is not None:
+        cmd.extend(["--diff-context", str(diff_context)])
+    if temporal_options.get("all_branches"):
+        cmd.append("--all-branches")
+    max_commits = temporal_options.get("max_commits")
+    if max_commits is not None:
+        cmd.extend(["--max-commits", str(max_commits)])
+    since_date = temporal_options.get("since_date")
+    if since_date:
+        cmd.extend(["--since", str(since_date)])
+    return cmd
+
+
 def _provider_index_job(
     repo_path: str,
     provider_name: str,
@@ -16859,6 +16926,104 @@ def _provider_index_job(
         )
         return {
             "success": False,
+            "stdout": "".join(all_stdout)[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:],
+            "stderr": str(exc),
+        }
+
+
+def _provider_temporal_index_job(
+    repo_path: str,
+    provider_name: str,
+    clear: bool = False,
+    progress_callback=None,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Background job for per-provider temporal index (Story #641).
+
+    Runs cidx index --index-commits with optional temporal_options from kwargs.
+    temporal_options must be passed via kwargs (not from golden_repo_manager
+    which is inaccessible from background threads).
+    """
+    from code_indexer.services.progress_phase_allocator import ProgressPhaseAllocator
+    from code_indexer.services.progress_subprocess_runner import (
+        IndexingSubprocessError,
+        gather_repo_metrics,
+        run_with_popen_progress,
+    )
+
+    repo_alias = kwargs.get("repo_alias", "")
+    actual_path, repo_alias, is_versioned_snapshot = _resolve_provider_job_repo_path(
+        repo_path, repo_alias
+    )
+    if (
+        is_versioned_snapshot
+        and actual_path == repo_path
+        and not Path(actual_path).exists()
+    ):
+        return {
+            "success": False,
+            "error": f"Base clone not found for {repo_path}",
+            "provider": provider_name,
+        }
+
+    env = _build_provider_api_key_env(provider_name)
+    temporal_options = kwargs.get("temporal_options", {}) or {}
+    cmd = _build_temporal_index_cmd(clear, temporal_options)
+
+    file_count, commit_count = gather_repo_metrics(actual_path)
+    allocator = ProgressPhaseAllocator()
+    allocator.calculate_weights(
+        index_types=["temporal"], file_count=file_count, commit_count=commit_count
+    )
+
+    all_stdout: list = []
+    all_stderr: list = []
+    try:
+        run_with_popen_progress(
+            command=cmd,
+            phase_name="temporal",
+            allocator=allocator,
+            progress_callback=progress_callback,
+            all_stdout=all_stdout,
+            all_stderr=all_stderr,
+            cwd=actual_path,
+            env=env,
+            timeout=None,
+            error_label="provider temporal index",
+        )
+        if is_versioned_snapshot and actual_path != repo_path:
+            try:
+                _post_provider_index_snapshot(
+                    repo_alias=repo_alias,
+                    base_clone_path=actual_path,
+                    old_snapshot_path=repo_path,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Post-temporal-index snapshot failed for %s: %s", repo_alias, exc
+                )
+        stdout_out = "".join(all_stdout)
+        stderr_out = "".join(all_stderr)
+        return {
+            "success": True,
+            "provider": provider_name,
+            "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
+            if stdout_out
+            else "",
+            "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
+            if stderr_out
+            else "",
+        }
+    except IndexingSubprocessError as exc:
+        logger.warning(
+            "Temporal provider index failed for provider=%s repo=%s: %s",
+            provider_name,
+            repo_path,
+            exc,
+        )
+        return {
+            "success": False,
+            "provider": provider_name,
             "stdout": "".join(all_stdout)[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:],
             "stderr": str(exc),
         }
