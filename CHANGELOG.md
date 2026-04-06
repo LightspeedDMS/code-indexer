@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.13.0
+
+### Features
+
+- feat: Multi-Provider Temporal Index Parity (Epic #627) -- Provider-aware temporal collection naming, legacy migration, dual-provider temporal indexing (VoyageAI + Cohere), RRF fusion for temporal queries, circuit breaker failover, per-provider progress metadata with format v2, force re-index clears all provider collections, CLI/status/MCP integration with provider attribution display, Web UI temporal indexing with provider selection. 11 stories, ~200 new tests, 5 new modules.
+
 ## v9.12.1
 
 ### Fixes
