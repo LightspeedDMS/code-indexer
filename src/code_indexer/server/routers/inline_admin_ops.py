@@ -415,7 +415,7 @@ def register_admin_ops_routes(
                     if base_clone:
                         _append_provider_to_config(base_clone, provider_name)
                     provider_job_id = background_job_manager.submit_job(
-                        operation_type="provider_temporal_index_add",
+                        operation_type=f"provider_temporal_index_add:{provider_name}",
                         func=_provider_temporal_index_job,
                         submitter_username=current_user.username,
                         repo_alias=alias,
