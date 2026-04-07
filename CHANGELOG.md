@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.13.8
+
+### Refactoring
+
+- refactor: Story #496 Phase 1+2 — split monolithic `handlers.py` (17,243 lines) into a `handlers/` package. `handlers/_legacy.py` preserves the full original implementation (git history intact). `handlers/_utils.py` extracts 30 shared utility functions (931 lines). `handlers/ssh_keys.py` extracts the SSH key domain (286 lines). `handlers/__init__.py` provides a fully backward-compatible namespace with `_ForwardingModule` that transparently forwards mock patches to `_legacy.py`, keeping all 1,500+ existing tests passing without modification. Remaining 11 domain modules to be extracted in follow-up commits (Story #496 in progress).
+
 ## v9.13.7
 
 ### Fixes
