@@ -156,7 +156,7 @@ class TemporalMetadataStore:
             logger.warning(f"Missing commit_hash in payload for point_id: {point_id}")
 
         file_path = payload.get("path", "")
-        if not file_path:
+        if not file_path and payload.get("type") != "commit_message":
             logger.warning(f"Missing path in payload for point_id: {point_id}")
 
         chunk_index = payload.get("chunk_index", 0)

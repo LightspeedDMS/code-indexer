@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.13.7
+
+### Fixes
+
+- fix: Bug #647 — `_index_exists` temporal stub always returned `False`, causing `get_golden_repo_indexes` to report `temporal.exists: false` even when a temporal collection was present on disk. AI agents seeing `exists: false` would trigger `add_golden_repo_index` which ran `--clear`, destroying hours of indexing work. Fixed by replacing the stub with a real filesystem scan using `get_temporal_collections()`.
+- fix: Bug #646 — `BackgroundJobManager._complete_job` unconditionally set job status to `COMPLETED` regardless of whether the job function returned `{"success": False}`. Jobs that failed (e.g. provider indexing CLI failure with `IndexingSubprocessError`) were silently marked as completed in the UI and database. Fixed by inspecting the result dict and setting `JobStatus.FAILED` when `result.get("success") is False`. Also fixed a memory leak: in-memory job dict was not cleaned up for `FAILED` jobs.
+- fix: Bug #648 — multi-provider temporal and semantic index adds each submitted N independent background jobs (one per provider), causing concurrent HNSW and SQLite temporal metadata races that could corrupt the index with `FileNotFoundError` on atomic rename. Fixed in `inline_admin_ops.py`: all providers are appended to config first, then a single job is submitted that runs the CLI once in sequence. Also fixed Bug #1 (enable_temporal flag not persisted via provider path) and Bug #6 (snapshot ValueError not cleaned up on concurrent runs).
+
 ## v9.13.6
 
 ### Fixes

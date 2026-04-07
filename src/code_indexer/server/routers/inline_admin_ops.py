@@ -365,22 +365,26 @@ def register_admin_ops_routes(
                         detail=f"Golden repository '{alias}' not found or path not resolvable",
                     )
 
-                # Bug #625: Write provider to base clone config before submitting job
+                # Bug #625: Write provider to base clone config before submitting job.
+                # Bug #648/#4: Append ALL providers to config first, then submit ONE job.
+                # The CLI handles all providers in sequence; submitting N jobs caused
+                # the 2nd+ to be silently dropped (same operation_type conflict) or race.
                 base_clone = _resolve_golden_repo_base_clone(alias)
 
-                for provider_name in request.providers:
-                    if base_clone:
+                if base_clone:
+                    for provider_name in request.providers:
                         _append_provider_to_config(base_clone, provider_name)
-                    provider_job_id = background_job_manager.submit_job(
-                        operation_type="provider_index_add",
-                        func=_provider_index_job,
-                        submitter_username=current_user.username,
-                        repo_alias=alias,
-                        repo_path=repo_path,
-                        provider_name=provider_name,
-                        clear=False,
-                    )
-                    job_ids.append(provider_job_id)
+
+                provider_job_id = background_job_manager.submit_job(
+                    operation_type="provider_index_add",
+                    func=_provider_index_job,
+                    submitter_username=current_user.username,
+                    repo_alias=alias,
+                    repo_path=repo_path,
+                    provider_name=request.providers[0],
+                    clear=False,
+                )
+                job_ids.append(provider_job_id)
 
             # Story #641: Per-provider temporal jobs (same pattern as semantic).
             if request.providers and "temporal" in remaining_index_types:
@@ -411,20 +415,25 @@ def register_admin_ops_routes(
                 if _repo_meta and getattr(_repo_meta, "temporal_options", None):
                     _temporal_opts = _repo_meta.temporal_options
 
-                for provider_name in request.providers:
-                    if base_clone:
+                # Bug #648/#3: Append ALL providers to config first, then submit ONE job.
+                # The CLI (cidx index --index-commits) handles all providers in sequence.
+                # Submitting N concurrent jobs causes HNSW + SQLite temporal metadata races
+                # that corrupt the index (FileNotFoundError on atomic rename).
+                if base_clone:
+                    for provider_name in request.providers:
                         _append_provider_to_config(base_clone, provider_name)
-                    provider_job_id = background_job_manager.submit_job(
-                        operation_type=f"provider_temporal_index_add:{provider_name}",
-                        func=_provider_temporal_index_job,
-                        submitter_username=current_user.username,
-                        repo_alias=alias,
-                        repo_path=repo_path,
-                        provider_name=provider_name,
-                        clear=False,
-                        temporal_options=_temporal_opts,
-                    )
-                    job_ids.append(provider_job_id)
+
+                provider_job_id = background_job_manager.submit_job(
+                    operation_type="provider_temporal_index_rebuild",
+                    func=_provider_temporal_index_job,
+                    submitter_username=current_user.username,
+                    repo_alias=alias,
+                    repo_path=repo_path,
+                    provider_name=request.providers[0],
+                    clear=False,
+                    temporal_options=_temporal_opts,
+                )
+                job_ids.append(provider_job_id)
 
             # Submit combined job for remaining non-semantic index types (Bug #473 fix: atomic).
             if remaining_index_types:

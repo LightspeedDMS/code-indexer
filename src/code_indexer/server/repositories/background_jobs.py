@@ -742,11 +742,15 @@ class BackgroundJobManager:
                     job_id, func, args, kwargs
                 )
 
-            # Job completed successfully
+            # Job completed — determine final status from result
             with self._lock:
                 job = self.jobs[job_id]
                 if not job.cancelled:
-                    job.status = JobStatus.COMPLETED
+                    # Bug #646: result["success"] is False (exact identity) → FAILED
+                    if isinstance(result, dict) and result.get("success") is False:
+                        job.status = JobStatus.FAILED
+                    else:
+                        job.status = JobStatus.COMPLETED
                     job.completed_at = datetime.now(timezone.utc)
                     job.result = result
                     job.progress = 100
@@ -765,24 +769,39 @@ class BackgroundJobManager:
                             result=job.result if isinstance(job.result, dict) else None,
                         )
                     else:
-                        # CANCELLED — record as failed with cancellation reason
-                        self._job_tracker.fail_job(job_id, error="cancelled")
+                        # FAILED or CANCELLED — record as failed with reason
+                        error_msg = (
+                            "cancelled"
+                            if job.status == JobStatus.CANCELLED
+                            else (
+                                job.result.get("error", "job failed")
+                                if isinstance(job.result, dict)
+                                else "job failed"
+                            )
+                        )
+                        self._job_tracker.fail_job(job_id, error=error_msg)
                 except Exception:
                     logging.warning(
                         f"JobTracker completion callback failed for {job_id}",
                         exc_info=True,
                     )
 
-            # Story #267 Component 8: Remove completed/cancelled jobs from memory
+            # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
             # Only when SQLite backend is available (data is preserved in DB)
             if self._sqlite_backend and job.status in (
                 JobStatus.COMPLETED,
                 JobStatus.CANCELLED,
+                JobStatus.FAILED,
             ):
                 with self._lock:
                     self.jobs.pop(job_id, None)
 
-            logging.info(f"Background job {job_id} completed successfully")
+            if job.status == JobStatus.FAILED:
+                logging.warning(
+                    f"Background job {job_id} completed with failure result"
+                )
+            else:
+                logging.info(f"Background job {job_id} completed successfully")
 
         except InterruptedError as e:
             # Job was cancelled

@@ -2958,9 +2958,15 @@ class GoldenRepoManager:
             return False
 
         elif index_type == "temporal":
-            # Temporal index detection is not yet implemented - always allow creation
-            # TODO: Implement proper detection by checking chunk metadata for commit hashes
-            return False
+            from code_indexer.services.temporal.temporal_collection_naming import (
+                get_temporal_collections,
+            )
+
+            index_dir = repo_dir / ".code-indexer" / "index"
+            collections = get_temporal_collections(None, index_dir)
+            if not collections:
+                return False
+            return any(any(coll_path.rglob("*.json")) for _, coll_path in collections)
 
         elif index_type == "scip":
             # AC3: scip requires .code-indexer/scip/ directory with valid .scip.db files containing data

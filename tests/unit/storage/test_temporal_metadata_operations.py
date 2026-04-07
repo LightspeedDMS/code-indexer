@@ -9,6 +9,7 @@ Tests metadata database operations:
 Code Review P0 Violation Fix: These operations had 0% test coverage.
 """
 
+import logging
 import tempfile
 from pathlib import Path
 import pytest
@@ -182,6 +183,38 @@ class TestTemporalMetadataOperations:
             # Then: No entries removed
             assert removed_count == 0
             assert metadata_store.count_entries() == 1
+
+    def test_save_metadata_no_warning_for_commit_message_type(self, caplog):
+        """Bug #648/#7: commit_message payloads have no path by design — no warning must fire.
+
+        temporal_indexer.py creates commit_message entries without a path field.
+        The old code fired a WARNING for every such entry (hundreds per rebuild).
+        After the fix, save_metadata must NOT log a WARNING when payload.type ==
+        'commit_message', even though path is absent.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collection_path = Path(tmpdir) / "code-indexer-temporal"
+            metadata_store = TemporalMetadataStore(collection_path)
+
+            point_id = "project:commit_message:abc123"
+            payload = {
+                "type": "commit_message",
+                "commit_hash": "abc123",
+                "chunk_index": 0,
+                # Intentionally no "path" key — this is the design for commit_message
+            }
+
+            with caplog.at_level(logging.WARNING):
+                metadata_store.save_metadata(point_id, payload)
+
+            # Bug #648/#7: no WARNING must be emitted for commit_message entries
+            warning_records = [
+                r for r in caplog.records if r.levelno >= logging.WARNING
+            ]
+            assert not warning_records, (
+                f"Expected no warnings for commit_message payload, got: "
+                f"{[r.message for r in warning_records]}"
+            )
 
     def test_cleanup_stale_metadata_empty_valid_set_removes_all(self):
         """cleanup_stale_metadata() with empty valid set removes all entries."""

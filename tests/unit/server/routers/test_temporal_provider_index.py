@@ -76,18 +76,21 @@ def admin_test_client():
 class TestAddIndexTemporalWithProviders:
     """POST /api/admin/golden-repos/{alias}/indexes with temporal + providers."""
 
-    def test_add_index_temporal_with_providers_creates_per_provider_jobs(
+    def test_add_index_temporal_with_providers_creates_single_job(
         self, admin_test_client
     ):
-        """AC-2: When providers specified with temporal, submit per-provider jobs.
+        """AC-2 (Bug #648/#3 corrected): When providers specified with temporal, submit ONE job.
 
-        Verifies that background_job_manager.submit_job is called once per
-        provider with operation_type='provider_temporal_index_add'.
+        Bug #648/#3: The original AC-2 test asserted one job per provider (buggy behavior).
+        The CLI (cidx index --index-commits) handles all providers in sequence internally.
+        Submitting N concurrent jobs caused HNSW + SQLite race conditions corrupting the index.
+        Fix: append all providers to config, then submit exactly ONE job with operation_type
+        'provider_temporal_index_rebuild'.
         """
         handler = _find_route_handler("/api/admin/golden-repos/{alias}/indexes", "POST")
 
         mock_bgm = MagicMock()
-        mock_bgm.submit_job.side_effect = ["job-temporal-voyage", "job-temporal-cohere"]
+        mock_bgm.submit_job.return_value = "job-temporal-single"
 
         mock_grm = MagicMock()
         mock_grm.golden_repos = {"my-repo": MagicMock(temporal_options=None)}
@@ -119,12 +122,10 @@ class TestAddIndexTemporalWithProviders:
             )
 
         assert response.status_code == 202
-        assert mock_bgm.submit_job.call_count == 2
-        call_args_list = mock_bgm.submit_job.call_args_list
-        operation_types = [c.kwargs.get("operation_type") for c in call_args_list]
-        providers_in_request = ["voyage-ai", "cohere"]
-        expected = [f"provider_temporal_index_add:{p}" for p in providers_in_request]
-        assert operation_types == expected
+        # Bug #648/#3 fix: ONE job, not N (one-per-provider was causing index corruption)
+        assert mock_bgm.submit_job.call_count == 1
+        submitted_op_type = mock_bgm.submit_job.call_args.kwargs.get("operation_type")
+        assert submitted_op_type == "provider_temporal_index_rebuild"
 
     def test_add_index_temporal_without_providers_uses_generic_job(
         self, admin_test_client
@@ -327,4 +328,357 @@ class TestProvidersFieldDescriptionIncludesTemporal:
         assert (
             "temporal" in providers_description.lower()
             or "641" in providers_description
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bug #648 fixes
+# ---------------------------------------------------------------------------
+
+
+class TestBug648SingleTemporalJob:
+    """Bug #648 Fix #3: Only ONE temporal job submitted regardless of provider count.
+
+    Previously N jobs (one per provider) were submitted concurrently, causing
+    index corruption. The CLI already handles all providers internally.
+    """
+
+    def test_only_one_temporal_job_submitted_for_two_providers(self, admin_test_client):
+        """Bug #3: Exactly one job submitted when temporal rebuild has 2 providers.
+
+        The old code submitted 2 jobs (one per provider). The fix must submit
+        exactly ONE job because the CLI handles all providers internally.
+        """
+        handler = _find_route_handler("/api/admin/golden-repos/{alias}/indexes", "POST")
+
+        mock_bgm = MagicMock()
+        mock_bgm.submit_job.return_value = "job-temporal-single"
+
+        mock_grm = MagicMock()
+        mock_grm.golden_repos = {"my-repo": MagicMock(temporal_options=None)}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_path",
+                return_value="/some/repo/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_base_clone",
+                return_value="/some/base/clone",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._append_provider_to_config",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._provider_temporal_index_job",
+            ),
+            _patch_closure(handler, "background_job_manager", mock_bgm),
+            _patch_closure(handler, "golden_repo_manager", mock_grm),
+        ):
+            response = admin_test_client.post(
+                "/api/admin/golden-repos/my-repo/indexes",
+                json={
+                    "index_types": ["temporal"],
+                    "providers": ["voyage-ai", "cohere"],
+                },
+            )
+
+        assert response.status_code == 202
+        # Bug #3 fix: exactly ONE job, not one per provider
+        assert mock_bgm.submit_job.call_count == 1, (
+            f"Expected 1 temporal job, got {mock_bgm.submit_job.call_count}. "
+            "Each provider was running its own full CLI (race condition / corruption)."
+        )
+
+
+class TestBug648SingleSemanticJob:
+    """Bug #648 Fix #4: Only ONE semantic job submitted regardless of provider count.
+
+    The same per-provider loop exists for semantic indexing with a fixed
+    operation_type='provider_index_add' causing silent conflict-detection drops
+    for 2nd+ providers. Fix: submit one job, all providers appended to config first.
+    """
+
+    def test_only_one_semantic_job_submitted_for_two_providers(self, admin_test_client):
+        """Bug #4: Exactly one job submitted when semantic rebuild has 2 providers.
+
+        The old code submitted 2 jobs, but the fixed operation_type de-duplicated
+        caused the 2nd to be silently dropped. Fix: submit exactly 1 job.
+        """
+        handler = _find_route_handler("/api/admin/golden-repos/{alias}/indexes", "POST")
+
+        mock_bgm = MagicMock()
+        mock_bgm.submit_job.return_value = "job-semantic-single"
+
+        mock_grm = MagicMock()
+        mock_grm.golden_repos = {"my-repo": MagicMock(temporal_options=None)}
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_path",
+                return_value="/some/repo/path",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._resolve_golden_repo_base_clone",
+                return_value="/some/base/clone",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._append_provider_to_config",
+            ),
+            patch(
+                "code_indexer.server.mcp.handlers._provider_index_job",
+            ),
+            _patch_closure(handler, "background_job_manager", mock_bgm),
+            _patch_closure(handler, "golden_repo_manager", mock_grm),
+        ):
+            response = admin_test_client.post(
+                "/api/admin/golden-repos/my-repo/indexes",
+                json={
+                    "index_types": ["semantic"],
+                    "providers": ["voyage-ai", "cohere"],
+                },
+            )
+
+        assert response.status_code == 202
+        # Bug #4 fix: exactly ONE job, not one per provider
+        assert mock_bgm.submit_job.call_count == 1, (
+            f"Expected 1 semantic job, got {mock_bgm.submit_job.call_count}. "
+            "Per-provider loop submits duplicates (2nd silently dropped or races)."
+        )
+
+
+class TestBug648EnableTemporalFlag:
+    """Bug #648 Fix #1: enable_temporal flag set to True after _provider_temporal_index_job succeeds."""
+
+    def test_enable_temporal_flag_set_after_provider_temporal_job_succeeds(
+        self, tmp_path
+    ):
+        """Bug #1: After successful _provider_temporal_index_job, enable_temporal=True written to DB.
+
+        Previously the flag was never set because 'temporal' was removed from
+        remaining_index_types before the flag-setting call. Fix: set flag inside
+        _provider_temporal_index_job after CLI succeeds.
+        """
+        initial_config = {
+            "embedding_provider": "voyage-ai",
+            "embedding_providers": ["voyage-ai", "cohere"],
+        }
+        repo_dir = _make_repo(tmp_path, initial_config)
+
+        from code_indexer.server.mcp.handlers import _provider_temporal_index_job
+
+        mock_grm = MagicMock()
+        mock_grm._sqlite_backend.update_enable_temporal.return_value = True
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.get_config_service"
+            ) as mock_cfg_svc,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+        ):
+            mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
+            mock_app_module.golden_repo_manager = mock_grm
+
+            result = _provider_temporal_index_job(
+                repo_path=str(repo_dir),
+                provider_name="voyage-ai",
+                repo_alias="my-repo",
+            )
+
+        assert result.get("success") is True
+        # Bug #1 fix: enable_temporal must be updated in the SQLite backend
+        mock_grm._sqlite_backend.update_enable_temporal.assert_called_once_with(
+            "my-repo", True
+        )
+
+
+class TestBug648GlobalRegistryUpdate:
+    """Bug #648 Codex review Finding #1: _set_enable_temporal_flag must update GlobalRegistry.
+
+    The function only updated golden_repos_metadata but NOT the global_repos table
+    via GlobalRegistry.  Mirror exactly the pattern from golden_repo_manager.py:2780-2812.
+    """
+
+    def test_set_enable_temporal_flag_also_updates_global_registry(self, tmp_path):
+        """Finding #1: GlobalRegistry.update_enable_temporal called with '{alias}-global'.
+
+        After _provider_temporal_index_job succeeds, _set_enable_temporal_flag must:
+        1. Update golden_repos_metadata via grm._sqlite_backend (existing behaviour).
+        2. ALSO update global_repos via GlobalRegistry._sqlite_backend with alias+'-global'.
+        """
+        initial_config = {
+            "embedding_provider": "voyage-ai",
+            "embedding_providers": ["voyage-ai"],
+        }
+        repo_dir = _make_repo(tmp_path, initial_config)
+
+        from code_indexer.server.mcp.handlers import _provider_temporal_index_job
+
+        mock_grm = MagicMock()
+        mock_grm._sqlite_backend.update_enable_temporal.return_value = True
+        mock_grm.data_dir = str(tmp_path)
+
+        mock_global_registry_instance = MagicMock()
+        mock_global_registry_instance._sqlite_backend = MagicMock()
+        mock_global_registry_instance._sqlite_backend.update_enable_temporal.return_value = True
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.get_config_service"
+            ) as mock_cfg_svc,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                return_value=mock_global_registry_instance,
+            ),
+        ):
+            mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
+            mock_app_module.golden_repo_manager = mock_grm
+
+            result = _provider_temporal_index_job(
+                repo_path=str(repo_dir),
+                provider_name="voyage-ai",
+                repo_alias="my-repo",
+            )
+
+        assert result.get("success") is True
+        # Finding #1: GlobalRegistry backend must also be updated with alias + '-global'
+        mock_global_registry_instance._sqlite_backend.update_enable_temporal.assert_called_once_with(
+            "my-repo-global", True
+        )
+
+    def test_set_enable_temporal_flag_uses_module_logger(self, tmp_path, caplog):
+        """Finding #2: _set_enable_temporal_flag uses module-level logger, not root logging.
+
+        The function must emit log records via the 'code_indexer.server.mcp.handlers'
+        logger (logger.info / logger.warning), not via the root logging.info /
+        logging.warning calls which bypass structured logging configuration.
+        """
+        import logging as stdlib_logging
+
+        initial_config = {
+            "embedding_provider": "voyage-ai",
+            "embedding_providers": ["voyage-ai"],
+        }
+        repo_dir = _make_repo(tmp_path, initial_config)
+
+        from code_indexer.server.mcp.handlers import _provider_temporal_index_job
+
+        mock_grm = MagicMock()
+        mock_grm._sqlite_backend.update_enable_temporal.return_value = True
+        mock_grm.data_dir = str(tmp_path)
+
+        mock_global_registry_instance = MagicMock()
+        mock_global_registry_instance._sqlite_backend = MagicMock()
+        mock_global_registry_instance._sqlite_backend.update_enable_temporal.return_value = True
+
+        with (
+            patch(
+                "code_indexer.server.mcp.handlers.get_config_service"
+            ) as mock_cfg_svc,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress",
+            ),
+            patch(
+                "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
+                return_value=(10, 5),
+            ),
+            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers.GlobalRegistry",
+                return_value=mock_global_registry_instance,
+            ),
+            caplog.at_level(
+                stdlib_logging.INFO, logger="code_indexer.server.mcp.handlers"
+            ),
+        ):
+            mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
+            mock_app_module.golden_repo_manager = mock_grm
+
+            _provider_temporal_index_job(
+                repo_path=str(repo_dir),
+                provider_name="voyage-ai",
+                repo_alias="my-repo",
+            )
+
+        # Finding #2 (positive): log records must come from the module-level logger
+        handler_log_records = [
+            r
+            for r in caplog.records
+            if r.name == "code_indexer.server.mcp.handlers"
+            and "enable_temporal" in r.message
+        ]
+        assert len(handler_log_records) >= 1, (
+            "Expected at least one enable_temporal log record from the module-level "
+            "'code_indexer.server.mcp.handlers' logger. "
+            "Likely cause: _set_enable_temporal_flag still uses root logging.info/warning "
+            "instead of logger.info/warning."
+        )
+        # Finding #2 (negative): root logger must NOT receive enable_temporal messages
+        root_log_records = [
+            r
+            for r in caplog.records
+            if r.name == "root" and "enable_temporal" in r.message
+        ]
+        assert not root_log_records, (
+            "Root logger must not be used for enable_temporal messages. "
+            "Replace logging.info/warning with logger.info/warning in _set_enable_temporal_flag."
+        )
+
+
+class TestBug648OrphanedSnapshotCleanup:
+    """Bug #648 Fix #6: Orphaned snapshot dirs cleaned up when swap_alias raises ValueError."""
+
+    def test_orphaned_snapshot_deleted_when_swap_alias_fails(self, tmp_path):
+        """Bug #6: If swap_alias raises ValueError (old_target mismatch), new snapshot is deleted.
+
+        When N concurrent jobs start with the same old_snapshot_path, only the
+        first swap succeeds. Jobs 2..N get ValueError. Their new snapshot dirs
+        must be cleaned up to prevent disk leak.
+        """
+        from code_indexer.server.mcp.handlers import _post_provider_index_snapshot
+
+        # Create a fake new snapshot directory that would be orphaned
+        new_snapshot_dir = tmp_path / "new_snapshot_v_12345"
+        new_snapshot_dir.mkdir()
+        (new_snapshot_dir / "some_index_file.json").write_text("{}")
+
+        # Verify it exists before the test
+        assert new_snapshot_dir.exists()
+
+        mock_scheduler = MagicMock()
+        mock_scheduler._create_snapshot.return_value = str(new_snapshot_dir)
+        mock_scheduler.alias_manager.swap_alias.side_effect = ValueError(
+            "current_target mismatch: expected old target '/old/path'"
+        )
+
+        with patch(
+            "code_indexer.server.mcp.handlers._get_app_refresh_scheduler",
+            return_value=mock_scheduler,
+        ):
+            # This should NOT raise; it should log warning and clean up
+            _post_provider_index_snapshot(
+                repo_alias="my-repo-global",
+                base_clone_path="/some/base/clone",
+                old_snapshot_path="/old/path",
+            )
+
+        # Bug #6 fix: orphaned new snapshot dir must be deleted
+        assert not new_snapshot_dir.exists(), (
+            "Orphaned snapshot directory was not cleaned up after swap_alias ValueError. "
+            "This causes disk leak on every multi-provider rebuild."
         )

@@ -46,6 +46,7 @@ from code_indexer.server.repositories.activated_repo_manager import (
 from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.global_repos.global_registry import GlobalRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -16600,11 +16601,27 @@ def _post_provider_index_snapshot(
             alias_name=repo_alias,
             source_path=base_clone_path,
         )
-        scheduler.alias_manager.swap_alias(
-            alias_name=repo_alias,
-            new_target=new_snapshot,
-            old_target=old_snapshot_path,
-        )
+        try:
+            scheduler.alias_manager.swap_alias(
+                alias_name=repo_alias,
+                new_target=new_snapshot,
+                old_target=old_snapshot_path,
+            )
+        except ValueError as swap_exc:
+            # Bug #648/#6: concurrent jobs may arrive here with the same old_target.
+            # Only the first swap succeeds; subsequent ones get ValueError.
+            # Best-effort cleanup of the orphaned new_snapshot to prevent disk leak.
+            import shutil as _shutil
+
+            _shutil.rmtree(new_snapshot, ignore_errors=True)
+            logger.warning(
+                "Alias swap skipped for %s (old_target mismatch — another job already "
+                "swapped ahead): %s. Best-effort cleanup of orphaned snapshot %s attempted.",
+                repo_alias,
+                swap_exc,
+                new_snapshot,
+            )
+            return
         # Schedule old snapshot for cleanup (it was a versioned dir)
         cleanup_manager = getattr(scheduler, "cleanup_manager", None)
         if cleanup_manager is not None:
@@ -16931,6 +16948,69 @@ def _provider_index_job(
         }
 
 
+def _set_enable_temporal_flag(repo_alias: str) -> None:
+    """Set enable_temporal=True in the SQLite backend and in-memory golden_repo_manager.
+
+    Called after _provider_temporal_index_job succeeds to persist the flag that
+    was never written via the provider path (Bug #648/#1).  Mirrors the pattern
+    in golden_repo_manager.py:2769-2807 (the only other place the flag is set).
+
+    Degrades gracefully: logs a warning on any failure rather than raising.
+    """
+    if not repo_alias:
+        return
+
+    grm = getattr(app_module, "golden_repo_manager", None)
+    if grm is None:
+        logger.warning(
+            "_set_enable_temporal_flag: golden_repo_manager unavailable, "
+            "cannot set enable_temporal=True for %s",
+            repo_alias,
+        )
+        return
+
+    try:
+        if grm._sqlite_backend.update_enable_temporal(repo_alias, True):
+            repo_meta = grm.golden_repos.get(repo_alias)
+            if repo_meta is not None:
+                repo_meta.enable_temporal = True
+            logger.info(
+                "Set enable_temporal=True for %s in golden_repos_metadata", repo_alias
+            )
+        else:
+            logger.warning(
+                "Failed to set enable_temporal=True for %s in golden_repos_metadata",
+                repo_alias,
+            )
+    except Exception as exc:
+        logger.warning("Error setting enable_temporal for %s: %s", repo_alias, exc)
+
+    global_alias = f"{repo_alias}-global"
+    try:
+        from pathlib import Path as _Path
+
+        data_dir = _Path(grm.data_dir)
+        golden_repos_dir = data_dir / "golden-repos"
+        sqlite_db_path = str(data_dir / "cidx_server.db")
+        registry = GlobalRegistry(
+            str(golden_repos_dir),
+            use_sqlite=True,
+            db_path=sqlite_db_path,
+        )
+        if (
+            registry._sqlite_backend is not None
+            and registry._sqlite_backend.update_enable_temporal(global_alias, True)
+        ):
+            logger.info("Set enable_temporal=True for %s in global_repos", global_alias)
+        else:
+            logger.warning(
+                "Failed to set enable_temporal=True for %s in global_repos",
+                global_alias,
+            )
+    except Exception as exc:
+        logger.error("Error updating global_repos table for %s: %s", global_alias, exc)
+
+
 def _provider_temporal_index_job(
     repo_path: str,
     provider_name: str,
@@ -17002,6 +17082,13 @@ def _provider_temporal_index_job(
                 logger.warning(
                     "Post-temporal-index snapshot failed for %s: %s", repo_alias, exc
                 )
+
+        # Bug #648/#1: Set enable_temporal=True in DB and in-memory after successful CLI run.
+        # The route handler removed "temporal" from remaining_index_types before calling
+        # add_indexes_to_golden_repo, which is the only other place the flag gets set.
+        # Mirror the pattern from golden_repo_manager.py:2769-2807.
+        _set_enable_temporal_flag(repo_alias)
+
         stdout_out = "".join(all_stdout)
         stderr_out = "".join(all_stderr)
         return {
