@@ -616,15 +616,16 @@ class TestBug648GlobalRegistryUpdate:
             )
 
         # Finding #2 (positive): log records must come from the module-level logger
+        # (handlers package split: logger may be handlers or handlers._legacy)
         handler_log_records = [
             r
             for r in caplog.records
-            if r.name == "code_indexer.server.mcp.handlers"
+            if r.name.startswith("code_indexer.server.mcp.handlers")
             and "enable_temporal" in r.message
         ]
         assert len(handler_log_records) >= 1, (
             "Expected at least one enable_temporal log record from the module-level "
-            "'code_indexer.server.mcp.handlers' logger. "
+            "'code_indexer.server.mcp.handlers' logger (or handlers._legacy submodule). "
             "Likely cause: _set_enable_temporal_flag still uses root logging.info/warning "
             "instead of logger.info/warning."
         )
