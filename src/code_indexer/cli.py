@@ -201,13 +201,15 @@ def _make_offset_callback(
         A wrapper callable with the same signature as base_callback.
     """
 
-    def _cb(current: int, total: "Optional[int]", **kwargs: "Any") -> None:
+    def _cb(
+        current: int, total: "Optional[int]", path: "Any" = None, **kwargs: "Any"
+    ) -> None:
         if total and total > 0:
             offset_current = provider_idx * total + current
             offset_total = num_providers * total
-            base_callback(offset_current, offset_total, **kwargs)
+            base_callback(offset_current, offset_total, path, **kwargs)
         else:
-            base_callback(current, total, **kwargs)
+            base_callback(current, total, path, **kwargs)
 
     return _cb
 

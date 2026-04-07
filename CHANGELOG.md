@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixes
 
-- fix: Version bump to align all deployment artifacts after hotfix sequencing.
+- fix: Bug #645 — regression in v9.13.3: `_make_offset_callback` wrapper dropped the `path` positional argument, breaking all server-triggered temporal indexing. The inner `_cb` function was defined as `(current, total, **kwargs)` but `temporal_indexer.py` calls `progress_callback(current, total, path, ...)` with 3 positional args, causing `TypeError: _cb() takes 2 positional arguments but 3 were given` on every temporal index job. Fixed by adding `path: Any = None` as 3rd positional param and forwarding it through both branches of `_cb`. Added `TestPathArgIsPreserved` test class that reproduces the exact 3-positional-arg crash scenario.
 
 ## v9.13.4
 
