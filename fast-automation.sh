@@ -89,13 +89,13 @@ else
     exit 1
 fi
 
-# 3. Check CLI code formatting with black
-print_step "Checking CLI code formatting with black"
-if black --check src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ tests/unit/cli/ tests/unit/remote/ tests/unit/api_clients/; then
-    print_success "CLI black formatting check passed"
+# 3. Check CLI code formatting with ruff format
+print_step "Checking CLI code formatting with ruff format"
+if ruff format --check src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ tests/unit/cli/ tests/unit/remote/ tests/unit/api_clients/; then
+    print_success "CLI ruff formatting check passed"
 else
-    print_error "CLI black formatting check failed"
-    print_warning "Run 'black' on the CLI-related files to fix formatting"
+    print_error "CLI ruff formatting check failed"
+    print_warning "Run 'ruff format' on the CLI-related files to fix formatting"
     exit 1
 fi
 
