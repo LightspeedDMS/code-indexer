@@ -201,8 +201,11 @@ class HNSWIndexManager:
         # Note: get_current_count() includes soft-deleted vectors, causing errors
         queryable_count = len(id_mapping) if id_mapping else index.get_current_count()
 
-        # Limit k to available queryable vectors
-        k_actual = min(k, queryable_count)
+        # Limit k to available queryable vectors.
+        # Also cap at index.get_current_count() to prevent hnswlib crash when
+        # id_mapping metadata diverges from the binary (e.g. transient mismatch
+        # during index refresh). hnswlib throws if k > getCurrentCount().
+        k_actual = min(k, queryable_count, index.get_current_count())
 
         # Ensure k_actual is at least 1 if there are any vectors
         if k_actual == 0 and queryable_count > 0:
