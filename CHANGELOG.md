@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.13.4
+
+### Fixes
+
+- fix: Bug #644 — defensive k-cap in HNSWIndexManager.query() prevents hnswlib crash when id_mapping metadata diverges from the binary index. Added `index.get_current_count()` as a third bound in the k_actual calculation (`min(k, queryable_count, index.get_current_count())`), so hnswlib never receives k > the number of vectors it actually contains. Previously, a transient mismatch between collection_meta.json id_mapping and the hnsw_index.bin (e.g. during a CoW snapshot creation) caused hnswlib to throw "Cannot return the results in a contiguous 2D array. Probably ef or M is too small", which propagated as MCP-GENERAL-170 errors and logged "Parallel query provider 'voyage-ai' failed" warnings.
+
 ## v9.13.3
 
 ### Fixes
