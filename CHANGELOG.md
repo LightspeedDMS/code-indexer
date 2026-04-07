@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.13.3
+
+### Fixes
+
+- fix: Bug #642 — temporal indexing max_commits and since_date parameters are now persisted to temporal_meta.json. Previously, running cidx --index-commits --max-commits N would apply the limit during initial indexing but the value was never written to the metadata file, so background refresh jobs had no way to re-apply the original limit and would silently re-index the full commit history on every refresh.
+- fix: Bug #643 — dual-provider temporal indexing no longer freezes job progress at 99%. When two embedding providers run sequential temporal indexing, the second provider's progress_callback emitted backward progress (resetting to 0 after provider 1 completed), which the server-side ProgressPhaseAllocator clamped, freezing display at ~99% for the entire second provider's run (up to 10+ hours on large repos). Fixed by wrapping each provider's callback with _make_offset_callback in cli.py to normalize per-provider 0-to-N progress into a globally monotonic range across all N providers.
+
 ## v9.13.2
 
 ### Refactoring
