@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.13.2
+
+### Refactoring
+
+- refactor: Dead code removal — issues #608-#612. Removed ~22,000 lines of orphaned production code with zero production callers, confirmed via SCIP reference analysis. Deleted packages: server/validation/ (~3,899 lines), business_logic/ (~460 lines), server/feedback/, server/cli/. Deleted dead services: ra_session_router, job_phase_detector, claude_code_response, search_limits_validator, search_result_file_manager (~672 lines). Deleted orphan modules: description_generator, test_reorganizer, hnswlib_verification (~700 lines). Fixed broken MetaDirectoryInitializer import (crash bug on cidx global init-meta). Removed deprecated setup_global_registry CLI command. Cleaned status_display.py dead helper functions. Removed server/scripts/__init__.py empty init.
+- style: Switch fast-automation.sh formatting check from black to ruff format to align with pre-commit hook and server-fast-automation.sh.
+
 ## v9.13.0
 
 ### Features
