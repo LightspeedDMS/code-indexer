@@ -20,6 +20,7 @@ from rich.table import Table
 # Rich progress imports removed - using MultiThreadedProgressManager instead
 
 from .config import ConfigManager, Config
+from .services.temporal.temporal_migration import migrate_legacy_temporal_collection
 from .disabled_commands import get_command_mode_icons
 from .utils.enhanced_messaging import (
     get_conflicting_flags_message,
@@ -3109,6 +3110,12 @@ def index(
                             "No existing temporal collections found. Starting fresh index."
                         )
                     console.print("✅ Temporal index cleared", style="green")
+
+                # Bug #642 Step 1: run migration BEFORE resolving the collection name.
+                # Without this, TemporalIndexer is constructed with the new provider-aware
+                # path before the legacy directory has been renamed, so temporal_meta.json
+                # is not found and last_commit = None -> full git log with no limit.
+                migrate_legacy_temporal_collection(index_dir, config)
 
                 # Initialize temporal indexer with provider-aware collection name
                 from code_indexer.services.temporal.temporal_collection_naming import (

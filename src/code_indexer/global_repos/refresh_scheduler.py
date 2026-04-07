@@ -36,6 +36,60 @@ logger = logging.getLogger(__name__)
 _GIT_URL_PREFIXES = ("https://", "http://", "git@", "ssh://", "git://")
 
 
+def _read_max_commits_from_temporal_meta(source_path: Path) -> Optional[int]:
+    """Read max_commits from temporal_meta.json when temporal_options is NULL.
+
+    Bug #642 Step 2 safety net: after path migration the DB temporal_options may
+    be NULL even though the index was originally created with a commit limit.
+    Scan both the legacy path and any provider-aware path for temporal_meta.json
+    and return the best available value.
+
+    Priority:
+    1. 'max_commits' field (written by Bug #642 Step 3 fix)
+    2. 'total_commits' field as conservative fallback
+
+    Returns:
+        max_commits integer if found, None otherwise.
+    """
+    import json as _json
+
+    index_dir = source_path / ".code-indexer" / "index"
+    if not index_dir.is_dir():
+        return None
+
+    # Candidate directory names: legacy first, then any provider-aware dirs
+    candidate_dirs = []
+    legacy = index_dir / "code-indexer-temporal"
+    if legacy.is_dir():
+        candidate_dirs.append(legacy)
+
+    for entry in index_dir.iterdir():
+        if entry.is_dir() and entry.name.startswith("code-indexer-temporal-"):
+            candidate_dirs.append(entry)
+
+    for candidate in candidate_dirs:
+        meta_file = candidate / "temporal_meta.json"
+        if not meta_file.exists():
+            continue
+        try:
+            meta = _json.loads(meta_file.read_text())
+            # Prefer the explicit max_commits field (Step 3 fix)
+            if meta.get("max_commits") is not None:
+                return int(meta["max_commits"])
+            # Conservative fallback: total_commits as upper bound
+            if meta.get("total_commits") is not None:
+                return int(meta["total_commits"])
+        except (OSError, UnicodeDecodeError, _json.JSONDecodeError, ValueError) as exc:
+            logger.debug(
+                "Bug #642: failed reading temporal_meta.json from %s: %s",
+                meta_file,
+                exc,
+            )
+            continue
+
+    return None
+
+
 def _is_git_repo_url(repo_url: str) -> bool:
     """
     Return True if repo_url represents a remote git repository.
@@ -1303,6 +1357,17 @@ class RefreshScheduler:
                     temporal_command.extend(["--diff-context", str(diff_context)])
                 if temporal_options.get("all_branches"):
                     temporal_command.append("--all-branches")
+            else:
+                # Bug #642 Step 2: temporal_options is NULL (e.g. after path migration
+                # where options were never written back to DB). Fall back to reading
+                # max_commits from temporal_meta.json in the repo's index directory.
+                _fallback_max = _read_max_commits_from_temporal_meta(Path(source_path))
+                if _fallback_max is not None:
+                    logger.info(
+                        f"Bug #642 fallback: temporal_options NULL for {alias_name}, "
+                        f"using max_commits={_fallback_max} from temporal_meta.json"
+                    )
+                    temporal_command.extend(["--max-commits", str(_fallback_max)])
 
         # Step 3: SCIP indexing on source (if enabled)
         enable_scip = repo_info.get("enable_scip", False) if repo_info else False

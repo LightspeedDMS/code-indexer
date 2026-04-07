@@ -1333,6 +1333,8 @@ class TemporalIndexer:
         approximate_vectors_created: int,
         branch_stats: dict,
         indexing_mode: str,
+        max_commits: Optional[int] = None,
+        since_date: Optional[str] = None,
     ):
         """Save temporal indexing metadata to JSON."""
         metadata = {
@@ -1344,6 +1346,11 @@ class TemporalIndexer:
             "indexing_mode": indexing_mode,
             "indexed_at": datetime.now().isoformat(),
         }
+
+        if max_commits is not None:
+            metadata["max_commits"] = max_commits
+        if since_date is not None:
+            metadata["since_date"] = since_date
 
         metadata_path = self.temporal_dir / "temporal_meta.json"
         with open(metadata_path, "w") as f:
