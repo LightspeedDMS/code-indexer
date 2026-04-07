@@ -177,3 +177,75 @@ class TestSaveTemporalMetadataPersistenceMaxCommits:
         assert "since_date" not in meta, (
             "since_date must NOT appear in JSON when not provided"
         )
+
+
+# ---------------------------------------------------------------------------
+# Wiring test: index_commits() → _save_temporal_metadata() parameter passing
+# ---------------------------------------------------------------------------
+
+
+class TestIndexCommitsWiringMaxCommitsSinceDate:
+    """Bug #642: index_commits() must forward max_commits/since_date to _save_temporal_metadata."""
+
+    def test_index_commits_passes_max_commits_and_since_date_to_metadata(
+        self, tmp_path
+    ):
+        """Full wiring: index_commits(max_commits=5, since_date='2024-01-01') must
+        result in temporal_meta.json containing both values.
+
+        Uses the established project pattern: mock git/embedding infrastructure
+        (external boundaries) while letting index_commits() execute its own logic,
+        including the _save_temporal_metadata() call with the forwarded parameters.
+        """
+        from unittest.mock import patch, Mock, MagicMock
+        from code_indexer.services.temporal.models import CommitInfo
+
+        fake_commit = CommitInfo(
+            hash="deadbeef1234",
+            timestamp=1700000000,
+            author_name="Test Author",
+            author_email="test@example.com",
+            message="Initial commit",
+            parent_hashes="",
+        )
+
+        indexer = _make_indexer(tmp_path)
+        indexer.vector_store.load_id_index.return_value = set()
+
+        mock_embedding_provider = Mock()
+        mock_vector_manager = MagicMock()
+        mock_vector_manager.cancellation_event = MagicMock()
+        mock_vector_manager.cancellation_event.is_set.return_value = False
+        mock_vector_manager.__enter__ = Mock(return_value=mock_vector_manager)
+        mock_vector_manager.__exit__ = Mock(return_value=None)
+
+        with (
+            patch.object(indexer, "_get_commit_history", return_value=[fake_commit]),
+            patch.object(indexer, "_get_current_branch", return_value="main"),
+            patch.object(
+                indexer,
+                "_process_commits_parallel",
+                return_value=(1, 3, 9),
+            ),
+            patch(
+                "code_indexer.services.embedding_factory.EmbeddingProviderFactory.create",
+                return_value=mock_embedding_provider,
+            ),
+            patch(
+                "code_indexer.services.temporal.temporal_indexer.VectorCalculationManager",
+                return_value=mock_vector_manager,
+            ),
+        ):
+            indexer.index_commits(max_commits=5, since_date="2024-01-01")
+
+        meta_path = indexer.temporal_dir / "temporal_meta.json"
+        assert meta_path.exists(), (
+            "temporal_meta.json must be written by index_commits()"
+        )
+        meta = json.loads(meta_path.read_text())
+        assert meta.get("max_commits") == 5, (
+            "index_commits() must forward max_commits to _save_temporal_metadata()"
+        )
+        assert meta.get("since_date") == "2024-01-01", (
+            "index_commits() must forward since_date to _save_temporal_metadata()"
+        )

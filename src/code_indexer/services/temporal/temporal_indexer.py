@@ -30,6 +30,11 @@ from .temporal_progressive_metadata import TemporalProgressiveMetadata
 
 logger = logging.getLogger(__name__)
 
+# Each indexed diff produces approximately this many vectors (diff chunk + commit
+# message + metadata).  Used only for the approximate_vectors_created statistic
+# written to temporal_meta.json — not a correctness-critical value.
+_APPROX_VECTORS_PER_UNIT = 3
+
 
 @dataclass
 class IndexingResult:
@@ -451,9 +456,12 @@ class TemporalIndexer:
             last_commit=commits_from_git[-1].hash,
             total_commits=len(commits_from_git),
             files_processed=total_blobs_processed,
-            approximate_vectors_created=total_vectors_created // 3,  # Approx
+            approximate_vectors_created=total_vectors_created
+            // _APPROX_VECTORS_PER_UNIT,
             branch_stats={"branches": branches_indexed, "per_branch_counts": {}},
             indexing_mode="all-branches" if all_branches else "single-branch",
+            max_commits=max_commits,
+            since_date=since_date,
         )
 
         return IndexingResult(

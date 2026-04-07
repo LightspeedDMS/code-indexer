@@ -1364,8 +1364,10 @@ class RefreshScheduler:
                 _fallback_max = _read_max_commits_from_temporal_meta(Path(source_path))
                 if _fallback_max is not None:
                     logger.info(
-                        f"Bug #642 fallback: temporal_options NULL for {alias_name}, "
-                        f"using max_commits={_fallback_max} from temporal_meta.json"
+                        "Bug #642 fallback: temporal_options NULL for %s, "
+                        "using max_commits=%s from temporal_meta.json",
+                        alias_name,
+                        _fallback_max,
                     )
                     temporal_command.extend(["--max-commits", str(_fallback_max)])
 
