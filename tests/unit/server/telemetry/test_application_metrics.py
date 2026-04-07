@@ -6,6 +6,8 @@ Tests OTEL counters and histograms for search, FTS, and embedding operations.
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
+import pytest
+
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 
@@ -29,6 +31,7 @@ def reset_all_singletons():
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestMetricsInstrumentationImport:
     """Tests for metrics instrumentation module import behavior."""
 
@@ -54,6 +57,7 @@ class TestMetricsInstrumentationImport:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestApplicationMetricsCreation:
     """Tests for ApplicationMetrics instantiation."""
 
@@ -122,6 +126,7 @@ class TestApplicationMetricsCreation:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestSearchMetrics:
     """Tests for search operation metrics."""
 
@@ -236,6 +241,7 @@ class TestSearchMetrics:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestFTSMetrics:
     """Tests for full-text search metrics."""
 
@@ -291,6 +297,7 @@ class TestFTSMetrics:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestEmbeddingMetrics:
     """Tests for embedding operation metrics."""
 
@@ -374,6 +381,7 @@ class TestEmbeddingMetrics:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestMetricsAttributes:
     """Tests for metrics attribute handling."""
 

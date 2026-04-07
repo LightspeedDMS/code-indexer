@@ -10,7 +10,10 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 
 import sqlite3
 
+import pytest
 
+
+@pytest.mark.slow
 class TestAuditLogServiceQuery:
     """Tests for AuditLogService.query() method."""
 
@@ -295,6 +298,7 @@ class TestAuditLogServiceQuery:
         assert logs[0]["action_type"] == "old"
 
 
+@pytest.mark.slow
 class TestAuditLogServiceQueryExcludeTargetType:
     """Tests for exclude_target_type parameter (AC5: Groups UI excludes auth events)."""
 

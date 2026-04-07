@@ -356,6 +356,7 @@ class TestAjaxRevokeRepoAccess:
         assert logs[0]["action_type"] == "repo_access_revoke"
 
 
+@pytest.mark.slow
 class TestBackwardsCompatibility:
     """Tests for AC6: Form POST endpoints still work (backwards compatibility)."""
 

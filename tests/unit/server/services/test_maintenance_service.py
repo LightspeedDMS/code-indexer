@@ -315,6 +315,7 @@ class TestSyncJobManagerMaintenanceIntegration:
                     scheduler._submit_refresh_job("test-repo-global")
 
 
+@pytest.mark.slow
 class TestHealthEndpointMaintenanceMode:
     """Test AC6: Health endpoint includes maintenance_mode field."""
 

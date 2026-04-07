@@ -41,6 +41,7 @@ def diagnostics_service_with_db(temp_db):
     return service
 
 
+@pytest.mark.slow
 class TestDiagnosticsPersistence:
     """Test suite for diagnostics persistence functionality."""
 

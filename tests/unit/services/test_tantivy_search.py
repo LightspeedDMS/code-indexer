@@ -13,6 +13,8 @@ Tests cover:
 import pytest
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 class TestTantivySearch:
     """Test suite for TantivyIndexManager search functionality."""

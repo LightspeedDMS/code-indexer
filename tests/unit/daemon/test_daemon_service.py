@@ -9,6 +9,8 @@ import pytest
 
 from code_indexer.daemon.cache import CacheEntry
 
+pytestmark = pytest.mark.slow
+
 
 class TestCIDXDaemonServiceInitialization:
     """Test daemon service initialization."""

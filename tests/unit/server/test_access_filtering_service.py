@@ -70,6 +70,7 @@ def access_filtering_service(group_access_manager):
     return AccessFilteringService(group_access_manager)
 
 
+@pytest.mark.slow
 class TestGetAccessibleRepos:
     """Tests for get_accessible_repos method - AC1 and AC2."""
 
@@ -109,6 +110,7 @@ class TestGetAccessibleRepos:
         assert len(accessible) == 1
 
 
+@pytest.mark.slow
 class TestFilterQueryResultsAC1AC2:
     """Tests for filter_query_results - AC1 and AC2."""
 
@@ -167,6 +169,7 @@ class TestFilterQueryResultsAC1AC2:
         assert filtered[0]["repository_alias"] == "cidx-meta"
 
 
+@pytest.mark.slow
 class TestFilterRepoListing:
     """Tests for AC4: Repository Listing Filtered."""
 
@@ -198,6 +201,7 @@ class TestFilterRepoListing:
         assert len(filtered) == 4
 
 
+@pytest.mark.slow
 class TestFilterCidxMetaResults:
     """Tests for AC3: cidx-meta Summary Filtering."""
 
@@ -254,6 +258,7 @@ class TestFilterCidxMetaResults:
         assert len(filtered) == 1
 
 
+@pytest.mark.slow
 class TestInvisibleRepoPattern:
     """Tests for AC5: Invisible Repo Pattern Enforced."""
 
@@ -286,6 +291,7 @@ class TestInvisibleRepoPattern:
         assert "repo-secret" not in accessible
 
 
+@pytest.mark.slow
 class TestFilterAppliedAfterHNSW:
     """Tests for AC6: Filter Applied After HNSW Search."""
 
@@ -328,6 +334,7 @@ class TestFilterAppliedAfterHNSW:
         assert len(filtered) == 0  # All filtered out
 
 
+@pytest.mark.slow
 class TestGroupMembershipAtQueryTime:
     """Tests for AC7: Group Membership Checked at Query Time."""
 

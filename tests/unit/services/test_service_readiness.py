@@ -3,7 +3,11 @@
 import time
 from unittest.mock import Mock, patch, MagicMock
 
+import pytest
+
 from code_indexer.services.health_checker import HealthChecker
+
+pytestmark = pytest.mark.slow
 
 
 class TestServiceReadiness:

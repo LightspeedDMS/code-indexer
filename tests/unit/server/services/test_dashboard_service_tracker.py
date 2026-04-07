@@ -90,6 +90,7 @@ def _make_mock_job_manager(completed=5, failed=1, running=0, pending=0):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestDashboardServiceGetJobTracker:
     """DashboardService must expose _get_job_tracker() method."""
 
@@ -251,6 +252,7 @@ class TestDashboardJobCountsWithTracker:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestDashboardRecentJobsWithTracker:
     """_get_recent_jobs must read from JobTracker when available."""
 

@@ -51,6 +51,7 @@ def mock_admin_user():
     )
 
 
+@pytest.mark.slow
 class TestCreateFileEndpoint:
     """Tests for POST /api/v1/repos/{alias}/files endpoint."""
 

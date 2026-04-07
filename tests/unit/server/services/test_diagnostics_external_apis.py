@@ -26,6 +26,8 @@ from code_indexer.server.services.diagnostics_service import (
     DiagnosticsService,
 )
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def diagnostics_service():
@@ -551,6 +553,7 @@ def test_external_api_cache_ttl_is_5_minutes():
     assert API_CACHE_TTL == timedelta(minutes=5)
 
 
+@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_external_api_diagnostics_cached_for_5_minutes(
     diagnostics_service,

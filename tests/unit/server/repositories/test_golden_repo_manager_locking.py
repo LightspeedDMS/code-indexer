@@ -45,6 +45,7 @@ def manager(mock_data_dir):
     return mgr
 
 
+@pytest.mark.slow
 def test_concurrent_add_operations_serialized(manager):
     """
     Test that concurrent add_golden_repo operations are serialized.
@@ -188,6 +189,7 @@ def test_concurrent_remove_operations_serialized(manager):
             )
 
 
+@pytest.mark.slow
 def test_concurrent_add_remove_serialized(manager):
     """
     Test that concurrent add and remove operations complete without errors.

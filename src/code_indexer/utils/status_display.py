@@ -1187,16 +1187,6 @@ def create_activity_status(console: Optional[Console] = None) -> StatusDisplayMa
     return StatusDisplayManager(StatusDisplayMode.ACTIVITY_LOG, console)
 
 
-def create_spinner_status(console: Optional[Console] = None) -> StatusDisplayManager:
-    """Create a spinner status display."""
-    return StatusDisplayManager(StatusDisplayMode.SPINNER, console)
-
-
-def create_silent_status(console: Optional[Console] = None) -> StatusDisplayManager:
-    """Create a silent status display."""
-    return StatusDisplayManager(StatusDisplayMode.SILENT, console)
-
-
 def create_split_stream_status(
     console: Optional[Console] = None,
 ) -> StatusDisplayManager:

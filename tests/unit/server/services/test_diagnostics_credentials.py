@@ -19,6 +19,7 @@ from code_indexer.server.services.diagnostics_service import (
 )
 
 
+@pytest.mark.slow
 class TestCheckGitLabToken:
     """Tests for check_gitlab_token() method (AC3)."""
 
@@ -155,6 +156,7 @@ class TestCheckGitLabToken:
         )
 
 
+@pytest.mark.slow
 class TestCheckClaudeDelegationCredentials:
     """Tests for check_claude_delegation_credentials() method (AC4)."""
 
@@ -285,6 +287,7 @@ class TestCheckClaudeDelegationCredentials:
         )
 
 
+@pytest.mark.slow
 class TestRunCredentialDiagnostics:
     """Tests for run_credential_diagnostics() method (AC5)."""
 
@@ -385,6 +388,7 @@ class TestRunCredentialDiagnostics:
         assert len(results) == 4
 
 
+@pytest.mark.slow
 class TestRunCategoryCredentials:
     """Tests for run_category() dispatching CREDENTIALS category."""
 
@@ -434,6 +438,7 @@ class TestRunCategoryCredentials:
                 os.unlink(tmp_db_path)
 
 
+@pytest.mark.slow
 class TestTokenManagerSQLiteBackend:
     """Tests for Bug #146: Verify CITokenManager uses SQLite backend."""
 

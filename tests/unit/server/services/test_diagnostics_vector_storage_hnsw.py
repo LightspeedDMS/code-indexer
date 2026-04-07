@@ -22,6 +22,7 @@ from code_indexer.server.services.diagnostics_service import (
 )
 
 
+@pytest.mark.slow
 class TestVectorStorageHNSWValidation:
     """Test HNSW index validation in vector storage diagnostics."""
 

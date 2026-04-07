@@ -19,6 +19,7 @@ import pytest
 from .conftest import make_service
 
 
+@pytest.mark.slow
 class TestFullAnalysisJobRegistration:
     """AC2: Full analysis registers as 'dependency_map_full' operation type."""
 
@@ -111,6 +112,7 @@ class TestFullAnalysisJobRegistration:
         assert dep_map_jobs[0]["job_id"]  # non-empty string
 
 
+@pytest.mark.slow
 class TestFullAnalysisStatusTransitions:
     """AC7: Status transitions pending -> running -> completed/failed."""
 

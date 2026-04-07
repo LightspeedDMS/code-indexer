@@ -191,6 +191,7 @@ class TestPayloadCacheSyncMethods:
         )
 
 
+@pytest.mark.slow
 class TestPayloadCacheSyncBehavior:
     """Tests verifying PayloadCache sync operations work correctly."""
 

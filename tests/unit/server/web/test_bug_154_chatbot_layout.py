@@ -43,6 +43,7 @@ def style_content(template_content):
     return "\n".join([s.string for s in styles if s.string])
 
 
+@pytest.mark.slow
 class TestChatbotLayoutStructure:
     """Test that HTML structure supports traditional chatbot layout."""
 
@@ -79,6 +80,7 @@ class TestChatbotLayoutStructure:
         )
 
 
+@pytest.mark.slow
 class TestLayoutConstraints:
     """Test CSS constraints for no page scroll, independent component scrolling."""
 
@@ -196,6 +198,7 @@ class TestLayoutConstraints:
         )
 
 
+@pytest.mark.slow
 class TestInputPinning:
     """Test that input box is pinned to bottom and always visible."""
 

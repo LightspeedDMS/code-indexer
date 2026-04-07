@@ -75,6 +75,7 @@ def test_client(group_manager, mock_admin_user):
     app.dependency_overrides.clear()
 
 
+@pytest.mark.slow
 class TestAC4BulkAddReposToGroup:
     """
     AC4: Bulk Add Repos to Group
@@ -162,6 +163,7 @@ class TestAC4BulkAddReposToGroup:
         assert response.status_code == 422
 
 
+@pytest.mark.slow
 class TestAC5BulkRemoveReposFromGroup:
     """
     AC5: Bulk Remove Repos from Group

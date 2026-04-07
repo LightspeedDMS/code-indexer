@@ -26,6 +26,7 @@ def _extract_mcp_data(mcp_response: dict) -> dict:
     return {}
 
 
+@pytest.mark.slow
 class TestQuickReferenceDisplayName:
     """Test suite for quick_reference a.k.a. line (Story #22 AC3)."""
 

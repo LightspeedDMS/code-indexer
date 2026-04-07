@@ -7,6 +7,8 @@ Tests multi-language filtering for FTS queries with --language flag.
 import pytest
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def temp_index_dir(tmp_path):

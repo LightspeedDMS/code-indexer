@@ -14,6 +14,7 @@ import pytest
 from code_indexer.server.storage.database_manager import DatabaseSchema
 
 
+@pytest.mark.slow
 class TestSelfMonitoringSchema:
     """Test self_monitoring_issues table schema."""
 

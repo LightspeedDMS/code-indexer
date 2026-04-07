@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -73,6 +75,7 @@ def _make_app(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestAC1AliasManagerPathResolution:
     """Routes resolve repo path via AliasManager.read_alias('{alias}-global')."""
 
@@ -139,6 +142,7 @@ class TestAC1AliasManagerPathResolution:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestAC2MissingAlias404NoFallback:
     """When alias JSON is absent, return 404 without touching get_actual_repo_path()."""
 

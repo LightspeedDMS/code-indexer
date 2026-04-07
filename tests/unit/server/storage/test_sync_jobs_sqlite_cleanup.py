@@ -64,6 +64,7 @@ def _get_job_status(db_path: str, job_id: str) -> dict:
     return {"status": row[0], "error_message": row[1], "completed_at": row[2]}
 
 
+@pytest.mark.slow
 class TestCleanupOrphanedJobsOnStartup:
     """Tests for SyncJobsSqliteBackend.cleanup_orphaned_jobs_on_startup()."""
 

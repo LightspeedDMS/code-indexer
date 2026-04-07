@@ -13,6 +13,8 @@ TDD RED PHASE: Tests written before production code exists.
 from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
 
 from .conftest import (
     FULL_DOMAIN_BODY,
@@ -25,6 +27,7 @@ from .conftest import (
 )
 
 
+@pytest.mark.slow
 class TestTruncationGuardRejectsShortOutput:
     """refine_or_create_domain rejects refinement result < 50% of original body."""
 
@@ -89,6 +92,7 @@ class TestTruncationGuardRejectsShortOutput:
         assert result is False
 
 
+@pytest.mark.slow
 class TestTruncationGuardAcceptsNormalOutput:
     """refine_or_create_domain accepts results >= 50% of original body length."""
 
@@ -154,6 +158,7 @@ class TestTruncationGuardAcceptsNormalOutput:
         assert result is True
 
 
+@pytest.mark.slow
 class TestTruncationGuardSkipsShortOriginals:
     """Truncation guard is bypassed when original body <= 500 chars."""
 
@@ -204,6 +209,7 @@ class TestTruncationGuardSkipsShortOriginals:
         assert very_short_result in written
 
 
+@pytest.mark.slow
 class TestNoopWhenContentIdentical:
     """refine_or_create_domain skips write when refined content is identical to existing."""
 

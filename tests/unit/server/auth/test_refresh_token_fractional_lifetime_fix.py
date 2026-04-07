@@ -20,6 +20,7 @@ from code_indexer.server.auth.refresh_token_manager import RefreshTokenManager
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 
 
+@pytest.mark.slow
 class TestFractionalLifetimeFix:
     """
     TDD test suite for fractional refresh token lifetime calculation fix.

@@ -92,6 +92,7 @@ def _make_access_service(
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC3RepoAliasInGuard:
     """AC3: _check_repository_access must check 'repo_alias' parameter name.
 
@@ -183,6 +184,7 @@ class TestAC3RepoAliasInGuard:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC9FailClosedGuard:
     """AC9: When access_filtering_service is not available, the guard must
     DENY access (fail-closed) rather than falling through (fail-open).
@@ -299,6 +301,7 @@ class TestAC9FailClosedGuard:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC1ErrorSuggestionsFiltered:
     """AC1: _get_available_repos() must accept a user parameter and filter
     through AccessFilteringService.filter_repo_listing() before returning.
@@ -378,6 +381,7 @@ class TestAC1ErrorSuggestionsFiltered:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC2WildcardExpansionFiltered:
     """AC2: _expand_wildcard_patterns() must accept a user parameter and filter
     the available_repos list through AccessFilteringService before matching.
@@ -459,6 +463,7 @@ class TestAC2WildcardExpansionFiltered:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC4OmniHandlersAccessControl:
     """AC4: Omni-* handlers must filter expanded repo_aliases through
     AccessFilteringService BEFORE the per-repo iteration loop.
@@ -553,6 +558,7 @@ class TestAC4OmniHandlersAccessControl:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC5CompositeRepoValidation:
     """AC5: manage_composite_repository() must check each alias in
     golden_repo_aliases against AccessFilteringService before passing
@@ -681,6 +687,7 @@ class TestAC5CompositeRepoValidation:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestAC7OmniSearchErrorsFiltered:
     """AC7: After omni-search/omni-regex completes, the errors dict must be
     filtered to remove keys (repo aliases) that the user does not have access to.

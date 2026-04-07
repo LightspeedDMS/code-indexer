@@ -69,6 +69,7 @@ def test_client(group_manager, mock_admin_user):
     set_group_manager(None)
 
 
+@pytest.mark.slow
 class TestAC1CreateCustomGroup:
     """AC1: Create Custom Group - POST returns 201, is_default=FALSE."""
 

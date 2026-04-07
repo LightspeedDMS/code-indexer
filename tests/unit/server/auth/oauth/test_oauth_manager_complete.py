@@ -14,6 +14,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 
 
+@pytest.mark.slow
 class TestOAuthManagerComplete:
     """Complete test suite for OAuth Manager covering all acceptance criteria."""
 

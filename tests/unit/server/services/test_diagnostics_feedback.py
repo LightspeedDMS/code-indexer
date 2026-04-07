@@ -19,6 +19,8 @@ from code_indexer.server.services.diagnostics_service import (
     DiagnosticStatus,
 )
 
+pytestmark = pytest.mark.slow
+
 
 class TestGetActionableFeedback:
     """Tests for get_actionable_feedback method."""

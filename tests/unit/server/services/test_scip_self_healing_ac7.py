@@ -15,6 +15,7 @@ from code_indexer.server.repositories.background_jobs import (
 )
 
 
+@pytest.mark.slow
 class TestSCIPSelfHealingServiceAC7:
     """Test AC7: Job Completion Logic with Partial Resolution Support."""
 

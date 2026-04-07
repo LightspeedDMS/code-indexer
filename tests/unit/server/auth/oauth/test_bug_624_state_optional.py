@@ -78,6 +78,7 @@ def _post_consent(
     )
 
 
+@pytest.mark.slow
 class TestBug624StateOptional:
     """Tests that state parameter is optional per OAuth 2.1 with PKCE."""
 
@@ -146,8 +147,21 @@ class TestBug624StateOptional:
 
     @pytest.fixture
     def session_cookies(self):
-        """Create a valid session cookie for testuser (NORMAL_USER role)."""
-        from code_indexer.server.web import get_session_manager
+        """Create a valid session cookie for testuser (NORMAL_USER role).
+
+        The session manager must remain initialized throughout the test because
+        the OAuth consent route calls get_session_manager() directly (not via
+        dependency injection). We restore the previous global state after yield.
+        """
+        import code_indexer.server.web.auth as auth_module
+        from code_indexer.server.web import init_session_manager, get_session_manager
+
+        # Minimal config stub — only .host is needed for secure-cookie decision
+        class _Config:
+            host = "127.0.0.1"
+
+        original = auth_module._session_manager
+        init_session_manager("test-secret-key-for-unit-tests", _Config())
 
         helper_app = FastAPI()
 
@@ -160,7 +174,14 @@ class TestBug624StateOptional:
 
         helper_client = TestClient(helper_app)
         session_resp = helper_client.get("/make-session")
-        return session_resp.cookies
+        cookies = session_resp.cookies
+
+        # Yield with session manager still active — the consent POST also calls
+        # get_session_manager() directly and needs it initialized.
+        yield cookies
+
+        # Restore previous global state so we don't pollute other tests
+        auth_module._session_manager = original
 
     # --- GET /oauth/authorize tests ---
 
@@ -375,6 +396,7 @@ class TestBug624PostAuthorizeStateOptional:
             )
 
 
+@pytest.mark.slow
 class TestBug624MfaVerifyStateOptional:
     """POST /oauth/mfa/verify — oauth_state=None must not block the flow.
 

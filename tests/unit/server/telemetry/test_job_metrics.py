@@ -6,6 +6,8 @@ Tests OTEL gauges and counters for job lifecycle and repository state.
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
+import pytest
+
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 
@@ -54,6 +56,7 @@ class TestJobMetricsImport:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestJobMetricsCreation:
     """Tests for JobMetrics instantiation."""
 
@@ -122,6 +125,7 @@ class TestJobMetricsCreation:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestJobCounterMetrics:
     """Tests for job completion and failure counters."""
 
@@ -228,6 +232,7 @@ class TestJobCounterMetrics:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestJobGaugeMetrics:
     """Tests for job active and queued gauges."""
 
@@ -302,6 +307,7 @@ class TestJobGaugeMetrics:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestRepositoryMetrics:
     """Tests for repository gauge metrics."""
 

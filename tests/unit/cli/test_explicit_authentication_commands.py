@@ -33,6 +33,7 @@ from code_indexer.remote.exceptions import (
 pytest_asyncio = pytest.importorskip("pytest_asyncio")
 
 
+@pytest.mark.slow
 class TestExplicitAuthenticationCommands:
     """Test suite for explicit authentication commands implementing Story 1 acceptance criteria."""
 

@@ -10,7 +10,10 @@ These tests follow TDD methodology - written BEFORE implementation.
 import uuid
 from unittest.mock import patch
 
+import pytest
 
+
+@pytest.mark.slow
 class TestAC3IndependentCachingPerField:
     """AC3: Independent Caching Per Field tests.
 

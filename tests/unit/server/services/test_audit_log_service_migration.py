@@ -17,7 +17,10 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 import json
 import sqlite3
 
+import pytest
 
+
+@pytest.mark.slow
 class TestMigrateFlat:
     """Tests for migrate_flat_file_to_sqlite() function (AC4)."""
 

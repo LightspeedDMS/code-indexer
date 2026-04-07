@@ -12,6 +12,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _mock_popen_proc():
     """Return a mock Popen process that exits successfully with no output."""
@@ -24,6 +26,7 @@ def _mock_popen_proc():
     return mock_proc
 
 
+@pytest.mark.slow
 class TestProviderIndexJobVersionedSnapshot:
     """_provider_index_job must use base clone when given a versioned snapshot path."""
 

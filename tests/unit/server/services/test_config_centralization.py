@@ -283,6 +283,7 @@ class TestExtractBootstrapDict:
             )
 
 
+@pytest.mark.slow
 class TestInitializeRuntimeDb:
     """Verify initialize_runtime_db migrates config from file to SQLite."""
 

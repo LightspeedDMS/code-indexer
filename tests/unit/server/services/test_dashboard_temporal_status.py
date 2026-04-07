@@ -33,13 +33,21 @@ class TestGetTemporalIndexStatus:
             }
             mock_manager_getter.return_value = mock_manager
 
-            # Mock temporal collection path exists
+            # Mock temporal collection directory found by iterdir()
+            mock_temporal_dir = MagicMock(spec=Path)
+            mock_temporal_dir.name = "code-indexer-temporal-voyage_code_3"
+            mock_temporal_dir.is_dir.return_value = True
+            mock_temporal_dir.exists.return_value = True
+
+            # Mock index_dir (Path("/fake/data") / "index")
+            mock_index_dir = MagicMock(spec=Path)
+            mock_index_dir.is_dir.return_value = True
+            mock_index_dir.iterdir.return_value = [mock_temporal_dir]
+
             with patch(
                 "code_indexer.server.services.dashboard_service.Path"
             ) as MockPath:
-                mock_temporal_path = MagicMock(spec=Path)
-                mock_temporal_path.exists.return_value = True
-                MockPath.return_value.__truediv__.return_value.__truediv__.return_value = mock_temporal_path
+                MockPath.return_value.__truediv__.return_value = mock_index_dir
 
                 # Mock format detection at source module
                 with patch(
@@ -88,13 +96,21 @@ class TestGetTemporalIndexStatus:
             }
             mock_manager_getter.return_value = mock_manager
 
-            # Mock temporal collection path exists
+            # Mock temporal collection directory found by iterdir()
+            mock_temporal_dir = MagicMock(spec=Path)
+            mock_temporal_dir.name = "code-indexer-temporal-voyage_code_3"
+            mock_temporal_dir.is_dir.return_value = True
+            mock_temporal_dir.exists.return_value = True
+
+            # Mock index_dir (Path("/fake/data") / "index")
+            mock_index_dir = MagicMock(spec=Path)
+            mock_index_dir.is_dir.return_value = True
+            mock_index_dir.iterdir.return_value = [mock_temporal_dir]
+
             with patch(
                 "code_indexer.server.services.dashboard_service.Path"
             ) as MockPath:
-                mock_temporal_path = MagicMock(spec=Path)
-                mock_temporal_path.exists.return_value = True
-                MockPath.return_value.__truediv__.return_value.__truediv__.return_value = mock_temporal_path
+                MockPath.return_value.__truediv__.return_value = mock_index_dir
 
                 # Mock format detection at source module
                 with patch(

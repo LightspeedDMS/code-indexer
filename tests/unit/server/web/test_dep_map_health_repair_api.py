@@ -213,6 +213,7 @@ class TestRepairEndpoint:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestJobStatusPartialAnomalyDetails:
     """
     Change 1: depmap_job_status_partial passes content_anomalies list to template.

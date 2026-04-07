@@ -129,6 +129,7 @@ class TestDiagnosticResult:
         assert result_dict["details"] == {}
 
 
+@pytest.mark.slow
 class TestDiagnosticsService:
     """Test DiagnosticsService functionality."""
 

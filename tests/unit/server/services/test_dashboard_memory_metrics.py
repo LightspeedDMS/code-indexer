@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import unittest
 
+import pytest
+
 from code_indexer.server.models.api_models import SystemHealthInfo
 from code_indexer.server.services.system_metrics_collector import (
     SystemMetricsCollector,
@@ -179,6 +181,7 @@ class TestSystemMetricsCollectorMemoryMetrics(unittest.TestCase):
         self.assertIn("swap_total_mb", metrics)
 
 
+@pytest.mark.slow
 class TestHealthServiceSystemInfoMemoryFields(unittest.TestCase):
     """Test that health_service._get_system_info() returns new memory fields."""
 

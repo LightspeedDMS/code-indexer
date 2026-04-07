@@ -658,6 +658,7 @@ def _call_get_known_repo_names(server_dir):
         return _get_known_repo_names()
 
 
+@pytest.mark.slow
 class TestGetKnownRepoNamesOrphanFiltering:
     """
     Change 2: _get_known_repo_names() must use INNER JOIN to exclude repos

@@ -17,6 +17,8 @@ from click.testing import CliRunner
 from code_indexer.cli import cli
 from tests.infrastructure.test_cidx_server import CIDXServerTestContext
 
+pytestmark = pytest.mark.slow
+
 
 class AsyncServerWrapper:
     """Wrapper to handle async server in sync tests with proper event loop management."""

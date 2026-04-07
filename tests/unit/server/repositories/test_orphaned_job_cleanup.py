@@ -104,6 +104,7 @@ def backend_with_orphaned_jobs(tmp_path: Path) -> Generator:
     yield backend
 
 
+@pytest.mark.slow
 class TestBackgroundJobsSqliteBackendOrphanedJobCleanup:
     """Tests for BackgroundJobsSqliteBackend orphaned job cleanup."""
 
@@ -271,6 +272,7 @@ class TestBackgroundJobsSqliteBackendOrphanedJobCleanup:
         assert cleanup_result == 0
 
 
+@pytest.mark.slow
 class TestBackgroundJobManagerOrphanedJobCleanup:
     """Tests for BackgroundJobManager orphaned job cleanup during initialization."""
 

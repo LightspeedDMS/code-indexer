@@ -115,6 +115,7 @@ class TestJobQueueConcurrency:
         assert job_manager.get_job(job_ids[2])["status"] == "running"
 
 
+@pytest.mark.slow
 class TestJobQueueConfiguration:
     """Test configuration updates for job queue settings."""
 

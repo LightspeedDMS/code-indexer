@@ -795,6 +795,7 @@ class TestRemoveMemberFromGroupHandler:
             assert "success" in content
 
 
+@pytest.mark.slow
 class TestAddReposToGroupHandler:
     """Tests for add_repos_to_group handler functionality."""
 
@@ -878,6 +879,7 @@ class TestRemoveRepoFromGroupHandler:
             assert content["success"] is True
 
 
+@pytest.mark.slow
 class TestBulkRemoveReposFromGroupHandler:
     """Tests for bulk_remove_repos_from_group handler functionality."""
 

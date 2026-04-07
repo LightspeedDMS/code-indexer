@@ -361,6 +361,7 @@ class TestGlobalReposSqliteBackend:
         assert row[0] == 0  # False stored as 0
 
 
+@pytest.mark.slow
 class TestUsersSqliteBackend:
     """Tests for UsersSqliteBackend with normalized tables."""
 
@@ -1365,6 +1366,7 @@ class TestSyncJobsSqliteBackend:
         assert result["analytics_data"] == analytics_data
 
 
+@pytest.mark.slow
 class TestCITokensSqliteBackend:
     """Tests for CITokensSqliteBackend CRUD operations."""
 

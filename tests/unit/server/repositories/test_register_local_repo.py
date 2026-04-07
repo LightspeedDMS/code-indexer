@@ -18,6 +18,7 @@ from src.code_indexer.server.repositories.golden_repo_manager import (
 from src.code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 
+@pytest.mark.slow
 class TestRegisterLocalRepo:
     """Unit tests for register_local_repo() method."""
 

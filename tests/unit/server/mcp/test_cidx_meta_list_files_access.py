@@ -5,6 +5,7 @@ files for non-admin users.
 TDD: Tests written FIRST before implementation (red phase).
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.mcp.handlers import list_files
@@ -12,6 +13,7 @@ from code_indexer.server.mcp.handlers import list_files
 from .conftest import extract_mcp_data, make_file_info, make_file_service_with_cidx_meta
 
 
+@pytest.mark.slow
 class TestListFilesCidxMetaAccessFiltering:
     """AC1: list_files on cidx-meta is filtered for non-admin users."""
 

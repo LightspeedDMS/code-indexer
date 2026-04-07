@@ -5,6 +5,7 @@ Story #310: JobTracker Class, TrackedJob Dataclass, Schema Migration (Epic #261 
 Covers AC6: cleanup_orphaned_jobs_on_startup
 """
 
+import pytest
 import sqlite3
 from datetime import datetime, timezone
 
@@ -26,6 +27,7 @@ def _insert_job_directly(db_path: str, job_id: str, status: str) -> None:
     conn.close()
 
 
+@pytest.mark.slow
 class TestCleanupOrphanedJobs:
     """Tests for cleanup_orphaned_jobs_on_startup (AC6)."""
 

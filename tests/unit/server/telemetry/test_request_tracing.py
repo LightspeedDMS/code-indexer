@@ -6,6 +6,7 @@ Tests FastAPI auto-instrumentation and X-Correlation-ID to OTEL span bridging.
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
+import pytest
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 
@@ -79,6 +80,7 @@ class TestCorrelationBridgeImport:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestFastAPIInstrumentation:
     """Tests for FastAPI auto-instrumentation."""
 

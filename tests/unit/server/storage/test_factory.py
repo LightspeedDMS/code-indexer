@@ -90,6 +90,7 @@ class TestBackendRegistryStructure:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestStorageFactoryNodeMetrics:
     """StorageFactory must create NodeMetricsBackend in SQLite mode."""
 
@@ -116,6 +117,7 @@ class TestStorageFactoryNodeMetrics:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestSQLiteModeNoKey:
     """When config has no storage_mode key, factory must use SQLite."""
 
@@ -146,6 +148,7 @@ class TestSQLiteModeNoKey:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestSQLiteModeExplicit:
     """When config has storage_mode="sqlite", factory must use SQLite."""
 
@@ -183,6 +186,7 @@ class TestSQLiteModeExplicit:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestSQLiteProtocolSatisfaction:
     """Every field in the registry must satisfy its Protocol type."""
 

@@ -40,6 +40,7 @@ class IndexStatusManagerForTesting:
         self.branch_statuses[branch_name] = status
 
 
+@pytest.mark.slow
 class TestBranchService:
     """Test cases for BranchService following CLAUDE.md anti-mock principles."""
 

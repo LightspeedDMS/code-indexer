@@ -12,6 +12,8 @@ import shutil
 from pathlib import Path
 from typing import List
 
+pytestmark = pytest.mark.slow
+
 
 class TestSimpleWatchHandlerInitialization:
     """Test SimpleWatchHandler initialization."""

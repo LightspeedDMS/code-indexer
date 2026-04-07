@@ -75,6 +75,7 @@ def test_client(group_manager, mock_admin_user):
     set_group_manager(None)
 
 
+@pytest.mark.slow
 class TestAC3ViewGroupDetailsWithMembers:
     """
     AC3: View Group Details with Members

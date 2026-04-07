@@ -6,9 +6,11 @@ Tests that API metrics are passed to the dashboard template and displayed correc
 Following TDD methodology: Write failing tests FIRST, then implement.
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 
+@pytest.mark.slow
 class TestDashboardApiMetricsIntegration:
     """Test AC3: API metrics appear in dashboard stats."""
 

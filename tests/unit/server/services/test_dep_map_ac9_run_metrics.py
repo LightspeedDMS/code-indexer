@@ -7,6 +7,7 @@ Story #216 AC9:
 - DependencyMapDashboardService.get_job_status() includes run_history
 """
 
+import pytest
 from unittest.mock import Mock
 
 
@@ -79,6 +80,7 @@ class TestRecordRunMetrics:
         assert abs(row["pass2_duration_s"] - 210.8) < 0.01
 
 
+@pytest.mark.slow
 class TestGetRunHistory:
     """AC9: get_run_history retrieves records in correct order."""
 
@@ -127,6 +129,7 @@ class TestGetRunHistory:
         assert len(backend.get_run_history()) == 5
 
 
+@pytest.mark.slow
 class TestDashboardRunHistory:
     """AC9: DependencyMapDashboardService.get_job_status includes run_history."""
 

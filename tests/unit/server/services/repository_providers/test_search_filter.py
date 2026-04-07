@@ -77,6 +77,7 @@ def create_mock_response(
     return mock_response
 
 
+@pytest.mark.slow
 class TestGitLabProviderSearchFilter:
     """Tests for GitLab provider search filtering (server-side via API)."""
 

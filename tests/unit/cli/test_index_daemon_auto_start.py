@@ -12,6 +12,8 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 import errno
 
+pytestmark = pytest.mark.slow
+
 
 class TestIndexDaemonAutoStart:
     """Test that _index_via_daemon has proper auto-start retry logic."""

@@ -4,7 +4,10 @@ This test file verifies the MCP endpoint returns HTTP 401 for unauthenticated
 requests as required by the MCP Authorization Specification (RFC 9728).
 """
 
+import pytest
 
+
+@pytest.mark.slow
 class TestMCP401Authentication:
     """Test MCP endpoint authentication requirements."""
 

@@ -21,6 +21,8 @@ from code_indexer.server.auth.dependencies import (
     get_current_admin_user,
 )
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def test_db():

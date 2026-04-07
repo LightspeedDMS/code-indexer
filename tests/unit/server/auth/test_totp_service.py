@@ -97,6 +97,7 @@ class TestQRCode:
         assert qr_bytes[:4] == b"\x89PNG"
 
 
+@pytest.mark.slow
 class TestCodeVerification:
     """TOTP code verification."""
 
@@ -121,6 +122,7 @@ class TestCodeVerification:
         assert totp_service.verify_code("unknown", "123456") is False
 
 
+@pytest.mark.slow
 class TestRecoveryCodes:
     """Recovery code generation and verification."""
 
@@ -163,6 +165,7 @@ class TestRecoveryCodes:
         assert totp_service.verify_recovery_code("alice", new_codes[0]) is True
 
 
+@pytest.mark.slow
 class TestMFALifecycle:
     """MFA activation and deactivation."""
 
@@ -459,6 +462,7 @@ class TestClusterEncryptionKey:
                 os.unlink(db_path)
 
 
+@pytest.mark.slow
 class TestClusterMFAOperations:
     """C2: MFA data operations through PostgreSQL pool."""
 

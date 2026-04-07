@@ -81,6 +81,7 @@ def test_client(group_manager, mock_admin_user):
     set_group_manager(None)
 
 
+@pytest.mark.slow
 class TestAC7AuditLogTable:
     """
     AC7: Audit Log for Administrative Actions
@@ -217,6 +218,7 @@ class TestAC7AuditLogRecording:
         assert "details" in log
 
 
+@pytest.mark.slow
 class TestAC8GetAuditLogsEndpoint:
     """
     AC8: Get Audit Logs
@@ -224,6 +226,9 @@ class TestAC8GetAuditLogsEndpoint:
     - Filters: action_type, target_type, admin_id, date_from, date_to
     - Pagination support
     - Sorted by timestamp descending
+
+    Timeout extended to 15s: TestClient + SQLite startup takes ~1s individually
+    but exceeds the default 3s chunk timeout when run after heavy tests.
     """
 
     def test_get_audit_logs_returns_200(self, test_client, group_manager):

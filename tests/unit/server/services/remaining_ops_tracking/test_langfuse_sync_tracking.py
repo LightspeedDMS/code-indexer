@@ -12,8 +12,8 @@ Tests:
 - AC1: Tracker raising exceptions doesn't break sync operation
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
-
 
 from code_indexer.server.services.job_tracker import JobTracker
 from code_indexer.server.services.langfuse_trace_sync_service import (
@@ -114,6 +114,7 @@ class TestLangfuseTraceSyncServiceConstructor:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestLangfuseJobRegistration:
     """AC1: langfuse_sync operation type is registered during sync."""
 

@@ -12,6 +12,8 @@ Tests cover:
 from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_indexer.server.models.api_models import SemanticSearchRequest
 from code_indexer.server.services.search_service import SemanticSearchService
 
@@ -196,6 +198,7 @@ class TestFilterConditionsBuilder:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestSemanticSearchServiceFiltersWired:
     """
     Test that SemanticSearchService._perform_semantic_search actually passes

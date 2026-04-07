@@ -11,6 +11,7 @@ Tests:
 - AC3: Tracker raising exceptions doesn't break execute_prompt
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 
@@ -85,6 +86,7 @@ class TestResearchAssistantServiceConstructor:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestResearchAssistantJobRegistration:
     """AC3: research_assistant_chat operation type is registered during execute_prompt."""
 

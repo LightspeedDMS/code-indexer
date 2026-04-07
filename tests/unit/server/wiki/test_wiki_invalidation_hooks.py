@@ -31,6 +31,7 @@ def invalidator_with_cache():
         pass
 
 
+@pytest.mark.slow
 class TestFileCRUDInvalidationHookAC1:
     """AC1: File CRUD triggers wiki cache invalidation (only .md/.markdown/.txt)."""
 
@@ -90,6 +91,7 @@ class TestFileCRUDInvalidationHookAC1:
             assert cache.get_sidebar("my-repo", repo_dir) is None
 
 
+@pytest.mark.slow
 class TestHandlersCallInvalidator:
     """Tests that handlers.py calls wiki_cache_invalidator after successful operations."""
 
@@ -279,6 +281,7 @@ class TestHandlersCallInvalidator:
         mock_cache.invalidate_repo.assert_not_called()
 
 
+@pytest.mark.slow
 class TestGitOperationInvalidationHookAC2:
     """AC2: Git operations trigger wiki cache invalidation."""
 
@@ -456,6 +459,7 @@ class TestGitOperationInvalidationHookAC2:
         mock_cache.invalidate_repo.assert_called_with("my-repo")
 
 
+@pytest.mark.slow
 class TestWriteModeExitInvalidationHookAC9:
     """AC9: Write-mode exit triggers wiki cache invalidation."""
 

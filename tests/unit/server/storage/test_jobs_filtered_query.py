@@ -305,6 +305,7 @@ class TestListJobsFilteredExcludeIds:
         assert total_count == 0
 
 
+@pytest.mark.slow
 class TestListJobsFilteredPagination:
     """Tests for pagination (AC6)."""
 
@@ -421,6 +422,7 @@ class TestListJobsFilteredOrdering:
         assert jobs[2]["job_id"] == "job-old"
 
 
+@pytest.mark.slow
 class TestListJobsFilteredAllCombined:
     """Tests that combine all filter parameters simultaneously (AC7)."""
 

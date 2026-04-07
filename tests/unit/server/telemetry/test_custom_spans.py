@@ -6,6 +6,8 @@ Tests @traced decorator, create_span() context manager, and span helpers.
 All tests use real components following MESSI Rule #1: No mocks.
 """
 
+import pytest
+
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 
@@ -57,6 +59,7 @@ class TestCustomSpansImport:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestTracedDecorator:
     """Tests for @traced decorator functionality."""
 
@@ -175,6 +178,7 @@ class TestTracedDecorator:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestCreateSpanContextManager:
     """Tests for create_span() context manager."""
 
@@ -327,6 +331,7 @@ class TestNoopWhenDisabled:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestAsyncSupport:
     """Tests for async function support."""
 

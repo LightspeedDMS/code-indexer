@@ -17,6 +17,8 @@ from code_indexer.server.services.diagnostics_service import (
     API_TIMEOUT_SECONDS,
 )
 
+pytestmark = pytest.mark.slow
+
 
 class TestCheckGitHubToken:
     """Tests for check_github_token() method (AC2, AC7, AC8)."""

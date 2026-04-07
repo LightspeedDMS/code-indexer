@@ -420,6 +420,7 @@ class TestWikiCacheMetadataJson:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestMetadataPanelRouteIntegration:
     """Integration tests verifying the metadata panel appears in rendered article HTML."""
 

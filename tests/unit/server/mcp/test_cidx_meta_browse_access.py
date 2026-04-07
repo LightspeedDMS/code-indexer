@@ -5,6 +5,7 @@ repo entries for non-admin users.
 TDD: Tests written FIRST before implementation (red phase).
 """
 
+import pytest
 from unittest.mock import patch
 
 from code_indexer.server.mcp.handlers import browse_directory
@@ -12,6 +13,7 @@ from code_indexer.server.mcp.handlers import browse_directory
 from .conftest import extract_mcp_data, make_file_service_with_cidx_meta
 
 
+@pytest.mark.slow
 class TestBrowseDirectoryCidxMetaAccessFiltering:
     """AC3: browse_directory on cidx-meta is filtered for non-admin users."""
 

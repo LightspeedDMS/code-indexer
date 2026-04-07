@@ -7,6 +7,7 @@ AC4: GET /debug/memory-compare?baseline={timestamp} returns delta between
 AC5: GET /debug/memory-compare?baseline=<unknown> returns 404 (no baseline found).
 """
 
+import pytest
 from datetime import datetime
 
 
@@ -15,6 +16,7 @@ from datetime import datetime
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestCompareSnapshot:
     """AC4/AC5: compare_snapshot logic."""
 
@@ -140,6 +142,7 @@ class TestCompareSnapshot:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestMemoryCompareEndpoint:
     """AC4/AC5: compare endpoint HTTP behavior."""
 

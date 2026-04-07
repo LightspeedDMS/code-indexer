@@ -61,6 +61,7 @@ class TestDebugRouterRegistration:
         )
 
 
+@pytest.mark.slow
 class TestDebugRouterHttpHandlers:
     """Test HTTP handler success and error paths by patching the localhost guard."""
 

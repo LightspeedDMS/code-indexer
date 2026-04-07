@@ -26,6 +26,7 @@ from .conftest import (
 )
 
 
+@pytest.mark.slow
 class TestOrphanedDomainCreation:
     """refine_or_create_domain creates .md file when it doesn't exist (Component 7)."""
 
@@ -127,6 +128,7 @@ class TestOrphanedDomainCreation:
         assert "last_refined:" in written
 
 
+@pytest.mark.slow
 class TestLastRefinedTimestampSet:
     """refine_or_create_domain sets last_refined in frontmatter (Component 6)."""
 
@@ -204,6 +206,7 @@ class TestLastRefinedTimestampSet:
             pytest.fail("last_refined key not found in frontmatter")
 
 
+@pytest.mark.slow
 class TestLastAnalyzedPreserved:
     """refine_or_create_domain preserves existing last_analyzed timestamp (Component 6)."""
 
@@ -244,6 +247,7 @@ class TestLastAnalyzedPreserved:
         )
 
 
+@pytest.mark.slow
 class TestRefinementDisabledSkips:
     """run_refinement_cycle skips processing when refinement_enabled=False (Component 8)."""
 
@@ -281,6 +285,7 @@ class TestRefinementDisabledSkips:
         assert result is None
 
 
+@pytest.mark.slow
 class TestIndexMdRegenerationAfterBatch:
     """_index.md is regenerated when at least one domain changed (Component 10)."""
 

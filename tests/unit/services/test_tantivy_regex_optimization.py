@@ -43,6 +43,8 @@ import time
 import re
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 class TestTantivyRegexCompilationOptimization:
     """Test suite for regex compilation optimization."""

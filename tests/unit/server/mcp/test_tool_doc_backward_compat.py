@@ -28,6 +28,7 @@ def temp_docs_dir(tmp_path):
     return docs_dir
 
 
+@pytest.mark.slow
 class TestBackwardCompatibility:
     """Tests for character-for-character backward compatibility (AC9)."""
 

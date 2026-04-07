@@ -6,11 +6,13 @@ Tests that DeploymentExecutor queries /api/admin/maintenance/drain-timeout endpo
 to get recommended drain timeout instead of using hardcoded value.
 """
 
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import tempfile
 
 
+@pytest.mark.slow
 class TestDeploymentExecutorDynamicTimeout:
     """Test DeploymentExecutor uses dynamic timeout from server API."""
 

@@ -11,6 +11,8 @@ import pytest
 
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 class TestTantivyLimitZero:
     """Test unlimited results with --limit 0."""

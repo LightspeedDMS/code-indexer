@@ -8629,39 +8629,6 @@ def fix_config(ctx, dry_run: bool, verbose: bool, force: bool):
         sys.exit(1)
 
 
-@cli.command("setup-global-registry")
-@click.option(
-    "--test-access",
-    is_flag=True,
-    help="(deprecated - no longer needed)",
-)
-@click.option(
-    "--quiet",
-    is_flag=True,
-    help="Suppress output",
-)
-@click.pass_context
-def setup_global_registry(ctx, test_access: bool, quiet: bool):
-    """Setup global port registry (deprecated - no longer needed).
-
-    This command is deprecated as container management has been removed (Story #506).
-    The filesystem backend doesn't require port coordination or global registry setup.
-
-    Please use filesystem backend: cidx init --vector-store filesystem
-    """
-    if not quiet:
-        console.print(
-            "⚠️  This command is deprecated and no longer needed", style="yellow"
-        )
-        console.print(
-            "Container management has been removed - filesystem backend is now default",
-            style="blue",
-        )
-        console.print(
-            "💡 Simply run: cidx init --vector-store filesystem", style="green"
-        )
-
-
 @cli.command("install-server")
 @click.option(
     "--port",
@@ -17897,70 +17864,6 @@ def global_activate(ctx, repo_name: str):
     except GlobalActivationError as e:
         console.print(f"[red]Error: Failed to activate '{repo_name}' globally[/red]")
         console.print(f"[red]{e}[/red]")
-        sys.exit(1)
-
-
-@global_group.command("init-meta")
-@click.pass_context
-def global_init_meta(ctx):
-    """Initialize meta-directory for repository discovery.
-
-    Creates a special meta-directory that contains AI-generated descriptions
-    of all registered global repositories, enabling semantic search for
-    repository discovery.
-
-    \b
-    USAGE:
-      cidx global init-meta
-
-    This creates:
-      - A meta-directory at ~/.code-indexer/golden-repos/cidx-meta
-      - Description files for all existing global repositories
-      - Registers the meta-directory as a queryable global repo
-
-    \b
-    WHEN TO USE:
-      - First time setup for repository discovery
-      - After registering multiple repositories to enable discovery
-      - To regenerate descriptions for all repositories
-    """
-    import os
-    from pathlib import Path
-    from .global_repos.meta_directory_initializer import MetaDirectoryInitializer
-    from .global_repos.global_registry import GlobalRegistry
-
-    console = Console()
-
-    # Get golden repos directory
-    golden_repos_dir = os.environ.get("CIDX_GOLDEN_REPOS_DIR")
-    if not golden_repos_dir:
-        golden_repos_dir = str(Path.home() / ".code-indexer" / "golden-repos")
-
-    try:
-        # Initialize registry
-        registry = GlobalRegistry(golden_repos_dir)
-
-        # Initialize meta-directory
-        initializer = MetaDirectoryInitializer(
-            golden_repos_dir=golden_repos_dir, registry=registry
-        )
-
-        console.print("[cyan]Initializing meta-directory...[/cyan]")
-        meta_dir = initializer.initialize()
-
-        console.print(f"[green]Meta-directory initialized: {meta_dir}[/green]")
-        console.print()
-        console.print("[blue]You can now discover repositories using:[/blue]")
-        console.print(
-            '  [cyan]cidx query "search for repos" --repo cidx-meta-global[/cyan]'
-        )
-
-    except Exception as e:
-        console.print("[red]Error: Failed to initialize meta-directory[/red]")
-        console.print(f"[red]{e}[/red]")
-        import traceback
-
-        console.print(traceback.format_exc(), style="dim red")
         sys.exit(1)
 
 

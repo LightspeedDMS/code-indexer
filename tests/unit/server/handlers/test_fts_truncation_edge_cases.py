@@ -6,9 +6,11 @@ Story #50: Updated to sync operations for FastAPI thread pool execution.
 These tests follow TDD methodology - written BEFORE implementation.
 """
 
+import pytest
 from unittest.mock import patch
 
 
+@pytest.mark.slow
 class TestFtsTruncationEdgeCases:
     """Edge case tests for FTS truncation.
 

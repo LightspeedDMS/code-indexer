@@ -111,6 +111,7 @@ class TestEnsureRipgrepDelegation:
         assert result is True
 
 
+@pytest.mark.slow
 class TestExecuteMethodIntegration:
     """Tests for execute() method integration with ripgrep installation."""
 

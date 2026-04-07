@@ -46,6 +46,7 @@ def managers(temp_dirs):
     }
 
 
+@pytest.mark.slow
 def test_add_golden_repo_result_contains_alias(managers, temp_dirs):
     """Test that add_golden_repo job result contains alias field."""
     # Create a test repository

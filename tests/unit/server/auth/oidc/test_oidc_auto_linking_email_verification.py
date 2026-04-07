@@ -3,6 +3,7 @@
 import pytest
 
 
+@pytest.mark.slow
 class TestOIDCAutoLinkingEmailVerification:
     """Test auto-linking behavior with different email verification settings."""
 

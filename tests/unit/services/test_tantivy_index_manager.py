@@ -17,6 +17,8 @@ import pytest
 if TYPE_CHECKING:
     from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 class TestTantivyIndexManager:
     """Test TantivyIndexManager core functionality."""

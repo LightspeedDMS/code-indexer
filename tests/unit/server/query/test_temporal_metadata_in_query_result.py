@@ -270,7 +270,8 @@ class TestExecuteTemporalQueryMetadataExtraction:
         config_dir = repo_path / ".code-indexer"
         config_dir.mkdir(parents=True, exist_ok=True)
 
-        # Mock all dependencies - patch at source modules since these are lazy imports
+        # Story #640: _execute_temporal_query now calls execute_temporal_query_with_fusion
+        # (not TemporalSearchService directly). Patch at the fusion dispatch module.
         with (
             patch(
                 "src.code_indexer.proxy.config_manager.ConfigManager"
@@ -279,11 +280,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "src.code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ) as MockEmbeddingFactory,
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-            ) as MockTemporalService,
+                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                return_value=temporal_results,
+            ),
         ):
             # Setup config manager mock
             mock_config = MagicMock()
@@ -298,20 +297,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
             mock_vector_store = MagicMock()
             mock_backend.get_vector_store_client.return_value = mock_vector_store
             MockBackendFactory.create.return_value = mock_backend
-
-            # Setup embedding provider mock
-            mock_embedding = MagicMock()
-            MockEmbeddingFactory.create.return_value = mock_embedding
-
-            # Setup temporal service mock
-            mock_temporal_service = MagicMock()
-            mock_temporal_service.has_temporal_index.return_value = True
-            mock_temporal_service._validate_date_range.return_value = (
-                "2025-01-01",
-                "2025-12-31",
-            )
-            mock_temporal_service.query_temporal.return_value = temporal_results
-            MockTemporalService.return_value = mock_temporal_service
 
             # Execute temporal query
             results = semantic_query_manager._execute_temporal_query(
@@ -381,6 +366,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
         config_dir = repo_path / ".code-indexer"
         config_dir.mkdir(parents=True, exist_ok=True)
 
+        # Story #640: patch execute_temporal_query_with_fusion (not TemporalSearchService)
         with (
             patch(
                 "src.code_indexer.proxy.config_manager.ConfigManager"
@@ -389,11 +375,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "src.code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ) as MockEmbeddingFactory,
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-            ) as MockTemporalService,
+                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                return_value=temporal_results,
+            ),
         ):
             mock_config = MagicMock()
             mock_config_manager = MagicMock()
@@ -404,18 +388,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
             mock_vector_store = MagicMock()
             mock_backend.get_vector_store_client.return_value = mock_vector_store
             MockBackendFactory.create.return_value = mock_backend
-
-            mock_embedding = MagicMock()
-            MockEmbeddingFactory.create.return_value = mock_embedding
-
-            mock_temporal_service = MagicMock()
-            mock_temporal_service.has_temporal_index.return_value = True
-            mock_temporal_service._validate_date_range.return_value = (
-                "2025-01-01",
-                "2025-12-31",
-            )
-            mock_temporal_service.query_temporal.return_value = temporal_results
-            MockTemporalService.return_value = mock_temporal_service
 
             mock_config.embedding_provider = "voyage-ai"
             mock_config.voyage_ai.model = "voyage-code-3"
@@ -488,6 +460,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
         config_dir = repo_path / ".code-indexer"
         config_dir.mkdir(parents=True, exist_ok=True)
 
+        # Story #640: patch execute_temporal_query_with_fusion (not TemporalSearchService)
         with (
             patch(
                 "src.code_indexer.proxy.config_manager.ConfigManager"
@@ -496,11 +469,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "src.code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ) as MockEmbeddingFactory,
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-            ) as MockTemporalService,
+                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                return_value=temporal_results,
+            ),
         ):
             mock_config = MagicMock()
             mock_config_manager = MagicMock()
@@ -511,18 +482,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
             mock_vector_store = MagicMock()
             mock_backend.get_vector_store_client.return_value = mock_vector_store
             MockBackendFactory.create.return_value = mock_backend
-
-            mock_embedding = MagicMock()
-            MockEmbeddingFactory.create.return_value = mock_embedding
-
-            mock_temporal_service = MagicMock()
-            mock_temporal_service.has_temporal_index.return_value = True
-            mock_temporal_service._validate_date_range.return_value = (
-                "2025-01-01",
-                "2025-12-31",
-            )
-            mock_temporal_service.query_temporal.return_value = temporal_results
-            MockTemporalService.return_value = mock_temporal_service
 
             mock_config.embedding_provider = "voyage-ai"
             mock_config.voyage_ai.model = "voyage-code-3"
@@ -608,6 +567,7 @@ class TestExecuteTemporalQueryMetadataExtraction:
         config_dir = repo_path / ".code-indexer"
         config_dir.mkdir(parents=True, exist_ok=True)
 
+        # Story #640: patch execute_temporal_query_with_fusion (not TemporalSearchService)
         with (
             patch(
                 "src.code_indexer.proxy.config_manager.ConfigManager"
@@ -616,11 +576,9 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "src.code_indexer.backends.backend_factory.BackendFactory"
             ) as MockBackendFactory,
             patch(
-                "src.code_indexer.services.embedding_factory.EmbeddingProviderFactory"
-            ) as MockEmbeddingFactory,
-            patch(
-                "src.code_indexer.services.temporal.temporal_search_service.TemporalSearchService"
-            ) as MockTemporalService,
+                "src.code_indexer.services.temporal.temporal_fusion_dispatch.execute_temporal_query_with_fusion",
+                return_value=temporal_results,
+            ),
         ):
             mock_config = MagicMock()
             mock_config_manager = MagicMock()
@@ -631,18 +589,6 @@ class TestExecuteTemporalQueryMetadataExtraction:
             mock_vector_store = MagicMock()
             mock_backend.get_vector_store_client.return_value = mock_vector_store
             MockBackendFactory.create.return_value = mock_backend
-
-            mock_embedding = MagicMock()
-            MockEmbeddingFactory.create.return_value = mock_embedding
-
-            mock_temporal_service = MagicMock()
-            mock_temporal_service.has_temporal_index.return_value = True
-            mock_temporal_service._validate_date_range.return_value = (
-                "2025-01-01",
-                "2025-12-31",
-            )
-            mock_temporal_service.query_temporal.return_value = temporal_results
-            MockTemporalService.return_value = mock_temporal_service
 
             mock_config.embedding_provider = "voyage-ai"
             mock_config.voyage_ai.model = "voyage-code-3"

@@ -218,6 +218,7 @@ class TestInstallClaudeCli:
         assert result is False
 
 
+@pytest.mark.slow
 class TestInstallMethodIntegration:
     """Tests for install() method integration with Claude CLI installation."""
 

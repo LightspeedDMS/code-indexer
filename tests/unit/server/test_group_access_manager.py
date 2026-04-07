@@ -274,6 +274,7 @@ class TestUserGroupAssignment:
         assert count == 1, "Should have at most one row per user_id"
 
 
+@pytest.mark.slow
 class TestGroupMembershipMetadata:
     """Tests for AC4: Group membership records assignment metadata."""
 

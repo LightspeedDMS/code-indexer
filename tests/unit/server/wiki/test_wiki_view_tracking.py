@@ -135,6 +135,7 @@ class TestEnsureTablesCreatesViewTable:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestIncrementView:
     def test_increment_view_creates_new_row_on_first_view(self, cache_db):
         """First increment_view call must insert a row with real_views=1."""
@@ -408,6 +409,7 @@ class TestPopulateViewsFromFrontMatter:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestRouteIncrementsView:
     def test_wiki_article_load_increments_view_count(self):
         """Serving a wiki article must call increment_view so view count increases."""

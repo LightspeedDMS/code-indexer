@@ -57,6 +57,7 @@ def _collect_paginated_content(handlers, cache_handle: str, user, initial: str):
     return all_content
 
 
+@pytest.mark.slow
 class TestCacheRetrievalIntegration:
     """Test complete flow: truncate file -> retrieve via cache handle (AC3)."""
 

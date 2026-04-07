@@ -7,6 +7,7 @@ AC3: Type names include module prefix for non-builtins, bare name for builtins.
 AC6: Snapshot overhead reported, no sustained memory growth.
 """
 
+import pytest
 from datetime import datetime
 
 
@@ -75,6 +76,7 @@ class TestQualifyTypeName:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestGetSnapshot:
     """AC1: Snapshot has all required fields with correct types and values."""
 
@@ -216,6 +218,7 @@ class TestGetSnapshot:
             )
 
 
+@pytest.mark.slow
 class TestGetSnapshotSizeofException:
     """Covers the except (TypeError, ValueError, ReferenceError): pass branch."""
 

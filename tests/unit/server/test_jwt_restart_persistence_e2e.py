@@ -9,11 +9,14 @@ secret key persistence.
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 from fastapi.testclient import TestClient
 
 from src.code_indexer.server.app import create_app
 
 
+@pytest.mark.slow
 class TestJWTRestartPersistenceE2E:
     """Test JWT token persistence across server restarts end-to-end."""
 

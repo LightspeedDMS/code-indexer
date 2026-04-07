@@ -119,6 +119,7 @@ def _make_user_wiki_app(
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestActivatedRepoManagerWikiEnabled:
     """Tests for get_wiki_enabled / set_wiki_enabled."""
 
@@ -181,6 +182,7 @@ class TestActivatedRepoManagerWikiEnabled:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestUserWikiAccessControl:
     """Access control: owner + admin can access, others get 404."""
 
@@ -272,6 +274,7 @@ class TestUserWikiAccessControl:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestUserWikiContent:
     """Content served from user's activated repo directory."""
 
@@ -357,6 +360,7 @@ class TestUserWikiContent:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestUserWikiCacheIsolation:
     """Cache keys for user wikis must be isolated from golden repo cache."""
 
@@ -427,6 +431,7 @@ class TestUserWikiCacheIsolation:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestUserWikiWebToggle:
     """The /admin/activated-repos/{username}/{alias}/wiki-toggle POST endpoint."""
 
@@ -456,6 +461,7 @@ class TestUserWikiWebToggle:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestUserWikiAssetRoute:
     """Asset serving from user's activated repo."""
 
@@ -484,6 +490,7 @@ class TestUserWikiAssetRoute:
 # ===========================================================================
 
 
+@pytest.mark.slow
 class TestUserWikiSearchRoute:
     """Search endpoint for user wiki."""
 

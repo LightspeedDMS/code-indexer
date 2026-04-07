@@ -424,6 +424,7 @@ class TestRestApiFtsMatchTextTruncation(TestRestApiQueryTruncation):
                 app_module.app.state.payload_cache = original
 
 
+@pytest.mark.slow
 class TestRestApiMultipleResults(TestRestApiQueryTruncation):
     """Tests for multiple results in one response (Issue #4)."""
 

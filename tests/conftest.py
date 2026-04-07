@@ -390,12 +390,16 @@ def clear_rate_limiters():
         refresh_token_rate_limiter._attempts.clear()
 
         # Also clear any app module instances that might have cached rate limiters
-        import code_indexer.server.app as app_module
+        # Only access app_module if already loaded — do NOT force-initialize the full
+        # FastAPI app (create_app() → initialize_services()) just to clear rate limiters.
+        import sys
 
-        if hasattr(app_module, "password_change_rate_limiter"):
-            app_module.password_change_rate_limiter._attempts.clear()
-        if hasattr(app_module, "refresh_token_rate_limiter"):
-            app_module.refresh_token_rate_limiter._attempts.clear()
+        app_module = sys.modules.get("code_indexer.server.app")
+        if app_module is not None:
+            if hasattr(app_module, "password_change_rate_limiter"):
+                app_module.password_change_rate_limiter._attempts.clear()
+            if hasattr(app_module, "refresh_token_rate_limiter"):
+                app_module.refresh_token_rate_limiter._attempts.clear()
 
     except (ImportError, AttributeError):
         pass  # Rate limiter might not be available in all test contexts

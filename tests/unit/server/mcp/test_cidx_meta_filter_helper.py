@@ -8,6 +8,7 @@ to a given user.
 TDD: Tests written FIRST before implementation (red phase).
 """
 
+import pytest
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -17,6 +18,7 @@ from code_indexer.server.auth.user_manager import User, UserRole
 from .conftest import extract_mcp_data, make_file_service_with_cidx_meta
 
 
+@pytest.mark.slow
 class TestFilterCidxMetaFilesHelper:
     """AC5: Unit tests for AccessFilteringService.filter_cidx_meta_files()."""
 
@@ -58,6 +60,7 @@ class TestFilterCidxMetaFilesHelper:
         assert "repo-c.md" not in result
 
 
+@pytest.mark.slow
 class TestCidxMetaGlobalAliasFiltering:
     """Ensure cidx-meta-global alias also triggers file-level filtering."""
 

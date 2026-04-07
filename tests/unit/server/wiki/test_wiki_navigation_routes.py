@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -54,6 +56,7 @@ def _make_app(authenticated_user, actual_repo_path, user_accessible_repos=None):
     return app
 
 
+@pytest.mark.slow
 class TestRoutesNavigationIntegration:
     def test_sidebar_appears_in_article_response(self):
         with tempfile.TemporaryDirectory() as tmpdir:

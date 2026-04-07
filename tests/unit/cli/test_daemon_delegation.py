@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import pytest
 
+pytestmark = pytest.mark.slow
+
 
 class TestDaemonConnection:
     """Test daemon connection with exponential backoff."""

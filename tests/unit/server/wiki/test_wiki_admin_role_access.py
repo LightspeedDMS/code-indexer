@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -73,6 +75,7 @@ def _make_app(
     return app
 
 
+@pytest.mark.slow
 class TestAdminRoleWikiAccess:
     """Verify that role=admin users can access the wiki even without group membership."""
 

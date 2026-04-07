@@ -15,6 +15,8 @@ from code_indexer.server.storage.repo_category_backend import RepoCategorySqlite
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.storage.database_manager import DatabaseSchema
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def test_db():

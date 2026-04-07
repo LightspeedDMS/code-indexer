@@ -114,6 +114,7 @@ REQUIRED_ATTRIBUTES = [
 ]
 
 
+@pytest.mark.slow
 class TestAppModuleAttributesExist:
     """Verify all required module-level globals are present and initialized."""
 
@@ -132,6 +133,7 @@ class TestAppModuleAttributesExist:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestMcpRouteSmoke:
     """Smoke test every MCP tool that accesses app.py module globals.
 

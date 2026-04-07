@@ -349,6 +349,7 @@ class TestPipInstallUsesServerPython:
         assert result is True
 
 
+@pytest.mark.slow
 class TestExecuteCallsEnsureAutoUpdater:
     """Tests for execute() calling _ensure_auto_updater_uses_server_python()."""
 

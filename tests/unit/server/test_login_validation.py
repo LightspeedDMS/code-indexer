@@ -5,12 +5,15 @@ These tests verify that login endpoint properly validates username and password
 inputs before attempting authentication.
 """
 
+import pytest
+
 from fastapi.testclient import TestClient
 from fastapi import status
 
 from src.code_indexer.server.app import create_app
 
 
+@pytest.mark.slow
 class TestLoginValidation:
     """Test login request input validation."""
 

@@ -14,6 +14,8 @@ import pytest
 from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.services.repo_category_service import RepoCategoryService
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def temp_db():

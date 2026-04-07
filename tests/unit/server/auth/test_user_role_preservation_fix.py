@@ -13,6 +13,9 @@ import tempfile
 import shutil
 from pathlib import Path
 
+import pytest
+
+
 from code_indexer.server.auth.jwt_manager import JWTManager
 from code_indexer.server.auth.user_manager import UserManager, UserRole
 from code_indexer.server.auth.refresh_token_manager import RefreshTokenManager
@@ -20,6 +23,7 @@ from code_indexer.server.utils.config_manager import PasswordSecurityConfig
 from code_indexer.server.utils.jwt_secret_manager import JWTSecretManager
 
 
+@pytest.mark.slow
 class TestUserRolePreservationFix:
     """
     TDD test suite for user role preservation through refresh token flow.

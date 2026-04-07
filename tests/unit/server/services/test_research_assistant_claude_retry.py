@@ -23,6 +23,7 @@ RETRY_CALL_WAIT = (
 )
 
 
+@pytest.mark.slow
 class TestResearchAssistantClaudeRetry:
     """Test Research Assistant Claude CLI retry logic for Bug #153."""
 

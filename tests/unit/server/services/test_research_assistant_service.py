@@ -12,6 +12,7 @@ import tempfile
 from pathlib import Path
 
 
+@pytest.mark.slow
 class TestResearchAssistantStorage:
     """Test Research Assistant SQLite storage."""
 
@@ -238,6 +239,7 @@ class TestResearchAssistantStorage:
         assert target.exists(), "Softlink must point to existing directory"
 
 
+@pytest.mark.slow
 class TestResearchSessionManagement:
     """Test Research Assistant Session Management (Story #143)."""
 

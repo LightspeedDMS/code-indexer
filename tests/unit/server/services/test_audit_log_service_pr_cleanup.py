@@ -16,6 +16,8 @@ TDD: These tests are written BEFORE the implementation exists (RED phase).
 
 import sqlite3
 
+import pytest
+
 
 class TestGetPrLogs:
     """Tests for AuditLogService.get_pr_logs() (AC3)."""
@@ -221,6 +223,7 @@ class TestGetPrLogs:
         assert logs == []
 
 
+@pytest.mark.slow
 class TestGetCleanupLogs:
     """Tests for AuditLogService.get_cleanup_logs() (AC3)."""
 

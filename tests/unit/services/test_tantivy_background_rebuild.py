@@ -13,6 +13,8 @@ import pytest
 
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 class TestFTSBackgroundRebuild:
     """Test FTS background rebuild pattern (Bug #1 - AC3)."""

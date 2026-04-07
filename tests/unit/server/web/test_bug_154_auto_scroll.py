@@ -86,6 +86,7 @@ def test_jump_to_bottom_button_exists(template_content):
     assert "Jump to bottom" in template_content
 
 
+@pytest.mark.slow
 def test_auto_scroll_uses_settimeout_for_dom_update(template_content):
     """Test that auto-scroll uses setTimeout to wait for DOM updates."""
     # Should use setTimeout to ensure DOM is updated before scrolling

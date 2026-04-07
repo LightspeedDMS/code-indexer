@@ -49,18 +49,3 @@ class BackendFactory:
             )
         else:
             raise ValueError(f"Unsupported vector store provider: {provider}")
-
-    @staticmethod
-    def create_from_legacy_config(
-        config: "Config", project_root: Path
-    ) -> VectorStoreBackend:
-        """Reject legacy configuration attempts.
-
-        Args:
-            config: Configuration object
-            project_root: Root directory of the project being indexed
-
-        Raises:
-            ValueError: Always
-        """
-        raise ValueError("Invalid configuration")

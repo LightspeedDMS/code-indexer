@@ -20,6 +20,7 @@ from code_indexer.api_clients.base_client import (
 from tests.infrastructure.test_cidx_server import CIDXServerTestContext
 
 
+@pytest.mark.slow
 class TestAdminAPIClientRealServer:
     """AdminAPIClient tests using real CIDX server - Foundation #1 compliant."""
 

@@ -35,6 +35,7 @@ def temp_db_path():
         db_path.unlink()
 
 
+@pytest.mark.slow
 class TestRepoGroupManyToMany:
     """Tests for AC1: Repository-Group Many-to-Many Relationship."""
 
@@ -89,6 +90,7 @@ class TestRepoGroupManyToMany:
         assert len(groups) == 2
 
 
+@pytest.mark.slow
 class TestAutoAssignGoldenRepos:
     """Tests for AC3: New Golden Repos Auto-Assigned to Admins and Powerusers."""
 
@@ -143,6 +145,7 @@ class TestAutoAssignGoldenRepos:
             assert row["granted_by"] == "system:auto-assignment"
 
 
+@pytest.mark.slow
 class TestUsersGroupNoAutoAssign:
     """Tests for AC4: Users Group Has No Auto-Assigned Repos."""
 
@@ -169,6 +172,7 @@ class TestUsersGroupNoAutoAssign:
         assert users_repos == ["cidx-meta"]
 
 
+@pytest.mark.slow
 class TestAdminManualOverride:
     """Tests for AC5: Admin Manual Override for Repo Access."""
 
@@ -216,6 +220,7 @@ class TestAdminManualOverride:
         assert "not found" in str(exc_info.value).lower()
 
 
+@pytest.mark.slow
 class TestAccessGrantMetadata:
     """Tests for AC6: Access Grant Metadata Recorded."""
 

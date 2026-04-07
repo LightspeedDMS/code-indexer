@@ -10,6 +10,8 @@ These tests follow TDD methodology - written BEFORE implementation.
 import uuid
 from unittest.mock import patch
 
+import pytest
+
 
 class TestRegexTruncationFunctionExists:
     """Test that _apply_regex_payload_truncation function exists."""
@@ -22,6 +24,7 @@ class TestRegexTruncationFunctionExists:
         assert callable(handlers._apply_regex_payload_truncation)
 
 
+@pytest.mark.slow
 class TestAC1LineContentTruncation:
     """AC1: Regex Line Content Truncation tests.
 

@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 
 def reset_all_singletons():
     """Reset all singletons to ensure clean test state.
@@ -39,6 +41,7 @@ def reset_all_singletons():
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestTelemetryAppIntegration:
     """Tests for TelemetryManager integration with app.py.
 
@@ -99,6 +102,7 @@ class TestTelemetryAppIntegration:
             asyncio.run(check_telemetry_state())
 
 
+@pytest.mark.slow
 class TestTelemetryEnvironmentOverrides:
     """Tests for environment variable overrides in app context."""
 

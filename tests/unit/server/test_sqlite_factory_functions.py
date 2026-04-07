@@ -19,7 +19,10 @@ class TestTokenManagerFactoryFunction:
         """
         Given _get_token_manager() factory function
         When called
-        Then it creates CITokenManager with db_path=server_dir/data/cidx_server.db
+        Then it calls create_token_manager with db_path=server_dir/data/cidx_server.db
+
+        Note: _get_token_manager() delegates to create_token_manager() (Bug #639 factory).
+        We patch create_token_manager where it is imported inside _get_token_manager.
         """
         # Setup: Mock the config service
         mock_config_manager = Mock()
@@ -27,25 +30,25 @@ class TestTokenManagerFactoryFunction:
         mock_config_service = Mock()
         mock_config_service.config_manager = mock_config_manager
 
-        # Patch where the name is used (in routes module), not where it's defined
         with patch(
             "code_indexer.server.services.config_service.get_config_service",
             return_value=mock_config_service,
         ):
             with patch(
-                "code_indexer.server.web.routes.CITokenManager"
-            ) as mock_manager_class:
+                "code_indexer.server.services.ci_token_manager.create_token_manager"
+            ) as mock_factory:
+                mock_factory.return_value = Mock()
+
                 # Import and call the factory function
                 from code_indexer.server.web.routes import _get_token_manager
 
                 _get_token_manager()
 
-                # Verify CITokenManager was instantiated with correct params
-                mock_manager_class.assert_called_once()
-                call_kwargs = mock_manager_class.call_args[1]
+                # Verify create_token_manager was called with correct params
+                mock_factory.assert_called_once()
+                call_kwargs = mock_factory.call_args[1]
 
-                assert call_kwargs["server_dir_path"] == str(tmp_path)
-                assert call_kwargs["use_sqlite"] is True
+                assert call_kwargs["server_dir"] == str(tmp_path)
                 expected_db_path = str(tmp_path / "data" / "cidx_server.db")
                 assert call_kwargs["db_path"] == expected_db_path
 

@@ -21,6 +21,7 @@ from code_indexer.server.web.mfa_routes import (
     user_mfa_router,
 )
 
+pytestmark = pytest.mark.slow
 
 # ---------------------------------------------------------------------------
 # Fixtures

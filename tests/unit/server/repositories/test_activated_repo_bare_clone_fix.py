@@ -40,7 +40,7 @@ def test_cow_clone_converts_bare_to_nonbare(bare_golden_repo, tmp_path):
     """Test that CoW cloning a bare repo creates a non-bare activated repo."""
     dest_path = tmp_path / "activated"
 
-    mgr = ActivatedRepoManager()
+    mgr = ActivatedRepoManager(data_dir=str(tmp_path / "data"))
 
     # Perform CoW clone
     success = mgr._clone_with_copy_on_write(bare_golden_repo, str(dest_path))
@@ -71,7 +71,7 @@ def test_cow_clone_configures_dual_remotes_for_bare_repo(bare_golden_repo, tmp_p
     """Test that CoW cloning a bare repo configures dual remotes."""
     dest_path = tmp_path / "activated"
 
-    mgr = ActivatedRepoManager()
+    mgr = ActivatedRepoManager(data_dir=str(tmp_path / "data"))
 
     # Perform CoW clone
     success = mgr._clone_with_copy_on_write(bare_golden_repo, str(dest_path))
@@ -114,7 +114,7 @@ def test_git_status_works_after_cow_clone(bare_golden_repo, tmp_path):
     """Test that git status works in activated repo after CoW clone."""
     dest_path = tmp_path / "activated"
 
-    mgr = ActivatedRepoManager()
+    mgr = ActivatedRepoManager(data_dir=str(tmp_path / "data"))
 
     # Perform CoW clone
     success = mgr._clone_with_copy_on_write(bare_golden_repo, str(dest_path))

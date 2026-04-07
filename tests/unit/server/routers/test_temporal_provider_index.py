@@ -122,7 +122,9 @@ class TestAddIndexTemporalWithProviders:
         assert mock_bgm.submit_job.call_count == 2
         call_args_list = mock_bgm.submit_job.call_args_list
         operation_types = [c.kwargs.get("operation_type") for c in call_args_list]
-        assert all(op == "provider_temporal_index_add" for op in operation_types)
+        providers_in_request = ["voyage-ai", "cohere"]
+        expected = [f"provider_temporal_index_add:{p}" for p in providers_in_request]
+        assert operation_types == expected
 
     def test_add_index_temporal_without_providers_uses_generic_job(
         self, admin_test_client

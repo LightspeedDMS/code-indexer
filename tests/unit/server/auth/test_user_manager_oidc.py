@@ -118,6 +118,7 @@ class TestUserManagerOIDC:
             assert "password_hash" in users_data["newuser"]  # Should have placeholder
 
 
+@pytest.mark.slow
 class TestUserManagerOIDCSQLite:
     """
     Test OIDC-related methods in UserManager with SQLite backend.
@@ -267,6 +268,7 @@ class TestUserManagerOIDCSQLite:
         assert user_data["oidc_identity"]["email"] == "new@example.com"
 
 
+@pytest.mark.slow
 class TestUserManagerSQLiteMCPAndOIDC:
     """
     Test MCP credential and OIDC methods in UserManager with SQLite backend.

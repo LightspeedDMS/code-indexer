@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 
+@pytest.mark.slow
 class TestPayloadCacheStoreWithKey:
     """Tests for PayloadCache.store_with_key() method."""
 

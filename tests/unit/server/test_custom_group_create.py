@@ -96,6 +96,7 @@ def non_admin_client(group_manager):
     set_group_manager(None)
 
 
+@pytest.mark.slow
 class TestAC1CreateCustomGroup:
     """AC1: POST /api/v1/groups creates new group with name, description."""
 
@@ -180,6 +181,7 @@ class TestAC1CreateCustomGroup:
         assert group.name == "custom-group"
 
 
+@pytest.mark.slow
 class TestAC2CustomGroupsStartEmpty:
     """AC2: New custom groups have no repository access (except implicit cidx-meta)."""
 

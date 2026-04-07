@@ -262,6 +262,7 @@ class TestWorkspaceCleanupServiceAC2:
         assert "deleted: 1" in caplog.text or "deleted=1" in caplog.text
 
 
+@pytest.mark.slow
 class TestWorkspaceCleanupServiceAC6:
     """AC6: Safe Cleanup Behavior tests."""
 

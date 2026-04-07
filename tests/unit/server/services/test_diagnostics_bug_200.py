@@ -35,6 +35,7 @@ from code_indexer.server.services.diagnostics_service import (
 )
 
 
+@pytest.mark.slow
 class TestBug200EmptyCollectionFalsePositive:
     """Test Bug #200: False positive on empty collections without hnsw_index metadata."""
 

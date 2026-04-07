@@ -18,6 +18,8 @@ from src.code_indexer.server.storage.database_manager import (
     DatabaseSchema,
 )
 
+pytestmark = pytest.mark.slow
+
 
 class TestTokenAuthenticatorResolveToken:
     """Test suite for TokenAuthenticator.resolve_token() method."""

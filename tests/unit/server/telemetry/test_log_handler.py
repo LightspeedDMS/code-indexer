@@ -7,6 +7,7 @@ All tests use real components following MESSI Rule #1: No mocks.
 """
 
 import logging
+import pytest
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 
@@ -299,6 +300,7 @@ class TestOTELLogHandler:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestLogCorrelationIntegration:
     """Tests for log correlation with active spans."""
 

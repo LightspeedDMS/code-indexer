@@ -77,6 +77,7 @@ def test_client(group_manager, mock_admin_user):
     set_group_manager(None)
 
 
+@pytest.mark.slow
 class TestAC1ListUsersWithGroupInformation:
     """
     AC1: List Users with Group Information
@@ -179,6 +180,7 @@ class TestAC1ListUsersWithGroupInformation:
         assert data["total"] == 5
 
 
+@pytest.mark.slow
 class TestAC2MoveUserBetweenGroups:
     """
     AC2: Move User Between Groups

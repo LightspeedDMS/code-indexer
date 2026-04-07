@@ -126,6 +126,7 @@ class TestRepoAliasesCacheHit:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestRepoAliasesTTLExpiry:
     """AC1: Cache expires after TTL and forces a fresh DB query."""
 
@@ -263,6 +264,7 @@ class TestRepoAliasesCacheInvalidation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestGroupAccessManagerCallbackPattern:
     """Bug #338: GroupAccessManager fires registered callbacks on repo access changes."""
 

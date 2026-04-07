@@ -70,6 +70,7 @@ def _make_snapshot(
     }
 
 
+@pytest.mark.slow
 class TestNodeMetricsSqliteBackendWriteSnapshot:
     """Tests for write_snapshot method."""
 

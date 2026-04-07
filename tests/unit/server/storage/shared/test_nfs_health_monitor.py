@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+import pytest
 from unittest.mock import MagicMock
 
 
@@ -125,6 +126,7 @@ class TestStartStop:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestIsHealthy:
     def test_healthy_after_healthy_check(self) -> None:
         validator = _make_mock_validator(_healthy_result())

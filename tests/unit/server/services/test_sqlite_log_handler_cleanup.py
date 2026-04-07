@@ -17,9 +17,11 @@ Uses real SQLite connections and real threads - zero mocking.
 import logging
 import sqlite3
 import threading
+import pytest
 from pathlib import Path
 
 
+@pytest.mark.slow
 class TestSQLiteLogHandlerCleanup:
     """Tests for connection management in SQLiteLogHandler."""
 

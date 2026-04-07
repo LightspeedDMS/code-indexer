@@ -348,6 +348,7 @@ class TestGetRepoStatus:
             await client.get_repo_status("some-repo")
 
 
+@pytest.mark.slow
 class TestWaitForRepoReady:
     """Tests for wait_for_repo_ready() method."""
 

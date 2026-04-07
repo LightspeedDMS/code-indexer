@@ -6,6 +6,7 @@ Story #310: JobTracker Class, TrackedJob Dataclass, Schema Migration (Epic #261 
 Covers AC3: get_job, get_active_jobs, get_recent_jobs, query_jobs
 """
 
+import pytest
 import time
 
 
@@ -97,6 +98,7 @@ class TestJobTrackerGetActiveJobs:
         assert "job-excl-002" in ids
 
 
+@pytest.mark.slow
 class TestJobTrackerGetRecentJobs:
     """Tests for get_recent_jobs (AC3)."""
 

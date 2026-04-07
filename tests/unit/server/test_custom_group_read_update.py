@@ -152,6 +152,7 @@ class TestAC3ReadCustomGroup:
         assert response.status_code == status.HTTP_404_NOT_FOUND
 
 
+@pytest.mark.slow
 class TestAC4UpdateCustomGroup:
     """AC4: PUT /api/v1/groups/{id} updates name and/or description."""
 

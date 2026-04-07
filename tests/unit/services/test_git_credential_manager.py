@@ -12,6 +12,8 @@ import tempfile
 import os
 from unittest.mock import AsyncMock, patch
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def db_path():

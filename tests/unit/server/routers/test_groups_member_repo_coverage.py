@@ -155,6 +155,7 @@ class TestEndpointDependencies:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestAssignUserToGroup:
     """Tests for POST /api/v1/groups/{group_id}/members."""
 
@@ -251,6 +252,7 @@ class TestAssignUserToGroup:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestAddRepoToGroup:
     """Tests for POST /api/v1/groups/{group_id}/repos."""
 
@@ -385,6 +387,7 @@ class TestAddRepoToGroup:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestRemoveRepoFromGroup:
     """Tests for DELETE /api/v1/groups/{group_id}/repos/{repo_name}."""
 
@@ -446,6 +449,7 @@ class TestRemoveRepoFromGroup:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestBulkRemoveReposFromGroup:
     """Tests for DELETE /api/v1/groups/{group_id}/repos (bulk)."""
 

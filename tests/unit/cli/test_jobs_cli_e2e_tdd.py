@@ -18,6 +18,8 @@ from code_indexer.cli import cli
 # Import real infrastructure (no mocks)
 from tests.infrastructure.test_cidx_server import CIDXServerTestContext
 
+pytestmark = pytest.mark.slow
+
 
 class TestJobsCLIEndToEndTDD:
     """End-to-end testing for jobs CLI command with real server integration."""

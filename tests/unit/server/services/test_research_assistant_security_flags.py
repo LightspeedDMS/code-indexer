@@ -26,6 +26,7 @@ from unittest.mock import patch, MagicMock
 BACKGROUND_THREAD_WAIT_SECONDS = 5.0
 
 
+@pytest.mark.slow
 class TestSecurityHardeningCommandFlags:
     """
     Tests for AC1/AC2/AC3/AC5: _run_claude_background must include

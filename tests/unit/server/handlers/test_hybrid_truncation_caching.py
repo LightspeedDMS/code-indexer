@@ -10,7 +10,10 @@ These tests follow TDD methodology - written BEFORE verification.
 import uuid
 from unittest.mock import patch
 
+import pytest
 
+
+@pytest.mark.slow
 class TestAC5IndependentFieldCaching:
     """AC5: Independent Field Caching - each field gets its OWN cache handle.
 
@@ -105,6 +108,7 @@ class TestAC5IndependentFieldCaching:
         assert match_text_retrieved.content == match_text_data
 
 
+@pytest.mark.slow
 class TestAC6CacheRetrievalForHybridFields:
     """AC6: Cache Retrieval for Hybrid Fields - all handles work with cache API.
 

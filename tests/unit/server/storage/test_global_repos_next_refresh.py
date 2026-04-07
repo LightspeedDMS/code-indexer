@@ -15,6 +15,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import pytest
+
 from code_indexer.server.storage.database_manager import DatabaseSchema
 from code_indexer.server.storage.sqlite_backends import GlobalReposSqliteBackend
 from code_indexer.global_repos.global_registry import GlobalRegistry
@@ -44,6 +46,7 @@ def _register_one_repo(
     )
 
 
+@pytest.mark.slow
 class TestSqliteNextRefreshRoundTrip:
     """SQLite CRUD tests for next_refresh column."""
 
@@ -230,6 +233,7 @@ class TestSchemaMigration:
         assert result.get("next_refresh") is None
 
 
+@pytest.mark.slow
 class TestGlobalRegistryNextRefresh:
     """Tests for GlobalRegistry.update_next_refresh() with JSON backend."""
 

@@ -7,6 +7,7 @@ files) to users who shouldn't see them, bypassing the filtering applied by
 list_files, get_file_content, and browse_directory.
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from code_indexer.global_repos.directory_explorer import DirectoryTreeResult, TreeNode
@@ -45,6 +46,7 @@ def _make_tree_result(filenames: list) -> DirectoryTreeResult:
 _ALL_FILES = ["repo-a.md", "repo-b.md", "repo-c.md", "README.md"]
 
 
+@pytest.mark.slow
 class TestDirectoryTreeCidxMetaAccessFiltering:
     """Finding 1: handle_directory_tree on cidx-meta is filtered for non-admin users."""
 

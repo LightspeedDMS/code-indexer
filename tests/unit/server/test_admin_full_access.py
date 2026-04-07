@@ -40,6 +40,7 @@ def access_filtering_service(group_access_manager):
     return AccessFilteringService(group_access_manager)
 
 
+@pytest.mark.slow
 class TestAdminFullAccessBug:
     """
     Tests for the admin full access bug fix.

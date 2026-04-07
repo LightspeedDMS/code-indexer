@@ -20,6 +20,7 @@ from code_indexer.server.services.subprocess_executor import (
 )
 
 
+@pytest.mark.slow
 class TestSubprocessExecutor:
     """Test suite for SubprocessExecutor."""
 
@@ -263,6 +264,7 @@ class TestSearchExecutionResult:
         assert result.error_message == "Command failed"
 
 
+@pytest.mark.slow
 class TestSubprocessExecutorSync:
     """Test suite for SubprocessExecutor sync methods (Story #51)."""
 

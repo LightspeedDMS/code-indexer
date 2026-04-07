@@ -25,6 +25,7 @@ def backend(tmp_path: Path) -> Generator:
     yield BackgroundJobsSqliteBackend(str(db_path))
 
 
+@pytest.mark.slow
 class TestBackgroundJobsSqliteBackend:
     """Tests for BackgroundJobsSqliteBackend CRUD operations."""
 

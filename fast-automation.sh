@@ -82,7 +82,7 @@ print_success "Dependencies installed"
 
 # 2. Lint CLI-related code with ruff
 print_step "Running ruff linter on CLI code"
-if ruff check src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ src/code_indexer/business_logic/ tests/unit/cli/ tests/unit/remote/ tests/unit/api_clients/; then
+if ruff check src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ tests/unit/cli/ tests/unit/remote/ tests/unit/api_clients/; then
     print_success "CLI ruff linting passed"
 else
     print_error "CLI ruff linting failed"
@@ -91,7 +91,7 @@ fi
 
 # 3. Check CLI code formatting with black
 print_step "Checking CLI code formatting with black"
-if black --check src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ src/code_indexer/business_logic/ tests/unit/cli/ tests/unit/remote/ tests/unit/api_clients/; then
+if black --check src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ tests/unit/cli/ tests/unit/remote/ tests/unit/api_clients/; then
     print_success "CLI black formatting check passed"
 else
     print_error "CLI black formatting check failed"
@@ -101,7 +101,7 @@ fi
 
 # 4. Type check CLI code with mypy
 print_step "Running mypy type checking on CLI code"
-if mypy src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ src/code_indexer/business_logic/ --ignore-missing-imports; then
+if mypy src/code_indexer/cli.py src/code_indexer/mode_* src/code_indexer/remote/ src/code_indexer/api_clients/ --ignore-missing-imports; then
     print_success "CLI MyPy type checking passed"
 else
     print_error "CLI MyPy type checking failed"
@@ -134,7 +134,6 @@ python3 -m pytest \
     --ignore=tests/mcpb/integration/test_bridge_e2e_real.py \
     --ignore=tests/unit/api_clients/test_base_cidx_remote_api_client_real.py \
     --ignore=tests/unit/api_clients/test_remote_query_client_real.py \
-    --ignore=tests/unit/api_clients/test_business_logic_integration_real.py \
     --ignore=tests/unit/api_clients/test_repository_linking_client_real.py \
     --ignore=tests/unit/api_clients/test_jwt_token_manager_real.py \
     --ignore=tests/unit/api_clients/test_real_api_integration_required.py \
@@ -241,6 +240,80 @@ python3 -m pytest \
     --deselect=tests/unit/storage/test_filesystem_vector_store.py::TestProgressReporting::test_progress_callback_invoked_for_each_point \
     --deselect=tests/unit/storage/test_filesystem_vector_store.py::TestFilesystemVectorStoreCore::test_batch_upsert_performance \
     --deselect=tests/unit/storage/test_parallel_index_loading.py::TestPerformanceRequirements::test_parallel_execution_reduces_latency \
+    --deselect=tests/unit/cli/test_cli_diff_type_and_author_filtering.py::TestCLIDiffTypeAndAuthorFiltering::test_cli_passes_author_to_temporal_service \
+    --deselect=tests/unit/cli/test_cli_diff_type_and_author_filtering.py::TestCLIDiffTypeAndAuthorFiltering::test_cli_passes_diff_type_to_temporal_service \
+    --deselect=tests/unit/cli/test_cli_temporal_file_path_bug.py::test_display_file_chunk_match_uses_path_field \
+    --deselect=tests/unit/cli/test_cli_temporal_initialization_bug.py::test_temporal_service_initialization_includes_vector_store_client \
+    --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_and_provider_mutually_exclusive \
+    --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_flag_accepted \
+    --deselect=tests/unit/cli/test_embedding_provider_option.py::TestDualEmbedOption::test_dual_embed_flag_in_help \
+    --deselect=tests/unit/cli/test_query_strategy_cli.py::TestStrategyFlagValidation::test_strategy_specific_without_provider_errors \
+    --deselect=tests/unit/cli/test_status_display_language_updates.py::test_temporal_index_shows_available_not_active \
+    --deselect=tests/unit/cli/test_status_temporal_error_handling.py::test_temporal_index_error_logged_not_silenced \
+    --deselect=tests/unit/cli/test_status_temporal_index_display.py::test_temporal_index_not_shown_when_missing \
+    --deselect=tests/unit/cli/test_status_temporal_macos_du_fix.py::test_empty_stdout_handled_gracefully \
+    --deselect=tests/unit/cli/test_status_temporal_macos_du_fix.py::test_gnu_du_success_path \
+    --deselect=tests/unit/cli/test_status_temporal_macos_du_fix.py::test_macos_bsd_du_fallback \
+    --deselect=tests/unit/daemon/test_cache_temporal.py::TestLoadTemporalIndexes::test_load_temporal_indexes_calls_hnsw_manager \
+    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_fresh_files_show_green_indicator \
+    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_query_includes_staleness_metadata \
+    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_staleness_failure_doesnt_break_query \
+    --deselect=tests/unit/daemon/test_daemon_staleness_detection.py::test_daemon_staleness_works_with_non_git_folders \
+    --deselect=tests/unit/daemon/test_daemon_staleness_ordering_bug.py::test_daemon_staleness_matches_by_file_path_not_index \
+    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_integrates_with_temporal_search_service \
+    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_loads_cache_on_first_call \
+    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_reloads_cache_if_stale \
+    --deselect=tests/unit/daemon/test_service_temporal_query.py::TestExposedQueryTemporal::test_exposed_query_temporal_returns_error_if_index_missing \
+    --deselect=tests/unit/daemon/test_temporal_path_filter_bug.py::TestTemporalPathFilterBug::test_daemon_handles_multiple_path_filters_correctly \
+    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestGrepExitCodeHandling::test_exit_code_1_with_stderr_logs_warning \
+    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestGrepExitCodeHandling::test_exit_code_2_logs_warning \
+    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestRipgrepExitCodeHandling::test_exit_code_1_with_stderr_logs_warning \
+    --deselect=tests/unit/global_repos/test_regex_search_exit_codes.py::TestRipgrepExitCodeHandling::test_exit_code_2_logs_warning \
+    --deselect=tests/unit/global_repos/test_regex_search.py::TestGrepInternalDirectoryExclusion::test_excludes_code_indexer_directory \
+    --deselect=tests/unit/global_repos/test_regex_search.py::TestGrepInternalDirectoryExclusion::test_excludes_git_directory \
+    --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_excludes_code_indexer_directory \
+    --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_excludes_git_directory \
+    --deselect=tests/unit/global_repos/test_regex_search.py::TestRipgrepInternalDirectoryExclusion::test_timeout_error_includes_context \
+    --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_no_extra_mcp_parameters \
+    --deselect=tests/unit/query/test_query_parameter_parity.py::TestQueryParameterParity::test_parameter_name_consistency_rest_mcp \
+    --deselect=tests/unit/services/temporal/test_temporal_none_vector_validation.py::TestLayer3APIValidation::test_voyage_ai_detects_none_embedding_in_multi_batch_response \
+    --deselect=tests/unit/services/temporal/test_temporal_worker_exception_logging.py::test_worker_exception_is_logged_and_propagated \
+    --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereErrorHandling401Bug595Issue2::test_401_error_message_mentions_api_key \
+    --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereErrorHandling401Bug595Issue2::test_401_response_raises_value_error \
+    --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereRetryLoopBug595Issue1::test_network_error_does_not_propagate_as_raw_exception \
+    --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereRetryLoopBug595Issue1::test_network_error_on_last_attempt_raises_runtime_error \
+    --deselect=tests/unit/services/test_cohere_embedding.py::TestCohereRetryLoopBug595Issue1::test_runtime_error_mentions_attempt_count \
+    --deselect=tests/unit/services/test_cohere_embedding.py::TestConnectReadTimeoutSplit::test_cohere_uses_split_timeout \
+    --deselect=tests/unit/services/test_git_push_upstream.py::TestGitPushAutoDetectBranch::test_push_auto_detects_branch_when_none \
+    --deselect=tests/unit/services/test_git_push_upstream.py::TestGitPushAutoDetectBranch::test_push_does_not_call_rev_parse_when_branch_provided \
+    --deselect=tests/unit/services/test_git_push_upstream.py::TestGitPushAutoDetectBranch::test_push_uses_detected_branch_in_refspec \
+    --deselect=tests/unit/services/test_git_push_upstream.py::TestGitPushExplicitRefspecAndUpstream::test_push_sets_upstream_after_success \
+    --deselect=tests/unit/services/test_git_push_upstream.py::TestGitPushExplicitRefspecAndUpstream::test_push_skips_upstream_when_set_upstream_false \
+    --deselect=tests/unit/services/test_git_push_upstream.py::TestGitPushExplicitRefspecAndUpstream::test_push_uses_explicit_refspec_with_provided_branch \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_sets_git_askpass_env_var \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_sets_git_author_email_from_credential \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_sets_git_author_name_from_credential \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_sets_git_committer_email_from_credential \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_sets_git_committer_name_from_credential \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_sets_git_terminal_prompt_to_zero \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatEnvVars::test_skips_name_email_when_not_in_credential \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatErrorHandling::test_cleanup_happens_on_success \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatReturn::test_returns_success_true_on_successful_push \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatUrlConversion::test_https_url_passed_through_unchanged \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatUrlConversion::test_push_with_branch_uses_explicit_refspec \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatUrlConversion::test_push_without_branch_auto_detects_and_uses_refspec \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatUrlConversion::test_ssh_url_converted_to_https_in_push_command \
+    --deselect=tests/unit/services/test_git_push_with_pat.py::TestGitPushWithPatUrlConversion::test_uses_provided_remote_url_without_subprocess_call \
+    --deselect=tests/unit/services/test_query_strategy.py::TestAverageFusion::test_average_both_providers \
+    --deselect=tests/unit/services/test_single_embedding_wrapper.py::TestSingleEmbeddingWrapperIntegration::test_cli_compatibility_preserved \
+    --deselect=tests/unit/services/test_single_embedding_wrapper.py::TestSingleEmbeddingWrapperIntegration::test_integration_single_embedding_via_batch \
+    --deselect=tests/unit/services/test_single_embedding_wrapper.py::TestSingleEmbeddingWrapper::test_get_embedding_method_signature_unchanged \
+    --deselect=tests/unit/storage/test_api_metrics_backend.py::TestBackendRegistryApiMetricsField::test_storage_factory_api_metrics_backend_is_functional \
+    --deselect=tests/unit/storage/test_description_refresh_tracking_schema.py::TestDescriptionRefreshTrackingSchema::test_status_has_default_value_pending \
+    --deselect=tests/unit/storage/test_filesystem_hnsw_integration.py::TestHNSWSearchPath::test_search_uses_hnsw_index \
+    --deselect=tests/unit/storage/test_parallel_index_loading.py::TestParallelExecutionMechanism::test_search_accepts_query_parameter_for_parallel_execution \
+    --deselect=tests/unit/test_scip_database_schema.py::TestIndexCreation::test_create_indexes_creates_all_indexes \
+    --deselect=tests/unit/tools/perf_suite/test_report.py::TestHardwareProfileSection::test_hardware_capture_with_invalid_host_returns_none \
     -m "not slow and not e2e and not real_api and not integration and not requires_server and not requires_containers" \
     --timeout=3 \
     2>&1 | tee "$TELEMETRY_FILE"

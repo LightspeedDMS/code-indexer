@@ -278,6 +278,7 @@ class TestArticlePageHasNoTopLevelArticleLoop:
             )
 
 
+@pytest.mark.slow
 class TestSidebarCategoryCollapsedByDefault:
     """AC1: All TOC sections render collapsed on page load."""
 

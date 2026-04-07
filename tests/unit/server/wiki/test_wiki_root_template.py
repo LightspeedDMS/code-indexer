@@ -6,6 +6,7 @@ bare index.html template.
 """
 
 import os
+import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -58,6 +59,7 @@ def _make_app(actual_repo_path=None, user_accessible_repos=None, wiki_enabled=Tr
     return app
 
 
+@pytest.mark.slow
 class TestRootPageTemplateWhenNoHomeMd:
     """When no home.md exists, root page must use full wiki UI (article.html)."""
 

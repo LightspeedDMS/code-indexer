@@ -4,6 +4,7 @@ Unit tests for Bug #336 AC4: Admin users retain full access to all cidx-meta fil
 TDD: Tests written FIRST before implementation (red phase).
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.mcp.handlers import (
@@ -15,6 +16,7 @@ from code_indexer.server.mcp.handlers import (
 from .conftest import extract_mcp_data, make_file_service_with_cidx_meta
 
 
+@pytest.mark.slow
 class TestAdminFullAccessToCidxMeta:
     """AC4: Admin users retain full access to all cidx-meta files."""
 

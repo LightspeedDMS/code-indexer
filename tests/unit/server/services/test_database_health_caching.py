@@ -9,6 +9,7 @@ import inspect
 import sqlite3
 import tempfile
 from pathlib import Path
+import pytest
 from unittest.mock import patch
 
 
@@ -66,6 +67,7 @@ class TestPragmaIntegrityCheck:
             Path(db_path).unlink(missing_ok=True)
 
 
+@pytest.mark.slow
 class TestDatabaseHealthCaching:
     """AC2: Tests for database health check caching with 60-second TTL."""
 
@@ -358,6 +360,7 @@ class TestSingletonCacheBehavior:
             Path(db_path).unlink(missing_ok=True)
 
 
+@pytest.mark.slow
 class TestDatabaseHealthErrorCases:
     """
     Tests for error handling and edge cases in DatabaseHealthService.

@@ -10,6 +10,8 @@ from pathlib import Path
 # Test fixtures will be imported from conftest
 from src.code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def sample_test_files(tmp_path: Path) -> Path:

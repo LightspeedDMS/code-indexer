@@ -141,6 +141,7 @@ class TestUsernameClaimExtraction:
         assert user_info.username is None
 
 
+@pytest.mark.slow
 class TestJITProvisioningWithUsernameClaim:
     """Test JIT provisioning using username_claim."""
 

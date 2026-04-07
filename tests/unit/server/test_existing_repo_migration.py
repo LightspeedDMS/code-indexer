@@ -29,6 +29,7 @@ from code_indexer.server.services.group_access_manager import (
 )
 
 
+@pytest.mark.slow
 class TestExistingRepoMigration:
     """Tests for existing golden repo migration to group access during startup."""
 

@@ -21,6 +21,7 @@ from code_indexer.server.auth.user_manager import UserManager, User, UserRole
 from code_indexer.server.auth.password_manager import PasswordManager
 
 
+@pytest.mark.slow
 class TestJWTManager:
     """Test JWT token creation, validation, and expiration logic."""
 
@@ -361,6 +362,7 @@ class TestUser:
         assert normal_user.has_permission("query_repos")
 
 
+@pytest.mark.slow
 class TestPasswordManager:
     """Test password hashing and verification."""
 

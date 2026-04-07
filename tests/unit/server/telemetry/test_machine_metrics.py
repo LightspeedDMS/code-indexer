@@ -9,6 +9,8 @@ All tests use real components following MESSI Rule #1: No mocks.
 
 import socket
 
+import pytest
+
 from src.code_indexer.server.utils.config_manager import TelemetryConfig
 
 
@@ -57,6 +59,7 @@ class TestMachineMetricsExporterImport:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestMachineMetricsExporterCreation:
     """Tests for MachineMetricsExporter instantiation."""
 
@@ -118,6 +121,7 @@ class TestMachineMetricsExporterCreation:
 # =============================================================================
 
 
+@pytest.mark.slow
 class TestMachineMetricsGaugeRegistration:
     """Tests for observable gauge registration."""
 

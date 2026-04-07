@@ -209,6 +209,7 @@ class TestAC9ListAllGroups:
         assert custom_names == sorted(custom_names)
 
 
+@pytest.mark.slow
 class TestFullCRUDFlow:
     """Integration test for complete CRUD workflow."""
 

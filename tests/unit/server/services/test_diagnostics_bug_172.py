@@ -25,6 +25,7 @@ from code_indexer.server.services.diagnostics_service import (
 )
 
 
+@pytest.mark.slow
 class TestDiagnosticsBug172VersionedPathResolution:
     """Test HNSW index validation with versioned repository structure."""
 

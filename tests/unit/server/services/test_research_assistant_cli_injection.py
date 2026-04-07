@@ -26,6 +26,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 
+@pytest.mark.slow
 class TestBug472CliInjectionFix:
     """Tests for Bug #472: CLI argument injection via user message text."""
 

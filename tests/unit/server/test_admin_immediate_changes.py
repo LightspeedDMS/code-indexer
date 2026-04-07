@@ -74,6 +74,7 @@ def test_client(group_manager, mock_admin_user):
     app.dependency_overrides.clear()
 
 
+@pytest.mark.slow
 class TestAC6ImmediateEffectOfChanges:
     """
     AC6: Immediate Effect of Changes

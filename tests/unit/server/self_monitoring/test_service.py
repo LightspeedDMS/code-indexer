@@ -8,6 +8,7 @@ Tests scheduled task behavior:
 - Proper start/stop lifecycle
 """
 
+import pytest
 from unittest.mock import Mock
 
 
@@ -704,6 +705,7 @@ class TestSelfMonitoringServiceStartupCadence:
         mock_job_manager.submit_job.assert_not_called()
 
 
+@pytest.mark.slow
 class TestOrphanedScanCleanup:
     """Test suite for orphaned scan cleanup (Feature request - automated cleanup)."""
 

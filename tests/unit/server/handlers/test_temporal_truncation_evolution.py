@@ -8,6 +8,7 @@ AC3: Evolution Entry Diff Truncation
 AC4: Multiple Evolution Entries (independent handles)
 """
 
+import pytest
 import uuid
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from unittest.mock import patch
 PREVIEW_SIZE = 2000
 
 
+@pytest.mark.slow
 class TestAC2EvolutionContentTruncation:
     """AC2: Evolution Entry Content Truncation tests.
 

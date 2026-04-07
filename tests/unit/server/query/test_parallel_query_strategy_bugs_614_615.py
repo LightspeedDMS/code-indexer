@@ -549,8 +549,23 @@ class TestBug615MinScoreAppliedAfterFusion:
         assert results[0].file_path == "src/high.py"
 
     def test_parallel_strategy_passes_limit_to_both_providers(self):
-        """Both providers receive the same limit parameter."""
+        """Both providers receive the same over-fetched limit parameter.
+
+        Story #638: To widen the candidate pool before score-gated filtering
+        and fusion, each provider receives limit * PARALLEL_FETCH_MULTIPLIER
+        (capped at MAX_PARALLEL_FETCH). Both providers must receive the same
+        over-fetched limit.
+        """
+        from code_indexer.services.query_strategy import (
+            PARALLEL_FETCH_MULTIPLIER,
+            MAX_PARALLEL_FETCH,
+        )
+
         manager = _make_manager()
+        requested_limit = 7
+        expected_provider_limit = min(
+            requested_limit * PARALLEL_FETCH_MULTIPLIER, MAX_PARALLEL_FETCH
+        )
 
         limits_received = []
 
@@ -566,7 +581,7 @@ class TestBug615MinScoreAppliedAfterFusion:
                 repo_path=self.repo_path,
                 repository_alias="test-repo",
                 query_text="authentication",
-                limit=7,
+                limit=requested_limit,
                 min_score=None,
                 file_extensions=None,
                 query_strategy="parallel",
@@ -576,7 +591,10 @@ class TestBug615MinScoreAppliedAfterFusion:
             f"Expected 2 provider calls, got {len(limits_received)}"
         )
         for lim in limits_received:
-            assert lim == 7, f"Provider received limit={lim}, expected 7"
+            assert lim == expected_provider_limit, (
+                f"Provider received limit={lim}, expected {expected_provider_limit} "
+                f"(= {requested_limit} * PARALLEL_FETCH_MULTIPLIER={PARALLEL_FETCH_MULTIPLIER})"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -726,12 +744,15 @@ class TestReviewFindings:
         both get their normalized score. The one from the higher-scoring provider
         ranks first.
 
+        Story #638: Score-gate filters weaker provider results when weaker_max
+        is below stronger_max * SCORE_GATE_RATIO (0.80). To test fusion without
+        score-gate interference, both providers return scores within the 0.80
+        ratio (0.90 and 0.75: 0.75 >= 0.90 * 0.80 = 0.72, so no gating).
+
         Setup:
           voyage-ai returns: [file_high.py score=0.90]
-          cohere    returns: [file_low.py  score=0.40]
-        With average fusion + normalization: each gets its own normalized score.
-        Since they are in separate providers, each normalizes to 1.0 (only item).
-        They tie at 1.0, but file_high.py should appear (both appear in results).
+          cohere    returns: [file_low.py  score=0.75]
+        Both pass score-gate (0.75 >= 0.90 * 0.80). Average fusion includes both.
         """
         manager = _make_manager()
 
@@ -753,8 +774,8 @@ class TestReviewFindings:
                     QueryResult(
                         file_path="src/file_low.py",
                         line_number=1,
-                        code_snippet="low score code",
-                        similarity_score=0.40,
+                        code_snippet="similar score code",
+                        similarity_score=0.75,
                         repository_alias="test-repo",
                         source_provider="cohere",
                     )

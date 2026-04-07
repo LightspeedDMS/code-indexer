@@ -29,6 +29,8 @@ Tests follow TDD methodology:
 import pytest
 from code_indexer.services.tantivy_index_manager import TantivyIndexManager
 
+pytestmark = pytest.mark.slow
+
 
 class TestTantivyUnicodeColumns:
     """Test suite for Unicode column calculation correctness."""

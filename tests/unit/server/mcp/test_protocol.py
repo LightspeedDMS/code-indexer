@@ -659,6 +659,7 @@ class TestInitializeMethod:
         assert "tools" in result["capabilities"]
 
 
+@pytest.mark.slow
 class TestStreamableHTTPTransport:
     """Test Streamable HTTP transport features (GET, DELETE, Mcp-Session-Id)."""
 

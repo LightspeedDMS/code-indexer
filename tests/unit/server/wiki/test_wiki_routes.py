@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -103,6 +105,7 @@ class TestAuthentication:
             assert client.get("/wiki/test-repo/").status_code == 200
 
 
+@pytest.mark.slow
 class TestAccessControl:
     def test_disabled_wiki_returns_404(self):
         app = _make_app(

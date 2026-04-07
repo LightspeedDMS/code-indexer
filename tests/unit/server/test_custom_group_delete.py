@@ -204,6 +204,7 @@ class TestAC6CannotDeleteGroupsWithUsers:
         assert "1" in str(exc_info.value) or "user" in str(exc_info.value).lower()
 
 
+@pytest.mark.slow
 class TestAC7DeleteEmptyCustomGroup:
     """AC7: DELETE /api/v1/groups/{id} on empty custom group succeeds."""
 

@@ -187,6 +187,7 @@ class TestPutGetArticle:
         assert cached_meta.get("visibility") == "internal"
 
 
+@pytest.mark.slow
 class TestPutGetSidebar:
     def test_put_sidebar_stores_json(self, cache_db, repo_dir):
         cache, _ = cache_db

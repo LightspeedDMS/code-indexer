@@ -14,6 +14,8 @@ import asyncio
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 
 from code_indexer.server.mcp.handlers import handle_regex_search
 
@@ -114,6 +116,7 @@ def _patch_regex_search_infrastructure(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
     """AC1 + AC3: regex_search on cidx-meta filters unauthorized repo .md files."""
 
@@ -219,6 +222,7 @@ class TestRegexSearchCidxMetaAccessFilteringNonAdmin:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestRegexSearchCidxMetaAccessFilteringAdmin:
     """AC2: Admin users retain full regex_search access to all cidx-meta files."""
 
@@ -311,6 +315,7 @@ class TestRegexSearchCidxMetaAccessFilteringAdmin:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestRegexSearchTotalMatchesReflectsFilteredCount:
     """Bug #337: total_matches in response must equal len(matches) after filtering."""
 

@@ -54,6 +54,7 @@ def test_folder_with_cidx_index(test_folder):
     return test_folder
 
 
+@pytest.mark.slow
 class TestRegisterLocalRepoCidxInit:
     """
     Tests for the cidx init behavior added to register_local_repo() in Story #270.

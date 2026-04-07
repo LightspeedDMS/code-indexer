@@ -18,6 +18,7 @@ from src.code_indexer.server.models.api_models import SemanticSearchRequest
 from src.code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
 
+@pytest.mark.slow
 class TestSearchServiceFilesystemParameters:
     """Test SemanticSearchService passes correct parameters to FilesystemVectorStore.search()."""
 

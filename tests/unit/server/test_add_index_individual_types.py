@@ -38,6 +38,7 @@ def manager_with_repo(tmp_path):
     return manager
 
 
+@pytest.mark.slow
 class TestValidIndexTypesBackend:
     """Test that backend supports new individual index types."""
 

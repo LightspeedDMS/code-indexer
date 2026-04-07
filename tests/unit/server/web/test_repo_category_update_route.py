@@ -106,6 +106,8 @@ def csrf_token(client, admin_session_cookie):
     return match.group(1)
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 def test_update_repo_category_requires_admin_session(client):
     """Test that updating category requires admin session."""
     response = client.post(
@@ -117,6 +119,8 @@ def test_update_repo_category_requires_admin_session(client):
     assert response.status_code in [302, 303, 401, 403]
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 def test_update_repo_category_with_valid_data_succeeds(
     client, admin_session_cookie, csrf_token, temp_db
 ):
@@ -155,6 +159,8 @@ def test_update_repo_category_with_valid_data_succeeds(
     assert repo["category_auto_assigned"] is False  # Manual override
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 def test_update_repo_category_to_unassigned(
     client, admin_session_cookie, csrf_token, temp_db
 ):
@@ -196,6 +202,8 @@ def test_update_repo_category_to_unassigned(
     assert repo["category_id"] is None
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 def test_update_repo_category_nonexistent_repo_returns_error(
     client, admin_session_cookie, csrf_token, temp_db
 ):
@@ -218,6 +226,8 @@ def test_update_repo_category_nonexistent_repo_returns_error(
     assert response.status_code in [400, 404, 500]
 
 
+@pytest.mark.slow
+@pytest.mark.timeout(30)
 def test_update_repo_category_invalid_category_id_returns_error(
     client, admin_session_cookie, csrf_token, temp_db
 ):

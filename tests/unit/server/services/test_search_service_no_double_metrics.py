@@ -23,6 +23,7 @@ from src.code_indexer.server.services.search_service import SemanticSearchServic
 from src.code_indexer.server.models.api_models import SemanticSearchRequest
 
 
+@pytest.mark.slow
 class TestSearchServiceNoDoubleMetrics:
     """Test SemanticSearchService does NOT track metrics (to prevent double-counting)."""
 

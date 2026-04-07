@@ -12,6 +12,7 @@ Story #50: Converted from async to sync since underlying handlers are sync.
 import pytest
 
 
+@pytest.mark.slow
 class TestMultiQueryTruncation:
     """Tests for REST API multi-query truncation helper."""
 

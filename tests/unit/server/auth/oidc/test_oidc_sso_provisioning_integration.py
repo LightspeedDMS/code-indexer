@@ -88,6 +88,7 @@ def create_user_info(subject: str, email: str, username: str = None) -> OIDCUser
     )
 
 
+@pytest.mark.slow
 class TestOIDCManagerSSOProvisioningIntegration:
     """Tests for OIDCManager integration with SSO provisioning."""
 

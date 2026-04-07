@@ -53,6 +53,7 @@ def cache(temp_db_path):
     cache.close()
 
 
+@pytest.mark.slow
 class TestTemporalCodeSnippetTruncation:
     """Tests for code_snippet truncation in temporal search results."""
 

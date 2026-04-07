@@ -45,6 +45,7 @@ def initialized_group_manager(temp_groups_db):
     set_group_manager(None)
 
 
+@pytest.mark.slow
 class TestGroupsListEndpoint:
     """Tests for GET /api/v1/groups endpoint."""
 
@@ -169,6 +170,7 @@ class TestGroupsListEndpoint:
         assert response.status_code == 403
 
 
+@pytest.mark.slow
 class TestGroupDetailsEndpoint:
     """Tests for GET /api/v1/groups/{id} endpoint."""
 
@@ -339,6 +341,7 @@ class TestGroupDetailsEndpoint:
         assert data["is_default"] is True
 
 
+@pytest.mark.slow
 class TestGroupMembershipEndpoints:
     """Tests for group membership and deletion API endpoints."""
 

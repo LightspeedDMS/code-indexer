@@ -110,6 +110,7 @@ class TestAC5CannotDeleteDefaultGroups:
             group_manager.delete_group(admins.id)
 
 
+@pytest.mark.slow
 class TestAC6CannotDeleteGroupsWithUsers:
     """AC6: Cannot Delete Groups with Users - DELETE returns 400 with user count."""
 

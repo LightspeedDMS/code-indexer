@@ -184,6 +184,7 @@ class TestRegisterJobDelegation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestUpdateDelegation:
     """State transitions must persist via backend.update_job."""
 

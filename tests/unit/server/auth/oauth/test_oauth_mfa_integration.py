@@ -23,6 +23,7 @@ from code_indexer.server.auth.oauth import routes
 from code_indexer.server.auth.user_manager import UserManager, UserRole
 
 
+@pytest.mark.slow
 class TestOAuthMfaIntegration:
     """Test MFA enforcement in the OAuth authorization flow."""
 

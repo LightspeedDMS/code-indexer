@@ -9,7 +9,10 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 
+
+@pytest.mark.slow
 class TestProviderIndexJobProgress:
     """_provider_index_job must forward real progress via run_with_popen_progress."""
 
