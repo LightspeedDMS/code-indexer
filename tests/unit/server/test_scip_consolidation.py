@@ -31,23 +31,25 @@ class TestNoDuplicateFindScipFiles:
         When searching for "def _find_scip_files" in handlers.py
         Then zero matches are found
         """
-        handlers_path = SERVER_DIR / "mcp" / "handlers.py"
-        assert handlers_path.exists(), f"handlers.py not found at {handlers_path}"
+        handlers_path = SERVER_DIR / "mcp" / "handlers" / "_legacy.py"
+        assert handlers_path.exists(), (
+            f"handlers/_legacy.py not found at {handlers_path}"
+        )
 
         content = handlers_path.read_text()
 
         # Check for private _find_scip_files (old duplicate)
         private_matches = re.findall(r"def _find_scip_files\s*\(", content)
         assert len(private_matches) == 0, (
-            f"Found {len(private_matches)} '_find_scip_files' definitions in handlers.py. "
+            f"Found {len(private_matches)} '_find_scip_files' definitions in handlers/_legacy.py. "
             "This function should be removed - use SCIPQueryService.find_scip_files() instead."
         )
 
         # Also check for public find_scip_files (shouldn't exist here either)
         public_matches = re.findall(r"def find_scip_files\s*\(", content)
         assert len(public_matches) == 0, (
-            f"Found {len(public_matches)} 'find_scip_files' definitions in handlers.py. "
-            "This function should be in SCIPQueryService, not handlers.py."
+            f"Found {len(public_matches)} 'find_scip_files' definitions in handlers/_legacy.py. "
+            "This function should be in SCIPQueryService, not handlers/_legacy.py."
         )
 
     def test_no_find_scip_files_in_scip_queries_py(self):
@@ -113,7 +115,7 @@ class TestSCIPQueryServiceImported:
 
         SCIPQueryService should be imported and used in MCP handlers.
         """
-        handlers_path = SERVER_DIR / "mcp" / "handlers.py"
+        handlers_path = SERVER_DIR / "mcp" / "handlers" / "_legacy.py"
         content = handlers_path.read_text()
 
         # Check for SCIPQueryService usage (may be lazily imported in function)
@@ -121,14 +123,20 @@ class TestSCIPQueryServiceImported:
         has_getter = "_get_scip_query_service" in content
 
         assert has_import or has_getter, (
-            "handlers.py must use SCIPQueryService. Expected to find either "
+            "handlers/_legacy.py must use SCIPQueryService. Expected to find either "
             "'SCIPQueryService' import or '_get_scip_query_service' function."
         )
 
-        # Verify _get_scip_query_service function exists
-        assert "def _get_scip_query_service" in content, (
-            "handlers.py must have '_get_scip_query_service' function to create "
-            "SCIPQueryService instances."
+        # Verify _get_scip_query_service function exists — after the package split
+        # the definition lives in _utils.py (shared utilities), imported into _legacy.py
+        utils_path = SERVER_DIR / "mcp" / "handlers" / "_utils.py"
+        utils_content = utils_path.read_text()
+        assert (
+            "def _get_scip_query_service" in utils_content
+            or "def _get_scip_query_service" in content
+        ), (
+            "handlers package must have '_get_scip_query_service' function to create "
+            "SCIPQueryService instances (defined in _utils.py or _legacy.py)."
         )
 
     def test_scip_queries_py_imports_scip_query_service(self):
@@ -161,27 +169,27 @@ class TestNoLegacyHelperFunctions:
     """Tests verifying legacy helper functions have been removed."""
 
     def test_no_get_accessible_repos_in_handlers(self):
-        """Verify _get_accessible_repos helper is removed from handlers.py."""
-        handlers_path = SERVER_DIR / "mcp" / "handlers.py"
+        """Verify _get_accessible_repos helper is removed from handlers/_legacy.py."""
+        handlers_path = SERVER_DIR / "mcp" / "handlers" / "_legacy.py"
         content = handlers_path.read_text()
 
         # This was a duplicate helper that should now be in SCIPQueryService
         matches = re.findall(r"def _get_accessible_repos\s*\(", content)
         assert len(matches) == 0, (
-            f"Found {len(matches)} '_get_accessible_repos' definitions in handlers.py. "
+            f"Found {len(matches)} '_get_accessible_repos' definitions in handlers/_legacy.py. "
             "This function should be removed - access control is handled by "
             "SCIPQueryService.get_accessible_repos() or AccessFilteringService."
         )
 
     def test_no_filter_scip_results_in_handlers(self):
-        """Verify _filter_scip_results helper is removed from handlers.py."""
-        handlers_path = SERVER_DIR / "mcp" / "handlers.py"
+        """Verify _filter_scip_results helper is removed from handlers/_legacy.py."""
+        handlers_path = SERVER_DIR / "mcp" / "handlers" / "_legacy.py"
         content = handlers_path.read_text()
 
         # This was a duplicate helper that should now be in SCIPQueryService
         matches = re.findall(r"def _filter_scip_results\s*\(", content)
         assert len(matches) == 0, (
-            f"Found {len(matches)} '_filter_scip_results' definitions in handlers.py. "
+            f"Found {len(matches)} '_filter_scip_results' definitions in handlers/_legacy.py. "
             "This function should be removed - filtering is handled internally by "
             "SCIPQueryService."
         )
