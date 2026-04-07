@@ -325,6 +325,7 @@ class TestAC1ErrorSuggestionsFiltered:
     def test_get_available_repos_returns_filtered_repos_for_restricted_user(self):
         """_get_available_repos(user) must return only repos the user can access."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _utils as handlers_utils
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -339,10 +340,14 @@ class TestAC1ErrorSuggestionsFiltered:
             {"alias_name": "another-secret-global"},
         ]
 
+        # Patch at _utils module scope — _get_available_repos calls these
+        # via _utils module references after Phase 2 refactor.
         with (
-            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
+            patch.object(handlers_utils, "_list_global_repos", return_value=mock_repos),
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_utils,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
         ):
             result = handlers._get_available_repos(user)
@@ -355,6 +360,7 @@ class TestAC1ErrorSuggestionsFiltered:
     def test_get_available_repos_returns_all_repos_for_admin(self):
         """_get_available_repos(user) must return all repos for admin users."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _utils as handlers_utils
 
         user = _make_user("admin_user", role=UserRole.ADMIN)
         access_service = _make_access_service(is_admin=True)
@@ -364,10 +370,14 @@ class TestAC1ErrorSuggestionsFiltered:
             {"alias_name": "repo-b-global"},
         ]
 
+        # Patch at _utils module scope — _get_available_repos calls these
+        # via _utils module references after Phase 2 refactor.
         with (
-            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
+            patch.object(handlers_utils, "_list_global_repos", return_value=mock_repos),
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_utils,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
         ):
             result = handlers._get_available_repos(user)
@@ -405,6 +415,7 @@ class TestAC2WildcardExpansionFiltered:
     def test_wildcard_star_only_returns_accessible_repos(self):
         """Wildcard '*-global' must only expand to repos the user can access."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _utils as handlers_utils
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -418,11 +429,15 @@ class TestAC2WildcardExpansionFiltered:
             {"alias_name": "cidx-meta-global"},
         ]
 
+        # Patch at _utils module scope — _expand_wildcard_patterns calls these
+        # via _utils module references after Phase 2 refactor.
         with (
-            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
-            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
+            patch.object(handlers_utils, "_get_golden_repos_dir", return_value="/fake"),
+            patch.object(handlers_utils, "_list_global_repos", return_value=mock_repos),
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_utils,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
         ):
             result = handlers._expand_wildcard_patterns(["*-global"], user)
@@ -434,6 +449,7 @@ class TestAC2WildcardExpansionFiltered:
     def test_literal_pattern_not_filtered(self):
         """Literal (non-wildcard) patterns should pass through unchanged."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _utils as handlers_utils
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -445,11 +461,15 @@ class TestAC2WildcardExpansionFiltered:
             {"alias_name": "allowed-repo-global"},
         ]
 
+        # Patch at _utils module scope — _expand_wildcard_patterns calls these
+        # via _utils module references after Phase 2 refactor.
         with (
-            patch.object(handlers, "_get_golden_repos_dir", return_value="/fake"),
-            patch.object(handlers, "_list_global_repos", return_value=mock_repos),
+            patch.object(handlers_utils, "_get_golden_repos_dir", return_value="/fake"),
+            patch.object(handlers_utils, "_list_global_repos", return_value=mock_repos),
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_utils,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
         ):
             # Literal pattern should be preserved (centralized guard will catch unauthorized)
@@ -474,6 +494,7 @@ class TestAC4OmniHandlersAccessControl:
     def test_omni_regex_filters_repo_aliases(self):
         """_omni_regex_search must filter repo_aliases for restricted users."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -481,14 +502,17 @@ class TestAC4OmniHandlersAccessControl:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
-        # We verify that _expand_wildcard_patterns is called with user
-        # and that the result is filtered before iteration
+        # Patch at _legacy module scope — _omni_regex_search resolves all names
+        # via _legacy module namespace (Phase 2 moved helpers to _utils, but _legacy
+        # imports them, so patch targets must be the _legacy bindings).
         with (
-            patch.object(handlers, "_expand_wildcard_patterns") as mock_expand,
+            patch.object(handlers_legacy, "_expand_wildcard_patterns") as mock_expand,
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
-            patch.object(handlers, "handle_regex_search") as mock_single,
+            patch.object(handlers_legacy, "handle_regex_search") as mock_single,
         ):
             mock_expand.return_value = ["allowed-repo-global", "secret-repo-global"]
 
@@ -520,6 +544,7 @@ class TestAC4OmniHandlersAccessControl:
     def test_omni_search_code_filters_repo_aliases(self):
         """_omni_search_code must pass user to _expand_wildcard_patterns."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -527,12 +552,17 @@ class TestAC4OmniHandlersAccessControl:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
+        # Patch at _legacy module scope — _omni_search_code resolves all names
+        # via _legacy module namespace (Phase 2 moved helpers to _utils, but _legacy
+        # imports them, so patch targets must be the _legacy bindings).
         with (
-            patch.object(handlers, "_expand_wildcard_patterns") as mock_expand,
+            patch.object(handlers_legacy, "_expand_wildcard_patterns") as mock_expand,
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
-            patch.object(handlers, "get_config_service") as mock_config,
+            patch.object(handlers_legacy, "get_config_service") as mock_config,
         ):
             mock_expand.return_value = []  # Empty to short-circuit
 
@@ -568,6 +598,7 @@ class TestAC5CompositeRepoValidation:
     def test_composite_create_blocks_unauthorized_component(self):
         """Creating composite repo with unauthorized component must fail."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -577,7 +608,9 @@ class TestAC5CompositeRepoValidation:
 
         with (
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
             patch.object(handlers, "app_module"),
         ):
@@ -610,6 +643,7 @@ class TestAC5CompositeRepoValidation:
     def test_composite_create_allows_all_authorized_components(self):
         """Creating composite repo with all authorized components must succeed."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -619,7 +653,9 @@ class TestAC5CompositeRepoValidation:
 
         with (
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
             patch.object(handlers, "app_module") as mock_app,
         ):
@@ -650,13 +686,16 @@ class TestAC5CompositeRepoValidation:
     def test_composite_admin_bypasses_check(self):
         """Admin users bypass composite repo access checks."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
 
         user = _make_user("admin_user", role=UserRole.ADMIN)
         access_service = _make_access_service(is_admin=True)
 
         with (
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
             patch.object(handlers, "app_module") as mock_app,
         ):
@@ -696,6 +735,7 @@ class TestAC7OmniSearchErrorsFiltered:
     def test_omni_regex_errors_filtered_for_restricted_user(self):
         """Errors dict in omni-regex response must only contain accessible repo keys."""
         from code_indexer.server.mcp import handlers
+        from code_indexer.server.mcp.handlers import _legacy as handlers_legacy
 
         user = _make_user("restricted_user")
         access_service = _make_access_service(
@@ -703,13 +743,17 @@ class TestAC7OmniSearchErrorsFiltered:
             accessible_repos={"cidx-meta", "allowed-repo"},
         )
 
+        # Patch at _legacy module scope — _omni_regex_search resolves all names
+        # via _legacy module namespace after Phase 2 refactor.
         # Simulate omni-regex that encounters errors for multiple repos
         with (
-            patch.object(handlers, "_expand_wildcard_patterns") as mock_expand,
+            patch.object(handlers_legacy, "_expand_wildcard_patterns") as mock_expand,
             patch.object(
-                handlers, "_get_access_filtering_service", return_value=access_service
+                handlers_legacy,
+                "_get_access_filtering_service",
+                return_value=access_service,
             ),
-            patch.object(handlers, "handle_regex_search") as mock_single,
+            patch.object(handlers_legacy, "handle_regex_search") as mock_single,
         ):
             # Return all repos (including secret ones - simulating a gap in AC2/AC4)
             mock_expand.return_value = [

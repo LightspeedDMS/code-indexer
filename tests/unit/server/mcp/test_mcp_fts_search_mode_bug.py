@@ -37,7 +37,7 @@ class TestMCPFTSSearchModeBugFix:
 
     def test_search_mode_fts_passed_to_query_user_repositories(self, mock_user):
         """Test that search_mode='fts' is passed to query_user_repositories."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
                 "results": [],
                 "total_results": 0,
@@ -73,7 +73,7 @@ class TestMCPFTSSearchModeBugFix:
 
     def test_search_mode_semantic_is_default(self, mock_user):
         """Test that search_mode defaults to 'semantic' when not specified."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
                 "results": [],
                 "total_results": 0,
@@ -101,7 +101,7 @@ class TestMCPFTSSearchModeBugFix:
 
     def test_search_mode_hybrid_passed_correctly(self, mock_user):
         """Test that search_mode='hybrid' is passed correctly."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.semantic_query_manager.query_user_repositories.return_value = {
                 "results": [],
                 "total_results": 0,

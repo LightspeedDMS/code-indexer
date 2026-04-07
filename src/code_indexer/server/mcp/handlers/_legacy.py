@@ -13,29 +13,18 @@ All handlers return MCP-compliant responses with content arrays:
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
-import difflib
 import json
 import logging
-import pathspec
 from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:
-    from code_indexer.services.hnsw_health_service import HNSWHealthService
+    pass
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies
-from code_indexer.server import app as app_module
+from . import _utils
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
-from code_indexer.server.services.ssh_key_manager import (
-    SSHKeyManager,
-    KeyNotFoundError,
-    HostConflictError,
-)
-from code_indexer.server.services.ssh_key_generator import (
-    InvalidKeyNameError,
-    KeyAlreadyExistsError,
-)
 from code_indexer.server.services.git_operations_service import (
     git_operations_service,
     GitCommandError,
@@ -43,920 +32,43 @@ from code_indexer.server.services.git_operations_service import (
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
-from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.global_registry import GlobalRegistry
 
+
+# Shared utilities extracted to _utils.py (Story #496 refactoring)
+from ._utils import (
+    _get_scip_audit_repository,
+    _get_hnsw_health_service,
+    _parse_json_string_array,
+    _coerce_int,
+    _coerce_float,
+    _get_wiki_enabled_repos,
+    _enrich_with_wiki_url,
+    _mcp_response,
+    _get_golden_repos_dir,
+    _list_global_repos,
+    _get_global_repo,
+    _get_query_tracker,
+    _get_app_refresh_scheduler,
+    _get_access_filtering_service,
+    _get_scip_query_service,
+    _apply_payload_truncation,
+    _apply_fts_payload_truncation,
+    _apply_regex_payload_truncation,
+    _apply_temporal_payload_truncation,
+    _apply_scip_payload_truncation,
+    _error_with_suggestions,
+    _get_available_repos,
+    _format_omni_response,
+    _is_temporal_query,
+    _get_temporal_status,
+    _validate_symbol_format,
+    _expand_wildcard_patterns,
+)
+
 logger = logging.getLogger(__name__)
-
-# Fallback SCIP Audit Repository for standalone/SQLite mode (no backend)
-_scip_audit_repository_fallback: Optional[SCIPAuditRepository] = None
-
-
-def _get_scip_audit_repository() -> SCIPAuditRepository:
-    """Get the SCIPAuditRepository instance.
-
-    Returns the backend-aware instance from app.state when available
-    (set during startup in app_wiring.py), otherwise falls back to a
-    module-level SQLite singleton for backward compatibility.
-    """
-    global _scip_audit_repository_fallback
-    repo = getattr(app_module.app.state, "scip_audit_repository", None)
-    if repo is not None:
-        return repo
-    if _scip_audit_repository_fallback is None:
-        _scip_audit_repository_fallback = SCIPAuditRepository()
-    return _scip_audit_repository_fallback
-
-
-# Module-level singleton for HNSWHealthService (Story #59 - fix caching bug)
-_hnsw_health_service: Optional["HNSWHealthService"] = None
-
-
-def _get_hnsw_health_service() -> "HNSWHealthService":
-    """Get or create HNSWHealthService singleton.
-
-    Returns singleton instance with 5-minute cache TTL.
-    Cache persists across requests.
-    """
-    global _hnsw_health_service
-    if _hnsw_health_service is None:
-        from code_indexer.services.hnsw_health_service import HNSWHealthService
-
-        _hnsw_health_service = HNSWHealthService(cache_ttl_seconds=300)
-    return _hnsw_health_service
-
-
-def _parse_json_string_array(value: Any) -> Any:
-    """Parse JSON string arrays from MCP clients that serialize arrays as strings.
-
-    Some MCP clients send arrays as JSON strings like '["repo1", "repo2"]'
-    instead of actual arrays. This function handles that case.
-    """
-    if isinstance(value, str) and value.startswith("["):
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, list):
-                return parsed
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return value
-
-
-def _coerce_int(value: Any, default: int) -> int:
-    """Coerce MCP parameter to int, returning default on failure."""
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
-
-
-def _coerce_float(value: Any, default: float) -> float:
-    """Coerce MCP parameter to float, returning default on failure."""
-    if value is None:
-        return default
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return default
-
-
-def _get_wiki_enabled_repos() -> set:
-    """Build set of wiki-enabled golden repo aliases (Story #292 AC2).
-
-    Called once per MCP request to avoid per-result DB queries.
-    Returns set of alias strings without -global suffix (e.g. {"sf-kb-wiki", "docs-repo"}).
-    Degrades gracefully: returns empty set on any error.
-    """
-    try:
-        grm = getattr(app_module, "golden_repo_manager", None)
-        if grm is None:
-            return set()
-        all_repos = grm._sqlite_backend.list_repos()
-        return {repo["alias"] for repo in all_repos if repo.get("wiki_enabled", False)}
-    except Exception as e:
-        logger.debug("Failed to fetch wiki-enabled repos, degrading gracefully: %s", e)
-        return set()
-
-
-def _enrich_with_wiki_url(
-    result_dict: dict,
-    file_path: Any,
-    repository_alias: Any,
-    wiki_enabled_repos: set,
-) -> None:
-    """Add wiki_url to result dict for .md files from wiki-enabled golden repos (Story #292).
-
-    Modifies result_dict in-place. Only adds wiki_url when ALL conditions are met:
-    - file_path ends with .md
-    - repository_alias (after stripping -global suffix) is in wiki_enabled_repos
-
-    Field is completely omitted (not null, not empty) when conditions are not met (AC4).
-    Wiki URL format: /wiki/{alias_without_global}/{path_without_md_extension}
-    Example: /wiki/sf-kb-wiki/Customer/getting-started
-    """
-    if not file_path or not str(file_path).endswith(".md"):
-        return
-
-    # Strip -global suffix to get golden repo alias for wiki_enabled check
-    wiki_alias = repository_alias
-    if wiki_alias and str(wiki_alias).endswith("-global"):
-        wiki_alias = str(wiki_alias)[:-7]  # Remove "-global" (7 chars)
-
-    if not wiki_alias or wiki_alias not in wiki_enabled_repos:
-        return
-
-    # Strip .md extension and build wiki URL
-    article_path = str(file_path)[:-3]  # Remove ".md"
-    result_dict["wiki_url"] = f"/wiki/{wiki_alias}/{article_path}"
-
-
-def _mcp_response(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Wrap response data in MCP-compliant content array format.
-
-    Per MCP spec, all tool responses must return:
-    {
-        "content": [
-            {
-                "type": "text",
-                "text": "<JSON-stringified data>"
-            }
-        ]
-    }
-
-    Args:
-        data: The actual response data to wrap (dict with success, results, etc)
-
-    Returns:
-        MCP-compliant response with content array
-    """
-    return {"content": [{"type": "text", "text": json.dumps(data, indent=2)}]}
-
-
-def _get_golden_repos_dir() -> str:
-    """Get golden_repos_dir from app.state.
-
-    Raises:
-        RuntimeError: If golden_repos_dir is not configured in app.state
-    """
-    from typing import Optional, cast
-
-    golden_repos_dir: Optional[str] = cast(
-        Optional[str], getattr(app_module.app.state, "golden_repos_dir", None)
-    )
-    if golden_repos_dir:
-        return golden_repos_dir
-
-    raise RuntimeError(
-        "golden_repos_dir not configured in app.state. "
-        "Server must set app.state.golden_repos_dir during startup."
-    )
-
-
-def _list_global_repos() -> list:
-    """List all global repos from the storage backend (SQLite or PostgreSQL).
-
-    Returns list of dicts with keys: alias_name, repo_name, repo_url,
-    index_path, created_at, last_refresh, enable_temporal, etc.
-    Works identically in standalone and cluster mode via BackendRegistry.
-    """
-    return list(
-        app_module.app.state.backend_registry.global_repos.list_repos().values()
-    )
-
-
-def _get_global_repo(alias_name: str):
-    """Get a single global repo by alias from the storage backend.
-
-    Returns dict with repo details, or None if not found.
-    Works identically in standalone and cluster mode via BackendRegistry.
-    """
-    return app_module.app.state.backend_registry.global_repos.get_repo(alias_name)
-
-
-def _get_query_tracker():
-    """Get QueryTracker from app.state.
-
-    Returns:
-        QueryTracker instance if configured, None otherwise.
-        Used for tracking active queries to prevent concurrent access issues
-        during repository removal operations.
-    """
-    return getattr(app_module.app.state, "query_tracker", None)
-
-
-def _get_app_refresh_scheduler():
-    """Get RefreshScheduler from app.state via global_lifecycle_manager (Story #231).
-
-    Returns:
-        RefreshScheduler instance if configured, None otherwise.
-    """
-    lifecycle_manager = getattr(app_module.app.state, "global_lifecycle_manager", None)
-    if lifecycle_manager is None:
-        return None
-    return getattr(lifecycle_manager, "refresh_scheduler", None)
-
-
-def _get_access_filtering_service():
-    """Get the AccessFilteringService if configured, None otherwise (Story #300).
-
-    Returns:
-        AccessFilteringService instance if configured in app.state, None otherwise.
-    """
-    return getattr(app_module.app.state, "access_filtering_service", None)
-
-
-def _get_scip_query_service():
-    """Get SCIPQueryService instance for SCIP handlers.
-
-    Creates a SCIPQueryService configured with:
-    - golden_repos_dir: From app.state (server configuration)
-    - access_filtering_service: From app.state (for user-based repository filtering)
-
-    Returns:
-        SCIPQueryService instance ready for use by SCIP handlers
-
-    Raises:
-        RuntimeError: If golden_repos_dir is not configured
-    """
-    from code_indexer.server.services.scip_query_service import SCIPQueryService
-
-    golden_repos_dir = _get_golden_repos_dir()
-    access_filtering_service = _get_access_filtering_service()
-
-    return SCIPQueryService(
-        golden_repos_dir=golden_repos_dir,
-        access_filtering_service=access_filtering_service,
-    )
-
-
-def _apply_payload_truncation(
-    results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Apply payload truncation to search results (Story #679, Bug Fix #683).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    For results with large content, replaces content with preview + cache_handle.
-    This reduces response size while allowing clients to fetch full content on demand.
-
-    Handles both 'content' field (REST API format) and 'code_snippet' field
-    (semantic search QueryResult.to_dict() format).
-
-    Args:
-        results: List of search result dicts with 'content' or 'code_snippet' field
-
-    Returns:
-        Modified results list with truncation applied
-    """
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
-    if payload_cache is None:
-        # Cache not available, return results unchanged
-        return results
-
-    for result_dict in results:
-        # Handle both content and code_snippet fields (Bug Fix #683)
-        # Logic for field selection:
-        # - If ONLY code_snippet exists: truncate code_snippet (semantic search format)
-        # - If ONLY content exists: truncate content (REST API format)
-        # - If BOTH exist: truncate content (hybrid mode - code_snippet handled by FTS)
-        has_code_snippet = "code_snippet" in result_dict
-        has_content = "content" in result_dict
-
-        if has_content:
-            # Content field exists - truncate it (works for both legacy and hybrid)
-            content = result_dict.get("content")
-            field_name = "content"
-        elif has_code_snippet:
-            # Only code_snippet exists - truncate it (semantic search format)
-            content = result_dict.get("code_snippet")
-            field_name = "code_snippet"
-        else:
-            # No content field to truncate, add default metadata
-            result_dict["cache_handle"] = None
-            result_dict["has_more"] = False
-            continue
-
-        if content is None:
-            # Field exists but is None, add default metadata
-            result_dict["cache_handle"] = None
-            result_dict["has_more"] = False
-            continue
-
-        try:
-            truncated = payload_cache.truncate_result(content)  # Sync call
-            if truncated.get("has_more", False):
-                # Large content: replace with preview and cache handle
-                result_dict["preview"] = truncated["preview"]
-                result_dict["cache_handle"] = truncated["cache_handle"]
-                result_dict["has_more"] = True
-                result_dict["total_size"] = truncated["total_size"]
-                del result_dict[field_name]  # Remove full content
-            else:
-                # Small content: keep as-is, add metadata
-                result_dict["cache_handle"] = None
-                result_dict["has_more"] = False
-        except Exception as e:
-            # Log error but don't fail the search
-            logger.warning(
-                format_error_log(
-                    "MCP-GENERAL-023",
-                    f"Failed to truncate result: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            )
-            # Keep original content on error
-            result_dict["cache_handle"] = None
-            result_dict["has_more"] = False
-
-    return results
-
-
-def _apply_fts_payload_truncation(
-    results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Apply payload truncation to FTS search results (Story #680).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    For FTS results with large code_snippet or match_text fields, replaces
-    them with preview + cache_handle. Each field is cached independently.
-
-    Args:
-        results: List of FTS search result dicts with 'code_snippet' and/or
-                 'match_text' fields
-
-    Returns:
-        Modified results list with truncation applied to FTS fields
-    """
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
-    if payload_cache is None:
-        # Cache not available, return results unchanged
-        return results
-
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        # Handle code_snippet field (AC1)
-        code_snippet = result_dict.get("code_snippet")
-        if code_snippet is not None:
-            try:
-                if len(code_snippet) > preview_size:
-                    # Large snippet: store and replace with preview (sync call)
-                    cache_handle = payload_cache.store(code_snippet)
-                    result_dict["snippet_preview"] = code_snippet[:preview_size]
-                    result_dict["snippet_cache_handle"] = cache_handle
-                    result_dict["snippet_has_more"] = True
-                    result_dict["snippet_total_size"] = len(code_snippet)
-                    del result_dict["code_snippet"]
-                else:
-                    # Small snippet: keep as-is, add metadata
-                    result_dict["snippet_cache_handle"] = None
-                    result_dict["snippet_has_more"] = False
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-024",
-                        f"Failed to truncate code_snippet: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                result_dict["snippet_cache_handle"] = None
-                result_dict["snippet_has_more"] = False
-
-        # Handle match_text field (AC2)
-        match_text = result_dict.get("match_text")
-        if match_text is not None:
-            try:
-                if len(match_text) > preview_size:
-                    # Large match_text: store and replace with preview (sync call)
-                    cache_handle = payload_cache.store(match_text)
-                    result_dict["match_text_preview"] = match_text[:preview_size]
-                    result_dict["match_text_cache_handle"] = cache_handle
-                    result_dict["match_text_has_more"] = True
-                    result_dict["match_text_total_size"] = len(match_text)
-                    del result_dict["match_text"]
-                else:
-                    # Small match_text: keep as-is, add metadata
-                    result_dict["match_text_cache_handle"] = None
-                    result_dict["match_text_has_more"] = False
-            except Exception as e:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-025",
-                        f"Failed to truncate match_text: {e}",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-                result_dict["match_text_cache_handle"] = None
-                result_dict["match_text_has_more"] = False
-
-    return results
-
-
-def _truncate_regex_field(
-    result_dict: Dict[str, Any],
-    field_name: str,
-    payload_cache,
-    preview_size: int,
-    is_list: bool = False,
-) -> None:
-    """Truncate a single regex field if needed (Story #684 helper).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    Args:
-        result_dict: Dict containing the field to truncate
-        field_name: Name of the field (e.g., "line_content", "context_before")
-        payload_cache: PayloadCache instance for storing large content
-        preview_size: Maximum chars before truncation
-        is_list: If True, field is a list of strings to join with newlines
-    """
-    field_value = result_dict.get(field_name)
-    if field_value is None:
-        return
-
-    try:
-        content = "\n".join(field_value) if is_list else field_value
-        if len(content) > preview_size:
-            cache_handle = payload_cache.store(content)  # Sync call
-            result_dict[f"{field_name}_preview"] = content[:preview_size]
-            result_dict[f"{field_name}_cache_handle"] = cache_handle
-            result_dict[f"{field_name}_has_more"] = True
-            result_dict[f"{field_name}_total_size"] = len(content)
-            del result_dict[field_name]
-        else:
-            result_dict[f"{field_name}_cache_handle"] = None
-            result_dict[f"{field_name}_has_more"] = False
-    except Exception as e:
-        logger.warning(
-            format_error_log(
-                "MCP-GENERAL-026",
-                f"Failed to truncate {field_name}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        result_dict[f"{field_name}_cache_handle"] = None
-        result_dict[f"{field_name}_has_more"] = False
-
-
-def _apply_regex_payload_truncation(
-    results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Apply payload truncation to regex search results (Story #684).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    For regex results with large line_content, context_before, or context_after
-    fields, replaces them with preview + cache_handle. Each field is cached
-    independently.
-
-    Args:
-        results: List of regex search result dicts
-
-    Returns:
-        Modified results list with truncation applied to regex fields
-    """
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
-    if payload_cache is None:
-        return results
-
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        # AC1: Handle line_content field (sync call)
-        _truncate_regex_field(
-            result_dict, "line_content", payload_cache, preview_size, is_list=False
-        )
-        # AC2: Handle context_before field (list of strings, sync call)
-        _truncate_regex_field(
-            result_dict, "context_before", payload_cache, preview_size, is_list=True
-        )
-        # AC2: Handle context_after field (list of strings, sync call)
-        _truncate_regex_field(
-            result_dict, "context_after", payload_cache, preview_size, is_list=True
-        )
-
-    return results
-
-
-def _truncate_field(
-    container: Dict[str, Any],
-    field_name: str,
-    payload_cache,
-    preview_size: int,
-    log_context: str = "field",
-) -> None:
-    """Truncate a single field if it exceeds preview_size (Story #681 helper).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    Args:
-        container: Dict containing the field to truncate
-        field_name: Name of the field (e.g., "content", "diff")
-        payload_cache: PayloadCache instance for storing large content
-        preview_size: Maximum chars before truncation
-        log_context: Context string for warning messages
-    """
-    value = container.get(field_name)
-    if value is None:
-        return
-
-    try:
-        if len(value) > preview_size:
-            cache_handle = payload_cache.store(value)  # Sync call
-            container[f"{field_name}_preview"] = value[:preview_size]
-            container[f"{field_name}_cache_handle"] = cache_handle
-            container[f"{field_name}_has_more"] = True
-            container[f"{field_name}_total_size"] = len(value)
-            del container[field_name]
-        else:
-            container[f"{field_name}_cache_handle"] = None
-            container[f"{field_name}_has_more"] = False
-    except Exception as e:
-        logger.warning(
-            format_error_log(
-                "MCP-GENERAL-027",
-                f"Failed to truncate {log_context}: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        container[f"{field_name}_cache_handle"] = None
-        container[f"{field_name}_has_more"] = False
-
-
-def _apply_temporal_payload_truncation(
-    results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Apply payload truncation to temporal search results (Story #681).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    Truncates large content fields with preview + cache_handle pattern.
-
-    Args:
-        results: List of temporal search result dicts
-
-    Returns:
-        Modified results with truncation applied to content and evolution entries
-    """
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
-    if payload_cache is None:
-        return results
-
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        # AC1: Handle main content field (sync call)
-        _truncate_field(
-            result_dict, "content", payload_cache, preview_size, "temporal content"
-        )
-
-        # Handle code_snippet field (temporal results use QueryResult.to_dict() format)
-        _truncate_field(
-            result_dict,
-            "code_snippet",
-            payload_cache,
-            preview_size,
-            "temporal code_snippet",
-        )
-
-        # AC2/AC3: Handle temporal_context.evolution entries (sync calls)
-        temporal_context = result_dict.get("temporal_context")
-        if temporal_context and "evolution" in temporal_context:
-            for entry in temporal_context["evolution"]:
-                _truncate_field(
-                    entry, "content", payload_cache, preview_size, "evolution content"
-                )
-                _truncate_field(
-                    entry, "diff", payload_cache, preview_size, "evolution diff"
-                )
-
-    return results
-
-
-def _apply_scip_payload_truncation(
-    results: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Apply payload truncation to SCIP query results (Story #685).
-
-    Story #50: Converted from async to sync for FastAPI thread pool execution.
-
-    For SCIP results with large context fields (> preview_size_chars), replaces
-    context with context_preview + context_cache_handle. This reduces response
-    size while allowing clients to fetch full context on demand.
-
-    Args:
-        results: List of SCIP result dicts with optional 'context' field
-
-    Returns:
-        Modified results list with truncation applied to context fields
-    """
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
-    if payload_cache is None:
-        # Cache not available, return results unchanged
-        return results
-
-    preview_size = payload_cache.config.preview_size_chars
-
-    for result_dict in results:
-        context = result_dict.get("context")
-
-        # Handle missing context field
-        if "context" not in result_dict:
-            result_dict["context_cache_handle"] = None
-            result_dict["context_has_more"] = False
-            continue
-
-        # Handle None context
-        if context is None:
-            result_dict["context_cache_handle"] = None
-            result_dict["context_has_more"] = False
-            continue
-
-        try:
-            if len(context) > preview_size:
-                # Large context: store full content and replace with preview (sync call)
-                cache_handle = payload_cache.store(context)
-                result_dict["context_preview"] = context[:preview_size]
-                result_dict["context_cache_handle"] = cache_handle
-                result_dict["context_has_more"] = True
-                result_dict["context_total_size"] = len(context)
-                del result_dict["context"]
-            else:
-                # Small context: keep as-is, add metadata
-                result_dict["context_cache_handle"] = None
-                result_dict["context_has_more"] = False
-        except Exception as e:
-            logger.warning(
-                format_error_log(
-                    "MCP-GENERAL-028",
-                    f"Failed to truncate SCIP context: {e}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            )
-            # Keep original context on error, add metadata
-            result_dict["context_cache_handle"] = None
-            result_dict["context_has_more"] = False
-
-    return results
-
-
-def _error_with_suggestions(
-    error_msg: str,
-    attempted_value: str,
-    available_values: List[str],
-    max_suggestions: int = 3,
-) -> Dict[str, Any]:
-    """Create structured error response with fuzzy-matched suggestions.
-
-    Args:
-        error_msg: The error message to include
-        attempted_value: The value the user tried (e.g., "myrepo-gloabl")
-        available_values: List of valid values to match against
-        max_suggestions: Maximum number of suggestions to return
-
-    Returns:
-        Structured error envelope with suggestions and available_values
-    """
-    # Use difflib for fuzzy matching
-    suggestions = difflib.get_close_matches(
-        attempted_value,
-        available_values,
-        n=max_suggestions,
-        cutoff=0.6,  # 60% similarity threshold
-    )
-
-    return {
-        "success": False,
-        "error": error_msg,
-        "suggestions": suggestions,
-        "available_values": available_values[:10],  # Limit to prevent huge responses
-    }
-
-
-def _get_available_repos(user: "User") -> List[str]:
-    """Get list of available global repository aliases for suggestions.
-
-    Story #331 AC1: Filters repos through AccessFilteringService so that
-    restricted users only see repos they have access to in error suggestions.
-
-    Args:
-        user: The authenticated user requesting the repo list.
-
-    Returns:
-        List of repository alias names the user can see.
-    """
-    try:
-        all_repos = [r["alias_name"] for r in _list_global_repos()]
-        access_service = _get_access_filtering_service()
-        if access_service:
-            filtered: List[str] = access_service.filter_repo_listing(
-                all_repos, user.username
-            )
-            return filtered
-        return all_repos
-    except Exception:
-        return []
-
-
-def _format_omni_response(
-    all_results: List[Dict[str, Any]],
-    response_format: str,
-    total_repos_searched: int,
-    errors: Dict[str, str],
-    cursor: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Format omni-search results based on response_format parameter.
-
-    Args:
-        all_results: Flat list of results with source_repo field
-        response_format: "flat" or "grouped"
-        total_repos_searched: Number of repos successfully searched
-        errors: Dict of repo alias -> error message for failed repos
-        cursor: Optional cursor for pagination
-
-    Returns:
-        Formatted response dict
-    """
-    base_response: Dict[str, Any] = {
-        "success": True,
-        "total_repos_searched": total_repos_searched,
-        "errors": errors,
-    }
-
-    if cursor:
-        base_response["cursor"] = cursor
-
-    if response_format == "grouped":
-        results_by_repo: Dict[str, Dict[str, Any]] = {}
-        for result in all_results:
-            repo = result.get("source_repo", "unknown")
-            if repo not in results_by_repo:
-                results_by_repo[repo] = {"count": 0, "results": []}
-            results_by_repo[repo]["count"] += 1
-            results_by_repo[repo]["results"].append(result)
-
-        base_response["results_by_repo"] = results_by_repo
-        base_response["total_results"] = len(all_results)
-    else:
-        base_response["results"] = all_results
-        base_response["total_results"] = len(all_results)
-
-    return base_response
-
-
-def _is_temporal_query(params: Dict[str, Any]) -> bool:
-    """Check if query includes temporal parameters.
-
-    Returns True if any temporal search parameters are present and truthy.
-    """
-    temporal_params = ["time_range", "time_range_all", "at_commit", "include_removed"]
-    return any(params.get(p) for p in temporal_params)
-
-
-def _get_temporal_status(repo_aliases: List[str]) -> Dict[str, Any]:
-    """Get temporal indexing status for each repository.
-
-    Args:
-        repo_aliases: List of repository aliases to check
-
-    Returns:
-        Dict with temporal_repos, non_temporal_repos, and optional warning
-    """
-    try:
-        all_repos = {r["alias_name"]: r for r in _list_global_repos()}
-
-        temporal_repos = []
-        non_temporal_repos = []
-
-        for alias in repo_aliases:
-            if alias in all_repos:
-                if all_repos[alias].get("enable_temporal", False):
-                    temporal_repos.append(alias)
-                else:
-                    non_temporal_repos.append(alias)
-
-        status: Dict[str, Any] = {
-            "temporal_repos": temporal_repos,
-            "non_temporal_repos": non_temporal_repos,
-        }
-
-        if not temporal_repos and non_temporal_repos:
-            status["warning"] = (
-                "None of the searched repositories have temporal indexing enabled. "
-                "Temporal queries will return no results. "
-                "Re-index with --index-commits to enable temporal search."
-            )
-
-        return status
-    except Exception:
-        return {}
-
-
-WILDCARD_CHARS = {"*", "?", "["}
-
-
-def _has_wildcard(pattern: str) -> bool:
-    """Check if pattern contains wildcard characters."""
-    return any(c in pattern for c in WILDCARD_CHARS)
-
-
-def _validate_symbol_format(symbol: Optional[str], param_name: str) -> Optional[str]:
-    """Validate symbol format for call chain queries.
-
-    Args:
-        symbol: The symbol string to validate (can be None)
-        param_name: Parameter name for error messages (e.g., "from_symbol", "to_symbol")
-
-    Returns:
-        None if valid, error message string if invalid
-    """
-    if not symbol or not symbol.strip():
-        return f"{param_name} cannot be empty"
-
-    return None
-
-
-def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
-    """Expand wildcard patterns to matching repository aliases.
-
-    Story #331 AC2: Accepts a user parameter and filters the available_repos
-    list through AccessFilteringService before wildcard matching, so that
-    restricted users only see repos they have access to.
-
-    Args:
-        patterns: List of repo patterns (may include wildcards like '*-global')
-        user: The authenticated user requesting the expansion.
-
-    Returns:
-        Expanded list of unique repository aliases
-    """
-    golden_repos_dir = _get_golden_repos_dir()
-    if not golden_repos_dir:
-        logger.debug(
-            "No golden_repos_dir, returning patterns unchanged",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return patterns
-
-    # Get available repos
-    try:
-        available_repos = [r["alias_name"] for r in _list_global_repos()]
-    except Exception as e:
-        logger.warning(
-            format_error_log(
-                "MCP-GENERAL-029",
-                f"Failed to list global repos for wildcard expansion: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return patterns
-
-    # Story #331 AC2: Filter available repos through access control
-    access_service = _get_access_filtering_service()
-    if access_service and not access_service.is_admin_user(user.username):
-        available_repos = access_service.filter_repo_listing(
-            available_repos, user.username
-        )
-
-    expanded = []
-    for pattern in patterns:
-        if _has_wildcard(pattern):
-            # Expand wildcard using pathspec (gitignore-style matching)
-            # This correctly handles ** as "zero or more directories"
-            spec = pathspec.PathSpec.from_lines("gitwildmatch", [pattern])
-            matches = [repo for repo in available_repos if spec.match_file(repo)]
-            if matches:
-                logger.debug(
-                    f"Expanded wildcard '{pattern}' -> {matches}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-                expanded.extend(matches)
-            else:
-                logger.warning(
-                    format_error_log(
-                        "MCP-GENERAL-030",
-                        f"Wildcard pattern '{pattern}' matched no repositories",
-                        extra={"correlation_id": get_correlation_id()},
-                    )
-                )
-        else:
-            # Keep literal pattern
-            expanded.append(pattern)
-
-    # Deduplicate while preserving order
-    seen = set()
-    result = []
-    for repo in expanded:
-        if repo not in seen:
-            seen.add(repo)
-            result.append(repo)
-
-    return result
 
 
 def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -971,9 +83,9 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Story #51: Converted from async to sync for FastAPI thread pool execution.
     """
     from collections import defaultdict
-    from ..multi.multi_search_config import MultiSearchConfig
-    from ..multi.multi_search_service import MultiSearchService
-    from ..multi.models import MultiSearchRequest
+    from ...multi.multi_search_config import MultiSearchConfig
+    from ...multi.multi_search_service import MultiSearchService
+    from ...multi.models import MultiSearchRequest
 
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
@@ -1083,11 +195,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     category_map = {}
     try:
         if (
-            hasattr(app_module, "golden_repo_manager")
-            and app_module.golden_repo_manager
+            hasattr(_utils.app_module, "golden_repo_manager")
+            and _utils.app_module.golden_repo_manager
         ):
             category_service = getattr(
-                app_module.golden_repo_manager, "_repo_category_service", None
+                _utils.app_module.golden_repo_manager, "_repo_category_service", None
             )
             if category_service:
                 category_map = category_service.get_repo_category_map()
@@ -1329,7 +441,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
                 # Coerce numeric parameters from MCP string types (MCP protocol sends all values as strings)
                 _evolution_limit_raw = params.get("evolution_limit")
-                results = app_module.semantic_query_manager._perform_search(
+                results = _utils.app_module.semantic_query_manager._perform_search(
                     username=user.username,
                     user_repos=mock_user_repos,
                     query_text=params["query_text"],
@@ -1390,11 +502,13 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             category_map = {}
             try:
                 if (
-                    hasattr(app_module, "golden_repo_manager")
-                    and app_module.golden_repo_manager
+                    hasattr(_utils.app_module, "golden_repo_manager")
+                    and _utils.app_module.golden_repo_manager
                 ):
                     category_service = getattr(
-                        app_module.golden_repo_manager, "_repo_category_service", None
+                        _utils.app_module.golden_repo_manager,
+                        "_repo_category_service",
+                        None,
                     )
                     if category_service:
                         category_map = category_service.get_repo_category_map()
@@ -1496,7 +610,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             _act_effective_limit = _act_requested_limit
 
         _evolution_limit_activated = params.get("evolution_limit")
-        result = app_module.semantic_query_manager.query_user_repositories(
+        result = _utils.app_module.semantic_query_manager.query_user_repositories(
             username=user.username,
             query_text=params["query_text"],
             repository_alias=params.get("repository_alias"),
@@ -1542,11 +656,13 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         category_map = {}
         try:
             if (
-                hasattr(app_module, "golden_repo_manager")
-                and app_module.golden_repo_manager
+                hasattr(_utils.app_module, "golden_repo_manager")
+                and _utils.app_module.golden_repo_manager
             ):
                 category_service = getattr(
-                    app_module.golden_repo_manager, "_repo_category_service", None
+                    _utils.app_module.golden_repo_manager,
+                    "_repo_category_service",
+                    None,
                 )
                 if category_service:
                     category_map = category_service.get_repo_category_map()
@@ -1610,7 +726,7 @@ def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Discover available repositories from configured sources."""
     try:
         # List all golden repositories (source_type filter not currently used)
-        repos = app_module.golden_repo_manager.list_golden_repos()
+        repos = _utils.app_module.golden_repo_manager.list_golden_repos()
 
         # Story #300: Apply group-based access filtering (AC3)
         access_filtering_service = _get_access_filtering_service()
@@ -1648,7 +764,9 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get activated repos from database
         raw_activated_repos = (
-            app_module.activated_repo_manager.list_activated_repositories(user.username)
+            _utils.app_module.activated_repo_manager.list_activated_repositories(
+                user.username
+            )
         )
 
         # Story #196: Filter activated repos to only include whitelisted fields
@@ -1708,11 +826,13 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         category_map = {}
         try:
             if (
-                hasattr(app_module, "golden_repo_manager")
-                and app_module.golden_repo_manager
+                hasattr(_utils.app_module, "golden_repo_manager")
+                and _utils.app_module.golden_repo_manager
             ):
                 category_service = getattr(
-                    app_module.golden_repo_manager, "_repo_category_service", None
+                    _utils.app_module.golden_repo_manager,
+                    "_repo_category_service",
+                    None,
                 )
                 if category_service:
                     category_map = category_service.get_repo_category_map()
@@ -1822,7 +942,7 @@ def activate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                                 }
                             )
 
-        job_id = app_module.activated_repo_manager.activate_repository(
+        job_id = _utils.app_module.activated_repo_manager.activate_repository(
             username=user.username,
             golden_repo_alias=golden_repo_alias,
             golden_repo_aliases=params.get("golden_repo_aliases"),
@@ -1844,7 +964,7 @@ def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Deactivate a repository."""
     try:
         user_alias = params["user_alias"]
-        job_id = app_module.activated_repo_manager.deactivate_repository(
+        job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
             username=user.username, user_alias=user_alias
         )
         return _mcp_response(
@@ -1867,8 +987,8 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         # Get category service from golden_repo_manager
         if (
-            not hasattr(app_module, "golden_repo_manager")
-            or not app_module.golden_repo_manager
+            not hasattr(_utils.app_module, "golden_repo_manager")
+            or not _utils.app_module.golden_repo_manager
         ):
             return _mcp_response(
                 {
@@ -1880,7 +1000,7 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         category_service = getattr(
-            app_module.golden_repo_manager, "_repo_category_service", None
+            _utils.app_module.golden_repo_manager, "_repo_category_service", None
         )
         if not category_service:
             return _mcp_response(
@@ -1922,11 +1042,13 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         category_map = {}
         try:
             if (
-                hasattr(app_module, "golden_repo_manager")
-                and app_module.golden_repo_manager
+                hasattr(_utils.app_module, "golden_repo_manager")
+                and _utils.app_module.golden_repo_manager
             ):
                 category_service = getattr(
-                    app_module.golden_repo_manager, "_repo_category_service", None
+                    _utils.app_module.golden_repo_manager,
+                    "_repo_category_service",
+                    None,
                 )
                 if category_service:
                     category_map = category_service.get_repo_category_map()
@@ -1978,7 +1100,7 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": True, "status": status})
 
         # Activated repository (original code)
-        status = app_module.repository_listing_manager.get_repository_details(
+        status = _utils.app_module.repository_listing_manager.get_repository_details(
             user_alias, user.username
         )
 
@@ -1998,7 +1120,7 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         user_alias = params["user_alias"]
         # Resolve alias to repository details
-        repos = app_module.activated_repo_manager.list_activated_repositories(
+        repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username
         )
         repo_id = None
@@ -2017,7 +1139,7 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Defensive check
-        if app_module.background_job_manager is None:
+        if _utils.app_module.background_job_manager is None:
             return _mcp_response(
                 {
                     "success": False,
@@ -2038,7 +1160,7 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Submit sync job with correct signature
-        job_id = app_module.background_job_manager.submit_job(
+        job_id = _utils.app_module.background_job_manager.submit_job(
             operation_type="sync_repository",
             func=sync_job_wrapper,
             submitter_username=user.username,
@@ -2063,7 +1185,7 @@ def switch_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         create = params.get("create", False)
 
         # Use activated_repo_manager.switch_branch (matches app.py endpoint pattern)
-        result = app_module.activated_repo_manager.switch_branch(
+        result = _utils.app_module.activated_repo_manager.switch_branch(
             username=user.username,
             user_alias=user_alias,
             branch_name=branch_name,
@@ -2238,7 +1360,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 path_pattern=final_path_pattern,
             )
 
-            result = app_module.file_service.list_files_by_path(
+            result = _utils.app_module.file_service.list_files_by_path(
                 repo_path=target_path,
                 query_params=query_params,
             )
@@ -2251,7 +1373,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             # Call with correct signature: list_files(repo_id, username, query_params)
-            result = app_module.file_service.list_files(
+            result = _utils.app_module.file_service.list_files(
                 repo_id=repository_alias,
                 username=user.username,
                 query_params=query_params,
@@ -2417,7 +1539,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Use resolved path for file_service with pagination parameters
             # Story #33 Fix: Use skip_truncation=True so TruncationHelper handles
             # truncation with cache_handle support (avoids double truncation)
-            result = app_module.file_service.get_file_content_by_path(
+            result = _utils.app_module.file_service.get_file_content_by_path(
                 repo_path=target_path,
                 file_path=file_path,
                 offset=offset,
@@ -2428,7 +1550,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Call file_service with pagination parameters
             # Story #33 Fix: Use skip_truncation=True so TruncationHelper handles
             # truncation with cache_handle support (avoids double truncation)
-            result = app_module.file_service.get_file_content(
+            result = _utils.app_module.file_service.get_file_content(
                 repository_alias=repository_alias,
                 file_path=file_path,
                 username=user.username,
@@ -2442,7 +1564,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         metadata = result.get("metadata", {})
 
         # Get payload cache and content limits config
-        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
         config_service = get_config_service()
         content_limits = config_service.get_config().content_limits_config
 
@@ -2630,12 +1752,12 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         if is_global_repo:
-            result = app_module.file_service.list_files_by_path(
+            result = _utils.app_module.file_service.list_files_by_path(
                 repo_path=repository_alias,
                 query_params=query_params,
             )
         else:
-            result = app_module.file_service.list_files(
+            result = _utils.app_module.file_service.list_files(
                 repo_id=repository_alias,
                 username=user.username,
                 query_params=query_params,
@@ -2728,9 +1850,11 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repo_path = target_path
         else:
             # Get repository path (matches app.py endpoint pattern at line 4383-4395)
-            repo_path = app_module.activated_repo_manager.get_activated_repo_path(
-                username=user.username,
-                user_alias=repository_alias,
+            repo_path = (
+                _utils.app_module.activated_repo_manager.get_activated_repo_path(
+                    username=user.username,
+                    user_alias=repository_alias,
+                )
             )
 
         # Initialize git topology service
@@ -2794,7 +1918,7 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #506: Include node_id in response for cluster mode identification.
         # In standalone mode node_id is None (app.state.node_id not set).
-        node_id = getattr(app_module.app.state, "node_id", None)
+        node_id = getattr(_utils.app_module.app.state, "node_id", None)
 
         # Use mode='json' to serialize datetime objects to ISO format strings
         return _mcp_response(
@@ -2835,7 +1959,7 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Resolve repository alias to clone path
-        repo = app_module.golden_repo_manager.get_golden_repo(repository_alias)
+        repo = _utils.app_module.golden_repo_manager.get_golden_repo(repository_alias)
         if not repo:
             return _mcp_response(
                 {"success": False, "error": f"Repository not found: {repository_alias}"}
@@ -2886,7 +2010,7 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         enable_temporal = params.get("enable_temporal", False)
         temporal_options = params.get("temporal_options")
 
-        job_id = app_module.golden_repo_manager.add_golden_repo(
+        job_id = _utils.app_module.golden_repo_manager.add_golden_repo(
             repo_url=repo_url,
             alias=alias,
             default_branch=default_branch,
@@ -2909,7 +2033,7 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Remove a golden repository (admin only)."""
     try:
         alias = params["alias"]
-        job_id = app_module.golden_repo_manager.remove_golden_repo(
+        job_id = _utils.app_module.golden_repo_manager.remove_golden_repo(
             alias, submitter_username=user.username
         )
         return _mcp_response(
@@ -2928,7 +2052,7 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         alias = params["alias"]
         # Validate repo exists via golden_repo_manager before scheduling
-        if alias not in app_module.golden_repo_manager.golden_repos:
+        if alias not in _utils.app_module.golden_repo_manager.golden_repos:
             raise Exception(f"Golden repository '{alias}' not found")
         # Delegate to RefreshScheduler (index-source-first versioned pipeline)
         refresh_scheduler = _get_app_refresh_scheduler()
@@ -2963,7 +2087,7 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
         )
 
     try:
-        result = app_module.golden_repo_manager.change_branch_async(
+        result = _utils.app_module.golden_repo_manager.change_branch_async(
             alias, branch, user.username
         )
         job_id = result.get("job_id")
@@ -2998,7 +2122,7 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
 def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
     try:
-        all_users = app_module.user_manager.get_all_users()
+        all_users = _utils.app_module.user_manager.get_all_users()
         return _mcp_response(
             {
                 "success": True,
@@ -3026,7 +2150,7 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         password = params["password"]
         role = UserRole(params["role"])
 
-        new_user = app_module.user_manager.create_user(
+        new_user = _utils.app_module.user_manager.create_user(
             username=username, password=password, role=role
         )
         return _mcp_response(
@@ -3114,9 +2238,9 @@ def get_job_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Use get_active_job_count, get_pending_job_count, get_failed_job_count instead.
     """
     try:
-        active = app_module.background_job_manager.get_active_job_count()
-        pending = app_module.background_job_manager.get_pending_job_count()
-        failed = app_module.background_job_manager.get_failed_job_count()
+        active = _utils.app_module.background_job_manager.get_active_job_count()
+        pending = _utils.app_module.background_job_manager.get_pending_job_count()
+        failed = _utils.app_module.background_job_manager.get_failed_job_count()
 
         stats = {
             "active": active,
@@ -3139,7 +2263,9 @@ def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
-        job = app_module.background_job_manager.get_job_status(job_id, user.username)
+        job = _utils.app_module.background_job_manager.get_job_status(
+            job_id, user.username
+        )
         if not job:
             return _mcp_response(
                 {
@@ -3157,14 +2283,16 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
     """Get status summary of all repositories."""
     try:
         # Get activated repos status
-        repos = app_module.activated_repo_manager.list_activated_repositories(
+        repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username
         )
         status_summary = []
         for repo in repos:
             try:
-                details = app_module.repository_listing_manager.get_repository_details(
-                    repo["user_alias"], user.username
+                details = (
+                    _utils.app_module.repository_listing_manager.get_repository_details(
+                        repo["user_alias"], user.username
+                    )
                 )
                 status_summary.append(details)
             except Exception:
@@ -3256,7 +2384,7 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
                         )
 
         if operation == "create":
-            job_id = app_module.activated_repo_manager.activate_repository(
+            job_id = _utils.app_module.activated_repo_manager.activate_repository(
                 username=user.username,
                 golden_repo_aliases=golden_repo_aliases,
                 user_alias=user_alias,
@@ -3272,13 +2400,13 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         elif operation == "update":
             # For update, deactivate then reactivate
             try:
-                app_module.activated_repo_manager.deactivate_repository(
+                _utils.app_module.activated_repo_manager.deactivate_repository(
                     username=user.username, user_alias=user_alias
                 )
             except Exception:
                 pass  # Ignore if doesn't exist
 
-            job_id = app_module.activated_repo_manager.activate_repository(
+            job_id = _utils.app_module.activated_repo_manager.activate_repository(
                 username=user.username,
                 golden_repo_aliases=golden_repo_aliases,
                 user_alias=user_alias,
@@ -3292,7 +2420,7 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
             )
 
         elif operation == "delete":
-            job_id = app_module.activated_repo_manager.deactivate_repository(
+            job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
                 username=user.username, user_alias=user_alias
             )
             return _mcp_response(
@@ -3404,7 +2532,7 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
 
     try:
         # Get GoldenRepoManager from app state
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -3451,7 +2579,7 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
 
     try:
         # Get GoldenRepoManager from app state
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -3787,7 +2915,9 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
             if not _is_write_mode_active(repository_alias, golden_repos_dir):
                 auto_watch_manager.start_watch(repo_path)
             else:
@@ -3942,7 +3072,9 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
             if not _is_write_mode_active(repository_alias, golden_repos_dir):
                 auto_watch_manager.start_watch(repo_path)
             else:
@@ -4093,7 +3225,9 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
             if not _is_write_mode_active(repository_alias, golden_repos_dir):
                 auto_watch_manager.start_watch(repo_path)
             else:
@@ -4676,7 +3810,7 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #35: Apply token-based truncation with cache handle support
         # Get payload cache and content limits config
-        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
         config_service = get_config_service()
         content_limits = config_service.get_config().content_limits_config
 
@@ -5128,7 +4262,7 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #34: Apply token-based truncation with cache handle support
         # Get payload cache and content limits config
-        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
         config_service = get_config_service()
         content_limits = config_service.get_config().content_limits_config
 
@@ -5792,287 +4926,18 @@ def handle_authenticate(
 HANDLER_REGISTRY["authenticate"] = handle_authenticate
 
 
-# SSH Key Management Handlers (Story #572)
-# SSH Key Manager singleton
-_ssh_key_manager: SSHKeyManager = None
+# SSH Key Management Handlers (Story #572) — extracted to ssh_keys.py
+from .ssh_keys import (  # noqa: F401, E402
+    get_ssh_key_manager,
+    handle_ssh_key_create,
+    handle_ssh_key_list,
+    handle_ssh_key_delete,
+    handle_ssh_key_show_public,
+    handle_ssh_key_assign_host,
+)
+from .ssh_keys import _register as _ssh_keys_register  # noqa: E402
 
-
-def get_ssh_key_manager() -> SSHKeyManager:
-    """Get or create the SSH key manager instance with SQLite backend (Story #702)."""
-    global _ssh_key_manager
-    if _ssh_key_manager is None:
-        from ..services.config_service import get_config_service
-
-        config_service = get_config_service()
-        server_dir = config_service.config_manager.server_dir
-        db_path = server_dir / "data" / "cidx_server.db"
-        metadata_dir = server_dir / "data" / "ssh_keys"
-
-        _ssh_key_manager = SSHKeyManager(
-            metadata_dir=metadata_dir,
-            use_sqlite=True,
-            db_path=db_path,
-        )
-    return _ssh_key_manager
-
-
-def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Create a new SSH key pair.
-
-    Args:
-        args: Dict with name, key_type (optional), email (optional), description (optional)
-        user: Authenticated user
-
-    Returns:
-        Dict with success status and public key
-    """
-    name = args.get("name")
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-
-    key_type = args.get("key_type", "ed25519")
-    email = args.get("email")
-    description = args.get("description")
-
-    manager = get_ssh_key_manager()
-
-    try:
-        metadata = manager.create_key(
-            name=name,
-            key_type=key_type,
-            email=email,
-            description=description,
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                "name": metadata.name,
-                "fingerprint": metadata.fingerprint,
-                "key_type": metadata.key_type,
-                "public_key": metadata.public_key,
-                "email": metadata.email,
-                "description": metadata.description,
-            }
-        )
-
-    except InvalidKeyNameError as e:
-        return _mcp_response({"success": False, "error": f"Invalid key name: {str(e)}"})
-    except KeyAlreadyExistsError as e:
-        return _mcp_response(
-            {"success": False, "error": f"Key already exists: {str(e)}"}
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error creating SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_create"] = handle_ssh_key_create
-
-
-def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    List all managed and unmanaged SSH keys.
-
-    Args:
-        args: Empty dict (no parameters needed)
-        user: Authenticated user
-
-    Returns:
-        Dict with managed and unmanaged key lists
-    """
-    manager = get_ssh_key_manager()
-
-    try:
-        result = manager.list_keys()
-
-        managed = [
-            {
-                "name": k.name,
-                "fingerprint": k.fingerprint,
-                "key_type": k.key_type,
-                "hosts": k.hosts,
-                "email": k.email,
-                "description": k.description,
-                "is_imported": k.is_imported,
-            }
-            for k in result.managed
-        ]
-
-        unmanaged = [
-            {
-                "name": k.name,
-                "fingerprint": k.fingerprint,
-                "private_path": str(k.private_path),
-            }
-            for k in result.unmanaged
-        ]
-
-        return _mcp_response(
-            {
-                "success": True,
-                "managed": managed,
-                "unmanaged": unmanaged,
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error listing SSH keys: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_list"] = handle_ssh_key_list
-
-
-def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Delete an SSH key.
-
-    Args:
-        args: Dict with name
-        user: Authenticated user
-
-    Returns:
-        Dict with success status
-    """
-    name = args.get("name")
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-
-    manager = get_ssh_key_manager()
-
-    try:
-        manager.delete_key(name)
-        return _mcp_response(
-            {
-                "success": True,
-                "message": f"Key '{name}' deleted",
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error deleting SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_delete"] = handle_ssh_key_delete
-
-
-def handle_ssh_key_show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Get the public key content for copy/paste.
-
-    Args:
-        args: Dict with name
-        user: Authenticated user
-
-    Returns:
-        Dict with public key content
-    """
-    name = args.get("name")
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-
-    manager = get_ssh_key_manager()
-
-    try:
-        public_key = manager.get_public_key(name)
-        return _mcp_response(
-            {
-                "success": True,
-                "name": name,
-                "public_key": public_key,
-            }
-        )
-
-    except KeyNotFoundError:
-        return _mcp_response({"success": False, "error": f"Key not found: {name}"})
-    except Exception as e:
-        logger.exception(
-            f"Error getting public key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_show_public"] = handle_ssh_key_show_public
-
-
-def handle_ssh_key_assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Assign a host to an SSH key.
-
-    Args:
-        args: Dict with name and hostname
-        user: Authenticated user
-
-    Returns:
-        Dict with updated key information
-    """
-    name = args.get("name")
-    hostname = args.get("hostname")
-
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-    if not hostname:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: hostname"}
-        )
-
-    force = args.get("force", False)
-
-    manager = get_ssh_key_manager()
-
-    try:
-        metadata = manager.assign_key_to_host(
-            key_name=name,
-            hostname=hostname,
-            force=force,
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                "name": metadata.name,
-                "fingerprint": metadata.fingerprint,
-                "key_type": metadata.key_type,
-                "hosts": metadata.hosts,
-                "email": metadata.email,
-                "description": metadata.description,
-            }
-        )
-
-    except KeyNotFoundError:
-        return _mcp_response({"success": False, "error": f"Key not found: {name}"})
-    except HostConflictError as e:
-        return _mcp_response({"success": False, "error": str(e)})
-    except Exception as e:
-        logger.exception(
-            f"Error assigning host to key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_assign_host"] = handle_ssh_key_assign_host
+_ssh_keys_register(HANDLER_REGISTRY)
 
 
 # SCIP Call Graph Query Handlers
@@ -6655,8 +5520,8 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         Dictionary with tool summaries filtered by category and user permissions
     """
     try:
-        from .tools import TOOL_REGISTRY
-        from .tool_doc_loader import _get_tool_doc_loader
+        from ..tools import TOOL_REGISTRY
+        from ..tool_doc_loader import _get_tool_doc_loader
 
         category_filter = params.get("category")
 
@@ -6722,9 +5587,10 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             response["category_filter"] = category_filter
 
         # Story #194: Add dependency map section when available (prominent positioning)
-        if app_module.golden_repo_manager:
+        if _utils.app_module.golden_repo_manager:
             cidx_meta_path = (
-                Path(app_module.golden_repo_manager.golden_repos_dir) / "cidx-meta"
+                Path(_utils.app_module.golden_repo_manager.golden_repos_dir)
+                / "cidx-meta"
             )
             dependency_map_section = _build_dependency_map_section(cidx_meta_path)
             if dependency_map_section:
@@ -6732,7 +5598,7 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Conditionally add Langfuse section
         langfuse_section = _build_langfuse_section(
-            config, app_module.golden_repo_manager
+            config, _utils.app_module.golden_repo_manager
         )
         if langfuse_section:
             response["langfuse_trace_search"] = langfuse_section
@@ -7220,8 +6086,8 @@ def _get_pat_credential_for_remote(
     """
     from code_indexer.server.services.git_credential_helper import GitCredentialHelper
     from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ...services.config_service import get_config_service
+    from ...services.git_credential_manager import GitCredentialManager
 
     # Get remote URL to determine forge host
     remote_url = ""
@@ -7322,8 +6188,8 @@ def _get_personal_credential_for_host(
     Returns:
         Credential dict with 'token' key, or None if not found
     """
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ...services.config_service import get_config_service
+    from ...services.git_credential_manager import GitCredentialManager
 
     try:
         config_service = get_config_service()
@@ -7880,7 +6746,9 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         assert repo_path is not None  # narrowed by error_msg check above
 
         # Write mode enforcement (Bug #391: also allow activated repo workspaces)
-        golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+        golden_repos_dir = getattr(
+            _utils.app_module.app.state, "golden_repos_dir", None
+        )
         if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
             return _mcp_response(
                 {
@@ -7999,7 +6867,9 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         assert repo_path is not None  # narrowed by error_msg check above
 
         # Write mode enforcement (Bug #391: also allow activated repo workspaces)
-        golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+        golden_repos_dir = getattr(
+            _utils.app_module.app.state, "golden_repos_dir", None
+        )
         if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
             return _mcp_response(
                 {
@@ -8469,8 +7339,8 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         )
 
     try:
-        from ..services.config_service import get_config_service
-        from ..services.git_credential_manager import GitCredentialManager
+        from ...services.config_service import get_config_service
+        from ...services.git_credential_manager import GitCredentialManager
 
         config_service = get_config_service()
         db_path = str(
@@ -8506,8 +7376,8 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
 def list_git_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for list_git_credentials - list user's configured git forge credentials."""
     try:
-        from ..services.config_service import get_config_service
-        from ..services.git_credential_manager import GitCredentialManager
+        from ...services.config_service import get_config_service
+        from ...services.git_credential_manager import GitCredentialManager
 
         config_service = get_config_service()
         db_path = str(
@@ -8537,8 +7407,8 @@ def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from ..services.config_service import get_config_service
-        from ..services.git_credential_manager import GitCredentialManager
+        from ...services.config_service import get_config_service
+        from ...services.git_credential_manager import GitCredentialManager
 
         config_service = get_config_service()
         db_path = str(
@@ -10291,7 +9161,7 @@ def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     Uses ToolDocLoader singleton to build categories from markdown documentation
     files without per-call disk I/O (Story #222 code review Finding 1).
     """
-    from .tool_doc_loader import _get_tool_doc_loader
+    from ..tool_doc_loader import _get_tool_doc_loader
 
     # Use singleton to avoid per-call disk I/O
     loader = _get_tool_doc_loader()
@@ -10353,7 +9223,7 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # Get log database path from app.state
-    log_db_path = getattr(app_module.app.state, "log_db_path", None)
+    log_db_path = getattr(_utils.app_module.app.state, "log_db_path", None)
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})
 
@@ -10414,7 +9284,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # Get log database path from app.state
-    log_db_path = getattr(app_module.app.state, "log_db_path", None)
+    log_db_path = getattr(_utils.app_module.app.state, "log_db_path", None)
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})
 
@@ -12694,7 +11564,7 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     # Get payload_cache from app.state
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
+    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
 
     if payload_cache is None:
         return _mcp_response(
@@ -12798,9 +11668,9 @@ def handle_set_session_impersonation(
 
     # Look up target user and set impersonation
     try:
-        # Bug fix: Use app_module.user_manager (properly configured with SQLite backend)
+        # Bug fix: Use _utils.app_module.user_manager (properly configured with SQLite backend)
         # instead of creating new UserManager() which defaults to JSON file storage
-        target_user = app_module.user_manager.get_user(username)
+        target_user = _utils.app_module.user_manager.get_user(username)
 
         if target_user is None:
             return _mcp_response(
@@ -12845,7 +11715,7 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
     Returns:
         Path to the function repository, or None if not configured
     """
-    from ..services.config_service import get_config_service
+    from ...services.config_service import get_config_service
 
     try:
         config_service = get_config_service()
@@ -12861,7 +11731,7 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
             return None
 
         # Get the actual path from golden repo manager
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
             logger.warning(
                 format_error_log("MCP-GENERAL-119", "Golden repo manager not available")
@@ -12901,7 +11771,7 @@ def _get_user_groups(user: User) -> set:
         Set of group names the user belongs to
     """
     try:
-        group_manager = getattr(app_module.app.state, "group_manager", None)
+        group_manager = getattr(_utils.app_module.app.state, "group_manager", None)
         if not group_manager:
             logger.warning(
                 format_error_log("MCP-GENERAL-122", "Group manager not available")
@@ -12939,7 +11809,7 @@ def handle_list_delegation_functions(
     Returns:
         MCP response with list of accessible functions
     """
-    from ..services.delegation_function_loader import DelegationFunctionLoader
+    from ...services.delegation_function_loader import DelegationFunctionLoader
 
     try:
         # Get the function repository path
@@ -12999,7 +11869,7 @@ def _get_delegation_config():
     Returns:
         ClaudeDelegationConfig if configured, None otherwise
     """
-    from ..services.config_service import get_config_service
+    from ...services.config_service import get_config_service
 
     try:
         config_service = get_config_service()
@@ -13068,7 +11938,7 @@ def _get_cidx_callback_base_url() -> Optional[str]:
     Returns:
         The CIDX callback URL from delegation config, or None if not configured
     """
-    from ..services.config_service import get_config_service
+    from ...services.config_service import get_config_service
 
     try:
         config_service = get_config_service()
@@ -13102,9 +11972,9 @@ async def handle_execute_delegation_function(
     Returns:
         MCP response with job_id on success or error details
     """
-    from ..services.delegation_function_loader import DelegationFunctionLoader
-    from ..services.prompt_template_processor import PromptTemplateProcessor
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...services.delegation_function_loader import DelegationFunctionLoader
+    from ...services.prompt_template_processor import PromptTemplateProcessor
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     try:
         # Configuration validation
@@ -13210,7 +12080,7 @@ async def handle_execute_delegation_function(
                     )
 
             # Story #720: Register job in tracker for callback-based completion
-            from ..services.delegation_job_tracker import DelegationJobTracker
+            from ...services.delegation_job_tracker import DelegationJobTracker
 
             tracker = DelegationJobTracker.get_instance()
             await tracker.register_job(job_id)
@@ -13262,7 +12132,7 @@ async def handle_poll_delegation_job(
     Returns:
         MCP response with result if available, or waiting status to retry
     """
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     job_id = ""
     try:
@@ -13316,7 +12186,9 @@ async def handle_poll_delegation_job(
             # Apply PayloadCache truncation for large results
             result_text = result.output
             if result_text:
-                payload_cache = getattr(app_module.app.state, "payload_cache", None)
+                payload_cache = getattr(
+                    _utils.app_module.app.state, "payload_cache", None
+                )
                 if payload_cache is not None:
                     try:
                         truncated = payload_cache.truncate_result(result_text)
@@ -13444,7 +12316,7 @@ def _resolve_guardrails(
 
     Args:
         config: ClaudeDelegationConfig instance.
-        golden_repo_manager: GoldenRepoManager (or None) from app_module.
+        golden_repo_manager: GoldenRepoManager (or None) from _utils.app_module.
 
     Returns:
         Tuple of (guardrails_text, guardrails_repo_alias).
@@ -13516,7 +12388,7 @@ def _get_repo_ready_timeout() -> float:
         Timeout in seconds as float
     """
     try:
-        from ..services.config_service import get_config_service
+        from ...services.config_service import get_config_service
 
         config_service = get_config_service()
         server_config = config_service.get_server_config()  # type: ignore[attr-defined]
@@ -13862,7 +12734,7 @@ async def _submit_open_delegation_job(
     Returns:
         MCP response dict (success with job_id, or error)
     """
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     for alias in repositories:
         git_url: Optional[str] = None
         branch = "main"
@@ -13907,7 +12779,7 @@ async def _submit_open_delegation_job(
 
     await _register_open_delegation_callback(client, job_id)
 
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     tracker = DelegationJobTracker.get_instance()
     await tracker.register_job(job_id)
@@ -13940,7 +12812,7 @@ async def _submit_collaborative_delegation_job(
             if r not in all_repos:
                 all_repos.append(r)
 
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     for alias in all_repos:
         git_url: Optional[str] = None
         branch = "main"
@@ -13998,7 +12870,7 @@ async def _submit_collaborative_delegation_job(
 
     await _register_open_delegation_callback(client, job_id)
 
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     tracker = DelegationJobTracker.get_instance()
     await tracker.register_job(job_id)
@@ -14023,7 +12895,7 @@ async def _submit_competitive_delegation_job(
     Returns:
         MCP response dict (success with job_id, or error).
     """
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     for alias in repositories:
         git_url: Optional[str] = None
         branch = "main"
@@ -14076,7 +12948,7 @@ async def _submit_competitive_delegation_job(
 
     await _register_open_delegation_callback(client, job_id)
 
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     tracker = DelegationJobTracker.get_instance()
     await tracker.register_job(job_id)
@@ -14101,7 +12973,7 @@ async def handle_execute_open_delegation(
     Returns:
         MCP response with job_id on success or error details
     """
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     try:
         delegation_config = _get_delegation_config()
@@ -14128,7 +13000,7 @@ async def handle_execute_open_delegation(
             return validation_error
 
         # Story #457: resolve safety guardrails and prepend to user prompt
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         guardrails_text, guardrails_repo_alias = _resolve_guardrails(
             delegation_config, golden_repo_manager
         )
@@ -14195,7 +13067,9 @@ async def handle_execute_open_delegation(
             result_data = json.loads(result["content"][0]["text"])
             if result_data.get("success"):
                 job_id = result_data.get("job_id", "")
-                audit_service = getattr(app_module.app.state, "audit_service", None)
+                audit_service = getattr(
+                    _utils.app_module.app.state, "audit_service", None
+                )
                 if audit_service is not None:
                     audit_service.log(
                         admin_id=effective_user.username,
@@ -14255,7 +13129,7 @@ def _lookup_golden_repo_for_cs(alias: str) -> tuple:
     Returns (git_url, branch, error_message).
     error_message is None on success; non-None string on failure.
     """
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     if not golden_repo_manager:
         return None, "main", f"Alias '{alias}' not found in CIDX golden repos"
     try:
@@ -14279,7 +13153,7 @@ async def handle_cs_register_repository(
     Looks up git URL and branch from CIDX, checks if already registered,
     registers if not found (404).
     """
-    from ..clients.claude_server_client import (
+    from ...clients.claude_server_client import (
         ClaudeServerClient,
         ClaudeServerError,
         ClaudeServerNotFoundError,
@@ -14370,7 +13244,7 @@ async def handle_cs_list_repositories(
     Story #460: Claude Server proxy tools
     Calls GET /repositories and returns a normalized list.
     """
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     delegation_config = _get_delegation_config()
     if delegation_config is None or not delegation_config.is_configured:
@@ -14431,7 +13305,7 @@ async def handle_cs_check_health(
     Story #460: Claude Server proxy tools
     Calls GET /health (anonymous on Claude Server, gated at CIDX level).
     """
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     delegation_config = _get_delegation_config()
     if delegation_config is None or not delegation_config.is_configured:
@@ -14482,7 +13356,7 @@ HANDLER_REGISTRY["cs_check_health"] = handle_cs_check_health
 
 def _get_group_manager():
     """Get the GroupAccessManager from app.state."""
-    return getattr(app_module.app.state, "group_manager", None)
+    return getattr(_utils.app_module.app.state, "group_manager", None)
 
 
 def _validate_group_id(
@@ -14681,7 +13555,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete a custom group."""
-    from ..services.group_access_manager import (
+    from ...services.group_access_manager import (
         DefaultGroupCannotBeDeletedError,
         GroupHasUsersError,
     )
@@ -14851,7 +13725,7 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Revoke a group's access to a single repository."""
-    from ..services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ...services.group_access_manager import CidxMetaCannotBeRevokedError
 
     try:
         group_manager = _get_group_manager()
@@ -14910,8 +13784,8 @@ def handle_bulk_remove_repos_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Revoke a group's access to multiple repositories."""
-    from ..services.group_access_manager import CidxMetaCannotBeRevokedError
-    from ..services.constants import CIDX_META_REPO
+    from ...services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ...services.constants import CIDX_META_REPO
 
     try:
         group_manager = _get_group_manager()
@@ -14981,7 +13855,7 @@ HANDLER_REGISTRY["bulk_remove_repos_from_group"] = handle_bulk_remove_repos_from
 def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all API keys for the authenticated user."""
     try:
-        keys = app_module.user_manager.get_api_keys(user.username)
+        keys = _utils.app_module.user_manager.get_api_keys(user.username)
         return _mcp_response(
             {
                 "success": True,
@@ -15013,7 +13887,7 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.server.auth.api_key_manager import ApiKeyManager
 
         description = args.get("description", "")
-        api_key_manager = ApiKeyManager(user_manager=app_module.user_manager)
+        api_key_manager = ApiKeyManager(user_manager=_utils.app_module.user_manager)
         api_key, key_id = api_key_manager.generate_key(user.username, name=description)
         return _mcp_response(
             {
@@ -15046,7 +13920,7 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        result = app_module.user_manager.delete_api_key(user.username, key_id)
+        result = _utils.app_module.user_manager.delete_api_key(user.username, key_id)
         return _mcp_response({"success": result})
     except Exception as e:
         logger.error(
@@ -15300,7 +14174,7 @@ def handle_admin_list_all_mcp_credentials(
     """List all MCP credentials across all users (admin only)."""
     try:
         all_credentials = []
-        all_users = app_module.user_manager.get_all_users()
+        all_users = _utils.app_module.user_manager.get_all_users()
 
         for target_user in all_users:
             user_creds = dependencies.mcp_credential_manager.get_credentials(
@@ -15439,9 +14313,8 @@ def _parse_log_details(row: dict) -> dict:
 
 def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> list:
     """Fetch PR logs from AuditLogService."""
-    import code_indexer.server.app as app_module
 
-    svc = getattr(getattr(app_module, "app", None), "state", None)
+    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -15451,9 +14324,8 @@ def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> l
 
 def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) -> list:
     """Fetch cleanup logs from AuditLogService."""
-    import code_indexer.server.app as app_module
 
-    svc = getattr(getattr(app_module, "app", None), "state", None)
+    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -15778,7 +14650,7 @@ _cleanup_job_state: Dict[str, Any] = {
 def _execute_workspace_cleanup() -> Dict[str, Any]:
     """Execute workspace cleanup and return result dict."""
     workspace_cleanup_service = getattr(
-        app_module.app.state, "workspace_cleanup_service", None
+        _utils.app_module.app.state, "workspace_cleanup_service", None
     )
     if workspace_cleanup_service:
         result = workspace_cleanup_service.cleanup_workspaces()
@@ -15867,7 +14739,7 @@ def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, An
             )
 
         workspace_cleanup_service = getattr(
-            app_module.app.state, "workspace_cleanup_service", None
+            _utils.app_module.app.state, "workspace_cleanup_service", None
         )
         service_status = (
             workspace_cleanup_service.get_cleanup_status()
@@ -16108,7 +14980,7 @@ def handle_trigger_dependency_analysis(
 
         # AC5: Check if analysis is already running
         dependency_map_service = getattr(
-            app_module.app.state, "dependency_map_service", None
+            _utils.app_module.app.state, "dependency_map_service", None
         )
         if not dependency_map_service:
             return _mcp_response(
@@ -16203,7 +15075,7 @@ def _get_wiki_cache_for_handler():
     """
     from code_indexer.server.wiki.wiki_cache import WikiCache
 
-    grm = getattr(app_module, "golden_repo_manager", None)
+    grm = getattr(_utils.app_module, "golden_repo_manager", None)
     if grm is None:
         return None
     db_path = getattr(grm, "db_path", None)
@@ -16223,7 +15095,7 @@ def _wiki_analytics_filter_by_search(
     """
     if not search_query or len(search_query) < _WIKI_ANALYTICS_MIN_QUERY_LENGTH:
         return None
-    sqm = getattr(app_module, "semantic_query_manager", None)
+    sqm = getattr(_utils.app_module, "semantic_query_manager", None)
     if sqm is None:
         raise RuntimeError("semantic_query_manager not available for search filter")
     result = sqm.query_user_repositories(
@@ -16520,7 +15392,7 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         if action in ("add", "recreate"):
             clear = action == "recreate"
 
-            if app_module.background_job_manager is None:
+            if _utils.app_module.background_job_manager is None:
                 return _mcp_response({"error": "Background job manager not available"})
 
             # Persist provider to config.json on BASE CLONE before submitting job
@@ -16544,7 +15416,7 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
                     }
                 )
 
-            job_id = app_module.background_job_manager.submit_job(
+            job_id = _utils.app_module.background_job_manager.submit_job(
                 operation_type=f"provider_index_{action}",
                 func=_provider_index_job,
                 submitter_username=user.username,
@@ -16812,7 +15684,7 @@ def _provider_index_job(
 ) -> Dict[str, Any]:
     """Background job worker for provider index add/recreate (Story #490, Bug #607, Story #620).
 
-    Runs cidx index which reads embedding_providers from .code-indexer/config.json
+    Runs cidx index which reads embedding_providers from ..code-indexer/config.json
     and indexes each configured provider in sequence. No config.json mutation occurs.
 
     If repo_path points to a versioned snapshot (.versioned/ in the path), the
@@ -16960,7 +15832,7 @@ def _set_enable_temporal_flag(repo_alias: str) -> None:
     if not repo_alias:
         return
 
-    grm = getattr(app_module, "golden_repo_manager", None)
+    grm = getattr(_utils.app_module, "golden_repo_manager", None)
     if grm is None:
         logger.warning(
             "_set_enable_temporal_flag: golden_repo_manager unavailable, "
@@ -17147,7 +16019,7 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
         job_ids = []
         skipped = []
 
-        if app_module.background_job_manager is None:
+        if _utils.app_module.background_job_manager is None:
             return _mcp_response({"error": "Background job manager not available"})
 
         for repo in global_repos:
@@ -17195,7 +16067,7 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
                 continue
 
             # Submit job
-            job_id = app_module.background_job_manager.submit_job(
+            job_id = _utils.app_module.background_job_manager.submit_job(
                 operation_type="provider_index_add",
                 func=_provider_index_job,
                 submitter_username=user.username,

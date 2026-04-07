@@ -30,7 +30,7 @@ class TestGetFileContentCidxMetaAccessFiltering:
         Must receive success=False with an access-related error message.
         """
         mock_file_service = _mock_file_service_with_content("# repo-a description")
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             mock_app.app.state.payload_cache = None
             with patch(
@@ -58,7 +58,7 @@ class TestGetFileContentCidxMetaAccessFiltering:
         AC2: power_user (repo-a, repo-b) requests repo-c.md. Must be denied.
         """
         mock_file_service = _mock_file_service_with_content("# repo-c description")
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             mock_app.app.state.payload_cache = None
             with patch(
@@ -81,7 +81,7 @@ class TestGetFileContentCidxMetaAccessFiltering:
         Must succeed.
         """
         mock_file_service = _mock_file_service_with_content("# cidx-meta README")
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             mock_app.app.state.payload_cache = None
             with patch(
@@ -103,7 +103,7 @@ class TestGetFileContentCidxMetaAccessFiltering:
         AC2: power_user (repo-a, repo-b) can read repo-a.md — it is accessible.
         """
         mock_file_service = _mock_file_service_with_content("# repo-a description")
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             mock_app.app.state.payload_cache = None
             with patch(
@@ -121,7 +121,7 @@ class TestGetFileContentCidxMetaAccessFiltering:
     def test_no_access_filtering_service_allows_all(self, regular_user):
         """If access_filtering_service is not configured, content is returned."""
         mock_file_service = _mock_file_service_with_content("# repo-a description")
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             mock_app.app.state.payload_cache = None
             with patch(

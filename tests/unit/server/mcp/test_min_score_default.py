@@ -61,7 +61,9 @@ def _invoke_search_code(params, user, mock_manager, base_dir):
                 "code_indexer.global_repos.alias_manager.AliasManager",
                 return_value=mock_alias_manager,
             ):
-                with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+                with patch(
+                    "code_indexer.server.mcp.handlers._utils.app_module"
+                ) as mock_app:
                     mock_app.semantic_query_manager = mock_manager
                     with patch.object(h, "_get_query_tracker", return_value=None):
                         with patch.object(

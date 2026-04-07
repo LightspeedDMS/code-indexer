@@ -84,7 +84,7 @@ class TestCidxMetaGlobalAliasFiltering:
         mock_alias_manager = Mock()
         mock_alias_manager.read_alias.return_value = "/fake/path/cidx-meta"
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._list_global_repos"

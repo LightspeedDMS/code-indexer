@@ -59,7 +59,9 @@ class TestBrowseDirectoryPathPatternCombination:
         it should be used directly, ignoring the path parameter.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -85,7 +87,9 @@ class TestBrowseDirectoryPathPatternCombination:
         with the path parameter.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -108,7 +112,9 @@ class TestBrowseDirectoryPathPatternCombination:
         Test that path_pattern containing '**/' is treated as absolute.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -134,7 +140,9 @@ class TestBrowseDirectoryPathPatternCombination:
         Expected: "code/src/**/*.java" (NOT "code/src/dms/.../access/**/code/src/**/*.java")
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -162,7 +170,9 @@ class TestBrowseDirectoryPathPatternCombination:
         This is the existing behavior that should continue working.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -183,7 +193,9 @@ class TestBrowseDirectoryPathPatternCombination:
         Test that simple filename patterns (no slashes) are treated as relative.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -206,7 +218,9 @@ class TestBrowseDirectoryPathPatternCombination:
         Test that patterns with subdirectories (containing '/') are absolute.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -229,7 +243,9 @@ class TestBrowseDirectoryPathPatternCombination:
         Test non-recursive mode with absolute pattern (should still use pattern directly).
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -252,7 +268,9 @@ class TestBrowseDirectoryPathPatternCombination:
         Test that brace expansion patterns without '/' are treated as relative.
         """
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {

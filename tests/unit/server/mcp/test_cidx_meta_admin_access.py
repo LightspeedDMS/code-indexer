@@ -23,7 +23,7 @@ class TestAdminFullAccessToCidxMeta:
     def test_admin_list_files_sees_all(self, admin_user, access_filtering_service):
         """AC4: Admin calling list_files on cidx-meta sees all four files."""
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -48,7 +48,7 @@ class TestAdminFullAccessToCidxMeta:
             "content": "# repo-c description",
             "metadata": {},
         }
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             mock_app.app.state.payload_cache = None
             with patch(
@@ -68,7 +68,7 @@ class TestAdminFullAccessToCidxMeta:
     ):
         """AC4: Admin calling browse_directory on cidx-meta sees all entries."""
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",

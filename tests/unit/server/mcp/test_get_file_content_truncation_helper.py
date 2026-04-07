@@ -105,7 +105,7 @@ class TestMcpHandlerSkipTruncation:
         """Verify MCP handler calls get_file_content with skip_truncation=True."""
         from code_indexer.server.mcp import handlers
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
             mock_file_service.get_file_content.return_value = (
@@ -127,7 +127,7 @@ class TestMcpHandlerSkipTruncation:
         from code_indexer.server.mcp import handlers
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers._list_global_repos"
             ) as mock_registry_func,
@@ -170,7 +170,7 @@ class TestTruncationHelperIntegration:
 
         large_content = "# Line content here\n" * LARGE_FILE_LINES
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
             mock_file_service.get_file_content.return_value = (
@@ -201,7 +201,7 @@ class TestTruncationHelperIntegration:
         large_content = "# Line content here\n" * HUGE_FILE_LINES
         mock_payload_cache.store.return_value = "cache-handle-xyz"
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
             mock_file_service.get_file_content.return_value = (
@@ -236,7 +236,7 @@ class TestBackwardCompatibility:
 
         small_content = "# Small file\nprint('hello')\n"
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_file_service = MagicMock()
             mock_app.file_service = mock_file_service
             mock_file_service.get_file_content.return_value = (

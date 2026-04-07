@@ -417,7 +417,7 @@ class TestHandlerIntegration:
                 "code_indexer.server.mcp.handlers._get_repo_ready_timeout",
                 return_value=1.0,
             ),
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.clients.claude_server_client.ClaudeServerClient"
             ) as mock_client_cls,
@@ -480,7 +480,7 @@ class TestHandlerIntegration:
                 "code_indexer.server.mcp.handlers._get_repo_ready_timeout",
                 return_value=1.0,
             ),
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.clients.claude_server_client.ClaudeServerClient"
             ) as mock_client_cls,
@@ -551,7 +551,7 @@ class TestHandlerIntegration:
                 "code_indexer.server.mcp.handlers._get_repo_ready_timeout",
                 return_value=1.0,
             ),
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.clients.claude_server_client.ClaudeServerClient"
             ) as mock_client_cls,
@@ -614,7 +614,7 @@ class TestHandlerIntegration:
                 "code_indexer.server.mcp.handlers._get_repo_ready_timeout",
                 return_value=1.0,
             ),
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.clients.claude_server_client.ClaudeServerClient"
             ) as mock_client_cls,
@@ -672,7 +672,7 @@ class TestHandlerIntegration:
                 "code_indexer.server.mcp.handlers._get_repo_ready_timeout",
                 return_value=1.0,
             ),
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.clients.claude_server_client.ClaudeServerClient"
             ) as mock_client_cls,

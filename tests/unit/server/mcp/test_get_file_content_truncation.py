@@ -45,7 +45,7 @@ class TestGetFileContentTruncation:
     @pytest.fixture
     def mock_file_service(self):
         """Create mock FileListingService."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_service = MagicMock()
             mock_app.file_service = mock_service
             yield mock_service, mock_app
@@ -165,7 +165,7 @@ class TestGetFileContentBackwardCompatibility:
     @pytest.fixture
     def mock_file_service(self):
         """Create mock FileListingService."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_service = MagicMock()
             mock_app.file_service = mock_service
             yield mock_service, mock_app
@@ -250,7 +250,7 @@ class TestGetFileContentGlobalRepoTruncation:
     @pytest.fixture
     def mock_global_repo_setup(self):
         """Set up mocks for global repo path resolution."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_service = MagicMock()
             mock_app.file_service = mock_service
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"

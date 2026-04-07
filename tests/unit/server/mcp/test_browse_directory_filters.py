@@ -64,7 +64,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_path_pattern_filter_without_path(self, mock_user):
         """Test that path_pattern filter is passed correctly when no path specified."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -84,7 +86,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_path_pattern_combined_with_path_recursive(self, mock_user):
         """Test path_pattern is combined with path correctly in recursive mode."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -105,7 +109,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_path_pattern_combined_with_path_non_recursive(self, mock_user):
         """Test path_pattern is combined with path correctly in non-recursive mode."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -126,7 +132,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_language_filter_passed_correctly(self, mock_user):
         """Test that language filter is passed to FileListQueryParams."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -144,7 +152,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_limit_parameter_passed_correctly(self, mock_user):
         """Test that limit parameter is passed to FileListQueryParams."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -162,7 +172,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_limit_default_is_500(self, mock_user):
         """Test that limit defaults to 500 when not specified."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -179,7 +191,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_limit_clamped_to_minimum(self, mock_user):
         """Test that limit below 1 is clamped to 1."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -197,7 +211,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_limit_clamped_to_maximum(self, mock_user):
         """Test that limit above 500 is clamped to 500."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -215,7 +231,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_sort_by_parameter_passed_correctly(self, mock_user):
         """Test that sort_by parameter is passed to FileListQueryParams."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -233,7 +251,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_sort_by_default_is_path(self, mock_user):
         """Test that sort_by defaults to 'path' when not specified."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -250,7 +270,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_sort_by_invalid_value_defaults_to_path(self, mock_user):
         """Test that invalid sort_by value defaults to 'path'."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -268,7 +290,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_sort_by_size_accepted(self, mock_user):
         """Test that sort_by='size' is accepted."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -286,7 +310,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_all_filter_parameters_combined(self, mock_user):
         """Test that all filter parameters work together."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -312,7 +338,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_path_without_path_pattern_uses_base_pattern(self, mock_user):
         """Test that path without path_pattern uses the standard base pattern."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -332,7 +360,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_no_path_no_pattern_returns_all_files(self, mock_user):
         """Test that omitting both path and path_pattern returns all files."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -350,7 +380,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_complex_path_pattern_supported(self, mock_user):
         """Test that complex glob patterns are supported."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -368,7 +400,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_negative_limit_clamped_to_minimum(self, mock_user):
         """Test that negative limit values are clamped to 1."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -386,7 +420,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_path_with_trailing_slash_normalized(self, mock_user):
         """Test that path with trailing slash is normalized correctly."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -406,7 +442,9 @@ class TestBrowseDirectoryFilterParameters:
     def test_empty_string_path_pattern_behaves_like_none(self, mock_user):
         """Test that empty string path_pattern behaves like None."""
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -431,7 +469,9 @@ class TestBrowseDirectoryFilterParametersResponseFormat:
         import json
 
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {
@@ -452,7 +492,9 @@ class TestBrowseDirectoryFilterParametersResponseFormat:
         import json
 
         mock_file_service = create_mock_file_service()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+        with patch(
+            "code_indexer.server.mcp.handlers._utils.app_module"
+        ) as mock_app_module:
             mock_app_module.file_service = mock_file_service
 
             params = {

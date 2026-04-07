@@ -27,7 +27,7 @@ def mock_user():
 @pytest.fixture
 def mock_semantic_query_manager():
     """Mock semantic_query_manager for single-repo searches."""
-    with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
         mock_app.semantic_query_manager.query_user_repositories.return_value = {
             "results": [],
             "total_results": 0,
