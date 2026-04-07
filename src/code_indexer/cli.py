@@ -173,6 +173,45 @@ def _log_skipped_provider_warning(provider_name: str) -> None:
     )
 
 
+def _make_offset_callback(
+    base_callback: "Callable[..., None]",
+    provider_idx: int,
+    num_providers: int,
+) -> "Callable[..., None]":
+    """Wrap a progress callback to emit monotonically increasing progress across N providers.
+
+    Each provider emits current in range 0→total independently.  When multiple
+    providers run sequentially the raw progress resets to 0 for each provider,
+    causing server-side monotonic clamps to freeze the display.
+
+    This wrapper maps provider i's progress into the global range
+    [i*total, (i+1)*total] out of (num_providers*total), so the combined
+    sequence is strictly non-decreasing regardless of how many providers run.
+
+    Single-provider case (num_providers=1, provider_idx=0) is identity:
+        offset_current = 0*total + current = current
+        offset_total   = 1*total           = total
+
+    Args:
+        base_callback: The underlying progress callback to forward calls to.
+        provider_idx: Zero-based index of this provider in the sequence.
+        num_providers: Total number of providers that will run.
+
+    Returns:
+        A wrapper callable with the same signature as base_callback.
+    """
+
+    def _cb(current: int, total: "Optional[int]", **kwargs: "Any") -> None:
+        if total and total > 0:
+            offset_current = provider_idx * total + current
+            offset_total = num_providers * total
+            base_callback(offset_current, offset_total, **kwargs)
+        else:
+            base_callback(current, total, **kwargs)
+
+    return _cb
+
+
 def _generate_language_help_text() -> str:
     """Generate dynamic help text for language option based on LanguageMapper."""
     try:
@@ -3308,11 +3347,23 @@ def index(
                 else:
                     console.print("   Mode: Current branch only", style="cyan")
 
+                # Compute total provider count before any provider runs so
+                # _make_offset_callback can normalise progress across all of them.
+                from .services.embedding_factory import (
+                    EmbeddingProviderFactory as _EPF_pre,
+                )
+
+                _num_temporal_providers = len(_EPF_pre.get_configured_providers(config))
+                if _num_temporal_providers < 1:
+                    _num_temporal_providers = 1
+
                 indexing_result = temporal_indexer.index_commits(
                     all_branches=all_branches,
                     max_commits=max_commits,
                     since_date=since_date,
-                    progress_callback=progress_callback,
+                    progress_callback=_make_offset_callback(
+                        progress_callback, 0, _num_temporal_providers
+                    ),
                     reconcile=reconcile,
                 )
 
@@ -3358,7 +3409,7 @@ def index(
                 _extra_temporal_providers = [
                     p for p in _all_temporal_providers if p != _primary_provider
                 ]
-                for _extra_provider in _extra_temporal_providers:
+                for _extra_idx, _extra_provider in enumerate(_extra_temporal_providers):
                     console.print(
                         f"\n🔄 Temporal indexing additional provider: {_extra_provider}",
                         style="cyan",
@@ -3389,7 +3440,11 @@ def index(
                             all_branches=all_branches,
                             max_commits=max_commits,
                             since_date=since_date,
-                            progress_callback=progress_callback,
+                            progress_callback=_make_offset_callback(
+                                progress_callback,
+                                _extra_idx + 1,
+                                _num_temporal_providers,
+                            ),
                             reconcile=reconcile,
                         )
                         console.print(
