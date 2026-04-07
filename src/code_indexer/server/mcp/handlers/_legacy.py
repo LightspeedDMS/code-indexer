@@ -970,9 +970,9 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Story #51: Converted from async to sync for FastAPI thread pool execution.
     """
     from collections import defaultdict
-    from ..multi.multi_search_config import MultiSearchConfig
-    from ..multi.multi_search_service import MultiSearchService
-    from ..multi.models import MultiSearchRequest
+    from ...multi.multi_search_config import MultiSearchConfig
+    from ...multi.multi_search_service import MultiSearchService
+    from ...multi.models import MultiSearchRequest
 
     repo_aliases = params.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
@@ -5800,7 +5800,7 @@ def get_ssh_key_manager() -> SSHKeyManager:
     """Get or create the SSH key manager instance with SQLite backend (Story #702)."""
     global _ssh_key_manager
     if _ssh_key_manager is None:
-        from ..services.config_service import get_config_service
+        from ...services.config_service import get_config_service
 
         config_service = get_config_service()
         server_dir = config_service.config_manager.server_dir
@@ -6654,8 +6654,8 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         Dictionary with tool summaries filtered by category and user permissions
     """
     try:
-        from .tools import TOOL_REGISTRY
-        from .tool_doc_loader import _get_tool_doc_loader
+        from ..tools import TOOL_REGISTRY
+        from ..tool_doc_loader import _get_tool_doc_loader
 
         category_filter = params.get("category")
 
@@ -7219,8 +7219,8 @@ def _get_pat_credential_for_remote(
     """
     from code_indexer.server.services.git_credential_helper import GitCredentialHelper
     from code_indexer.utils.git_runner import run_git_command as _run_git_cmd
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ...services.config_service import get_config_service
+    from ...services.git_credential_manager import GitCredentialManager
 
     # Get remote URL to determine forge host
     remote_url = ""
@@ -7321,8 +7321,8 @@ def _get_personal_credential_for_host(
     Returns:
         Credential dict with 'token' key, or None if not found
     """
-    from ..services.config_service import get_config_service
-    from ..services.git_credential_manager import GitCredentialManager
+    from ...services.config_service import get_config_service
+    from ...services.git_credential_manager import GitCredentialManager
 
     try:
         config_service = get_config_service()
@@ -8468,8 +8468,8 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
         )
 
     try:
-        from ..services.config_service import get_config_service
-        from ..services.git_credential_manager import GitCredentialManager
+        from ...services.config_service import get_config_service
+        from ...services.git_credential_manager import GitCredentialManager
 
         config_service = get_config_service()
         db_path = str(
@@ -8505,8 +8505,8 @@ def configure_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]
 def list_git_credentials(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for list_git_credentials - list user's configured git forge credentials."""
     try:
-        from ..services.config_service import get_config_service
-        from ..services.git_credential_manager import GitCredentialManager
+        from ...services.config_service import get_config_service
+        from ...services.git_credential_manager import GitCredentialManager
 
         config_service = get_config_service()
         db_path = str(
@@ -8536,8 +8536,8 @@ def delete_git_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     try:
-        from ..services.config_service import get_config_service
-        from ..services.git_credential_manager import GitCredentialManager
+        from ...services.config_service import get_config_service
+        from ...services.git_credential_manager import GitCredentialManager
 
         config_service = get_config_service()
         db_path = str(
@@ -10290,7 +10290,7 @@ def get_tool_categories(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     Uses ToolDocLoader singleton to build categories from markdown documentation
     files without per-call disk I/O (Story #222 code review Finding 1).
     """
-    from .tool_doc_loader import _get_tool_doc_loader
+    from ..tool_doc_loader import _get_tool_doc_loader
 
     # Use singleton to avoid per-call disk I/O
     loader = _get_tool_doc_loader()
@@ -12844,7 +12844,7 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
     Returns:
         Path to the function repository, or None if not configured
     """
-    from ..services.config_service import get_config_service
+    from ...services.config_service import get_config_service
 
     try:
         config_service = get_config_service()
@@ -12938,7 +12938,7 @@ def handle_list_delegation_functions(
     Returns:
         MCP response with list of accessible functions
     """
-    from ..services.delegation_function_loader import DelegationFunctionLoader
+    from ...services.delegation_function_loader import DelegationFunctionLoader
 
     try:
         # Get the function repository path
@@ -12998,7 +12998,7 @@ def _get_delegation_config():
     Returns:
         ClaudeDelegationConfig if configured, None otherwise
     """
-    from ..services.config_service import get_config_service
+    from ...services.config_service import get_config_service
 
     try:
         config_service = get_config_service()
@@ -13067,7 +13067,7 @@ def _get_cidx_callback_base_url() -> Optional[str]:
     Returns:
         The CIDX callback URL from delegation config, or None if not configured
     """
-    from ..services.config_service import get_config_service
+    from ...services.config_service import get_config_service
 
     try:
         config_service = get_config_service()
@@ -13101,9 +13101,9 @@ async def handle_execute_delegation_function(
     Returns:
         MCP response with job_id on success or error details
     """
-    from ..services.delegation_function_loader import DelegationFunctionLoader
-    from ..services.prompt_template_processor import PromptTemplateProcessor
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...services.delegation_function_loader import DelegationFunctionLoader
+    from ...services.prompt_template_processor import PromptTemplateProcessor
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     try:
         # Configuration validation
@@ -13209,7 +13209,7 @@ async def handle_execute_delegation_function(
                     )
 
             # Story #720: Register job in tracker for callback-based completion
-            from ..services.delegation_job_tracker import DelegationJobTracker
+            from ...services.delegation_job_tracker import DelegationJobTracker
 
             tracker = DelegationJobTracker.get_instance()
             await tracker.register_job(job_id)
@@ -13261,7 +13261,7 @@ async def handle_poll_delegation_job(
     Returns:
         MCP response with result if available, or waiting status to retry
     """
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     job_id = ""
     try:
@@ -13515,7 +13515,7 @@ def _get_repo_ready_timeout() -> float:
         Timeout in seconds as float
     """
     try:
-        from ..services.config_service import get_config_service
+        from ...services.config_service import get_config_service
 
         config_service = get_config_service()
         server_config = config_service.get_server_config()  # type: ignore[attr-defined]
@@ -13906,7 +13906,7 @@ async def _submit_open_delegation_job(
 
     await _register_open_delegation_callback(client, job_id)
 
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     tracker = DelegationJobTracker.get_instance()
     await tracker.register_job(job_id)
@@ -13997,7 +13997,7 @@ async def _submit_collaborative_delegation_job(
 
     await _register_open_delegation_callback(client, job_id)
 
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     tracker = DelegationJobTracker.get_instance()
     await tracker.register_job(job_id)
@@ -14075,7 +14075,7 @@ async def _submit_competitive_delegation_job(
 
     await _register_open_delegation_callback(client, job_id)
 
-    from ..services.delegation_job_tracker import DelegationJobTracker
+    from ...services.delegation_job_tracker import DelegationJobTracker
 
     tracker = DelegationJobTracker.get_instance()
     await tracker.register_job(job_id)
@@ -14100,7 +14100,7 @@ async def handle_execute_open_delegation(
     Returns:
         MCP response with job_id on success or error details
     """
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     try:
         delegation_config = _get_delegation_config()
@@ -14278,7 +14278,7 @@ async def handle_cs_register_repository(
     Looks up git URL and branch from CIDX, checks if already registered,
     registers if not found (404).
     """
-    from ..clients.claude_server_client import (
+    from ...clients.claude_server_client import (
         ClaudeServerClient,
         ClaudeServerError,
         ClaudeServerNotFoundError,
@@ -14369,7 +14369,7 @@ async def handle_cs_list_repositories(
     Story #460: Claude Server proxy tools
     Calls GET /repositories and returns a normalized list.
     """
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     delegation_config = _get_delegation_config()
     if delegation_config is None or not delegation_config.is_configured:
@@ -14430,7 +14430,7 @@ async def handle_cs_check_health(
     Story #460: Claude Server proxy tools
     Calls GET /health (anonymous on Claude Server, gated at CIDX level).
     """
-    from ..clients.claude_server_client import ClaudeServerClient, ClaudeServerError
+    from ...clients.claude_server_client import ClaudeServerClient, ClaudeServerError
 
     delegation_config = _get_delegation_config()
     if delegation_config is None or not delegation_config.is_configured:
@@ -14680,7 +14680,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete a custom group."""
-    from ..services.group_access_manager import (
+    from ...services.group_access_manager import (
         DefaultGroupCannotBeDeletedError,
         GroupHasUsersError,
     )
@@ -14850,7 +14850,7 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
 
 def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Revoke a group's access to a single repository."""
-    from ..services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ...services.group_access_manager import CidxMetaCannotBeRevokedError
 
     try:
         group_manager = _get_group_manager()
@@ -14909,8 +14909,8 @@ def handle_bulk_remove_repos_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Revoke a group's access to multiple repositories."""
-    from ..services.group_access_manager import CidxMetaCannotBeRevokedError
-    from ..services.constants import CIDX_META_REPO
+    from ...services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ...services.constants import CIDX_META_REPO
 
     try:
         group_manager = _get_group_manager()
@@ -16795,7 +16795,7 @@ def _provider_index_job(
 ) -> Dict[str, Any]:
     """Background job worker for provider index add/recreate (Story #490, Bug #607, Story #620).
 
-    Runs cidx index which reads embedding_providers from .code-indexer/config.json
+    Runs cidx index which reads embedding_providers from ..code-indexer/config.json
     and indexes each configured provider in sequence. No config.json mutation occurs.
 
     If repo_path points to a versioned snapshot (.versioned/ in the path), the
