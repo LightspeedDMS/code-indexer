@@ -25,7 +25,7 @@ class TestListFilesCidxMetaAccessFiltering:
         repo-a.md, repo-b.md, repo-c.md must be hidden; README.md passes through.
         """
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -49,7 +49,7 @@ class TestListFilesCidxMetaAccessFiltering:
         repo-a.md and repo-b.md are visible; repo-c.md is hidden.
         """
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -76,7 +76,7 @@ class TestListFilesCidxMetaAccessFiltering:
                 make_file_info("src/secret.py"),
             ]
         )
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -93,7 +93,7 @@ class TestListFilesCidxMetaAccessFiltering:
     def test_no_access_filtering_service_returns_all_files(self, regular_user):
         """If access_filtering_service is not configured, all files are returned."""
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",

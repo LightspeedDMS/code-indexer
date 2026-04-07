@@ -61,7 +61,7 @@ class TestQueryTrackerIntegrationInHandlers:
         mock_state.query_tracker = query_tracker
         mock_state.golden_repos_dir = str(tmp_path)
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state = mock_state
 
             # Mock GlobalRegistry
@@ -127,7 +127,7 @@ class TestQueryTrackerIntegrationInHandlers:
         mock_state.query_tracker = query_tracker
         mock_state.golden_repos_dir = str(tmp_path)
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state = mock_state
 
             with patch(
@@ -543,7 +543,7 @@ class TestGetQueryTrackerFunction:
         mock_state = Mock()
         mock_state.query_tracker = query_tracker
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state = mock_state
 
             # Import after patching
@@ -556,7 +556,7 @@ class TestGetQueryTrackerFunction:
         """Test that get_query_tracker returns None when not configured."""
         mock_state = Mock(spec=[])  # Empty spec - no attributes
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state = mock_state
 
             from code_indexer.server.mcp.handlers import _get_query_tracker

@@ -43,7 +43,7 @@ async def test_list_files_with_string_repository_alias(mock_user):
         )
     ]
 
-    with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
         mock_app.file_service.list_files.return_value = mock_result
 
         result = await list_files(params, mock_user)

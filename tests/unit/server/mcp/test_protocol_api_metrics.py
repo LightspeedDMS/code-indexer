@@ -94,7 +94,9 @@ class TestProtocolTracksNonSearchTools:
         mock_handler = _make_mock_handler()
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module"
+            ) as mock_app_module,
             patch(
                 "code_indexer.server.mcp.session_registry.get_session_registry"
             ) as mock_reg,
@@ -146,7 +148,9 @@ class TestProtocolTracksNonSearchTools:
         mock_handler = _make_mock_handler()
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module"
+            ) as mock_app_module,
             patch(
                 "code_indexer.server.mcp.session_registry.get_session_registry"
             ) as mock_reg,
@@ -198,7 +202,9 @@ class TestProtocolTracksNonSearchTools:
         mock_handler = _make_mock_handler()
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module"
+            ) as mock_app_module,
             patch(
                 "code_indexer.server.mcp.session_registry.get_session_registry"
             ) as mock_reg,
@@ -259,7 +265,9 @@ class TestProtocolSkipsSelfTrackingTools:
         mock_handler = _make_mock_handler()
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module"
+            ) as mock_app_module,
             patch(
                 "code_indexer.server.mcp.session_registry.get_session_registry"
             ) as mock_reg,
@@ -312,7 +320,9 @@ class TestProtocolSkipsSelfTrackingTools:
         mock_handler = _make_mock_handler()
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module"
+            ) as mock_app_module,
             patch(
                 "code_indexer.server.mcp.session_registry.get_session_registry"
             ) as mock_reg,
@@ -374,7 +384,9 @@ class TestProtocolDoesNotTrackFailedCalls:
         raising_handler = _make_raising_handler(ValueError("Tool execution failed"))
 
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module,
+            patch(
+                "code_indexer.server.mcp.handlers._utils.app_module"
+            ) as mock_app_module,
             patch(
                 "code_indexer.server.mcp.session_registry.get_session_registry"
             ) as mock_reg,

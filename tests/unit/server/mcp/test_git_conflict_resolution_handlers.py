@@ -193,7 +193,7 @@ class TestGitMarkResolvedHandler:
             patch(
                 "code_indexer.server.mcp.handlers._is_write_mode_active"
             ) as mock_write_mode,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
         ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = False
@@ -230,7 +230,7 @@ class TestGitMarkResolvedHandler:
             patch(
                 "code_indexer.server.mcp.handlers._is_write_mode_active"
             ) as mock_write_mode,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
         ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
@@ -260,7 +260,7 @@ class TestGitMarkResolvedHandler:
             patch(
                 "code_indexer.server.mcp.handlers._is_write_mode_active"
             ) as mock_write_mode,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
         ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True
@@ -291,7 +291,7 @@ class TestGitMarkResolvedHandler:
             patch(
                 "code_indexer.server.mcp.handlers._is_write_mode_active"
             ) as mock_write_mode,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
         ):
             mock_resolve.return_value = ("/tmp/test-repo", None)
             mock_write_mode.return_value = True

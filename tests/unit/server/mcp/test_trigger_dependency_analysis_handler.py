@@ -47,7 +47,7 @@ def test_handler_accesses_dependency_map_service_from_app_state(
 ):
     """Test that handler gets dependency_map_service from app.state, not module level."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
         # Set up app.state (correct pattern)
         mock_app_module.app.state.dependency_map_service = mock_app_state
 
@@ -73,7 +73,7 @@ def test_handler_accesses_dependency_map_service_from_app_state(
 def test_handler_loads_config_via_config_service(admin_user, mock_app_state):
     """Test that handler loads config via get_config_service, not ServerConfigManager."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
         mock_app_module.app.state.dependency_map_service = mock_app_state
 
         # Mock get_config_service (actual pattern used by handler)
@@ -99,7 +99,7 @@ def test_handler_loads_config_via_config_service(admin_user, mock_app_state):
 def test_handler_returns_error_when_feature_disabled(admin_user, mock_app_state):
     """Test that handler checks dependency_map_enabled from config."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
         mock_app_module.app.state.dependency_map_service = mock_app_state
 
         with patch(
@@ -125,7 +125,7 @@ def test_handler_returns_error_when_feature_disabled(admin_user, mock_app_state)
 def test_handler_returns_error_when_service_unavailable(admin_user):
     """Test that handler handles missing dependency_map_service gracefully."""
     # Arrange
-    with patch("code_indexer.server.mcp.handlers.app_module") as mock_app_module:
+    with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app_module:
         # Service not available on app.state
         mock_app_module.app.state.dependency_map_service = None
 

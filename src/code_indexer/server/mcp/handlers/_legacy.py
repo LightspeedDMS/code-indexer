@@ -22,18 +22,9 @@ if TYPE_CHECKING:
     pass
 from code_indexer.server.auth.user_manager import User, UserRole
 from code_indexer.server.auth import dependencies
-from code_indexer.server import app as app_module
+from . import _utils
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
-from code_indexer.server.services.ssh_key_manager import (
-    SSHKeyManager,
-    KeyNotFoundError,
-    HostConflictError,
-)
-from code_indexer.server.services.ssh_key_generator import (
-    InvalidKeyNameError,
-    KeyAlreadyExistsError,
-)
 from code_indexer.server.services.git_operations_service import (
     git_operations_service,
     GitCommandError,
@@ -203,11 +194,11 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     category_map = {}
     try:
         if (
-            hasattr(app_module, "golden_repo_manager")
-            and app_module.golden_repo_manager
+            hasattr(_utils.app_module, "golden_repo_manager")
+            and _utils.app_module.golden_repo_manager
         ):
             category_service = getattr(
-                app_module.golden_repo_manager, "_repo_category_service", None
+                _utils.app_module.golden_repo_manager, "_repo_category_service", None
             )
             if category_service:
                 category_map = category_service.get_repo_category_map()
@@ -449,7 +440,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
                 # Coerce numeric parameters from MCP string types (MCP protocol sends all values as strings)
                 _evolution_limit_raw = params.get("evolution_limit")
-                results = app_module.semantic_query_manager._perform_search(
+                results = _utils.app_module.semantic_query_manager._perform_search(
                     username=user.username,
                     user_repos=mock_user_repos,
                     query_text=params["query_text"],
@@ -510,11 +501,13 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             category_map = {}
             try:
                 if (
-                    hasattr(app_module, "golden_repo_manager")
-                    and app_module.golden_repo_manager
+                    hasattr(_utils.app_module, "golden_repo_manager")
+                    and _utils.app_module.golden_repo_manager
                 ):
                     category_service = getattr(
-                        app_module.golden_repo_manager, "_repo_category_service", None
+                        _utils.app_module.golden_repo_manager,
+                        "_repo_category_service",
+                        None,
                     )
                     if category_service:
                         category_map = category_service.get_repo_category_map()
@@ -616,7 +609,7 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             _act_effective_limit = _act_requested_limit
 
         _evolution_limit_activated = params.get("evolution_limit")
-        result = app_module.semantic_query_manager.query_user_repositories(
+        result = _utils.app_module.semantic_query_manager.query_user_repositories(
             username=user.username,
             query_text=params["query_text"],
             repository_alias=params.get("repository_alias"),
@@ -662,11 +655,13 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         category_map = {}
         try:
             if (
-                hasattr(app_module, "golden_repo_manager")
-                and app_module.golden_repo_manager
+                hasattr(_utils.app_module, "golden_repo_manager")
+                and _utils.app_module.golden_repo_manager
             ):
                 category_service = getattr(
-                    app_module.golden_repo_manager, "_repo_category_service", None
+                    _utils.app_module.golden_repo_manager,
+                    "_repo_category_service",
+                    None,
                 )
                 if category_service:
                     category_map = category_service.get_repo_category_map()
@@ -730,7 +725,7 @@ def discover_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Discover available repositories from configured sources."""
     try:
         # List all golden repositories (source_type filter not currently used)
-        repos = app_module.golden_repo_manager.list_golden_repos()
+        repos = _utils.app_module.golden_repo_manager.list_golden_repos()
 
         # Story #300: Apply group-based access filtering (AC3)
         access_filtering_service = _get_access_filtering_service()
@@ -768,7 +763,9 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Get activated repos from database
         raw_activated_repos = (
-            app_module.activated_repo_manager.list_activated_repositories(user.username)
+            _utils.app_module.activated_repo_manager.list_activated_repositories(
+                user.username
+            )
         )
 
         # Story #196: Filter activated repos to only include whitelisted fields
@@ -828,11 +825,13 @@ def list_repositories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         category_map = {}
         try:
             if (
-                hasattr(app_module, "golden_repo_manager")
-                and app_module.golden_repo_manager
+                hasattr(_utils.app_module, "golden_repo_manager")
+                and _utils.app_module.golden_repo_manager
             ):
                 category_service = getattr(
-                    app_module.golden_repo_manager, "_repo_category_service", None
+                    _utils.app_module.golden_repo_manager,
+                    "_repo_category_service",
+                    None,
                 )
                 if category_service:
                     category_map = category_service.get_repo_category_map()
@@ -942,7 +941,7 @@ def activate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                                 }
                             )
 
-        job_id = app_module.activated_repo_manager.activate_repository(
+        job_id = _utils.app_module.activated_repo_manager.activate_repository(
             username=user.username,
             golden_repo_alias=golden_repo_alias,
             golden_repo_aliases=params.get("golden_repo_aliases"),
@@ -964,7 +963,7 @@ def deactivate_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Deactivate a repository."""
     try:
         user_alias = params["user_alias"]
-        job_id = app_module.activated_repo_manager.deactivate_repository(
+        job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
             username=user.username, user_alias=user_alias
         )
         return _mcp_response(
@@ -987,8 +986,8 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         # Get category service from golden_repo_manager
         if (
-            not hasattr(app_module, "golden_repo_manager")
-            or not app_module.golden_repo_manager
+            not hasattr(_utils.app_module, "golden_repo_manager")
+            or not _utils.app_module.golden_repo_manager
         ):
             return _mcp_response(
                 {
@@ -1000,7 +999,7 @@ def list_repo_categories(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         category_service = getattr(
-            app_module.golden_repo_manager, "_repo_category_service", None
+            _utils.app_module.golden_repo_manager, "_repo_category_service", None
         )
         if not category_service:
             return _mcp_response(
@@ -1042,11 +1041,13 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         category_map = {}
         try:
             if (
-                hasattr(app_module, "golden_repo_manager")
-                and app_module.golden_repo_manager
+                hasattr(_utils.app_module, "golden_repo_manager")
+                and _utils.app_module.golden_repo_manager
             ):
                 category_service = getattr(
-                    app_module.golden_repo_manager, "_repo_category_service", None
+                    _utils.app_module.golden_repo_manager,
+                    "_repo_category_service",
+                    None,
                 )
                 if category_service:
                     category_map = category_service.get_repo_category_map()
@@ -1098,7 +1099,7 @@ def get_repository_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": True, "status": status})
 
         # Activated repository (original code)
-        status = app_module.repository_listing_manager.get_repository_details(
+        status = _utils.app_module.repository_listing_manager.get_repository_details(
             user_alias, user.username
         )
 
@@ -1118,7 +1119,7 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         user_alias = params["user_alias"]
         # Resolve alias to repository details
-        repos = app_module.activated_repo_manager.list_activated_repositories(
+        repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username
         )
         repo_id = None
@@ -1137,7 +1138,7 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Defensive check
-        if app_module.background_job_manager is None:
+        if _utils.app_module.background_job_manager is None:
             return _mcp_response(
                 {
                     "success": False,
@@ -1158,7 +1159,7 @@ def sync_repository(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Submit sync job with correct signature
-        job_id = app_module.background_job_manager.submit_job(
+        job_id = _utils.app_module.background_job_manager.submit_job(
             operation_type="sync_repository",
             func=sync_job_wrapper,
             submitter_username=user.username,
@@ -1183,7 +1184,7 @@ def switch_branch(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         create = params.get("create", False)
 
         # Use activated_repo_manager.switch_branch (matches app.py endpoint pattern)
-        result = app_module.activated_repo_manager.switch_branch(
+        result = _utils.app_module.activated_repo_manager.switch_branch(
             username=user.username,
             user_alias=user_alias,
             branch_name=branch_name,
@@ -1358,7 +1359,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 path_pattern=final_path_pattern,
             )
 
-            result = app_module.file_service.list_files_by_path(
+            result = _utils.app_module.file_service.list_files_by_path(
                 repo_path=target_path,
                 query_params=query_params,
             )
@@ -1371,7 +1372,7 @@ def list_files(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
             # Call with correct signature: list_files(repo_id, username, query_params)
-            result = app_module.file_service.list_files(
+            result = _utils.app_module.file_service.list_files(
                 repo_id=repository_alias,
                 username=user.username,
                 query_params=query_params,
@@ -1537,7 +1538,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Use resolved path for file_service with pagination parameters
             # Story #33 Fix: Use skip_truncation=True so TruncationHelper handles
             # truncation with cache_handle support (avoids double truncation)
-            result = app_module.file_service.get_file_content_by_path(
+            result = _utils.app_module.file_service.get_file_content_by_path(
                 repo_path=target_path,
                 file_path=file_path,
                 offset=offset,
@@ -1548,7 +1549,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             # Call file_service with pagination parameters
             # Story #33 Fix: Use skip_truncation=True so TruncationHelper handles
             # truncation with cache_handle support (avoids double truncation)
-            result = app_module.file_service.get_file_content(
+            result = _utils.app_module.file_service.get_file_content(
                 repository_alias=repository_alias,
                 file_path=file_path,
                 username=user.username,
@@ -1562,7 +1563,7 @@ def get_file_content(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         metadata = result.get("metadata", {})
 
         # Get payload cache and content limits config
-        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
         config_service = get_config_service()
         content_limits = config_service.get_config().content_limits_config
 
@@ -1750,12 +1751,12 @@ def browse_directory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
         if is_global_repo:
-            result = app_module.file_service.list_files_by_path(
+            result = _utils.app_module.file_service.list_files_by_path(
                 repo_path=repository_alias,
                 query_params=query_params,
             )
         else:
-            result = app_module.file_service.list_files(
+            result = _utils.app_module.file_service.list_files(
                 repo_id=repository_alias,
                 username=user.username,
                 query_params=query_params,
@@ -1848,9 +1849,11 @@ def get_branches(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             repo_path = target_path
         else:
             # Get repository path (matches app.py endpoint pattern at line 4383-4395)
-            repo_path = app_module.activated_repo_manager.get_activated_repo_path(
-                username=user.username,
-                user_alias=repository_alias,
+            repo_path = (
+                _utils.app_module.activated_repo_manager.get_activated_repo_path(
+                    username=user.username,
+                    user_alias=repository_alias,
+                )
             )
 
         # Initialize git topology service
@@ -1914,7 +1917,7 @@ def check_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #506: Include node_id in response for cluster mode identification.
         # In standalone mode node_id is None (app.state.node_id not set).
-        node_id = getattr(app_module.app.state, "node_id", None)
+        node_id = getattr(_utils.app_module.app.state, "node_id", None)
 
         # Use mode='json' to serialize datetime objects to ISO format strings
         return _mcp_response(
@@ -1955,7 +1958,7 @@ def check_hnsw_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         # Resolve repository alias to clone path
-        repo = app_module.golden_repo_manager.get_golden_repo(repository_alias)
+        repo = _utils.app_module.golden_repo_manager.get_golden_repo(repository_alias)
         if not repo:
             return _mcp_response(
                 {"success": False, "error": f"Repository not found: {repository_alias}"}
@@ -2006,7 +2009,7 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         enable_temporal = params.get("enable_temporal", False)
         temporal_options = params.get("temporal_options")
 
-        job_id = app_module.golden_repo_manager.add_golden_repo(
+        job_id = _utils.app_module.golden_repo_manager.add_golden_repo(
             repo_url=repo_url,
             alias=alias,
             default_branch=default_branch,
@@ -2029,7 +2032,7 @@ def remove_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Remove a golden repository (admin only)."""
     try:
         alias = params["alias"]
-        job_id = app_module.golden_repo_manager.remove_golden_repo(
+        job_id = _utils.app_module.golden_repo_manager.remove_golden_repo(
             alias, submitter_username=user.username
         )
         return _mcp_response(
@@ -2048,7 +2051,7 @@ def refresh_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         alias = params["alias"]
         # Validate repo exists via golden_repo_manager before scheduling
-        if alias not in app_module.golden_repo_manager.golden_repos:
+        if alias not in _utils.app_module.golden_repo_manager.golden_repos:
             raise Exception(f"Golden repository '{alias}' not found")
         # Delegate to RefreshScheduler (index-source-first versioned pipeline)
         refresh_scheduler = _get_app_refresh_scheduler()
@@ -2083,7 +2086,7 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
         )
 
     try:
-        result = app_module.golden_repo_manager.change_branch_async(
+        result = _utils.app_module.golden_repo_manager.change_branch_async(
             alias, branch, user.username
         )
         job_id = result.get("job_id")
@@ -2118,7 +2121,7 @@ def change_golden_repo_branch(params: Dict[str, Any], user: User) -> Dict[str, A
 def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
     try:
-        all_users = app_module.user_manager.get_all_users()
+        all_users = _utils.app_module.user_manager.get_all_users()
         return _mcp_response(
             {
                 "success": True,
@@ -2146,7 +2149,7 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         password = params["password"]
         role = UserRole(params["role"])
 
-        new_user = app_module.user_manager.create_user(
+        new_user = _utils.app_module.user_manager.create_user(
             username=username, password=password, role=role
         )
         return _mcp_response(
@@ -2234,9 +2237,9 @@ def get_job_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     Use get_active_job_count, get_pending_job_count, get_failed_job_count instead.
     """
     try:
-        active = app_module.background_job_manager.get_active_job_count()
-        pending = app_module.background_job_manager.get_pending_job_count()
-        failed = app_module.background_job_manager.get_failed_job_count()
+        active = _utils.app_module.background_job_manager.get_active_job_count()
+        pending = _utils.app_module.background_job_manager.get_pending_job_count()
+        failed = _utils.app_module.background_job_manager.get_failed_job_count()
 
         stats = {
             "active": active,
@@ -2259,7 +2262,9 @@ def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
-        job = app_module.background_job_manager.get_job_status(job_id, user.username)
+        job = _utils.app_module.background_job_manager.get_job_status(
+            job_id, user.username
+        )
         if not job:
             return _mcp_response(
                 {
@@ -2277,14 +2282,16 @@ def get_all_repositories_status(params: Dict[str, Any], user: User) -> Dict[str,
     """Get status summary of all repositories."""
     try:
         # Get activated repos status
-        repos = app_module.activated_repo_manager.list_activated_repositories(
+        repos = _utils.app_module.activated_repo_manager.list_activated_repositories(
             user.username
         )
         status_summary = []
         for repo in repos:
             try:
-                details = app_module.repository_listing_manager.get_repository_details(
-                    repo["user_alias"], user.username
+                details = (
+                    _utils.app_module.repository_listing_manager.get_repository_details(
+                        repo["user_alias"], user.username
+                    )
                 )
                 status_summary.append(details)
             except Exception:
@@ -2376,7 +2383,7 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
                         )
 
         if operation == "create":
-            job_id = app_module.activated_repo_manager.activate_repository(
+            job_id = _utils.app_module.activated_repo_manager.activate_repository(
                 username=user.username,
                 golden_repo_aliases=golden_repo_aliases,
                 user_alias=user_alias,
@@ -2392,13 +2399,13 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
         elif operation == "update":
             # For update, deactivate then reactivate
             try:
-                app_module.activated_repo_manager.deactivate_repository(
+                _utils.app_module.activated_repo_manager.deactivate_repository(
                     username=user.username, user_alias=user_alias
                 )
             except Exception:
                 pass  # Ignore if doesn't exist
 
-            job_id = app_module.activated_repo_manager.activate_repository(
+            job_id = _utils.app_module.activated_repo_manager.activate_repository(
                 username=user.username,
                 golden_repo_aliases=golden_repo_aliases,
                 user_alias=user_alias,
@@ -2412,7 +2419,7 @@ def manage_composite_repository(params: Dict[str, Any], user: User) -> Dict[str,
             )
 
         elif operation == "delete":
-            job_id = app_module.activated_repo_manager.deactivate_repository(
+            job_id = _utils.app_module.activated_repo_manager.deactivate_repository(
                 username=user.username, user_alias=user_alias
             )
             return _mcp_response(
@@ -2524,7 +2531,7 @@ def handle_add_golden_repo_index(args: Dict[str, Any], user: User) -> Dict[str, 
 
     try:
         # Get GoldenRepoManager from app state
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -2571,7 +2578,7 @@ def handle_get_golden_repo_indexes(args: Dict[str, Any], user: User) -> Dict[str
 
     try:
         # Get GoldenRepoManager from app state
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
             return _mcp_response(
                 {"success": False, "error": "Golden repository manager not available"}
@@ -2907,7 +2914,9 @@ def handle_create_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
             if not _is_write_mode_active(repository_alias, golden_repos_dir):
                 auto_watch_manager.start_watch(repo_path)
             else:
@@ -3062,7 +3071,9 @@ def handle_edit_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
             if not _is_write_mode_active(repository_alias, golden_repos_dir):
                 auto_watch_manager.start_watch(repo_path)
             else:
@@ -3213,7 +3224,9 @@ def handle_delete_file(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 repo_path = activated_repo_manager.get_activated_repo_path(
                     username=user.username, user_alias=repository_alias
                 )
-            golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+            golden_repos_dir = getattr(
+                _utils.app_module.app.state, "golden_repos_dir", None
+            )
             if not _is_write_mode_active(repository_alias, golden_repos_dir):
                 auto_watch_manager.start_watch(repo_path)
             else:
@@ -3796,7 +3809,7 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #35: Apply token-based truncation with cache handle support
         # Get payload cache and content limits config
-        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
         config_service = get_config_service()
         content_limits = config_service.get_config().content_limits_config
 
@@ -4248,7 +4261,7 @@ def handle_git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Story #34: Apply token-based truncation with cache handle support
         # Get payload cache and content limits config
-        payload_cache = getattr(app_module.app.state, "payload_cache", None)
+        payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
         config_service = get_config_service()
         content_limits = config_service.get_config().content_limits_config
 
@@ -4912,287 +4925,18 @@ def handle_authenticate(
 HANDLER_REGISTRY["authenticate"] = handle_authenticate
 
 
-# SSH Key Management Handlers (Story #572)
-# SSH Key Manager singleton
-_ssh_key_manager: SSHKeyManager = None
+# SSH Key Management Handlers (Story #572) — extracted to ssh_keys.py
+from .ssh_keys import (  # noqa: F401, E402
+    get_ssh_key_manager,
+    handle_ssh_key_create,
+    handle_ssh_key_list,
+    handle_ssh_key_delete,
+    handle_ssh_key_show_public,
+    handle_ssh_key_assign_host,
+)
+from .ssh_keys import _register as _ssh_keys_register  # noqa: E402
 
-
-def get_ssh_key_manager() -> SSHKeyManager:
-    """Get or create the SSH key manager instance with SQLite backend (Story #702)."""
-    global _ssh_key_manager
-    if _ssh_key_manager is None:
-        from ...services.config_service import get_config_service
-
-        config_service = get_config_service()
-        server_dir = config_service.config_manager.server_dir
-        db_path = server_dir / "data" / "cidx_server.db"
-        metadata_dir = server_dir / "data" / "ssh_keys"
-
-        _ssh_key_manager = SSHKeyManager(
-            metadata_dir=metadata_dir,
-            use_sqlite=True,
-            db_path=db_path,
-        )
-    return _ssh_key_manager
-
-
-def handle_ssh_key_create(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Create a new SSH key pair.
-
-    Args:
-        args: Dict with name, key_type (optional), email (optional), description (optional)
-        user: Authenticated user
-
-    Returns:
-        Dict with success status and public key
-    """
-    name = args.get("name")
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-
-    key_type = args.get("key_type", "ed25519")
-    email = args.get("email")
-    description = args.get("description")
-
-    manager = get_ssh_key_manager()
-
-    try:
-        metadata = manager.create_key(
-            name=name,
-            key_type=key_type,
-            email=email,
-            description=description,
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                "name": metadata.name,
-                "fingerprint": metadata.fingerprint,
-                "key_type": metadata.key_type,
-                "public_key": metadata.public_key,
-                "email": metadata.email,
-                "description": metadata.description,
-            }
-        )
-
-    except InvalidKeyNameError as e:
-        return _mcp_response({"success": False, "error": f"Invalid key name: {str(e)}"})
-    except KeyAlreadyExistsError as e:
-        return _mcp_response(
-            {"success": False, "error": f"Key already exists: {str(e)}"}
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error creating SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_create"] = handle_ssh_key_create
-
-
-def handle_ssh_key_list(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    List all managed and unmanaged SSH keys.
-
-    Args:
-        args: Empty dict (no parameters needed)
-        user: Authenticated user
-
-    Returns:
-        Dict with managed and unmanaged key lists
-    """
-    manager = get_ssh_key_manager()
-
-    try:
-        result = manager.list_keys()
-
-        managed = [
-            {
-                "name": k.name,
-                "fingerprint": k.fingerprint,
-                "key_type": k.key_type,
-                "hosts": k.hosts,
-                "email": k.email,
-                "description": k.description,
-                "is_imported": k.is_imported,
-            }
-            for k in result.managed
-        ]
-
-        unmanaged = [
-            {
-                "name": k.name,
-                "fingerprint": k.fingerprint,
-                "private_path": str(k.private_path),
-            }
-            for k in result.unmanaged
-        ]
-
-        return _mcp_response(
-            {
-                "success": True,
-                "managed": managed,
-                "unmanaged": unmanaged,
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error listing SSH keys: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_list"] = handle_ssh_key_list
-
-
-def handle_ssh_key_delete(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Delete an SSH key.
-
-    Args:
-        args: Dict with name
-        user: Authenticated user
-
-    Returns:
-        Dict with success status
-    """
-    name = args.get("name")
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-
-    manager = get_ssh_key_manager()
-
-    try:
-        manager.delete_key(name)
-        return _mcp_response(
-            {
-                "success": True,
-                "message": f"Key '{name}' deleted",
-            }
-        )
-
-    except Exception as e:
-        logger.exception(
-            f"Error deleting SSH key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_delete"] = handle_ssh_key_delete
-
-
-def handle_ssh_key_show_public(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Get the public key content for copy/paste.
-
-    Args:
-        args: Dict with name
-        user: Authenticated user
-
-    Returns:
-        Dict with public key content
-    """
-    name = args.get("name")
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-
-    manager = get_ssh_key_manager()
-
-    try:
-        public_key = manager.get_public_key(name)
-        return _mcp_response(
-            {
-                "success": True,
-                "name": name,
-                "public_key": public_key,
-            }
-        )
-
-    except KeyNotFoundError:
-        return _mcp_response({"success": False, "error": f"Key not found: {name}"})
-    except Exception as e:
-        logger.exception(
-            f"Error getting public key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_show_public"] = handle_ssh_key_show_public
-
-
-def handle_ssh_key_assign_host(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Assign a host to an SSH key.
-
-    Args:
-        args: Dict with name and hostname
-        user: Authenticated user
-
-    Returns:
-        Dict with updated key information
-    """
-    name = args.get("name")
-    hostname = args.get("hostname")
-
-    if not name:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: name"}
-        )
-    if not hostname:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: hostname"}
-        )
-
-    force = args.get("force", False)
-
-    manager = get_ssh_key_manager()
-
-    try:
-        metadata = manager.assign_key_to_host(
-            key_name=name,
-            hostname=hostname,
-            force=force,
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                "name": metadata.name,
-                "fingerprint": metadata.fingerprint,
-                "key_type": metadata.key_type,
-                "hosts": metadata.hosts,
-                "email": metadata.email,
-                "description": metadata.description,
-            }
-        )
-
-    except KeyNotFoundError:
-        return _mcp_response({"success": False, "error": f"Key not found: {name}"})
-    except HostConflictError as e:
-        return _mcp_response({"success": False, "error": str(e)})
-    except Exception as e:
-        logger.exception(
-            f"Error assigning host to key: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["cidx_ssh_key_assign_host"] = handle_ssh_key_assign_host
+_ssh_keys_register(HANDLER_REGISTRY)
 
 
 # SCIP Call Graph Query Handlers
@@ -5842,9 +5586,10 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             response["category_filter"] = category_filter
 
         # Story #194: Add dependency map section when available (prominent positioning)
-        if app_module.golden_repo_manager:
+        if _utils.app_module.golden_repo_manager:
             cidx_meta_path = (
-                Path(app_module.golden_repo_manager.golden_repos_dir) / "cidx-meta"
+                Path(_utils.app_module.golden_repo_manager.golden_repos_dir)
+                / "cidx-meta"
             )
             dependency_map_section = _build_dependency_map_section(cidx_meta_path)
             if dependency_map_section:
@@ -5852,7 +5597,7 @@ def quick_reference(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         # Conditionally add Langfuse section
         langfuse_section = _build_langfuse_section(
-            config, app_module.golden_repo_manager
+            config, _utils.app_module.golden_repo_manager
         )
         if langfuse_section:
             response["langfuse_trace_search"] = langfuse_section
@@ -7000,7 +6745,9 @@ def git_merge(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         assert repo_path is not None  # narrowed by error_msg check above
 
         # Write mode enforcement (Bug #391: also allow activated repo workspaces)
-        golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+        golden_repos_dir = getattr(
+            _utils.app_module.app.state, "golden_repos_dir", None
+        )
         if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
             return _mcp_response(
                 {
@@ -7119,7 +6866,9 @@ def git_mark_resolved(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         assert repo_path is not None  # narrowed by error_msg check above
 
         # Write mode enforcement (Bug #391: also allow activated repo workspaces)
-        golden_repos_dir = getattr(app_module.app.state, "golden_repos_dir", None)
+        golden_repos_dir = getattr(
+            _utils.app_module.app.state, "golden_repos_dir", None
+        )
         if not _is_writable_repo(repository_alias, repo_path, golden_repos_dir):
             return _mcp_response(
                 {
@@ -9473,7 +9222,7 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # Get log database path from app.state
-    log_db_path = getattr(app_module.app.state, "log_db_path", None)
+    log_db_path = getattr(_utils.app_module.app.state, "log_db_path", None)
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})
 
@@ -9534,7 +9283,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
 
     # Get log database path from app.state
-    log_db_path = getattr(app_module.app.state, "log_db_path", None)
+    log_db_path = getattr(_utils.app_module.app.state, "log_db_path", None)
     if not log_db_path:
         return _mcp_response({"success": False, "error": "Log database not configured"})
 
@@ -11814,7 +11563,7 @@ def handle_get_cached_content(args: Dict[str, Any], user: User) -> Dict[str, Any
         )
 
     # Get payload_cache from app.state
-    payload_cache = getattr(app_module.app.state, "payload_cache", None)
+    payload_cache = getattr(_utils.app_module.app.state, "payload_cache", None)
 
     if payload_cache is None:
         return _mcp_response(
@@ -11918,9 +11667,9 @@ def handle_set_session_impersonation(
 
     # Look up target user and set impersonation
     try:
-        # Bug fix: Use app_module.user_manager (properly configured with SQLite backend)
+        # Bug fix: Use _utils.app_module.user_manager (properly configured with SQLite backend)
         # instead of creating new UserManager() which defaults to JSON file storage
-        target_user = app_module.user_manager.get_user(username)
+        target_user = _utils.app_module.user_manager.get_user(username)
 
         if target_user is None:
             return _mcp_response(
@@ -11981,7 +11730,7 @@ def _get_delegation_function_repo_path() -> Optional[Path]:
             return None
 
         # Get the actual path from golden repo manager
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         if not golden_repo_manager:
             logger.warning(
                 format_error_log("MCP-GENERAL-119", "Golden repo manager not available")
@@ -12021,7 +11770,7 @@ def _get_user_groups(user: User) -> set:
         Set of group names the user belongs to
     """
     try:
-        group_manager = getattr(app_module.app.state, "group_manager", None)
+        group_manager = getattr(_utils.app_module.app.state, "group_manager", None)
         if not group_manager:
             logger.warning(
                 format_error_log("MCP-GENERAL-122", "Group manager not available")
@@ -12436,7 +12185,9 @@ async def handle_poll_delegation_job(
             # Apply PayloadCache truncation for large results
             result_text = result.output
             if result_text:
-                payload_cache = getattr(app_module.app.state, "payload_cache", None)
+                payload_cache = getattr(
+                    _utils.app_module.app.state, "payload_cache", None
+                )
                 if payload_cache is not None:
                     try:
                         truncated = payload_cache.truncate_result(result_text)
@@ -12564,7 +12315,7 @@ def _resolve_guardrails(
 
     Args:
         config: ClaudeDelegationConfig instance.
-        golden_repo_manager: GoldenRepoManager (or None) from app_module.
+        golden_repo_manager: GoldenRepoManager (or None) from _utils.app_module.
 
     Returns:
         Tuple of (guardrails_text, guardrails_repo_alias).
@@ -12982,7 +12733,7 @@ async def _submit_open_delegation_job(
     Returns:
         MCP response dict (success with job_id, or error)
     """
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     for alias in repositories:
         git_url: Optional[str] = None
         branch = "main"
@@ -13060,7 +12811,7 @@ async def _submit_collaborative_delegation_job(
             if r not in all_repos:
                 all_repos.append(r)
 
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     for alias in all_repos:
         git_url: Optional[str] = None
         branch = "main"
@@ -13143,7 +12894,7 @@ async def _submit_competitive_delegation_job(
     Returns:
         MCP response dict (success with job_id, or error).
     """
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     for alias in repositories:
         git_url: Optional[str] = None
         branch = "main"
@@ -13248,7 +12999,7 @@ async def handle_execute_open_delegation(
             return validation_error
 
         # Story #457: resolve safety guardrails and prepend to user prompt
-        golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+        golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
         guardrails_text, guardrails_repo_alias = _resolve_guardrails(
             delegation_config, golden_repo_manager
         )
@@ -13315,7 +13066,9 @@ async def handle_execute_open_delegation(
             result_data = json.loads(result["content"][0]["text"])
             if result_data.get("success"):
                 job_id = result_data.get("job_id", "")
-                audit_service = getattr(app_module.app.state, "audit_service", None)
+                audit_service = getattr(
+                    _utils.app_module.app.state, "audit_service", None
+                )
                 if audit_service is not None:
                     audit_service.log(
                         admin_id=effective_user.username,
@@ -13375,7 +13128,7 @@ def _lookup_golden_repo_for_cs(alias: str) -> tuple:
     Returns (git_url, branch, error_message).
     error_message is None on success; non-None string on failure.
     """
-    golden_repo_manager = getattr(app_module, "golden_repo_manager", None)
+    golden_repo_manager = getattr(_utils.app_module, "golden_repo_manager", None)
     if not golden_repo_manager:
         return None, "main", f"Alias '{alias}' not found in CIDX golden repos"
     try:
@@ -13602,7 +13355,7 @@ HANDLER_REGISTRY["cs_check_health"] = handle_cs_check_health
 
 def _get_group_manager():
     """Get the GroupAccessManager from app.state."""
-    return getattr(app_module.app.state, "group_manager", None)
+    return getattr(_utils.app_module.app.state, "group_manager", None)
 
 
 def _validate_group_id(
@@ -14101,7 +13854,7 @@ HANDLER_REGISTRY["bulk_remove_repos_from_group"] = handle_bulk_remove_repos_from
 def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all API keys for the authenticated user."""
     try:
-        keys = app_module.user_manager.get_api_keys(user.username)
+        keys = _utils.app_module.user_manager.get_api_keys(user.username)
         return _mcp_response(
             {
                 "success": True,
@@ -14133,7 +13886,7 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         from code_indexer.server.auth.api_key_manager import ApiKeyManager
 
         description = args.get("description", "")
-        api_key_manager = ApiKeyManager(user_manager=app_module.user_manager)
+        api_key_manager = ApiKeyManager(user_manager=_utils.app_module.user_manager)
         api_key, key_id = api_key_manager.generate_key(user.username, name=description)
         return _mcp_response(
             {
@@ -14166,7 +13919,7 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 }
             )
 
-        result = app_module.user_manager.delete_api_key(user.username, key_id)
+        result = _utils.app_module.user_manager.delete_api_key(user.username, key_id)
         return _mcp_response({"success": result})
     except Exception as e:
         logger.error(
@@ -14420,7 +14173,7 @@ def handle_admin_list_all_mcp_credentials(
     """List all MCP credentials across all users (admin only)."""
     try:
         all_credentials = []
-        all_users = app_module.user_manager.get_all_users()
+        all_users = _utils.app_module.user_manager.get_all_users()
 
         for target_user in all_users:
             user_creds = dependencies.mcp_credential_manager.get_credentials(
@@ -14559,9 +14312,8 @@ def _parse_log_details(row: dict) -> dict:
 
 def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> list:
     """Fetch PR logs from AuditLogService."""
-    import code_indexer.server.app as app_module
 
-    svc = getattr(getattr(app_module, "app", None), "state", None)
+    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -14571,9 +14323,8 @@ def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> l
 
 def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) -> list:
     """Fetch cleanup logs from AuditLogService."""
-    import code_indexer.server.app as app_module
 
-    svc = getattr(getattr(app_module, "app", None), "state", None)
+    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
     audit_service = getattr(svc, "audit_service", None) if svc else None
     if audit_service is None:
         raise RuntimeError("AuditLogService not available on app.state")
@@ -14898,7 +14649,7 @@ _cleanup_job_state: Dict[str, Any] = {
 def _execute_workspace_cleanup() -> Dict[str, Any]:
     """Execute workspace cleanup and return result dict."""
     workspace_cleanup_service = getattr(
-        app_module.app.state, "workspace_cleanup_service", None
+        _utils.app_module.app.state, "workspace_cleanup_service", None
     )
     if workspace_cleanup_service:
         result = workspace_cleanup_service.cleanup_workspaces()
@@ -14987,7 +14738,7 @@ def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, An
             )
 
         workspace_cleanup_service = getattr(
-            app_module.app.state, "workspace_cleanup_service", None
+            _utils.app_module.app.state, "workspace_cleanup_service", None
         )
         service_status = (
             workspace_cleanup_service.get_cleanup_status()
@@ -15228,7 +14979,7 @@ def handle_trigger_dependency_analysis(
 
         # AC5: Check if analysis is already running
         dependency_map_service = getattr(
-            app_module.app.state, "dependency_map_service", None
+            _utils.app_module.app.state, "dependency_map_service", None
         )
         if not dependency_map_service:
             return _mcp_response(
@@ -15323,7 +15074,7 @@ def _get_wiki_cache_for_handler():
     """
     from code_indexer.server.wiki.wiki_cache import WikiCache
 
-    grm = getattr(app_module, "golden_repo_manager", None)
+    grm = getattr(_utils.app_module, "golden_repo_manager", None)
     if grm is None:
         return None
     db_path = getattr(grm, "db_path", None)
@@ -15343,7 +15094,7 @@ def _wiki_analytics_filter_by_search(
     """
     if not search_query or len(search_query) < _WIKI_ANALYTICS_MIN_QUERY_LENGTH:
         return None
-    sqm = getattr(app_module, "semantic_query_manager", None)
+    sqm = getattr(_utils.app_module, "semantic_query_manager", None)
     if sqm is None:
         raise RuntimeError("semantic_query_manager not available for search filter")
     result = sqm.query_user_repositories(
@@ -15640,7 +15391,7 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
         if action in ("add", "recreate"):
             clear = action == "recreate"
 
-            if app_module.background_job_manager is None:
+            if _utils.app_module.background_job_manager is None:
                 return _mcp_response({"error": "Background job manager not available"})
 
             # Persist provider to config.json on BASE CLONE before submitting job
@@ -15664,7 +15415,7 @@ def manage_provider_indexes(params: Dict[str, Any], user: User) -> Dict[str, Any
                     }
                 )
 
-            job_id = app_module.background_job_manager.submit_job(
+            job_id = _utils.app_module.background_job_manager.submit_job(
                 operation_type=f"provider_index_{action}",
                 func=_provider_index_job,
                 submitter_username=user.username,
@@ -16181,7 +15932,7 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
         job_ids = []
         skipped = []
 
-        if app_module.background_job_manager is None:
+        if _utils.app_module.background_job_manager is None:
             return _mcp_response({"error": "Background job manager not available"})
 
         for repo in global_repos:
@@ -16229,7 +15980,7 @@ def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any
                 continue
 
             # Submit job
-            job_id = app_module.background_job_manager.submit_job(
+            job_id = _utils.app_module.background_job_manager.submit_job(
                 operation_type="provider_index_add",
                 func=_provider_index_job,
                 submitter_username=user.username,

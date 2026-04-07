@@ -25,7 +25,7 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
         Only README.md should appear — no repo-specific .md files.
         """
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -51,7 +51,7 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
         repo-a.md and repo-b.md visible; repo-c.md hidden.
         """
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",
@@ -70,7 +70,7 @@ class TestBrowseDirectoryCidxMetaAccessFiltering:
     def test_no_access_filtering_service_returns_all_entries(self, regular_user):
         """If access_filtering_service is not configured, all entries are returned."""
         mock_file_service = make_file_service_with_cidx_meta()
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.file_service = mock_file_service
             with patch(
                 "code_indexer.server.mcp.handlers._get_access_filtering_service",

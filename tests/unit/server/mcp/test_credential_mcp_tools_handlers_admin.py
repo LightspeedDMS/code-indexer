@@ -222,7 +222,7 @@ class TestAdminListAllMCPCredentialsHandler:
     ):
         """admin_list_all_mcp_credentials returns success for admin user."""
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
         ):
             mock_app.user_manager = mock_user_manager
@@ -239,7 +239,7 @@ class TestAdminListAllMCPCredentialsHandler:
     ):
         """admin_list_all_mcp_credentials returns credentials array."""
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
         ):
             mock_app.user_manager = mock_user_manager
@@ -257,7 +257,7 @@ class TestAdminListAllMCPCredentialsHandler:
     ):
         """admin_list_all_mcp_credentials includes username in each credential."""
         with (
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch("code_indexer.server.mcp.handlers.dependencies") as mock_deps,
         ):
             mock_app.user_manager = mock_user_manager

@@ -48,7 +48,7 @@ class TestGetFileContentPaginationInfo:
     @pytest.fixture
     def mock_file_service(self):
         """Create mock FileListingService."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_service = MagicMock()
             mock_app.file_service = mock_service
             yield mock_service, mock_app

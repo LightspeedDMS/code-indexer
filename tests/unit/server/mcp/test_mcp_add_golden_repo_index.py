@@ -50,7 +50,7 @@ class TestAddGoldenRepoIndex:
             "job-123-semantic"
         )
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -80,7 +80,7 @@ class TestAddGoldenRepoIndex:
         # Setup mock to return job_id
         mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-123-fts"
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -113,7 +113,7 @@ class TestAddGoldenRepoIndex:
             "job-456-temporal"
         )
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -129,7 +129,7 @@ class TestAddGoldenRepoIndex:
         """Test AC1: add_golden_repo_index successfully submits job for scip index."""
         mock_golden_repo_manager.add_index_to_golden_repo.return_value = "job-789-scip"
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -149,7 +149,7 @@ class TestAddGoldenRepoIndex:
             "Golden repository 'nonexistent-repo' not found"
         )
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -169,7 +169,7 @@ class TestAddGoldenRepoIndex:
             "Invalid index_type: invalid_type. Must be one of: semantic, fts, temporal, scip"
         )
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -189,7 +189,7 @@ class TestAddGoldenRepoIndex:
             "Index type 'semantic' already exists for golden repo 'test-repo'"
         )
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -203,7 +203,7 @@ class TestAddGoldenRepoIndex:
 
     def test_add_index_error_missing_alias(self, mock_admin_user):
         """Test error when alias parameter is missing."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
             args = {"index_type": "semantic"}
@@ -216,7 +216,7 @@ class TestAddGoldenRepoIndex:
 
     def test_add_index_error_missing_index_type(self, mock_admin_user):
         """Test error when index_type parameter is missing."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
             args = {"alias": "test-repo"}
@@ -256,7 +256,7 @@ class TestGetGoldenRepoIndexes:
             },
         }
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -297,7 +297,7 @@ class TestGetGoldenRepoIndexes:
             "Golden repository 'nonexistent-repo' not found"
         )
 
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
             mock_app.golden_repo_manager = mock_golden_repo_manager
 
@@ -311,7 +311,7 @@ class TestGetGoldenRepoIndexes:
 
     def test_get_indexes_error_missing_alias(self, mock_admin_user):
         """Test error when alias parameter is missing."""
-        with patch("code_indexer.server.mcp.handlers.app_module") as mock_app:
+        with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
             args = {}

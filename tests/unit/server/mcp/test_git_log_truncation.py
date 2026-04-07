@@ -174,7 +174,7 @@ class TestGitLogTruncationWithCacheHandle:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
@@ -228,7 +228,7 @@ class TestGitLogTruncationWithCacheHandle:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
@@ -279,7 +279,7 @@ class TestGitLogTruncationWithCacheHandle:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
@@ -338,7 +338,7 @@ class TestGitLogTruncationWithCacheHandle:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
@@ -388,7 +388,7 @@ class TestGitLogTruncationWithCacheHandle:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
@@ -437,7 +437,7 @@ class TestGitLogTruncationWithCacheHandle:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
@@ -527,7 +527,7 @@ class TestGitLogTruncationHelperIntegration:
             patch(
                 "code_indexer.global_repos.git_operations.GitOperationsService"
             ) as mock_git_service_class,
-            patch("code_indexer.server.mcp.handlers.app_module") as mock_app,
+            patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app,
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service"
             ) as mock_config_svc,
