@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.0
+
+### Features
+
+- feat: Epic #649 — Cross-encoder reranking integration for all four MCP search tools (`search_code`, `regex_search`, `git_search_commits`, `git_search_diffs`). Callers may pass `rerank_query` and optional `rerank_instruction` to trigger post-retrieval reranking. Provider chain: Voyage `rerank-2.5` (primary) → Cohere `rerank-v3.5` (fallback). Reranker fires after dual-provider RRF coalescing and before truncation, using 5x overfetch to ensure quality candidates. New `VoyageRerankerClient` and `CohereRerankerClient` in `server/clients/reranker_clients.py`; reranking pipeline in `server/mcp/reranking.py`. Config managed via Web UI (reranking section in config screen). Response `query_metadata` includes `reranker_used`, `reranker_provider`, and `rerank_time_ms` fields. 182 unit tests, 15 E2E test calls (12 Voyage + 3 Cohere failover) all passing.
+
 ## v9.13.8
 
 ### Refactoring

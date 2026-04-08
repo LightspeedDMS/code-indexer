@@ -30,6 +30,7 @@ def _make_config_service(api_key: str = "test-api-key") -> MagicMock:
     """Return a MagicMock config service that exposes the given voyageai_api_key."""
     mock_config = MagicMock()
     mock_config.claude_integration_config.voyageai_api_key = api_key
+    mock_config.rerank_config.voyage_reranker_model = None
     mock_cs = MagicMock()
     mock_cs.get_config.return_value = mock_config
     return mock_cs
@@ -287,6 +288,37 @@ class TestVoyageRerankerClientApiKey:
         from code_indexer.server.clients.reranker_clients import VoyageRerankerClient
 
         assert VoyageRerankerClient()._get_model() == "rerank-2.5"
+
+    def test_get_model_returns_configured_voyage_model(self):
+        """_get_model() returns the operator-configured model when set in config."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.server.clients.reranker_clients import VoyageRerankerClient
+
+        mock_cs = MagicMock()
+        mock_cs.get_config.return_value.rerank_config.voyage_reranker_model = (
+            "rerank-3.0"
+        )
+        with patch(
+            "code_indexer.server.clients.reranker_clients.get_config_service",
+            return_value=mock_cs,
+        ):
+            assert VoyageRerankerClient()._get_model() == "rerank-3.0"
+
+    @pytest.mark.parametrize("empty_value", [None, ""])
+    def test_get_model_falls_back_to_default_when_config_empty(self, empty_value):
+        """_get_model() falls back to 'rerank-2.5' when config model is None or empty."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.server.clients.reranker_clients import VoyageRerankerClient
+
+        mock_cs = MagicMock()
+        mock_cs.get_config.return_value.rerank_config.voyage_reranker_model = (
+            empty_value
+        )
+        with patch(
+            "code_indexer.server.clients.reranker_clients.get_config_service",
+            return_value=mock_cs,
+        ):
+            assert VoyageRerankerClient()._get_model() == "rerank-2.5"
 
 
 class TestVoyageRerankerClientRerank:
@@ -621,6 +653,7 @@ def _make_cohere_config_service(api_key: str = "test-cohere-key") -> MagicMock:
     """Return a MagicMock config service that exposes the given cohere_api_key."""
     mock_config = MagicMock()
     mock_config.claude_integration_config.cohere_api_key = api_key
+    mock_config.rerank_config.cohere_reranker_model = None
     mock_cs = MagicMock()
     mock_cs.get_config.return_value = mock_config
     return mock_cs
@@ -786,6 +819,39 @@ class TestCohereRerankerClientApiKey:
         from code_indexer.server.clients.reranker_clients import CohereRerankerClient
 
         assert CohereRerankerClient()._get_model() == "rerank-v3.5"
+
+    def test_get_model_returns_configured_cohere_model(self):
+        """_get_model() returns the operator-configured model when set in config."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.server.clients.reranker_clients import CohereRerankerClient
+
+        mock_cs = MagicMock()
+        mock_cs.get_config.return_value.rerank_config.cohere_reranker_model = (
+            "rerank-v4.0"
+        )
+        with patch(
+            "code_indexer.server.clients.reranker_clients.get_config_service",
+            return_value=mock_cs,
+        ):
+            assert CohereRerankerClient()._get_model() == "rerank-v4.0"
+
+    @pytest.mark.parametrize("empty_value", [None, ""])
+    def test_cohere_get_model_falls_back_to_default_when_config_empty(
+        self, empty_value
+    ):
+        """_get_model() falls back to 'rerank-v3.5' when config model is None or empty."""
+        from unittest.mock import MagicMock, patch
+        from code_indexer.server.clients.reranker_clients import CohereRerankerClient
+
+        mock_cs = MagicMock()
+        mock_cs.get_config.return_value.rerank_config.cohere_reranker_model = (
+            empty_value
+        )
+        with patch(
+            "code_indexer.server.clients.reranker_clients.get_config_service",
+            return_value=mock_cs,
+        ):
+            assert CohereRerankerClient()._get_model() == "rerank-v3.5"
 
     @pytest.mark.parametrize("bad_key", [None, ""])
     def test_cohere_reranker_client_rejects_invalid_api_key(self, bad_key):

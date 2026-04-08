@@ -14,7 +14,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 import httpx
 
@@ -195,7 +195,16 @@ class VoyageRerankerClient(RerankerClient):
         return config.claude_integration_config.voyageai_api_key  # type: ignore[no-any-return]
 
     def _get_model(self) -> str:
-        """Return the Voyage reranker model name."""
+        """Return the Voyage reranker model from config, falling back to the built-in default.
+
+        Reads ``rerank_config.voyage_reranker_model`` from the config service.
+        Falls back to ``_DEFAULT_MODEL`` when the config value is absent or empty.
+        """
+        rerank_cfg = get_config_service().get_config().rerank_config
+        if rerank_cfg:
+            configured = rerank_cfg.voyage_reranker_model
+            if configured:
+                return cast(str, configured)
         return _DEFAULT_MODEL
 
     # ------------------------------------------------------------------
@@ -429,7 +438,16 @@ class CohereRerankerClient(RerankerClient):
         return config.claude_integration_config.cohere_api_key  # type: ignore[no-any-return]
 
     def _get_model(self) -> str:
-        """Return the Cohere reranker model name."""
+        """Return the Cohere reranker model from config, falling back to the built-in default.
+
+        Reads ``rerank_config.cohere_reranker_model`` from the config service.
+        Falls back to ``_COHERE_DEFAULT_MODEL`` when the config value is absent or empty.
+        """
+        rerank_cfg = get_config_service().get_config().rerank_config
+        if rerank_cfg:
+            configured = rerank_cfg.cohere_reranker_model
+            if configured:
+                return cast(str, configured)
         return _COHERE_DEFAULT_MODEL
 
     def _validate_document_count(self, documents: List[str]) -> None:

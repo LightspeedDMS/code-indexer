@@ -44,10 +44,10 @@ inputSchema:
       maximum: 200
     rerank_query:
       type: string
-      description: 'Query for cross-encoder reranking. When set, results are reranked by relevance before return. Leave empty for chronological order.'
+      description: 'Query for cross-encoder reranking. When set, matching diff results are semantically reranked before return. Leave empty to preserve the default diff-match order.'
     rerank_instruction:
       type: string
-      description: 'Instruction prefix for the reranker (e.g. ''Find commits that introduced bugs''). Has no effect without rerank_query.'
+      description: 'Optional instruction prefix for the reranker (e.g. ''Find commits that introduced bugs''). Has no effect without rerank_query. Steers ranking only; does not change which commits match.'
   required:
   - repository_alias
 outputSchema:
@@ -102,6 +102,21 @@ outputSchema:
     search_time_ms:
       type: number
       description: Search execution time in ms
+    query_metadata:
+      type: object
+      description: Reranking telemetry when rerank_query is provided
+      properties:
+        reranker_used:
+          type: boolean
+          description: Whether cross-encoder reranking was actually applied
+        reranker_provider:
+          type:
+          - string
+          - 'null'
+          description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+        rerank_time_ms:
+          type: integer
+          description: Time spent in the reranking stage in milliseconds
     error:
       type: string
       description: Error message if failed
@@ -117,11 +132,10 @@ TL;DR: Find when specific code was added/removed in git history (pickaxe search)
 This is DIFFERENT from search_string/search_pattern: those find commits where the literal text or pattern
 appeared or disappeared, while rerank_query is optimized for cross-encoder scoring (verbose natural language
 descriptions work better) to re-score the matched commits for semantic relevance.
-Omit rerank_query to return results in chronological order (no reranking overhead).
+Omit rerank_query to return results in the default diff-match order (no reranking overhead).
 
-**rerank_instruction**: Optional relevance steering hint passed to the Voyage AI reranker. Has no effect
-without rerank_query or when using the Cohere reranker (which receives the instruction concatenated into
-the query). Example: "Focus on commits that introduced a vulnerability, not refactors or renames".
+**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
+It only influences ranking among the matched diffs. Example: "Focus on commits that introduced a vulnerability, not refactors or renames".
 
 #### When to Use Reranking
 
@@ -130,6 +144,28 @@ Diff search retrieves code changes that contain your search string or pattern, b
 snippets for semantic relevance to your rerank_query, cutting through formatting artifacts. Particularly
 useful when a string appears in many commits but only a few represent the meaningful change you are
 looking for.
+
+Reranking for git_search_diffs uses `diff_snippet` when available, with fallback to the commit subject if a
+snippet is unavailable. Because it only sees the returned snippet, omitted diff context can limit ranking quality.
+
+#### What Reranking Does Not Do
+
+Reranking does NOT search more history or find additional pickaxe matches. It only reorders the matched diff results.
+
+#### When Not to Use Reranking
+
+Skip reranking when raw historical order matters more than semantic best match, for example when you are tracing
+first introduction, reviewing change chronology, or auditing all matching commits.
+
+#### Returned Telemetry
+
+When reranking is requested, the response includes query_metadata with:
+- reranker_used
+- reranker_provider
+- rerank_time_ms
+
+If providers are disabled, unavailable, or all rerank attempts fail, the tool falls back to the base diff
+ordering and reports that reranking was not used.
 
 #### Examples
 
@@ -154,6 +190,17 @@ looking for.
 }
 ```
 
+**With reranking — regex diff search:**
+```json
+{
+  "search_pattern": "def\\s+authenticate|create_session",
+  "is_regex": true,
+  "rerank_query": "code changes that introduced or significantly modified production authentication flow",
+  "repository_alias": "backend-global",
+  "limit": 20
+}
+```
+
 **Without reranking (intentional opt-out):**
 ```json
 {
@@ -162,4 +209,4 @@ looking for.
   "limit": 20
 }
 ```
-Result: same commits but in chronological order, with no reranking overhead.
+Result: same commits in the default diff-match order, with no reranking overhead.

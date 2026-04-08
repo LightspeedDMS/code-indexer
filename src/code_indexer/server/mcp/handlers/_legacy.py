@@ -13,6 +13,7 @@ All handlers return MCP-compliant responses with content arrays:
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 
+import asyncio
 import json
 import logging
 from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
@@ -37,7 +38,6 @@ from code_indexer.global_repos.alias_manager import AliasManager
 from code_indexer.global_repos.git_operations import GitOperationsService
 from code_indexer.global_repos.global_registry import GlobalRegistry
 from code_indexer.server.mcp import reranking as _mcp_reranking
-
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from ._utils import (
@@ -71,6 +71,9 @@ from ._utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Story #653 AC3: Default overfetch multiplier when rerank_config is unavailable.
+_DEFAULT_OVERFETCH_MULTIPLIER = 5
 
 
 def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -435,6 +438,17 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             else:
                 _effective_limit = _requested_limit
 
+            # Story #653 AC3: Overfetch when reranking is active
+            if params.get("rerank_query"):
+                _rc = get_config_service().get_config().rerank_config
+                _overfetch_mul = (
+                    _rc.overfetch_multiplier if _rc else _DEFAULT_OVERFETCH_MULTIPLIER
+                )
+                _access_filter_extra = _effective_limit - _requested_limit
+                _effective_limit = _mcp_reranking.calculate_overfetch_limit(
+                    _requested_limit, _overfetch_mul, _access_filter_extra
+                )
+
             start_time = time.time()
             try:
                 # Increment ref count before query (if QueryTracker available)
@@ -627,6 +641,19 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
         else:
             _act_effective_limit = _act_requested_limit
+
+        # Story #653 AC3: Overfetch when reranking is active
+        if params.get("rerank_query"):
+            _act_rc = get_config_service().get_config().rerank_config
+            _act_overfetch_mul = (
+                _act_rc.overfetch_multiplier
+                if _act_rc
+                else _DEFAULT_OVERFETCH_MULTIPLIER
+            )
+            _act_access_extra = _act_effective_limit - _act_requested_limit
+            _act_effective_limit = _mcp_reranking.calculate_overfetch_limit(
+                _act_requested_limit, _act_overfetch_mul, _act_access_extra
+            )
 
         _evolution_limit_activated = params.get("evolution_limit")
         result = _utils.app_module.semantic_query_manager.query_user_repositories(
@@ -2840,13 +2867,16 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 
         # Story #653/#654: Apply cross-encoder reranking after retrieval, before truncation
         _regex_limit = _coerce_int(args.get("max_results"), len(matches))
-        matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+        _rerank_kwargs = dict(
             results=matches,
             rerank_query=args.get("rerank_query"),
             rerank_instruction=args.get("rerank_instruction"),
             content_extractor=lambda r: r.get("line_content", "") or "",
             requested_limit=_regex_limit,
             config_service=get_config_service(),
+        )
+        matches, _rerank_meta = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: _mcp_reranking._apply_reranking_sync(**_rerank_kwargs)
         )
 
         # Story #684: Apply payload truncation to regex search results
@@ -4688,15 +4718,34 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
             for m in result.matches
         ]
 
+        # Story #653/#654: Apply cross-encoder reranking after retrieval, before return
+        _commit_limit = _coerce_int(args.get("limit"), len(matches))
+        matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+            results=matches,
+            rerank_query=args.get("rerank_query"),
+            rerank_instruction=args.get("rerank_instruction"),
+            content_extractor=lambda r: (
+                ((r.get("subject") or "") + " " + (r.get("body") or "")).strip()
+            ),
+            requested_limit=_commit_limit,
+            config_service=get_config_service(),
+        )
+
         return _mcp_response(
             {
                 "success": True,
                 "query": result.query,
                 "is_regex": result.is_regex,
                 "matches": matches,
-                "total_matches": result.total_matches,
+                "total_matches": len(matches),
                 "truncated": result.truncated,
                 "search_time_ms": result.search_time_ms,
+                # Story #654: reranker telemetry
+                "query_metadata": {
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+                },
             }
         )
 
@@ -4784,7 +4833,9 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             results=matches,
             rerank_query=args.get("rerank_query"),
             rerank_instruction=args.get("rerank_instruction"),
-            content_extractor=lambda r: r.get("diff_snippet", "") or "",
+            content_extractor=lambda r: (
+                r.get("diff_snippet") or r.get("subject") or ""
+            ),
             requested_limit=_coerce_int(args.get("limit"), 50),
             config_service=get_config_service(),
         )

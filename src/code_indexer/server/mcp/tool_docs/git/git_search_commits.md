@@ -44,10 +44,10 @@ inputSchema:
       default: flat
     rerank_query:
       type: string
-      description: 'Query for cross-encoder reranking. When set, results are reranked by relevance before return. Leave empty for keyword-match order.'
+      description: 'Query for cross-encoder reranking. When set, matching commits are semantically reranked before return. Leave empty to preserve the default commit-match order.'
     rerank_instruction:
       type: string
-      description: 'Instruction prefix for the reranker (e.g. ''Find bug fix commits''). Has no effect without rerank_query.'
+      description: 'Optional instruction prefix for the reranker (e.g. ''Find bug fix commits''). Has no effect without rerank_query. Steers ranking only; does not change which commits match.'
   required:
   - repository_alias
   - query
@@ -104,6 +104,21 @@ outputSchema:
     search_time_ms:
       type: number
       description: Search execution time in ms
+    query_metadata:
+      type: object
+      description: Reranking telemetry when rerank_query is provided
+      properties:
+        reranker_used:
+          type: boolean
+          description: Whether cross-encoder reranking was actually applied
+        reranker_provider:
+          type:
+          - string
+          - 'null'
+          description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+        rerank_time_ms:
+          type: integer
+          description: Time spent in the reranking stage in milliseconds
     error:
       type: string
       description: Error message if failed
@@ -118,11 +133,10 @@ TL;DR: Search commit messages for keywords, ticket numbers, or patterns. WHEN TO
 **rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
 This is DIFFERENT from query: query is a keyword or pattern matched against commit message text,
 while rerank_query is optimized for cross-encoder scoring (verbose natural language descriptions work better).
-Omit rerank_query to return results in keyword-match order (no reranking overhead).
+Omit rerank_query to return results in the default commit-match order (no reranking overhead).
 
-**rerank_instruction**: Optional relevance steering hint passed to the Voyage AI reranker. Has no effect
-without rerank_query or when using the Cohere reranker (which receives the instruction concatenated into
-the query). Example: "Prioritize commits that changed core business logic, not config or formatting".
+**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
+It only influences ranking among the commits already matched. Example: "Prioritize commits that changed core business logic, not config or formatting".
 
 #### When to Use Reranking
 
@@ -130,6 +144,23 @@ Commit message search can be noisy — short commit subjects, formatting convent
 messages create retrieval noise. Cross-encoder reranking re-scores commits against your rerank_query to
 surface commits that best describe what you are looking for. Particularly useful when many commits match
 the keyword but only a few are semantically relevant to your intent.
+
+Reranking for git_search_commits uses the combined commit `subject + body` text. It works best when commit
+messages are reasonably descriptive. Very terse or auto-generated commit messages limit reranker usefulness.
+
+#### What Reranking Does Not Do
+
+Reranking does NOT search additional commits. It only reorders the commits already matched by query or regex.
+
+#### Returned Telemetry
+
+When reranking is requested, the response includes query_metadata with:
+- reranker_used
+- reranker_provider
+- rerank_time_ms
+
+If providers are disabled, unavailable, or all rerank attempts fail, the tool falls back to the base commit
+ordering and reports that reranking was not used.
 
 #### Examples
 
@@ -154,6 +185,17 @@ the keyword but only a few are semantically relevant to your intent.
 }
 ```
 
+**With reranking — regex commit search:**
+```json
+{
+  "query": "fix|bug|incident",
+  "is_regex": true,
+  "rerank_query": "commits that fixed a customer-facing production issue in authentication or session handling",
+  "repository_alias": "backend-global",
+  "limit": 20
+}
+```
+
 **Without reranking (intentional opt-out):**
 ```json
 {
@@ -162,4 +204,4 @@ the keyword but only a few are semantically relevant to your intent.
   "limit": 20
 }
 ```
-Result: same commits but in keyword-match order (most recent or relevance by git), with no reranking overhead.
+Result: same commits in the default commit-match order, with no reranking overhead.

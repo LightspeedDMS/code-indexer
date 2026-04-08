@@ -10,11 +10,74 @@ Tests verify:
 Epic #649, Story #653.
 """
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from code_indexer.server.mcp.tools import TOOL_REGISTRY
+
+
+@contextmanager
+def _patched_global_repo_env(rerank_meta: dict, fake_result):
+    """Context manager encapsulating all patches for global-repo search_code tests.
+
+    Args:
+        rerank_meta: Dict returned by the patched _apply_reranking_sync.
+        fake_result: Mock result object returned by _perform_search.
+
+    Yields:
+        mock_utils: The patched _utils module so callers can inspect call args.
+    """
+    with (
+        patch(
+            "code_indexer.server.mcp.handlers._legacy._get_golden_repos_dir",
+            return_value="/fake/golden",
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers._legacy._list_global_repos",
+            return_value=[
+                {
+                    "alias_name": "test-repo-global",
+                    "repo_name": "test-repo",
+                    "repo_url": "https://example.com/test.git",
+                }
+            ],
+        ),
+        patch(
+            "code_indexer.global_repos.alias_manager.AliasManager"
+        ) as mock_alias_mgr_cls,
+        patch("code_indexer.server.mcp.handlers._legacy._utils") as mock_utils,
+        patch(
+            "code_indexer.server.mcp.handlers._legacy.get_config_service",
+            return_value=_make_config_service_with_rerank(),
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers._legacy._get_access_filtering_service",
+            return_value=None,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers._legacy._get_query_tracker",
+            return_value=None,
+        ),
+        patch(
+            "code_indexer.server.mcp.handlers._legacy._get_wiki_enabled_repos",
+            return_value=set(),
+        ),
+        patch("pathlib.Path.exists", return_value=True),
+        patch(
+            "code_indexer.server.mcp.reranking._apply_reranking_sync",
+            return_value=([fake_result.to_dict()], rerank_meta),
+        ),
+    ):
+        mock_alias_mgr_cls.return_value.read_alias.return_value = (
+            "/fake/golden/test-repo-global"
+        )
+        mock_utils.app_module.semantic_query_manager._perform_search.return_value = [
+            fake_result
+        ]
+        mock_utils.app_module.golden_repo_manager = None
+        yield mock_utils
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +398,7 @@ class TestGitSearchDiffsHandlerRerankingWiring:
         sample = {"diff_snippet": "+def foo(): return 42"}
         assert extractor(sample) == "+def foo(): return 42"
         sample_empty = {"subject": "no snippet"}
-        assert extractor(sample_empty) == ""
+        assert extractor(sample_empty) == "no snippet"
 
 
 class TestGitSearchCommitsHandlerRerankingWiring:
@@ -434,6 +497,106 @@ class TestGitSearchCommitsHandlerRerankingWiring:
         assert extractor(sample) == "fix: auth bug Details here."
         sample_no_body = {"subject": "chore: bump", "body": ""}
         assert extractor(sample_no_body) == "chore: bump"
+
+
+# ---------------------------------------------------------------------------
+# PART 5: Story #653 AC3 — overfetch limit wired in handlers
+# ---------------------------------------------------------------------------
+
+
+class TestAC3OverfetchLimitGlobalPath:
+    """search_code (global repo path) must query with overfetched limit when reranking."""
+
+    def test_perform_search_called_with_overfetch_limit_when_rerank_query_set(self):
+        """_perform_search must receive limit=requested*overfetch_multiplier (5*5=25)."""
+        from code_indexer.server.mcp.handlers._legacy import search_code
+
+        fake = _fake_search_result()
+        params = {
+            "repository_alias": "test-repo-global",
+            "query_text": "foo function",
+            "rerank_query": "find the foo function",
+            "limit": 5,
+        }
+        with _patched_global_repo_env(_default_rerank_meta(), fake) as mock_utils:
+            search_code(params, _fake_user())
+
+        call_args = (
+            mock_utils.app_module.semantic_query_manager._perform_search.call_args
+        )
+        actual_limit = call_args[1].get(
+            "limit", call_args[0][3] if len(call_args[0]) > 3 else None
+        )
+        assert actual_limit == 25, (
+            f"Expected _perform_search called with limit=25 (5*5), got {actual_limit}"
+        )
+
+    def test_perform_search_uses_requested_limit_without_rerank_query(self):
+        """Without rerank_query, _perform_search must receive the plain requested limit."""
+        from code_indexer.server.mcp.handlers._legacy import search_code
+
+        fake = _fake_search_result()
+        no_rerank_meta = {
+            "reranker_used": False,
+            "reranker_provider": None,
+            "rerank_time_ms": 0,
+            "rerank_hint": None,
+        }
+        params = {
+            "repository_alias": "test-repo-global",
+            "query_text": "foo function",
+            "limit": 5,
+        }
+        with _patched_global_repo_env(no_rerank_meta, fake) as mock_utils:
+            search_code(params, _fake_user())
+
+        call_args = (
+            mock_utils.app_module.semantic_query_manager._perform_search.call_args
+        )
+        actual_limit = call_args[1].get(
+            "limit", call_args[0][3] if len(call_args[0]) > 3 else None
+        )
+        assert actual_limit == 5, (
+            f"Expected _perform_search called with limit=5 (no reranking), got {actual_limit}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Named constants for AC3 / overfetch tests
+# ---------------------------------------------------------------------------
+
+_TEST_SIMILARITY_SCORE = 0.9
+_TEST_RERANK_TIME_MS = 5
+
+
+def _fake_user():
+    """Return a mock User with username 'testuser'."""
+    from code_indexer.server.auth.user_manager import User
+
+    user = MagicMock(spec=User)
+    user.username = "testuser"
+    return user
+
+
+def _fake_search_result():
+    """Return a mock result object with a .to_dict() returning a standard dict."""
+    result = MagicMock()
+    result.to_dict.return_value = {
+        "file_path": "src/foo.py",
+        "content": "def foo(): return 42",
+        "similarity_score": _TEST_SIMILARITY_SCORE,
+    }
+    return result
+
+
+def _default_rerank_meta():
+    """Return a minimal rerank_metadata dict for tests that need reranking active."""
+    return {
+        "reranker_used": True,
+        "reranker_provider": "voyage",
+        "rerank_time_ms": _TEST_RERANK_TIME_MS,
+        "rerank_hint": None,
+    }
 
 
 # ---------------------------------------------------------------------------

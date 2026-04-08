@@ -182,10 +182,10 @@ inputSchema:
         results organized under results_by_repo by repository.'
     rerank_query:
       type: string
-      description: 'Query for cross-encoder reranking. When set, results are reranked by relevance before return. Leave empty for embedding-similarity order.'
+      description: 'Query for cross-encoder reranking. When set, the server overfetches additional candidates, reranks them for the selected search mode, and returns up to limit results. Leave empty to preserve the default retrieval order.'
     rerank_instruction:
       type: string
-      description: 'Instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query.'
+      description: 'Optional instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query. Steers ranking only; does not widen recall.'
   required:
   - query_text
 outputSchema:
@@ -309,6 +309,17 @@ outputSchema:
             timeout_occurred:
               type: boolean
               description: Whether query timed out
+            reranker_used:
+              type: boolean
+              description: Whether cross-encoder reranking was actually applied
+            reranker_provider:
+              type:
+              - string
+              - 'null'
+              description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+            rerank_time_ms:
+              type: integer
+              description: Time spent in the reranking stage in milliseconds
     error:
       type: string
       description: Error message (present when success=False)
@@ -346,19 +357,43 @@ EXAMPLE: search_code('authentication logic', repository_alias='backend-global', 
 ### Reranking Parameters (Optional)
 
 **rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
-This is DIFFERENT from query_text: query_text is optimized for HNSW embedding lookup (short keywords work well),
-while rerank_query is optimized for cross-encoder scoring (verbose natural language descriptions work better).
-Omit rerank_query to return results in embedding-similarity order (no reranking overhead).
+This is DIFFERENT from query_text: query_text drives candidate retrieval, while rerank_query is optimized for
+cross-encoder scoring over the retrieved candidates. Use concise terms or identifiers in query_text to find
+candidates; use a more explicit natural-language description in rerank_query to improve final ordering.
+Omit rerank_query to return results in the default retrieval order for the selected search mode (no reranking overhead).
 
-**rerank_instruction**: Optional relevance steering hint passed to the Voyage AI reranker. Has no effect
-without rerank_query or when using the Cohere reranker (which receives the instruction concatenated into
-the query). Example: "Focus on production code, not test fixtures".
+**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
+It only influences ranking within the retrieved candidate set; it does not cause additional files or snippets to be found.
+Example: "Focus on production code, not test fixtures".
 
 #### When to Use Reranking
 
 Embedding similarity scores code by vector distance, which may not match human-judged relevance for complex
 queries. Cross-encoder reranking re-scores each result against your rerank_query using a language model,
-producing better relevance ordering for detailed or nuanced queries.
+producing better relevance ordering for detailed or nuanced queries. This is useful for semantic, FTS, hybrid,
+regex-enabled FTS, and temporal search paths when the base retrieval step finds plausible candidates but not the
+best ordering.
+
+#### What Reranking Does Not Do
+
+Reranking does NOT expand recall. It only reorders the candidate set already retrieved by search_code.
+If the base query fails to retrieve the relevant file, reranking cannot recover it. Reranking quality therefore
+depends on the initial candidate pool and the configured overfetch multiplier.
+
+#### When Not to Use Reranking
+
+Skip reranking for exact identifier lookups, very small result sets, or quick exploratory searches where the
+default retrieval order is already good enough. Reranking is opt-in and adds latency.
+
+#### Returned Telemetry
+
+When reranking is requested, query_metadata reports whether reranking actually ran and which provider handled it:
+- reranker_used
+- reranker_provider
+- rerank_time_ms
+
+If providers are unavailable, disabled, or all rerank attempts fail, the tool falls back to the base retrieval
+order and the telemetry reflects that reranking was not used.
 
 #### Examples
 
@@ -373,11 +408,12 @@ producing better relevance ordering for detailed or nuanced queries.
 }
 ```
 
-**With reranking — finding error handling:**
+**With reranking — hybrid/FTS query with semantic prioritization:**
 ```json
 {
-  "query_text": "error handling retry",
-  "rerank_query": "code that catches exceptions and retries failed operations with exponential backoff",
+  "query_text": "authenticate session token",
+  "search_mode": "hybrid",
+  "rerank_query": "production code that validates a session token and rejects expired or malformed credentials",
   "repository_alias": "backend-global",
   "limit": 10
 }

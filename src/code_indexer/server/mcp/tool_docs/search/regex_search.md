@@ -69,10 +69,10 @@ inputSchema:
       default: flat
     rerank_query:
       type: string
-      description: 'Query for cross-encoder reranking. When set, results are reranked by relevance before return. Leave empty for pattern-match order.'
+      description: 'Query for cross-encoder reranking. When set, regex hits are semantically reranked before return. Leave empty to preserve the default match order.'
     rerank_instruction:
       type: string
-      description: 'Instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query.'
+      description: 'Optional instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query. Steers ranking only; does not change which regex matches are found.'
   required:
   - repository_alias
   - pattern
@@ -112,6 +112,21 @@ outputSchema:
       type: string
     search_time_ms:
       type: number
+    query_metadata:
+      type: object
+      description: Reranking telemetry when rerank_query is provided
+      properties:
+        reranker_used:
+          type: boolean
+          description: Whether cross-encoder reranking was actually applied
+        reranker_provider:
+          type:
+          - string
+          - 'null'
+          description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+        rerank_time_ms:
+          type: integer
+          description: Time spent in the reranking stage in milliseconds
     error:
       type: string
       description: Error message if failed
@@ -130,11 +145,10 @@ EXAMPLE: regex_search(repository_alias='backend-global', pattern='def authentica
 **rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
 This is DIFFERENT from the pattern parameter: pattern is a regex used for exact structural matching,
 while rerank_query is optimized for cross-encoder scoring (verbose natural language descriptions work better).
-Omit rerank_query to return results in pattern-match order (no reranking overhead).
+Omit rerank_query to return results in the default regex match order (no reranking overhead).
 
-**rerank_instruction**: Optional relevance steering hint passed to the Voyage AI reranker. Has no effect
-without rerank_query or when using the Cohere reranker (which receives the instruction concatenated into
-the query). Example: "Focus on production authentication code, not test stubs".
+**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
+It only influences ranking of the regex hits already found. Example: "Focus on production authentication code, not test stubs".
 
 #### When to Use Reranking
 
@@ -142,6 +156,29 @@ Regex results have NO semantic ordering — results are ordered by file path or 
 relevance. Cross-encoder reranking adds semantic relevance scoring on top of regex pattern matching,
 ensuring the most semantically relevant matches appear first. This is especially valuable when a pattern
 matches many files but only a subset are actually relevant to your intent.
+
+Reranking for regex_search is based on each match's `line_content`, not the full file. It works best when
+the matching line carries meaningful context. Very short or ambiguous match lines may rerank poorly.
+
+#### What Reranking Does Not Do
+
+Reranking does NOT find additional regex matches. It only reorders the matches already returned by the
+pattern search.
+
+#### When Not to Use Reranking
+
+Skip reranking when doing exhaustive auditing or compliance-style searches where completeness matters but
+semantic prioritization does not. It also adds latency for broad searches with many matches.
+
+#### Returned Telemetry
+
+When reranking is requested, the response includes query_metadata with:
+- reranker_used
+- reranker_provider
+- rerank_time_ms
+
+If reranking is requested but providers are disabled, unavailable, or all attempts fail, the tool returns
+the base regex ordering and reports that reranking was not used.
 
 #### Examples
 
@@ -153,6 +190,16 @@ matches many files but only a subset are actually relevant to your intent.
   "rerank_instruction": "Focus on production code, not test fixtures or mock helpers",
   "repository_alias": "backend-global",
   "max_results": 20
+}
+```
+
+**With reranking — broad pattern narrowed semantically:**
+```json
+{
+  "pattern": "auth|token|session",
+  "rerank_query": "production authentication code that validates tokens or creates authenticated sessions",
+  "repository_alias": "backend-global",
+  "max_results": 30
 }
 ```
 
