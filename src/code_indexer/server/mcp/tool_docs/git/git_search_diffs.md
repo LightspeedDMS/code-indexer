@@ -128,14 +128,17 @@ TL;DR: Find when specific code was added/removed in git history (pickaxe search)
 
 ### Reranking Parameters (Optional)
 
-**rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
-This is DIFFERENT from search_string/search_pattern: those find commits where the literal text or pattern
-appeared or disappeared, while rerank_query is optimized for cross-encoder scoring (verbose natural language
-descriptions work better) to re-score the matched commits for semantic relevance.
-Omit rerank_query to return results in the default diff-match order (no reranking overhead).
+**Mental model — two-query pattern**: Use `search_string`/`search_pattern` (literal text or regex) to find commits where code was added or removed; use `rerank_query` (verbose natural language) to pick the best ordering from those matches. These serve different purposes.
 
-**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
-It only influences ranking among the matched diffs. Example: "Focus on commits that introduced a vulnerability, not refactors or renames".
+- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing the ideal change. The cross-encoder scores each `diff_snippet` (or commit subject if no snippet) against this description.
+- **rerank_instruction** = WHAT to deprioritize. Steer the reranker away from noise. Example: "Focus on commits that introduced a vulnerability, not refactors or renames". Has no effect without rerank_query.
+
+#### When to Proactively Add Reranking
+
+Consider adding rerank_query even when the user did not ask for it explicitly:
+- The search string is common and matches many commits, but the user only cares about a specific kind of change
+- The result set will likely be >5 diff matches where ordering matters
+- Chronological or diff-position order does not reflect what the user actually wants on top
 
 #### When to Use Reranking
 

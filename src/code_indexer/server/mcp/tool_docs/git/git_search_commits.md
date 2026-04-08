@@ -130,13 +130,17 @@ TL;DR: Search commit messages for keywords, ticket numbers, or patterns. WHEN TO
 
 ### Reranking Parameters (Optional)
 
-**rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
-This is DIFFERENT from query: query is a keyword or pattern matched against commit message text,
-while rerank_query is optimized for cross-encoder scoring (verbose natural language descriptions work better).
-Omit rerank_query to return results in the default commit-match order (no reranking overhead).
+**Mental model — two-query pattern**: Use `query` (short keyword or regex) to find matching commits; use `rerank_query` (verbose natural language) to pick the best ordering from those matches. These serve different purposes.
 
-**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
-It only influences ranking among the commits already matched. Example: "Prioritize commits that changed core business logic, not config or formatting".
+- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing your ideal commit. The cross-encoder scores each commit's `subject + body` text against this description.
+- **rerank_instruction** = WHAT to deprioritize. Steer the reranker away from noise. Example: "Prioritize commits that changed core business logic, not config or formatting". Has no effect without rerank_query.
+
+#### When to Proactively Add Reranking
+
+Consider adding rerank_query even when the user did not ask for it explicitly:
+- The keyword matches many commits but the user only cares about a specific kind of change
+- The result set will likely be >5 commits where ordering matters
+- Chronological or keyword-match order does not reflect what the user actually wants on top
 
 #### When to Use Reranking
 

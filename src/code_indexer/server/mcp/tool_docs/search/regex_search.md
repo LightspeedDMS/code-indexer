@@ -142,13 +142,17 @@ EXAMPLE: regex_search(repository_alias='backend-global', pattern='def authentica
 
 ### Reranking Parameters (Optional)
 
-**rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
-This is DIFFERENT from the pattern parameter: pattern is a regex used for exact structural matching,
-while rerank_query is optimized for cross-encoder scoring (verbose natural language descriptions work better).
-Omit rerank_query to return results in the default regex match order (no reranking overhead).
+**Mental model — two-query pattern**: Use `pattern` (exact regex) to find matching lines; use `rerank_query` (verbose natural language) to pick the best ordering from those matches. These serve different purposes.
 
-**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
-It only influences ranking of the regex hits already found. Example: "Focus on production authentication code, not test stubs".
+- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing your ideal match. The cross-encoder scores each `line_content` against this description.
+- **rerank_instruction** = WHAT to deprioritize. Steer the reranker away from noise. Example: "Focus on production authentication code, not test stubs". Has no effect without rerank_query.
+
+#### When to Proactively Add Reranking
+
+Consider adding rerank_query even when the user did not ask for it explicitly:
+- The pattern is broad and matches many files, but the user only cares about a subset
+- The result set will likely be >5 matches where ordering matters
+- File-path or match-position ordering does not reflect what the user actually wants on top
 
 #### When to Use Reranking
 

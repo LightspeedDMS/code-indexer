@@ -356,15 +356,17 @@ EXAMPLE: search_code('authentication logic', repository_alias='backend-global', 
 
 ### Reranking Parameters (Optional)
 
-**rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
-This is DIFFERENT from query_text: query_text drives candidate retrieval, while rerank_query is optimized for
-cross-encoder scoring over the retrieved candidates. Use concise terms or identifiers in query_text to find
-candidates; use a more explicit natural-language description in rerank_query to improve final ordering.
-Omit rerank_query to return results in the default retrieval order for the selected search mode (no reranking overhead).
+**Mental model — two-query pattern**: Use `query_text` (short, concise) to retrieve candidates; use `rerank_query` (verbose natural language) to pick the best ordering from those candidates. These serve different purposes and should be written differently.
 
-**rerank_instruction**: Optional relevance steering hint for the reranker. Has no effect without rerank_query.
-It only influences ranking within the retrieved candidate set; it does not cause additional files or snippets to be found.
-Example: "Focus on production code, not test fixtures".
+- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing your ideal result. The cross-encoder reads both this and each result snippet to score relevance.
+- **rerank_instruction** = WHAT to deprioritize. Steer the reranker away from noise. Example: "Focus on production implementation, not test fixtures or mock helpers". Has no effect without rerank_query.
+
+#### When to Proactively Add Reranking
+
+Consider adding rerank_query even when the user did not ask for it explicitly:
+- The user's intent is conceptual or multi-faceted (not a simple identifier lookup)
+- The result set will likely be >5 candidates where ordering matters
+- The base retrieval order (embedding similarity, file-path, chronological) does not match what the user actually wants on top
 
 #### When to Use Reranking
 
