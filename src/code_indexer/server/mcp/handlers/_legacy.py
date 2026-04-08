@@ -34,7 +34,9 @@ from code_indexer.server.repositories.activated_repo_manager import (
 )
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.global_repos.alias_manager import AliasManager
+from code_indexer.global_repos.git_operations import GitOperationsService
 from code_indexer.global_repos.global_registry import GlobalRegistry
+from code_indexer.server.mcp import reranking as _mcp_reranking
 
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
@@ -554,6 +556,19 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
                 response_results.append(result_dict)
 
+            # Story #653: Apply cross-encoder reranking after retrieval, before truncation
+            _rerank_query = params.get("rerank_query")
+            _rerank_instruction = params.get("rerank_instruction")
+            response_results, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=response_results,
+                rerank_query=_rerank_query,
+                rerank_instruction=_rerank_instruction,
+                content_extractor=lambda r: r.get("content", "")
+                or r.get("code_snippet", ""),
+                requested_limit=_requested_limit,
+                config_service=get_config_service(),
+            )
+
             # Apply payload truncation based on search mode
             # Story #50: Truncation functions are now sync
             search_mode = params.get("search_mode", "semantic")
@@ -591,6 +606,10 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "execution_time_ms": execution_time_ms,
                     "repositories_searched": 1,
                     "timeout_occurred": timeout_occurred,
+                    # Story #654: reranker telemetry
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
                 },
             }
 
@@ -686,6 +705,25 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     golden_alias = repo_alias.replace("-global", "")
                     category_info = category_map.get(golden_alias, {})
                     res["repo_category"] = category_info.get("category_name")
+
+        # Story #653/#654: Apply cross-encoder reranking after retrieval, before truncation
+        if "results" in result and isinstance(result["results"], list):
+            _rerank_query = params.get("rerank_query")
+            _rerank_instruction = params.get("rerank_instruction")
+            result["results"], _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=result["results"],
+                rerank_query=_rerank_query,
+                rerank_instruction=_rerank_instruction,
+                content_extractor=lambda r: r.get("content", "")
+                or r.get("code_snippet", ""),
+                requested_limit=_act_requested_limit,
+                config_service=get_config_service(),
+            )
+            # Story #654: inject telemetry into query_metadata (create if absent)
+            _qm: dict = result.setdefault("query_metadata", {})  # type: ignore[assignment]  # result typed as Dict[str,object]; setdefault returns object not dict
+            _qm["reranker_used"] = _rerank_meta["reranker_used"]
+            _qm["reranker_provider"] = _rerank_meta["reranker_provider"]
+            _qm["rerank_time_ms"] = _rerank_meta["rerank_time_ms"]
 
         # Apply payload truncation based on search mode
         # Story #50: Truncation functions are now sync
@@ -2800,6 +2838,17 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                 wiki_enabled_repos,
             )
 
+        # Story #653/#654: Apply cross-encoder reranking after retrieval, before truncation
+        _regex_limit = _coerce_int(args.get("max_results"), len(matches))
+        matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+            results=matches,
+            rerank_query=args.get("rerank_query"),
+            rerank_instruction=args.get("rerank_instruction"),
+            content_extractor=lambda r: r.get("line_content", "") or "",
+            requested_limit=_regex_limit,
+            config_service=get_config_service(),
+        )
+
         # Story #684: Apply payload truncation to regex search results
         # Story #50: Truncation functions are now sync
         matches = _apply_regex_payload_truncation(matches)
@@ -2823,6 +2872,12 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
                 "truncated": result.truncated,
                 "search_engine": result.search_engine,
                 "search_time_ms": result.search_time_ms,
+                # Story #654: reranker telemetry
+                "query_metadata": {
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+                },
             }
         )
 
@@ -4528,6 +4583,19 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
 
     elapsed_ms = int((time.time() - start_time) * 1000)
 
+    # Story #653/#654: Apply cross-encoder reranking after collecting all matches, before formatting
+    _commit_limit = _coerce_int(args.get("limit"), len(all_matches))
+    all_matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+        results=all_matches,
+        rerank_query=args.get("rerank_query"),
+        rerank_instruction=args.get("rerank_instruction"),
+        content_extractor=lambda r: (
+            ((r.get("subject") or "") + " " + (r.get("body") or "")).strip()
+        ),
+        requested_limit=_commit_limit,
+        config_service=get_config_service(),
+    )
+
     # Story #331 AC7: Filter errors dict to hide unauthorized repo aliases
     _ac7_service = _get_access_filtering_service()
     if _ac7_service and not _ac7_service.is_admin_user(user.username):
@@ -4549,6 +4617,12 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
     formatted["is_regex"] = is_regex
     formatted["truncated"] = truncated
     formatted["search_time_ms"] = elapsed_ms
+    # Story #654: reranker telemetry
+    formatted["query_metadata"] = {
+        "reranker_used": _rerank_meta["reranker_used"],
+        "reranker_provider": _rerank_meta["reranker_provider"],
+        "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+    }
     if response_format == "flat":
         formatted["matches"] = formatted.pop("results")
         formatted["total_matches"] = formatted.pop("total_results")
@@ -4637,7 +4711,6 @@ def handle_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any
 def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for git_search_diffs tool - search for code changes (pickaxe search)."""
     from pathlib import Path
-    from code_indexer.global_repos.git_operations import GitOperationsService
 
     repository_alias = args.get("repository_alias")
     search_string = args.get("search_string")
@@ -4706,6 +4779,16 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             for m in result.matches
         ]
 
+        # Story #653/#654: Apply cross-encoder reranking after retrieval, before return
+        matches, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+            results=matches,
+            rerank_query=args.get("rerank_query"),
+            rerank_instruction=args.get("rerank_instruction"),
+            content_extractor=lambda r: r.get("diff_snippet", "") or "",
+            requested_limit=_coerce_int(args.get("limit"), 50),
+            config_service=get_config_service(),
+        )
+
         return _mcp_response(
             {
                 "success": True,
@@ -4715,6 +4798,12 @@ def handle_git_search_diffs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "total_matches": result.total_matches,
                 "truncated": result.truncated,
                 "search_time_ms": result.search_time_ms,
+                # Story #654: reranker telemetry
+                "query_metadata": {
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+                },
             }
         )
 

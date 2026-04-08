@@ -4991,6 +4991,8 @@ def _get_current_config() -> dict:
         IndexingConfig,
         # Story #400 - Data retention configuration
         DataRetentionConfig,
+        # Story #652 - Reranking configuration
+        RerankConfig,
     )
     from dataclasses import asdict
 
@@ -5199,6 +5201,8 @@ def _get_current_config() -> dict:
         ),
         # Story #400: Data retention configuration
         "data_retention": settings.get("data_retention", asdict(DataRetentionConfig())),
+        # Story #652: Reranking configuration
+        "rerank": settings.get("rerank", asdict(RerankConfig())),
     }
 
 
@@ -6158,6 +6162,20 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Cache Max Entries must be a valid number"
 
+    elif section == "rerank":
+        # Story #652: Reranking configuration validation
+        for field_name, label in [
+            ("overfetch_multiplier", "Overfetch Multiplier"),
+        ]:
+            field_value = data.get(field_name)
+            if field_value is not None:
+                try:
+                    val_int = int(field_value)
+                    if val_int < 1:
+                        return f"{label} must be a positive integer"
+                except (ValueError, TypeError):
+                    return f"{label} must be a valid number"
+
     return None
 
 
@@ -6916,6 +6934,8 @@ async def update_config_section(
         "wiki",
         # Story #400 - Data retention configuration
         "data_retention",
+        # Story #652 - Reranking configuration
+        "rerank",
     ]
     if section not in valid_sections:
         return _create_config_page_response(

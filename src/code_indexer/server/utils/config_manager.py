@@ -859,6 +859,31 @@ class LoginSecurityConfig:
 
 
 @dataclass
+class RerankConfig:
+    """
+    Reranking configuration (Story #652 — Epic #649 Voyage AI + Cohere Reranker).
+
+    Controls which reranker providers are active and how many candidate results to
+    fetch before reranking.
+
+    Empty model strings mean that provider is disabled.  Consumers should use the
+    pattern ``config.rerank_config or RerankConfig()`` to get defaults when the
+    field is None (fresh install, no DB entry).
+
+    overfetch_multiplier is applied regardless of query accuracy mode: the pipeline
+    fetches (requested_limit * overfetch_multiplier) candidates, reranks them, then
+    returns the top requested_limit results.
+    """
+
+    # Provider model names — empty string means provider is disabled
+    voyage_reranker_model: str = ""
+    cohere_reranker_model: str = ""
+
+    # Single overfetch multiplier applied for all query accuracy modes
+    overfetch_multiplier: int = 5  # fetch N× the requested limit before reranking
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -936,6 +961,9 @@ class ServerConfig:
     login_security_config: Optional[LoginSecurityConfig] = None  # Story #557
     mfa_config: Optional[MfaConfig] = None  # Story #558
     password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
+
+    # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
+    rerank_config: Optional[RerankConfig] = None
 
     # Epic #408 - Cluster mode configuration
     storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
@@ -1491,6 +1519,12 @@ class ServerConfigManager:
             config_dict["wiki_config"], dict
         ):
             config_dict["wiki_config"] = WikiConfig(**config_dict["wiki_config"])
+
+        # Story #652: Convert rerank_config dict to RerankConfig
+        if "rerank_config" in config_dict and isinstance(
+            config_dict["rerank_config"], dict
+        ):
+            config_dict["rerank_config"] = RerankConfig(**config_dict["rerank_config"])
 
         # Story #400: Convert data_retention_config dict to DataRetentionConfig
         if "data_retention_config" in config_dict and isinstance(

@@ -1070,6 +1070,71 @@ function saveLlmCredsConfig() {
 
 <!-- Content Limits Settings Section (Story #32 - Unified Content Limits Configuration) -->
 
+<!-- Reranking Settings Section (Story #652) -->
+<details class="config-section" id="section-rerank">
+    <summary>
+        <h2>Reranking</h2>
+    </summary>
+    <p class="section-description">
+        Configure reranker providers and overfetch multiplier. Leave model fields empty to disable that provider. The overfetch multiplier controls how many extra results are fetched before reranking (e.g., 5 = fetch 5x the requested limit, then rerank down to the final count).
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-rerank">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Voyage Reranker Model</td>
+                        <td class="config-value">{{ config.rerank.voyage_reranker_model if config.rerank.voyage_reranker_model else 'Disabled' }}</td>
+                        <td class="config-note"><small>Empty = provider disabled</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Cohere Reranker Model</td>
+                        <td class="config-value">{{ config.rerank.cohere_reranker_model if config.rerank.cohere_reranker_model else 'Disabled' }}</td>
+                        <td class="config-note"><small>Empty = provider disabled</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Overfetch Multiplier</td>
+                        <td class="config-value">{{ config.rerank.overfetch_multiplier }}</td>
+                        <td class="config-note"><small>Candidates fetched = requested limit × multiplier (default: 5)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('rerank')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-rerank" method="post" action="/admin/config/rerank" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.rerank %}
+            <div class="validation-error">{{ validation_errors.rerank }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="rerank-voyage-model">
+                    Voyage Reranker Model (empty = disabled)
+                    <input type="text" id="rerank-voyage-model" name="voyage_reranker_model" value="{{ config.rerank.voyage_reranker_model }}" placeholder="e.g. rerank-2.5">
+                    <small>Leave empty to disable Voyage reranking</small>
+                </label>
+                <label for="rerank-cohere-model">
+                    Cohere Reranker Model (empty = disabled)
+                    <input type="text" id="rerank-cohere-model" name="cohere_reranker_model" value="{{ config.rerank.cohere_reranker_model }}" placeholder="e.g. rerank-english-v3.0">
+                    <small>Leave empty to disable Cohere reranking</small>
+                </label>
+                <label for="rerank-overfetch-multiplier">
+                    Overfetch Multiplier
+                    <input type="number" id="rerank-overfetch-multiplier" name="overfetch_multiplier" value="{{ config.rerank.overfetch_multiplier }}" min="1">
+                    <small>Fetch this many times the requested limit before reranking (default: 5, must be a positive integer)</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('rerank')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════ -->

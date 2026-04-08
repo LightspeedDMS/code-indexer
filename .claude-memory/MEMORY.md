@@ -15,3 +15,6 @@
 - [feedback_no_sleep_in_production.md](feedback_no_sleep_in_production.md) - NEVER add time.sleep() for UI visibility — fix display logic
 - [feedback_progress_reporting_delicate.md](feedback_progress_reporting_delicate.md) - Ask confirmation before ANY changes to progress reporting
 - [project_query_is_everything.md](project_query_is_everything.md) - Query capability is core value — NEVER remove/break query functionality
+- [feedback_use_codex_for_reviews.md](feedback_use_codex_for_reviews.md) - Always use codex-code-reviewer (not code-reviewer) for all code reviews in this project
+- [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field in either; Voyage prepends instruction to query, Cohere concatenates
+- [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER dual-provider RRF coalescing, BEFORE truncation/caching — mandatory pipeline order for Story #653

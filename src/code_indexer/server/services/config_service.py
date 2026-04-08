@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from ..utils.config_manager import (
     ServerConfigManager,
     ServerConfig,
+    RerankConfig,
 )
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
@@ -547,6 +548,14 @@ class ConfigService:
             },
         }
 
+        # Reranking settings (Story #652)
+        rerank_cfg = config.rerank_config or RerankConfig()
+        settings["rerank"] = {
+            "voyage_reranker_model": rerank_cfg.voyage_reranker_model,
+            "cohere_reranker_model": rerank_cfg.cohere_reranker_model,
+            "overfetch_multiplier": rerank_cfg.overfetch_multiplier,
+        }
+
         return settings
 
     def _get_delegation_settings(self) -> Dict[str, Any]:
@@ -647,6 +656,9 @@ class ConfigService:
         # Story #323 - Wiki metadata fields configuration
         elif category == "wiki":
             self._update_wiki_setting(config, key, value)
+        # Story #652 - Reranking configuration
+        elif category == "rerank":
+            self._update_rerank_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -974,6 +986,22 @@ class ConfigService:
             wiki.metadata_display_order = str(value)
         else:
             raise ValueError(f"Unknown wiki setting: {key}")
+
+    def _update_rerank_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a reranking configuration setting (Story #652)."""
+        if config.rerank_config is None:
+            config.rerank_config = RerankConfig()
+        rerank = config.rerank_config
+        if key == "voyage_reranker_model":
+            rerank.voyage_reranker_model = str(value)
+        elif key == "cohere_reranker_model":
+            rerank.cohere_reranker_model = str(value)
+        elif key == "overfetch_multiplier":
+            rerank.overfetch_multiplier = int(value)
+        else:
+            raise ValueError(f"Unknown rerank setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

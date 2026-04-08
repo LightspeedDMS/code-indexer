@@ -180,6 +180,12 @@ inputSchema:
       default: flat
       description: 'Multi-repo result format. ''flat'' (default): single array with source_repo field per result. ''grouped'':
         results organized under results_by_repo by repository.'
+    rerank_query:
+      type: string
+      description: 'Query for cross-encoder reranking. When set, results are reranked by relevance before return. Leave empty for embedding-similarity order.'
+    rerank_instruction:
+      type: string
+      description: 'Instruction prefix for the reranker (e.g. ''Find implementation, not tests''). Has no effect without rerank_query.'
   required:
   - query_text
 outputSchema:
@@ -336,3 +342,53 @@ LIMIT BEHAVIOR: limit=10 with 3 repos in 'global' mode may return 7+3+0=10. In '
 PERFORMANCE: Start with limit=5. Each result consumes tokens proportional to code snippet size. Large fields may be truncated to snippet_preview + snippet_cache_handle (use get_cached_content to retrieve full content).
 
 EXAMPLE: search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=5)
+
+### Reranking Parameters (Optional)
+
+**rerank_query**: When provided, enables cross-encoder reranking to reorder results by semantic relevance.
+This is DIFFERENT from query_text: query_text is optimized for HNSW embedding lookup (short keywords work well),
+while rerank_query is optimized for cross-encoder scoring (verbose natural language descriptions work better).
+Omit rerank_query to return results in embedding-similarity order (no reranking overhead).
+
+**rerank_instruction**: Optional relevance steering hint passed to the Voyage AI reranker. Has no effect
+without rerank_query or when using the Cohere reranker (which receives the instruction concatenated into
+the query). Example: "Focus on production code, not test fixtures".
+
+#### When to Use Reranking
+
+Embedding similarity scores code by vector distance, which may not match human-judged relevance for complex
+queries. Cross-encoder reranking re-scores each result against your rerank_query using a language model,
+producing better relevance ordering for detailed or nuanced queries.
+
+#### Examples
+
+**With reranking — finding login implementation:**
+```json
+{
+  "query_text": "login authentication",
+  "rerank_query": "function that validates user credentials and creates a session on successful login",
+  "rerank_instruction": "Focus on implementation, not test fixtures",
+  "repository_alias": "backend-global",
+  "limit": 10
+}
+```
+
+**With reranking — finding error handling:**
+```json
+{
+  "query_text": "error handling retry",
+  "rerank_query": "code that catches exceptions and retries failed operations with exponential backoff",
+  "repository_alias": "backend-global",
+  "limit": 10
+}
+```
+
+**Without reranking (intentional opt-out):**
+```json
+{
+  "query_text": "login authentication",
+  "repository_alias": "backend-global",
+  "limit": 10
+}
+```
+Result: same 10 results but in embedding-similarity order, with no reranking overhead.

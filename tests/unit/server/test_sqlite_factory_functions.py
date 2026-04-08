@@ -158,6 +158,14 @@ class TestMCPSSHKeyManagerFactory:
         When called
         Then it creates SSHKeyManager with use_sqlite=True and correct db_path
         """
+        # Import modules BEFORE patch context to avoid triggering app.py's
+        # initialize_services() while get_config_service is mocked.
+        import code_indexer.server.mcp.handlers.ssh_keys as ssh_keys_module
+        from code_indexer.server.mcp.handlers.ssh_keys import get_ssh_key_manager
+
+        # Reset the singleton (lives in ssh_keys submodule, not handlers package)
+        ssh_keys_module._ssh_key_manager = None
+
         # Setup mock config service
         mock_config_manager = Mock()
         mock_config_manager.server_dir = tmp_path
@@ -169,16 +177,8 @@ class TestMCPSSHKeyManagerFactory:
             return_value=mock_config_service,
         ):
             with patch(
-                "code_indexer.server.mcp.handlers.SSHKeyManager"
+                "code_indexer.server.mcp.handlers.ssh_keys.SSHKeyManager"
             ) as mock_manager_class:
-                # Reset the singleton
-                import code_indexer.server.mcp.handlers as handlers_module
-
-                handlers_module._ssh_key_manager = None
-
-                # Import and call the factory function
-                from code_indexer.server.mcp.handlers import get_ssh_key_manager
-
                 get_ssh_key_manager()
 
                 # Verify SSHKeyManager was instantiated with correct params
