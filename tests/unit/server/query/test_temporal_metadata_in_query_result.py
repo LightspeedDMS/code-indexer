@@ -21,6 +21,9 @@ from src.code_indexer.services.temporal.temporal_search_service import (
     TemporalSearchResults,
 )
 
+# Unix timestamp for 2025-05-28 UTC — used in test fixtures for commit_timestamp assertions
+TEST_COMMIT_TS = 1748390400
+
 
 class TestQueryResultTemporalMetadata:
     """Test QueryResult dataclass includes temporal metadata fields."""
@@ -346,10 +349,12 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "diff_type": "modified",
             },
             temporal_context={
-                "first_seen": "2025-03-24",
-                "last_seen": "2025-05-28",
-                "appearance_count": 5,
-                "commits": ["abc123", "def456", "0b7b331"],
+                "commit_hash": "0b7b331",
+                "commit_date": "2025-05-28",
+                "commit_message": "Test commit",
+                "author_name": "Test Author",
+                "commit_timestamp": TEST_COMMIT_TS,
+                "diff_type": "modified",
             },
         )
 
@@ -408,12 +413,14 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert len(results) == 1
             result = results[0]
 
-            # KEY ASSERTION: temporal_context field should be populated
+            # KEY ASSERTION: temporal_context uses new diff-based fields (not legacy first_seen/last_seen)
             assert result.temporal_context is not None
-            assert result.temporal_context["first_seen"] == "2025-03-24"
-            assert result.temporal_context["last_seen"] == "2025-05-28"
-            assert result.temporal_context["commit_count"] == 5
-            assert result.temporal_context["commits"] == ["abc123", "def456", "0b7b331"]
+            assert result.temporal_context["commit_hash"] == "0b7b331"
+            assert result.temporal_context["commit_date"] == "2025-05-28"
+            assert result.temporal_context["commit_message"] == "Test commit"
+            assert result.temporal_context["author_name"] == "Test Author"
+            assert result.temporal_context["commit_timestamp"] == TEST_COMMIT_TS
+            assert result.temporal_context["diff_type"] == "modified"
 
     def test_execute_temporal_query_to_dict_produces_expected_mcp_response(
         self, semantic_query_manager, temp_data_dir
@@ -436,14 +443,12 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 "diff_type": "modified",
             },
             temporal_context={
-                "first_seen": "2025-03-24",
-                "last_seen": "2025-05-28",
-                "appearance_count": 5,
-                "commits": [
-                    {"hash": "abc123", "date": "2025-03-24"},
-                    {"hash": "def456", "date": "2025-04-15"},
-                    {"hash": "0b7b331", "date": "2025-05-28"},
-                ],
+                "commit_hash": "0b7b331",
+                "commit_date": "2025-05-28",
+                "commit_message": "EVO-45522 Making changes to the PartsTransferPanel Layout.",
+                "author_name": "Ryan Pearson",
+                "commit_timestamp": TEST_COMMIT_TS,
+                "diff_type": "modified",
             },
         )
 
@@ -528,11 +533,17 @@ class TestExecuteTemporalQueryMetadataExtraction:
             )
             assert result_dict["metadata"]["diff_type"] == "modified"
 
-            # Verify temporal_context in response
+            # Verify temporal_context uses new diff-based fields (not legacy first_seen/last_seen)
             assert "temporal_context" in result_dict
-            assert result_dict["temporal_context"]["first_seen"] == "2025-03-24"
-            assert result_dict["temporal_context"]["last_seen"] == "2025-05-28"
-            assert result_dict["temporal_context"]["commit_count"] == 5
+            assert result_dict["temporal_context"]["commit_hash"] == "0b7b331"
+            assert result_dict["temporal_context"]["commit_date"] == "2025-05-28"
+            assert (
+                result_dict["temporal_context"]["commit_message"]
+                == "EVO-45522 Making changes to the PartsTransferPanel Layout."
+            )
+            assert result_dict["temporal_context"]["author_name"] == "Ryan Pearson"
+            assert result_dict["temporal_context"]["commit_timestamp"] == TEST_COMMIT_TS
+            assert result_dict["temporal_context"]["diff_type"] == "modified"
 
     def test_execute_temporal_query_handles_missing_metadata_fields_gracefully(
         self, semantic_query_manager, temp_data_dir
@@ -549,8 +560,8 @@ class TestExecuteTemporalQueryMetadataExtraction:
                 # Missing: commit_date, author_name, author_email, commit_message, diff_type
             },
             temporal_context={
-                "first_seen": "2025-03-24",
-                # Missing: last_seen, appearance_count, commits
+                "commit_hash": "abc123",
+                # Missing: commit_date, commit_message, author_name, commit_timestamp, diff_type
             },
         )
 
@@ -616,6 +627,8 @@ class TestExecuteTemporalQueryMetadataExtraction:
             assert result.metadata.get("commit_date") is None
             assert result.metadata.get("author_name") is None
 
-            # Temporal context should exist with available fields
+            # Temporal context should exist with available new diff-based fields (others None)
             assert result.temporal_context is not None
-            assert result.temporal_context["first_seen"] == "2025-03-24"
+            assert result.temporal_context["commit_hash"] == "abc123"
+            assert result.temporal_context.get("commit_date") is None
+            assert result.temporal_context.get("author_name") is None

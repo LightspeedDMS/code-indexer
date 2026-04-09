@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.2
+
+### Fixes
+
+- fix: Temporal index anti-fallback — removed dishonest "Showing results from current code only" fallback messaging when a temporal index is unavailable. The old behavior silently returned a warning claiming to show current-code results; the corrected behavior returns an empty result set and an honest message stating "No results returned. Build the temporal index with 'cidx index --index-commits' to enable time-range queries." Applies to both MCP/REST (server) and CLI paths. Rule: graceful failure over forced success (Messi Rule #2).
+
+- fix: Temporal query `temporal_context` field mapping — `_execute_temporal_query` was reading legacy fields (`first_seen`, `last_seen`, `appearance_count`, `commits`) from `TemporalSearchResult.temporal_context` that no longer exist in the current diff-based implementation, causing all temporal_context fields to be `None` in query responses. Fixed by mapping the actual current fields: `commit_hash`, `commit_date`, `commit_message`, `author_name`, `commit_timestamp`, `diff_type`. Verified end-to-end with a real git repo, temporal index, and CLI query confirming all fields populated with real data.
+
 ## v9.14.1
 
 ### Fixes

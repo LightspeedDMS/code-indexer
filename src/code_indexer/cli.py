@@ -5289,6 +5289,8 @@ def query(
                 console.print(
                     f"📊 Found {len(temporal_results.results)} results (total matches: {temporal_results.total_found})"
                 )
+                if temporal_results.warning:
+                    console.print(f"⚠️  {temporal_results.warning}", style="yellow")
                 console.print()
 
             # Display results using new Story 2.1 implementation

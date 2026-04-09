@@ -302,7 +302,7 @@ class SemanticQueryResponse(BaseModel):
     query_metadata: QueryMetadata
     warning: Optional[str] = Field(
         default=None,
-        description="Warning message for graceful fallbacks (e.g., missing temporal index)",
+        description="Warning message when temporal index is unavailable",
     )
 
 

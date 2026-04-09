@@ -593,8 +593,9 @@ class SemanticQueryManager:
         warning_message = None
         if has_temporal_params and len(results) == 0:
             warning_message = (
-                "Temporal index not available. Showing results from current code only. "
-                "Build temporal index with 'cidx index --index-commits' to enable temporal queries."
+                "Temporal index not available for this repository. "
+                "No results returned. "
+                "Build the temporal index with 'cidx index --index-commits' to enable time-range queries."
             )
 
         # Build response with temporal context in results
@@ -982,7 +983,7 @@ class SemanticQueryManager:
         - 'hybrid': Combined FTS + semantic search with result fusion
 
         For temporal queries (when time_range, at_commit, or show_evolution provided),
-        uses TemporalSearchService with graceful fallback to regular search if temporal
+        uses TemporalSearchService; returns empty list with error if temporal
         index not available.
 
         For composite repositories (proxy_mode=true), delegates to CLI integration
@@ -1913,12 +1914,12 @@ class SemanticQueryManager:
         path_filter: Optional[str] = None,
         exclude_path: Optional[str] = None,
     ) -> List[QueryResult]:
-        """Execute temporal query using TemporalSearchService with graceful fallback.
+        """Execute temporal query using TemporalSearchService.
 
         Story #446: Temporal Query Parameters via API
 
         Integrates TemporalSearchService for time-based code searches. If temporal
-        index not available, gracefully falls back to regular search with warning.
+        index not available, returns empty list with warning — no fallback to regular search.
 
         Args:
             repo_path: Repository path
@@ -1993,7 +1994,7 @@ class SemanticQueryManager:
                 logger.warning(
                     format_error_log(
                         "QUERY-MIGRATE-009",
-                        "Temporal index not available for repository, falling back to regular search",
+                        "Temporal index not available for repository, returning empty results",
                         repository_alias=repository_alias,
                     ),
                     extra=get_log_extra("QUERY-MIGRATE-009"),
@@ -2015,14 +2016,18 @@ class SemanticQueryManager:
                 }
 
                 # Build temporal context (Acceptance Criterion 7)
-                # Contains aggregate info across all commits for this file
+                # Contains diff-based commit fields produced by TemporalSearchService
                 temporal_context = {
-                    "first_seen": temporal_result.temporal_context.get("first_seen"),
-                    "last_seen": temporal_result.temporal_context.get("last_seen"),
-                    "commit_count": temporal_result.temporal_context.get(
-                        "appearance_count", 0
+                    "commit_hash": temporal_result.temporal_context.get("commit_hash"),
+                    "commit_date": temporal_result.temporal_context.get("commit_date"),
+                    "commit_message": temporal_result.temporal_context.get(
+                        "commit_message"
                     ),
-                    "commits": temporal_result.temporal_context.get("commits", []),
+                    "author_name": temporal_result.temporal_context.get("author_name"),
+                    "commit_timestamp": temporal_result.temporal_context.get(
+                        "commit_timestamp"
+                    ),
+                    "diff_type": temporal_result.temporal_context.get("diff_type"),
                 }
 
                 # Add is_removed flag if applicable
@@ -2067,7 +2072,7 @@ class SemanticQueryManager:
             )
             raise ValueError(str(e))
         except Exception as e:
-            # Log error and fall back to regular search
+            # Log error and propagate as SemanticQueryError
             logger.error(
                 format_error_log(
                     "QUERY-MIGRATE-011",
