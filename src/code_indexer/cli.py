@@ -5267,6 +5267,9 @@ def query(
                 limit=limit,
                 time_range=(start_date, end_date),
                 file_path_filter=_path_filter_str,
+                diff_types=list(diff_types) if diff_types else None,
+                author=author,
+                chunk_type=chunk_type,
             )
 
             # Keep a reference for display helpers that expect a temporal_service param

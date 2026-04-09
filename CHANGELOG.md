@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.5
+
+### Fixes
+
+- fix: Bug #666 — CLI standalone temporal path silently dropped `chunk_type`, `author`, and `diff_types` filters. The `_execute_temporal_fusion` call in `cli.py` only forwarded 7 of 18 available parameters, so `--chunk-type`, `--author`, and `--diff-type` CLI options were accepted by the parser but had zero effect. Fixed by adding `diff_types=list(diff_types) if diff_types else None`, `author=author`, and `chunk_type=chunk_type` to the dispatch call. Discovered during E2E validation of Bug #664/#665. Verified: `--chunk-type commit_message` now returns commit message content, distinct from the unfiltered result set.
+
 ## v9.14.4
 
 ### Fixes
