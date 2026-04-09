@@ -2093,49 +2093,26 @@ class FilesystemVectorStore:
         with open(meta_file) as f:
             metadata = json.load(f)
 
-        # === CHECK HNSW STALENESS AND REBUILD IF NEEDED ===
+        # === CHECK HNSW STALENESS ===
+        # Bug #668: NEVER rebuild HNSW during a query. Rebuilding is the indexer's
+        # responsibility (cidx index / cidx watch). Queries must use whatever index
+        # exists on disk. If stale and bin missing → return empty. If stale and
+        # bin exists → use it as-is with a warning.
         from .hnsw_index_manager import HNSWIndexManager
 
         vector_size = metadata.get("vector_size", 1536)
         hnsw_manager = HNSWIndexManager(vector_dim=vector_size, space="cosine")
 
-        # Check if HNSW needs rebuild (watch mode coordination)
         if hnsw_manager.is_stale(collection_path):
-            self.logger.info(
-                f"HNSW index is stale for '{collection_name}', rebuilding..."
-            )
-
-            # Bug #306: Read current_branch from stale metadata for branch-aware rebuild.
-            # When metadata has filtered=True + current_branch, use hidden_branches filtering
-            # so the rebuild doesn't overwrite a filtered HNSW with all vectors.
-            stale_meta = hnsw_manager.get_index_stats(collection_path)
-            query_time_branch = None
-            if (
-                stale_meta
-                and stale_meta.get("filtered")
-                and stale_meta.get("current_branch")
-            ):
-                query_time_branch = stale_meta["current_branch"]
-                self.logger.info(
-                    f"Query-time rebuild for '{collection_name}' will filter by branch "
-                    f"'{query_time_branch}' (hidden_branches)"
+            if not hnsw_manager.index_exists(collection_path):
+                self.logger.warning(
+                    f"HNSW index is stale and missing for '{collection_name}'. "
+                    "Run 'cidx index' to build the index. Returning empty results."
                 )
-
-            # Rebuild HNSW with locking
-            rebuild_start = time.time()
-            hnsw_manager.rebuild_from_vectors(
-                collection_path=collection_path,
-                progress_callback=None,
-                current_branch=query_time_branch,
-            )
-            rebuild_ms = (time.time() - rebuild_start) * 1000
-
-            if return_timing:
-                timing["hnsw_rebuild_triggered"] = True
-                timing["hnsw_rebuild_ms"] = rebuild_ms
-
-            self.logger.info(
-                f"HNSW rebuild complete for '{collection_name}' ({rebuild_ms:.0f}ms)"
+                return ([], timing) if return_timing else []
+            self.logger.warning(
+                f"HNSW index is stale for '{collection_name}'. "
+                "Querying existing index as-is. Run 'cidx index' to rebuild."
             )
 
         # === PARALLEL EXECUTION (always) ===

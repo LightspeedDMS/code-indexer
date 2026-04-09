@@ -308,3 +308,119 @@ class TestGate2WarningMessagePresence:
             )
 
         assert "warning" not in result
+
+
+# ---------------------------------------------------------------------------
+# Gate 3: Dual-provider bypass regression (Bug #667)
+# When both providers are configured, query_strategy auto-sets to "parallel"
+# which returned early (line ~1354) BEFORE the temporal routing gate (line ~1387).
+# Fix: skip parallel strategy when temporal params are present.
+# Observable: execute_temporal_query_with_fusion called (temporal) vs NOT called
+#             (parallel semantic).
+# ---------------------------------------------------------------------------
+
+
+class TestGate3TemporalRoutingWithDualProviders:
+    """Bug #667: verify temporal routing fires even with dual providers configured."""
+
+    @pytest.mark.parametrize(
+        "extra_kwargs",
+        [
+            {"chunk_type": "commit_diff"},
+            {"diff_type": "added"},
+            {"author": "Alice"},
+        ],
+    )
+    def test_temporal_param_with_dual_providers_calls_temporal_fusion(
+        self, manager, extra_kwargs, tmp_path
+    ):
+        """chunk_type/diff_type/author must invoke temporal fusion even when both
+        providers are configured (dual-provider should NOT override temporal routing).
+
+        Before Bug #667 fix: query_strategy was set to "parallel", parallel block
+        ran and returned early — temporal fusion was never called.
+        After fix: temporal params prevent parallel strategy, temporal gate fires.
+        """
+        repo_path = str(tmp_path / "my-repo")
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        cm_patch, bf_patch, app_cache_patch, sm_cache_patch, fusion_patch = (
+            _temporal_infrastructure_patches()
+        )
+
+        # Simulate dual-provider configuration — this is the Bug #667 trigger
+        dual_provider_patch = patch.object(
+            manager, "_both_providers_configured", return_value=True
+        )
+
+        with (
+            cm_patch,
+            bf_patch,
+            app_cache_patch,
+            sm_cache_patch,
+            dual_provider_patch,
+            fusion_patch as mock_fusion,
+        ):
+            manager._search_single_repository(
+                repo_path=repo_path,
+                repository_alias="my-repo",
+                query_text="test query",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                time_range=None,
+                time_range_all=False,
+                at_commit=None,
+                show_evolution=False,
+                **extra_kwargs,
+            )
+
+        (
+            mock_fusion.assert_called_once(),
+            (
+                f"Bug #667 regression: temporal fusion not called with dual providers "
+                f"and {extra_kwargs}. Parallel strategy bypassed temporal routing gate."
+            ),
+        )
+
+    def test_no_temporal_params_with_dual_providers_does_not_call_temporal_fusion(
+        self, manager, tmp_path
+    ):
+        """Without temporal params, dual-provider should use parallel semantic search
+        (not temporal). Control test to verify the fix doesn't break the non-temporal path.
+        """
+        repo_path = str(tmp_path / "my-repo")
+        Path(repo_path).mkdir(parents=True, exist_ok=True)
+
+        _, _, _, _, fusion_patch = _temporal_infrastructure_patches()
+
+        dual_provider_patch = patch.object(
+            manager, "_both_providers_configured", return_value=True
+        )
+
+        with (
+            fusion_patch as mock_fusion,
+            dual_provider_patch,
+            patch.object(manager, "_search_with_provider", return_value=[]),
+        ):
+            manager._search_single_repository(
+                repo_path=repo_path,
+                repository_alias="my-repo",
+                query_text="test query",
+                limit=10,
+                min_score=None,
+                file_extensions=None,
+                time_range=None,
+                time_range_all=False,
+                at_commit=None,
+                show_evolution=False,
+                # No temporal params
+            )
+
+        (
+            mock_fusion.assert_not_called(),
+            (
+                "Without temporal params, dual-provider parallel path should run, "
+                "not temporal fusion."
+            ),
+        )

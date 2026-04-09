@@ -1059,8 +1059,23 @@ class SemanticQueryManager:
             return results
 
         # Story #618: Auto-default to parallel when both providers configured
+        # Bug #667: Skip parallel when temporal params present — temporal routing gate
+        # at line ~1387 must be reached; parallel block returns early before it.
         if query_strategy is None:
-            if self._both_providers_configured(repo_path):
+            _has_temporal_for_strategy = any(
+                [
+                    time_range,
+                    time_range_all,
+                    at_commit,
+                    show_evolution,
+                    chunk_type,
+                    diff_type,
+                    author,
+                ]
+            )
+            if not _has_temporal_for_strategy and self._both_providers_configured(
+                repo_path
+            ):
                 query_strategy = "parallel"
                 score_fusion = score_fusion or "rrf"
             else:

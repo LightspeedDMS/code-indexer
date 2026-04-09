@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.7
+
+### Fixes
+
+- fix: Bug #667 Gate 3 — dual-provider parallel strategy bypass of temporal routing. When both VoyageAI and Cohere providers are configured, `_search_single_repository` auto-set `query_strategy = "parallel"` and the parallel block returned early at line ~1354, before reaching the temporal routing gate at line ~1387. Queries with `chunk_type`, `diff_type`, or `author` were silently routed through parallel semantic search instead of temporal execution. Fixed by checking `_has_temporal_for_strategy` before allowing `query_strategy = "parallel"` — if any temporal param is present, falls back to `"primary_only"` which reaches the temporal gate. 4 new unit tests in `TestGate3TemporalRoutingWithDualProviders` covering all three temporal params and the control case.
+
+- fix: Bug #668 — `FilesystemVectorStore.search()` rebuilt HNSW index inline during queries when the index was stale. The watch-mode optimization deferred HNSW rebuilds to "query time" (via `skip_hnsw_rebuild=True`), causing the first temporal query after indexing to block for 16+ seconds while rebuilding the index. This is never acceptable during a query. New policy: if HNSW is stale and the bin file exists, query it as-is with a warning; if stale and missing, return empty results with a warning. Rebuilding the index is the indexer's responsibility, not the query path's. 3 new unit tests in `TestStaleHNSWQueryNeverRebuilds` verifying `rebuild_from_vectors` is never called during search under any staleness condition.
+
 ## v9.14.6
 
 ### Fixes
