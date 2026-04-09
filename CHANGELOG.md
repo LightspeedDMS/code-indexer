@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.6
+
+### Fixes
+
+- fix: Bug #667 — temporal routing gates incomplete: `chunk_type`, `diff_type`, and `author` parameters did not trigger the temporal query path. When claude.ai calls `search_code` with `chunk_type="commit_diff"` without a `time_range`, the query was silently routed to regular semantic search, returning no temporal metadata. Fixed three routing gates: (1) `_is_temporal_query()` in `handlers/_utils.py` — used by all MCP tools (`search_code`, `regex_search`, `git_search_commits`, `git_search_diffs`); (2) `has_temporal_params` routing condition in `semantic_query_manager.py` main search path; (3) same condition in the no-results warning path. 26 new unit tests covering all three gates. Root cause of previous testing failure: E2E was run through CLI path which has its own `chunk_type` guard, masking the server/MCP routing bug.
+
 ## v9.14.5
 
 ### Fixes

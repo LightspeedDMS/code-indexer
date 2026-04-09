@@ -587,8 +587,17 @@ class SemanticQueryManager:
             )
 
         # Check if temporal parameters were used but no results (graceful fallback)
+        # Bug fix: chunk_type, diff_type, author must also be recognised as temporal
         has_temporal_params = any(
-            [time_range, time_range_all, at_commit, show_evolution]
+            [
+                time_range,
+                time_range_all,
+                at_commit,
+                show_evolution,
+                chunk_type,
+                diff_type,
+                author,
+            ]
         )
         warning_message = None
         if has_temporal_params and len(results) == 0:
@@ -1377,8 +1386,17 @@ class SemanticQueryManager:
 
             # TEMPORAL QUERY HANDLING (Story #446)
             # Check if temporal parameters are present
+            # Bug fix: chunk_type, diff_type, author must also route to temporal index
             has_temporal_params = any(
-                [time_range, time_range_all, at_commit, show_evolution]
+                [
+                    time_range,
+                    time_range_all,
+                    at_commit,
+                    show_evolution,
+                    chunk_type,
+                    diff_type,
+                    author,
+                ]
             )
 
             if has_temporal_params:

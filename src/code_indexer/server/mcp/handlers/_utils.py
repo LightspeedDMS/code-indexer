@@ -786,7 +786,15 @@ def _is_temporal_query(params: Dict[str, Any]) -> bool:
 
     Returns True if any temporal search parameters are present and truthy.
     """
-    temporal_params = ["time_range", "time_range_all", "at_commit", "include_removed"]
+    temporal_params = [
+        "time_range",
+        "time_range_all",
+        "at_commit",
+        "include_removed",
+        "chunk_type",
+        "diff_type",
+        "author",
+    ]
     return any(params.get(p) for p in temporal_params)
 
 
