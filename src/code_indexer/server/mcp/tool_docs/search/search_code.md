@@ -346,60 +346,50 @@ REPOSITORY SELECTION:
 
 SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid (runs both, merges via RRF - common hits ranked highest)
 
+RERANKING SMELL TEST: query_text is 2+ words and search_mode is semantic or hybrid? Add rerank_query. Write query_text short for retrieval, write rerank_query long for precision. Skipping reranking on a conceptual query typically costs 2-4 additional searches to find the right result; reranking adds ~200-500ms but is almost always cheaper than re-searching.
+
+SKIP RERANKING ONLY WHEN: exact single-identifier lookup (e.g., fts for 'def authenticate_user') | result set <= 3 | chronological/positional order matters more than relevance
+
+STANDARD CALL TEMPLATE:
+  query_text:          [short: 1-4 keywords for retrieval]
+  search_mode:         [semantic|fts|hybrid]
+  repository_alias:    [target repo]
+  limit:               [start at 5]
+  rerank_query:        [FILL THIS IN — verbose sentence describing your ideal result]
+  rerank_instruction:  [FILL THIS IN — what to deprioritize, e.g., "Focus on implementation, not tests"]
+
 CRITICAL: Semantic search finds code by MEANING, not exact text. Results are APPROXIMATE. For exhaustive exact-text results, use FTS mode or regex_search tool.
 
 LIMIT BEHAVIOR: limit=10 with 3 repos in 'global' mode may return 7+3+0=10. In 'per_repo' mode returns 4+3+3=10 (NOT 30 - per_repo does NOT multiply the limit).
 
 PERFORMANCE: Start with limit=5. Each result consumes tokens proportional to code snippet size. Large fields may be truncated to snippet_preview + snippet_cache_handle (use get_cached_content to retrieve full content).
 
-EXAMPLE: search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=5)
+EXAMPLE (standard call with reranking):
+search_code('authentication logic', repository_alias='backend-global', search_mode='semantic', limit=5,
+            rerank_query='production code implementing user authentication flow',
+            rerank_instruction='Focus on implementation, not tests or config')
 
-### Reranking Parameters (Optional)
+### Reranking
 
-**Mental model — two-query pattern**: Use `query_text` (short, concise) to retrieve candidates; use `rerank_query` (verbose natural language) to pick the best ordering from those candidates. These serve different purposes and should be written differently.
+DEFAULT: Use reranking. Skip it only for exact identifier lookups, result sets <= 3, or when retrieval order already matches intent.
 
-- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing your ideal result. The cross-encoder reads both this and each result snippet to score relevance.
+**Mental model — two-query pattern**: Use `query_text` (short, 1-4 keywords) to retrieve candidates; use `rerank_query` (verbose natural language sentence) to pick the best ordering. These serve different purposes and should be written differently.
+
+- **rerank_query** = WHAT you want ranked highest. Write a detailed sentence describing your ideal result. The cross-encoder reads both this and each result snippet to score relevance. Cost: ~200-500ms latency. Benefit: saves 2-4 follow-up searches when the query is conceptual.
 - **rerank_instruction** = WHAT to deprioritize. Steer the reranker away from noise. Example: "Focus on production implementation, not test fixtures or mock helpers". Has no effect without rerank_query.
 
-#### When to Proactively Add Reranking
-
-Consider adding rerank_query even when the user did not ask for it explicitly:
+Add rerank_query proactively (even without explicit user request) when:
 - The user's intent is conceptual or multi-faceted (not a simple identifier lookup)
 - The result set will likely be >5 candidates where ordering matters
-- The base retrieval order (embedding similarity, file-path, chronological) does not match what the user actually wants on top
+- The base retrieval order does not match what the user actually wants on top
 
-#### When to Use Reranking
+What reranking does NOT do: Reranking only reorders the candidate set already retrieved. It cannot recover a file the base query missed. Quality depends on the initial candidate pool.
 
-Embedding similarity scores code by vector distance, which may not match human-judged relevance for complex
-queries. Cross-encoder reranking re-scores each result against your rerank_query using a language model,
-producing better relevance ordering for detailed or nuanced queries. This is useful for semantic, FTS, hybrid,
-regex-enabled FTS, and temporal search paths when the base retrieval step finds plausible candidates but not the
-best ordering.
-
-#### What Reranking Does Not Do
-
-Reranking does NOT expand recall. It only reorders the candidate set already retrieved by search_code.
-If the base query fails to retrieve the relevant file, reranking cannot recover it. Reranking quality therefore
-depends on the initial candidate pool and the configured overfetch multiplier.
-
-#### When Not to Use Reranking
-
-Skip reranking for exact identifier lookups, very small result sets, or quick exploratory searches where the
-default retrieval order is already good enough. Reranking is opt-in and adds latency.
-
-#### Returned Telemetry
-
-When reranking is requested, query_metadata reports whether reranking actually ran and which provider handled it:
-- reranker_used
-- reranker_provider
-- rerank_time_ms
-
-If providers are unavailable, disabled, or all rerank attempts fail, the tool falls back to the base retrieval
-order and the telemetry reflects that reranking was not used.
+Returned telemetry: reranker_used, reranker_provider, rerank_time_ms. If providers are unavailable or all attempts fail, the tool falls back to base retrieval order.
 
 #### Examples
 
-**With reranking — finding login implementation:**
+**Finding login implementation:**
 ```json
 {
   "query_text": "login authentication",
@@ -410,7 +400,7 @@ order and the telemetry reflects that reranking was not used.
 }
 ```
 
-**With reranking — hybrid/FTS query with semantic prioritization:**
+**Hybrid/FTS with semantic prioritization:**
 ```json
 {
   "query_text": "authenticate session token",
@@ -421,12 +411,12 @@ order and the telemetry reflects that reranking was not used.
 }
 ```
 
-**Without reranking (intentional opt-out):**
+**Intentional opt-out (exact identifier lookup):**
 ```json
 {
-  "query_text": "login authentication",
+  "query_text": "authenticate_user",
+  "search_mode": "fts",
   "repository_alias": "backend-global",
   "limit": 10
 }
 ```
-Result: same 10 results but in embedding-similarity order, with no reranking overhead.

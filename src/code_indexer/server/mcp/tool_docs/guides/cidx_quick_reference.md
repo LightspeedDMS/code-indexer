@@ -107,4 +107,6 @@ MULTI-REPO: Pass array to repository_alias. aggregation_mode='global' for best m
 
 SEARCH MODE: 'authentication logic' (concept) -> semantic | 'def authenticate_user' (exact) -> fts | unsure -> hybrid
 
+RERANKING: Default is to use reranking for any conceptual or multi-word semantic/hybrid query. Add rerank_query (verbose sentence describing ideal result) and rerank_instruction (what to deprioritize). Skip only for exact identifier lookups, result sets <= 3, or positional ordering. Cost: ~200-500ms. Benefit: saves 2-4 re-searches.
+
 EXAMPLE: cidx_quick_reference(category='search') for search-specific guidance.

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.9
+
+### Improvements
+
+- docs: Repositioned reranking as the default workflow in `search_code` and `cidx_quick_reference` tool documentation. Added RERANKING SMELL TEST heuristic (2+ word semantic/hybrid query = add rerank_query), SKIP RERANKING ONLY WHEN guard (identifier lookup / <=3 results / positional order), and STANDARD CALL TEMPLATE with rerank_query and rerank_instruction as visible fill-in fields. Updated canonical example to include reranking. Flipped section framing from "Optional" add-on to "DEFAULT: Use reranking" with concrete cost/benefit (~200-500ms vs 2-4 re-searches). Added matching RERANKING summary line to cidx_quick_reference guide.
+
 ## v9.14.8
 
 ### Fixes
