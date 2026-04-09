@@ -5,11 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.3
+
+### Fixes
+
+- fix: Temporal CLI anti-fallback (second path) — discovered during E2E variation testing that `cli.py` had a second fallback at the `_has_temporal` check (line ~5190). When no temporal collection directory existed at all, the CLI printed "Falling back to space-only search (current code state only)" and set `time_range = None`, causing a full regular semantic search to execute silently. Fixed by replacing `time_range = None` fall-through with an early `return` after printing the honest "No results returned" message. Added test `test_cli_no_temporal_index_returns_immediately` that verifies `execute_temporal_query_with_fusion` is never called when the temporal index is absent.
+
 ## v9.14.2
 
 ### Fixes
 
-- fix: Temporal index anti-fallback — removed dishonest "Showing results from current code only" fallback messaging when a temporal index is unavailable. The old behavior silently returned a warning claiming to show current-code results; the corrected behavior returns an empty result set and an honest message stating "No results returned. Build the temporal index with 'cidx index --index-commits' to enable time-range queries." Applies to both MCP/REST (server) and CLI paths. Rule: graceful failure over forced success (Messi Rule #2).
+- fix: Temporal index anti-fallback — removed dishonest "Showing results from current code only" fallback messaging when a temporal index is unavailable in the server/MCP path (`semantic_query_manager.py`) and in the CLI warning display when `execute_temporal_query_with_fusion` returns empty results with a warning. The corrected behavior returns an empty result set and an honest message stating "No results returned. Build the temporal index with 'cidx index --index-commits' to enable time-range queries." Rule: graceful failure over forced success (Messi Rule #2).
 
 - fix: Temporal query `temporal_context` field mapping — `_execute_temporal_query` was reading legacy fields (`first_seen`, `last_seen`, `appearance_count`, `commits`) from `TemporalSearchResult.temporal_context` that no longer exist in the current diff-based implementation, causing all temporal_context fields to be `None` in query responses. Fixed by mapping the actual current fields: `commit_hash`, `commit_date`, `commit_message`, `author_name`, `commit_timestamp`, `diff_type`. Verified end-to-end with a real git repo, temporal index, and CLI query confirming all fields populated with real data.
 

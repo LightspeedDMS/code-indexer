@@ -5188,18 +5188,18 @@ def query(
             if d.is_dir()
         )
         if not _has_temporal:
-            console.print("[yellow]⚠️  Temporal index not found[/yellow]")
+            console.print("[yellow]⚠️  Temporal index not available[/yellow]")
             console.print()
-            console.print("Time-range filtering requires a temporal index.")
             console.print(
-                "Falling back to space-only search (current code state only)."
+                "Temporal index not available for this repository. No results returned."
             )
             console.print()
-            console.print("To enable temporal queries, build the temporal index:")
-            console.print("  [cyan]cidx index --index-commits[/cyan]")
-            console.print()
-            # Fall through to regular search without time-range filtering
-            time_range = None
+            console.print(
+                "Build the temporal index with "
+                "[cyan]cidx index --index-commits[/cyan] "
+                "to enable time-range queries."
+            )
+            return
         else:
             # Handle time_range="all" from --time-range-all flag
             if time_range == "all":

@@ -122,8 +122,57 @@ def _invoke_temporal_query(runner, temp_project, temporal_results):
         )
 
 
+@pytest.fixture
+def temp_project_no_temporal(tmp_path):
+    """Project directory WITHOUT any temporal collection — _has_temporal check fails."""
+    code_indexer_dir = tmp_path / ".code-indexer" / "index"
+    code_indexer_dir.mkdir(parents=True)
+    # No temporal collection directory created — simulates missing temporal index
+    return tmp_path
+
+
 class TestCLITemporalWarningDisplay:
     """Verify the CLI displays the warning from TemporalSearchResults."""
+
+    def test_cli_no_temporal_index_returns_immediately(
+        self, runner, temp_project_no_temporal
+    ):
+        """When no temporal collection directory exists, CLI returns immediately.
+
+        Must print honest "No results returned" message and must NOT invoke
+        execute_temporal_query_with_fusion at all (no fallback search).
+        """
+        config_manager_mock = _make_config_manager_mock(temp_project_no_temporal)
+
+        with patch(
+            "src.code_indexer.services.temporal.temporal_fusion_dispatch"
+            ".execute_temporal_query_with_fusion"
+        ) as mock_fusion:
+            result = runner.invoke(
+                query_command,
+                ["--time-range-all", "authentication"],
+                obj={
+                    "config_manager": config_manager_mock,
+                    "project_root": str(temp_project_no_temporal),
+                    "mode": "local",
+                    "standalone": True,
+                },
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, (
+            f"Expected exit code 0, got {result.exit_code}. Output: {result.output!r}"
+        )
+        assert "No results returned" in result.output, (
+            f"CLI must display honest 'No results returned' message. Output: {result.output!r}"
+        )
+        assert "cidx index --index-commits" in result.output, (
+            f"CLI must mention the build command. Output: {result.output!r}"
+        )
+        assert not mock_fusion.called, (
+            "Fusion dispatch must NOT be called when temporal index is absent — "
+            "no fallback search allowed"
+        )
 
     def test_cli_displays_temporal_warning_when_no_index(self, runner, temp_project):
         """When fusion dispatch returns empty results with a warning, CLI must display it.
