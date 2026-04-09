@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.1
+
+### Fixes
+
+- fix: Bug #663 — Race condition in `FilesystemVectorStore.upsert_points` orphan deletion silently dropped shared content chunks from the HNSW index. When two source files contained identical chunks (same `point_id`), one file's orphan cleanup would unconditionally delete the `_id_index` entry and vector file even when another file still referenced the same point. Fix: STEP 1 now removes the file's path mapping first, then calls `PathIndex.has_other_owner(point_id)` to skip deletion scheduling for any point still owned by another file. STEP 3 retains a path-equality guard as defense-in-depth for the concurrent-write race window. Symptom was `WARNING:code_indexer.storage.filesystem_vector_store:Vector file not found for point 'xxxx', skipping` on large codebases with code duplication, resulting in those chunks being unsearchable.
+
 ## v9.14.0
 
 ### Features

@@ -81,6 +81,29 @@ class PathIndex:
         """
         return self._path_index.get(file_path, set()).copy()
 
+    def has_other_owner(self, point_id: str) -> bool:
+        """Return True if any file in the index references the given point_id.
+
+        Args:
+            point_id: The point ID to look up.
+
+        Returns:
+            True if at least one file entry contains point_id; False otherwise.
+
+        Thread safety:
+            Callers MUST hold the enclosing _path_index_lock before calling
+            this method. PathIndex has no internal lock — it relies on the
+            caller's lock for safe concurrent access.
+
+        Usage:
+            Used by upsert_points STEP 1 (Bug #663 fix) to detect shared
+            point_ids: after removing a file's path mapping, call this to
+            check whether any other file still references the same point_id
+            before scheduling deletion of the underlying vector file and
+            _id_index entry.
+        """
+        return any(point_id in pids for pids in self._path_index.values())
+
     def save(self, path: Path) -> None:
         """Save path index to disk using msgpack.
 
@@ -853,10 +876,23 @@ class FilesystemVectorStore:
                 # Identify orphaned point_ids (in old but not in new)
                 orphan_point_ids = old_point_ids - new_point_ids
 
-                # Gather orphan metadata (just reading id_index, no I/O)
+                # Bug #663: Remove file_path's orphaned points from path index
+                # first — this file no longer owns these points regardless of what
+                # happens next. Then only schedule deletion for truly isolated orphans
+                # (no other file in the path index still references the same point_id).
                 if orphan_point_ids:
+                    for orphan_id in orphan_point_ids:
+                        path_index.remove_point(file_path, orphan_id)
+
                     with self._id_index_lock:
                         for orphan_id in orphan_point_ids:
+                            # Skip if another file still holds this point_id.
+                            # path_index.remove_point was already called above for
+                            # file_path, so has_other_owner only finds other files.
+                            # _path_index_lock is held by the outer context.
+                            if path_index.has_other_owner(orphan_id):
+                                continue
+
                             if orphan_id in self._id_index.get(collection_name, {}):
                                 vector_file = self._id_index[collection_name][orphan_id]
                                 orphans_to_delete.append(
@@ -875,25 +911,29 @@ class FilesystemVectorStore:
                 # File already deleted by another thread - this is safe to ignore
                 pass
 
-        # STEP 3: Update indexes INSIDE lock (fast, just dict/set updates)
+        # STEP 3: Update _id_index INSIDE lock (fast, just dict updates)
+        # path_index updates were already done in STEP 1 (Bug #663 fix).
         if orphans_to_delete:
-            with self._path_index_lock:
-                path_index = self._path_indexes[collection_name]
+            with self._id_index_lock:
+                for file_path, orphan_id, vector_file in orphans_to_delete:
+                    # Bug #663 defense-in-depth: a concurrent thread may have
+                    # re-written this point_id between STEP 2 (file delete) and
+                    # STEP 3. Only evict if the stored path still matches the
+                    # vector_file captured in STEP 1.
+                    current_path = self._id_index.get(collection_name, {}).get(
+                        orphan_id
+                    )
+                    if current_path != vector_file:
+                        # Concurrent thread re-populated — do not evict
+                        continue
 
-                with self._id_index_lock:
-                    for file_path, orphan_id, vector_file in orphans_to_delete:
-                        # Remove from id_index
-                        if orphan_id in self._id_index.get(collection_name, {}):
-                            del self._id_index[collection_name][orphan_id]
+                    del self._id_index[collection_name][orphan_id]
 
-                        # Track deletion for HNSW incremental updates
-                        if collection_name in self._indexing_session_changes:
-                            self._indexing_session_changes[collection_name][
-                                "deleted"
-                            ].add(orphan_id)
-
-                        # Remove from path index
-                        path_index.remove_point(file_path, orphan_id)
+                    # Track deletion for HNSW incremental updates
+                    if collection_name in self._indexing_session_changes:
+                        self._indexing_session_changes[collection_name]["deleted"].add(
+                            orphan_id
+                        )
 
         # Process all points
         total_points = len(points)
