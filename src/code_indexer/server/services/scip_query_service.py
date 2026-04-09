@@ -27,6 +27,7 @@ SERVER-ONLY SCOPE:
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Union, TYPE_CHECKING
 from code_indexer.server.logging_utils import format_error_log
@@ -115,6 +116,17 @@ class SCIPQueryService:
 
         scip_files: List[Path] = []
 
+        # Normalize repository_alias once before the loop (loop-invariant).
+        # Converts MCP alias form (e.g. "flask-large-global") or full path
+        # (e.g. "/data/golden-repos/flask-large") to a bare directory name
+        # (e.g. "flask-large") for comparison with repo_dir.name.
+        normalized_alias: Optional[str] = None
+        if repository_alias is not None:
+            normalized_alias = repository_alias
+            if os.sep in normalized_alias or "/" in normalized_alias:
+                normalized_alias = Path(normalized_alias).name
+            normalized_alias = normalized_alias.removesuffix("-global")
+
         for repo_dir in golden_repos_path.iterdir():
             # Skip non-directories
             if not repo_dir.is_dir():
@@ -125,7 +137,7 @@ class SCIPQueryService:
                 continue
 
             # Filter by repository_alias if provided
-            if repository_alias and repo_dir.name != repository_alias:
+            if normalized_alias is not None and repo_dir.name != normalized_alias:
                 continue
 
             # Check access control if enabled

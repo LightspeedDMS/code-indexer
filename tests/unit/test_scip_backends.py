@@ -253,3 +253,162 @@ class TestDatabaseBackend:
 
         # Sanity check: Should find some dependents
         assert isinstance(results, list)
+
+
+# ============================================================================
+# Bug #662: context field always null — populate from source file
+# ============================================================================
+
+# Named constants for the minimal SCIP fixture used in Bug #662 tests.
+# The fixture source file has exactly two lines:
+#   line 0: "class MyClass:"          <- definition of MyClass at col 6
+#   line 1: "MyClass()"               <- reference  of MyClass at col 0
+_DEF_LINE = 0
+_DEF_START_COL = 6
+_DEF_END_COL = 13  # len("MyClass") == 7 chars starting at col 6 → end at 13
+_REF_LINE = 1
+_REF_START_COL = 0
+_REF_END_COL = 7  # len("MyClass") == 7
+
+_SCIP_ROLE_DEFINITION = 1
+_SCIP_ROLE_REFERENCE = 0
+
+_FIXTURE_SOURCE_LINES = ["class MyClass:", "MyClass()"]
+
+
+def _add_occurrence(doc, line: int, start: int, end: int, roles: int) -> None:
+    """Add a single-line occurrence to a SCIP document."""
+    occ = doc.occurrences.add()
+    occ.symbol = "python test `sample`/MyClass#"
+    occ.range.extend([line, start, end])
+    occ.symbol_roles = roles
+
+
+def _build_minimal_scip_db(tmp_path: Path, source_lines: list) -> tuple:
+    """
+    Create a minimal SCIP database alongside a real source file.
+
+    Returns (db_path, project_root).  The source file is written to
+    project_root/src/sample.py so that DB entries with relative_path
+    'src/sample.py' resolve to actual lines on disk.
+
+    The SCIP protobuf encodes two occurrences in src/sample.py:
+      - _DEF_LINE: definition of MyClass (role=DEFINITION)
+      - _REF_LINE: reference  of MyClass (role=REFERENCE)
+    """
+    from code_indexer.scip.database.builder import SCIPDatabaseBuilder
+    from code_indexer.scip.protobuf import scip_pb2
+
+    # Write the actual source file
+    project_root = tmp_path / "project"
+    src_dir = project_root / "src"
+    src_dir.mkdir(parents=True)
+    source_file = src_dir / "sample.py"
+    source_file.write_text("\n".join(source_lines) + "\n")
+
+    # Build a minimal SCIP protobuf
+    index = scip_pb2.Index()
+
+    # Declare the symbol
+    sym_info = index.external_symbols.add()
+    sym_info.symbol = "python test `sample`/MyClass#"
+    sym_info.display_name = "MyClass"
+    sym_info.kind = scip_pb2.SymbolInformation.Class  # type: ignore[attr-defined]
+
+    # Document with two occurrences
+    doc = index.documents.add()
+    doc.relative_path = "src/sample.py"
+    doc.language = "python"
+
+    _add_occurrence(doc, _DEF_LINE, _DEF_START_COL, _DEF_END_COL, _SCIP_ROLE_DEFINITION)
+    _add_occurrence(doc, _REF_LINE, _REF_START_COL, _REF_END_COL, _SCIP_ROLE_REFERENCE)
+
+    scip_file = tmp_path / "index.scip"
+    scip_file.write_bytes(index.SerializeToString())
+
+    db_path = tmp_path / "index.scip.db"
+    SCIPDatabaseBuilder().build(scip_file, db_path)
+
+    return db_path, project_root
+
+
+class TestContextFieldBug662:
+    """
+    Tests for Bug #662: context field is always null in DatabaseBackend results.
+
+    The context field must be populated with the actual source line from the
+    file at project_root/file_path at the 0-based line number stored in the DB.
+    """
+
+    def test_find_definition_context_is_populated(self, tmp_path: Path):
+        """find_definition() must return context populated from source file."""
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
+
+        backend = DatabaseBackend(db_path, project_root=str(project_root))
+
+        results = backend.find_definition("MyClass", exact=False)
+
+        assert len(results) > 0, "Expected at least one definition result"
+        # Before fix: context is None.  After fix: actual source line.
+        assert results[0].context is not None, "context must be populated, not None"
+        assert "MyClass" in results[0].context
+
+    def test_find_references_context_is_populated(self, tmp_path: Path):
+        """find_references() must return context populated from source file."""
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
+
+        backend = DatabaseBackend(db_path, project_root=str(project_root))
+
+        results = backend.find_references("MyClass", exact=False)
+
+        assert len(results) > 0, "Expected at least one reference result"
+        contexts = [r.context for r in results if r.context is not None]
+        assert len(contexts) > 0, "At least one reference must have context populated"
+
+    def test_find_definition_context_matches_correct_line(self, tmp_path: Path):
+        """context field value must be the exact source line at the reported line."""
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        custom_lines = ["class MyClass:  # annotated version", "MyClass()"]
+        db_path, project_root = _build_minimal_scip_db(tmp_path, custom_lines)
+
+        backend = DatabaseBackend(db_path, project_root=str(project_root))
+        results = backend.find_definition("MyClass", exact=False)
+
+        assert len(results) > 0
+        defn = next(r for r in results if r.line == _DEF_LINE)
+        assert defn.context == custom_lines[_DEF_LINE]
+
+    def test_find_definition_context_graceful_on_missing_source(self, tmp_path: Path):
+        """When source file is missing, context stays None (no crash)."""
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        db_path, project_root = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
+
+        # Delete the source file after building the DB
+        (project_root / "src" / "sample.py").unlink()
+
+        backend = DatabaseBackend(db_path, project_root=str(project_root))
+        # Must not raise — context should be None when file is missing
+        results = backend.find_definition("MyClass", exact=False)
+
+        assert len(results) > 0
+        for r in results:
+            assert r.context is None
+
+    def test_find_definition_no_project_root_context_is_none(self, tmp_path: Path):
+        """When project_root is empty string, context stays None (no crash)."""
+        from code_indexer.scip.query.backends import DatabaseBackend
+
+        db_path, _ = _build_minimal_scip_db(tmp_path, _FIXTURE_SOURCE_LINES)
+
+        backend = DatabaseBackend(db_path, project_root="")
+        results = backend.find_definition("MyClass", exact=False)
+
+        assert len(results) > 0
+        for r in results:
+            assert r.context is None

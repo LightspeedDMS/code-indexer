@@ -185,6 +185,47 @@ class DatabaseBackend(SCIPBackend):
         ensure_indexes_created(self.conn)
         update_scip_db_version(config_path, 2)
 
+    def _read_context_lines(self, results: List[QueryResult]) -> None:
+        """
+        Populate the ``context`` field on each result with the source line from disk.
+
+        Reads are grouped by file path to avoid re-opening the same file for every
+        result.  If a file cannot be read (missing, permission error, encoding error)
+        the context for that file's results stays ``None`` — no exception is raised.
+
+        Line numbers in the SCIP database are 0-based; ``context`` receives the raw
+        line string with the trailing newline stripped.
+
+        Args:
+            results: List of QueryResult objects to mutate in-place.
+        """
+        if not self.project_root:
+            return  # Cannot resolve relative paths without a project root
+
+        project_root_path = Path(self.project_root)
+
+        # Group result indices by relative file path to read each file at most once.
+        from collections import defaultdict
+
+        indices_by_file: Dict[str, List[int]] = defaultdict(list)
+        for idx, result in enumerate(results):
+            indices_by_file[result.file_path].append(idx)
+
+        for rel_path, indices in indices_by_file.items():
+            abs_path = project_root_path / rel_path
+            try:
+                lines = abs_path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+            except OSError:
+                # File missing or unreadable — leave context as None for these results.
+                continue
+
+            for idx in indices:
+                line_num = results[idx].line  # 0-based
+                if 0 <= line_num < len(lines):
+                    results[idx].context = lines[line_num]
+
     def find_definition(self, symbol: str, exact: bool = False) -> List[QueryResult]:
         """Find definition locations using database queries."""
         from ..database.queries import find_definition as db_find_definition
@@ -215,6 +256,7 @@ class DatabaseBackend(SCIPBackend):
             if has_class_definitions:
                 results = [r for r in results if r.symbol.endswith("#")]
 
+        self._read_context_lines(results)
         return results
 
     def find_references(
@@ -239,6 +281,7 @@ class DatabaseBackend(SCIPBackend):
             )
             results.append(result)
 
+        self._read_context_lines(results)
         return results
 
     def get_dependencies(

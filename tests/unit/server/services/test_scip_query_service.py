@@ -1452,3 +1452,125 @@ class TestAccessControlForQueryMethods:
 
             # Both repos should be queried
             assert len(engine_calls) == 2
+
+
+# ============================================================================
+# Bug #661: repository_alias normalization — strip -global suffix, handle paths
+# ============================================================================
+
+
+class TestAliasNormalizationBug661:
+    """
+    Tests for Bug #661: find_scip_files() alias normalization.
+
+    The MCP layer passes aliases like 'flask-large-global' but the golden-repos
+    directory basename is 'flask-large'. The -global suffix must be stripped.
+    Similarly, if the caller passes a full path the basename must be extracted.
+    """
+
+    def test_global_suffix_alias_resolves_to_correct_repo(self):
+        """find_scip_files with 'repo-name-global' alias must find 'repo-name' dir."""
+        import tempfile
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+
+            # Directory on disk is 'flask-large', alias passed is 'flask-large-global'
+            scip_dir = golden_repos / "flask-large" / ".code-indexer" / "scip"
+            scip_dir.mkdir(parents=True)
+            (scip_dir / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), None)
+
+            # Before fix: returns [] because 'flask-large' != 'flask-large-global'
+            # After fix: returns 1 result
+            scip_files = service.find_scip_files(repository_alias="flask-large-global")
+
+            assert len(scip_files) == 1
+            assert scip_files[0].parent.parent.parent.name == "flask-large"
+
+    def test_full_path_alias_resolves_to_correct_repo(self):
+        """find_scip_files with a full filesystem path alias uses basename."""
+        import tempfile
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+
+            scip_dir = golden_repos / "my-repo" / ".code-indexer" / "scip"
+            scip_dir.mkdir(parents=True)
+            (scip_dir / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), None)
+
+            # Caller passes full path e.g. '/home/user/.cidx/golden-repos/my-repo'
+            full_path_alias = str(golden_repos / "my-repo")
+            scip_files = service.find_scip_files(repository_alias=full_path_alias)
+
+            assert len(scip_files) == 1
+            assert scip_files[0].parent.parent.parent.name == "my-repo"
+
+    def test_bare_name_alias_still_works(self):
+        """find_scip_files with plain repo name (no suffix) still resolves."""
+        import tempfile
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+
+            scip_dir = golden_repos / "my-repo" / ".code-indexer" / "scip"
+            scip_dir.mkdir(parents=True)
+            (scip_dir / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), None)
+
+            # Plain name must keep working (no regression)
+            scip_files = service.find_scip_files(repository_alias="my-repo")
+
+            assert len(scip_files) == 1
+            assert scip_files[0].parent.parent.parent.name == "my-repo"
+
+    def test_nonexistent_alias_returns_empty(self):
+        """find_scip_files with an alias that matches no repo returns []."""
+        import tempfile
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+
+            scip_dir = golden_repos / "my-repo" / ".code-indexer" / "scip"
+            scip_dir.mkdir(parents=True)
+            (scip_dir / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), None)
+
+            scip_files = service.find_scip_files(
+                repository_alias="does-not-exist-global"
+            )
+
+            assert scip_files == []
+
+    def test_unfiltered_query_still_returns_all_repos(self):
+        """Omitting repository_alias returns all repos (no regression)."""
+        import tempfile
+        from code_indexer.server.services.scip_query_service import SCIPQueryService
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            golden_repos = Path(tmpdir) / "golden-repos"
+            golden_repos.mkdir()
+
+            for name in ["repo-a", "repo-b", "repo-c"]:
+                scip_dir = golden_repos / name / ".code-indexer" / "scip"
+                scip_dir.mkdir(parents=True)
+                (scip_dir / "index.scip.db").touch()
+
+            service = SCIPQueryService(str(golden_repos), None)
+
+            scip_files = service.find_scip_files()
+
+            assert len(scip_files) == 3
