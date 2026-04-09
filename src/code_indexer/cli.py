@@ -1825,6 +1825,10 @@ def cli(
     if not verbose:
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("root").setLevel(logging.WARNING)
+        # Suppress provider health warnings during CLI — they break Rich's live display
+        logging.getLogger("code_indexer.services.provider_health_monitor").setLevel(
+            logging.ERROR
+        )
 
     # Handle --use-cidx-prompt flag (early return)
     if use_cidx_prompt:
