@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.8
+
+### Fixes
+
+- fix: Bug #669 — `_query_multi_provider_fusion` crashed with `"Temporal query failed: 2 (of 3) futures unfinished"` when the `as_completed(..., timeout=15)` timer fired. The inner `try/except` was inside the loop body and only caught `.result()` errors on completed futures — the iteration-level `TimeoutError` propagated uncaught. Compounding issue: the exception exited the `with ThreadPoolExecutor` block triggering `shutdown(wait=True)`, blocking until all in-flight VoyageAI/Cohere embedding threads finished. Fix: (1) catch `concurrent.futures.TimeoutError` at the loop level; (2) cancel remaining futures and call `executor.shutdown(wait=False, cancel_futures=True)` to prevent blocking; (3) call `record_temporal_failure` for each timed-out provider so health monitor can gate them; (4) return partial results (or empty with warning) — never raise an exception. 4 new unit tests covering all timeout paths.
+
 ## v9.14.7
 
 ### Fixes

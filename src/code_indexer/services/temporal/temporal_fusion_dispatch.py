@@ -6,7 +6,12 @@ Used by CLI, server (semantic_query_manager), multi_search_service, and daemon.
 """
 
 import logging
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    TimeoutError as FuturesTimeoutError,
+    as_completed,
+)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -222,6 +227,64 @@ def _query_single_provider(
     return results
 
 
+def _collect_provider_results(
+    future_to_coll: Dict[Future, str],
+    results_by_provider: Dict[str, list],
+    warnings: List[str],
+    failed_providers: List[str],
+) -> None:
+    """Drain completed futures from as_completed, collecting results and warnings.
+
+    Catches FuturesTimeoutError at the loop level (Bug #669). On timeout,
+    all unfinished futures are cancelled and record_temporal_failure is called
+    for each timed-out collection so the health monitor can gate them out.
+
+    Args:
+        future_to_coll: Mapping of Future -> collection name (all futures already submitted).
+        results_by_provider: Mutable dict populated with provider display-name -> result list.
+        warnings: Mutable list populated with failure/timeout warning strings.
+        failed_providers: Mutable list of collection names that failed or timed out.
+    """
+    from .temporal_collection_naming import collection_display_name
+
+    try:
+        for future in as_completed(
+            future_to_coll, timeout=TEMPORAL_QUERY_TIMEOUT_SECONDS
+        ):
+            coll_name = future_to_coll[future]
+            _display = collection_display_name(coll_name)
+            try:
+                result = future.result()
+                if result.results:
+                    results_by_provider[_display] = result.results
+                record_temporal_success(coll_name, _UNKNOWN_LATENCY_MS)
+            except Exception as e:
+                record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)
+                failed_providers.append(coll_name)
+                logger.warning("Temporal query failed for %s: %s", coll_name, e)
+                warnings.append(
+                    f"Provider {collection_display_name(coll_name)} failed: {e}"
+                )
+    except FuturesTimeoutError:
+        # Cancel unfinished futures. record_temporal_failure is called for each
+        # so the health monitor can gate them out on future queries.
+        for future, coll_name in future_to_coll.items():
+            if not future.done():
+                future.cancel()
+                record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)
+                failed_providers.append(coll_name)
+                _display = collection_display_name(coll_name)
+                logger.warning(
+                    "Temporal provider %s timed out after %ss",
+                    _display,
+                    TEMPORAL_QUERY_TIMEOUT_SECONDS,
+                )
+                warnings.append(
+                    f"Provider {_display} timed out after "
+                    f"{TEMPORAL_QUERY_TIMEOUT_SECONDS}s"
+                )
+
+
 def _query_multi_provider_fusion(
     config: Any,
     vector_store: Any,
@@ -237,12 +300,19 @@ def _query_multi_provider_fusion(
     author: Optional[str] = None,
     chunk_type: Optional[str] = None,
 ) -> Any:
-    """Query multiple providers in parallel and fuse results."""
+    """Query multiple providers in parallel and fuse results.
+
+    Delegates parallel execution and timeout handling to _collect_provider_results.
+    Returns partial results with a warning if providers time out (Bug #669).
+    Never raises an exception to the caller.
+    """
     from .temporal_search_service import TemporalSearchResults, ALL_TIME_RANGE
+    from .temporal_search_service import TemporalSearchService
 
     overfetch_limit = limit * TEMPORAL_OVERFETCH_MULTIPLIER
     results_by_provider: Dict[str, list] = {}
     warnings: List[str] = []
+    failed_providers: List[str] = []
 
     resolved_range = time_range if time_range is not None else ALL_TIME_RANGE
     path_filter = [file_path_filter] if file_path_filter else None
@@ -269,44 +339,33 @@ def _query_multi_provider_fusion(
             chunk_type=chunk_type,
         )
 
-    from .temporal_search_service import TemporalSearchService
-    from .temporal_collection_naming import collection_display_name
-
-    with ThreadPoolExecutor(max_workers=len(collections)) as executor:
-        future_to_coll: Dict[Future, str] = {}
-        for coll_name, _ in collections:
-            future = executor.submit(query_provider, coll_name)
-            future_to_coll[future] = coll_name
-
-        for future in as_completed(
-            future_to_coll, timeout=TEMPORAL_QUERY_TIMEOUT_SECONDS
-        ):
-            coll_name = future_to_coll[future]
-            _display = collection_display_name(coll_name)
-            try:
-                result = future.result()
-                if result.results:
-                    results_by_provider[_display] = result.results
-                record_temporal_success(coll_name, _UNKNOWN_LATENCY_MS)
-            except Exception as e:
-                record_temporal_failure(coll_name, _UNKNOWN_LATENCY_MS)
-                logger.warning("Temporal query failed for %s: %s", coll_name, e)
-                warnings.append(f"Provider {coll_name} failed: {e}")
-
-    for future, coll_name in future_to_coll.items():
-        if not future.done():
-            future.cancel()
-            warnings.append(
-                f"Provider {coll_name} timed out after {TEMPORAL_QUERY_TIMEOUT_SECONDS}s"
-            )
+    # Use explicit lifecycle instead of context manager so shutdown(wait=False)
+    # prevents blocking on in-flight embedding API calls after a timeout (Bug #669).
+    executor = ThreadPoolExecutor(max_workers=len(collections))
+    try:
+        future_to_coll: Dict[Future, str] = {
+            executor.submit(query_provider, coll_name): coll_name
+            for coll_name, _ in collections
+        }
+        _collect_provider_results(
+            future_to_coll, results_by_provider, warnings, failed_providers
+        )
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
     if not results_by_provider:
+        # Only warn "All providers failed" when providers actually failed or timed out.
+        # Empty results from healthy providers are not a failure.
+        if failed_providers:
+            warning_msg = "; ".join(warnings) if warnings else "All providers failed"
+        else:
+            warning_msg = None
         return TemporalSearchResults(
             results=[],
             query=query_text,
             filter_type="time_range" if time_range else "none",
             filter_value=time_range,
-            warning="; ".join(warnings) if warnings else "All providers failed",
+            warning=warning_msg,
         )
 
     fused = fuse_rrf_multi(
