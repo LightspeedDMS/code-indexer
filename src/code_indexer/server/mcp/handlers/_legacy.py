@@ -74,6 +74,110 @@ logger = logging.getLogger(__name__)
 
 # Story #653 AC3: Default overfetch multiplier when rerank_config is unavailable.
 _DEFAULT_OVERFETCH_MULTIPLIER = 5
+# Story #658: Maximum number of commits to fetch when overfetching for reranking.
+_MAX_RERANK_FETCH_LIMIT = 200
+
+
+def _serialize_file_history_commits(commits: list) -> List[dict]:
+    """Convert a list of FileHistoryCommit dataclass instances to JSON-serializable dicts."""
+    return [
+        {
+            "hash": c.hash,
+            "short_hash": c.short_hash,
+            "author_name": c.author_name,
+            "author_date": c.author_date,
+            "subject": c.subject,
+            "insertions": c.insertions,
+            "deletions": c.deletions,
+            "old_path": c.old_path,
+        }
+        for c in commits
+    ]
+
+
+def _compute_file_history_fetch_limit(
+    requested_limit: int, rerank_query: Optional[str]
+) -> int:
+    """Return the effective fetch limit for get_file_history.
+
+    When rerank_query is set, overfetch so the reranker has more candidates.
+    The result is capped at _MAX_RERANK_FETCH_LIMIT.
+    """
+    if not rerank_query:
+        return requested_limit
+    _rc = get_config_service().get_config().rerank_config
+    _m = getattr(_rc, "overfetch_multiplier", None) if _rc is not None else None
+    multiplier = _m if isinstance(_m, int) and _m > 0 else _DEFAULT_OVERFETCH_MULTIPLIER
+    return min(requested_limit * multiplier, _MAX_RERANK_FETCH_LIMIT)
+
+
+def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for git_file_history tool - get commit history for a file."""
+    repository_alias = args.get("repository_alias")
+    path = args.get("path")
+    if not repository_alias:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: repository_alias"}
+        )
+    if not path:
+        return _mcp_response(
+            {"success": False, "error": "Missing required parameter: path"}
+        )
+    try:
+        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
+        if error_msg is not None:
+            return _mcp_response({"success": False, "error": error_msg})
+        assert repo_path is not None
+        requested_limit = max(1, _coerce_int(args.get("limit"), 50))
+        rerank_query = args.get("rerank_query") or None
+        fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
+        service = GitOperationsService(Path(repo_path))
+        result = service.get_file_history(
+            path=path,
+            limit=fetch_limit,
+            follow_renames=args.get("follow_renames", True),
+        )
+        commits = _serialize_file_history_commits(result.commits)
+        # Story #658: Apply cross-encoder reranking after retrieval, before return.
+        # Guard: skip entirely when no rerank_query to avoid overhead.
+        if rerank_query:
+            commits, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=commits,
+                rerank_query=rerank_query,
+                rerank_instruction=args.get("rerank_instruction"),
+                content_extractor=lambda r: r.get("subject") or "",
+                requested_limit=requested_limit,
+                config_service=get_config_service(),
+            )
+        else:
+            _rerank_meta = {
+                "reranker_used": False,
+                "reranker_provider": None,
+                "rerank_time_ms": 0,
+            }
+        return _mcp_response(
+            {
+                "success": True,
+                "path": result.path,
+                "commits": commits,
+                "total_count": result.total_count,
+                "truncated": result.truncated,
+                "renamed_from": result.renamed_from,
+                "query_metadata": {
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+                },
+            }
+        )
+    except ValueError as e:
+        return _mcp_response({"success": False, "error": str(e)})
+    except Exception as e:
+        logger.exception(
+            f"Error in git_file_history: {e}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _mcp_response({"success": False, "error": str(e)})
 
 
 def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -3859,10 +3963,15 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
 
+        # Story #660: Extract reranking parameters and compute fetch limit
+        requested_limit = max(1, _coerce_int(args.get("limit"), 50))
+        rerank_query = args.get("rerank_query") or None
+        fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
+
         # Create service and execute query
         service = GitOperationsService(Path(repo_path))
         result = service.get_log(
-            limit=_coerce_int(args.get("limit"), 50),
+            limit=fetch_limit,
             path=args.get("path"),
             author=args.get("author"),
             since=args.get("since"),
@@ -3886,6 +3995,25 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
             for c in result.commits
         ]
+
+        # Story #660: Apply cross-encoder reranking after retrieval, before caching.
+        if rerank_query:
+            commits, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=commits,
+                rerank_query=rerank_query,
+                rerank_instruction=args.get("rerank_instruction"),
+                content_extractor=lambda r: "\n".join(
+                    p for p in [r.get("subject") or "", r.get("body") or ""] if p
+                ),
+                requested_limit=requested_limit,
+                config_service=get_config_service(),
+            )
+        else:
+            _rerank_meta = {
+                "reranker_used": False,
+                "reranker_provider": None,
+                "rerank_time_ms": 0,
+            }
 
         # Story #35: Build full log result for potential caching
         full_log_data = {
@@ -3941,6 +4069,12 @@ def handle_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 "preview_tokens": preview_tokens,
                 "total_pages": total_pages,
                 "has_more": has_more,
+                # Story #660: Reranking telemetry
+                "query_metadata": {
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+                },
             }
         )
 
@@ -4471,75 +4605,6 @@ def handle_git_blame(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     except Exception as e:
         logger.exception(
             f"Error in git_blame: {e}", extra={"correlation_id": get_correlation_id()}
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-def handle_git_file_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Handler for git_file_history tool - get commit history for a file."""
-    from pathlib import Path
-    from code_indexer.global_repos.git_operations import GitOperationsService
-
-    repository_alias = args.get("repository_alias")
-    path = args.get("path")
-
-    # Validate required parameters
-    if not repository_alias:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: repository_alias"}
-        )
-    if not path:
-        return _mcp_response(
-            {"success": False, "error": "Missing required parameter: path"}
-        )
-
-    try:
-        # Resolve repository path, checking for .git directory existence
-        repo_path, error_msg = _resolve_git_repo_path(repository_alias, user.username)
-        if error_msg is not None:
-            return _mcp_response({"success": False, "error": error_msg})
-        assert repo_path is not None  # narrowed by error_msg check above
-
-        # Create service and execute query
-        service = GitOperationsService(Path(repo_path))
-        result = service.get_file_history(
-            path=path,
-            limit=_coerce_int(args.get("limit"), 50),
-            follow_renames=args.get("follow_renames", True),
-        )
-
-        # Convert dataclasses to dicts for JSON serialization
-        commits = [
-            {
-                "hash": c.hash,
-                "short_hash": c.short_hash,
-                "author_name": c.author_name,
-                "author_date": c.author_date,
-                "subject": c.subject,
-                "insertions": c.insertions,
-                "deletions": c.deletions,
-                "old_path": c.old_path,
-            }
-            for c in result.commits
-        ]
-
-        return _mcp_response(
-            {
-                "success": True,
-                "path": result.path,
-                "commits": commits,
-                "total_count": result.total_count,
-                "truncated": result.truncated,
-                "renamed_from": result.renamed_from,
-            }
-        )
-
-    except ValueError as e:
-        return _mcp_response({"success": False, "error": str(e)})
-    except Exception as e:
-        logger.exception(
-            f"Error in git_file_history: {e}",
-            extra={"correlation_id": get_correlation_id()},
         )
         return _mcp_response({"success": False, "error": str(e)})
 
@@ -5155,6 +5220,8 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             - exact: Optional boolean for exact match
             - project: Optional project filter
             - repository_alias: Optional repository name to filter SCIP indexes
+            - rerank_query: Optional query for cross-encoder reranking (Story #659)
+            - rerank_instruction: Optional instruction prefix for reranker (Story #659)
         user: Authenticated user (for permission checking)
 
     Returns:
@@ -5162,21 +5229,28 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     try:
         symbol = params.get("symbol")
-        limit = _coerce_int(params.get("limit"), 100)
+        requested_limit = _coerce_int(params.get("limit"), 100)
         exact = params.get("exact", False)
         project = params.get("project")
         repository_alias = params.get("repository_alias")
+        # Story #659: Optional reranking parameters
+        rerank_query = params.get("rerank_query") or None
+        rerank_instruction = params.get("rerank_instruction")
 
         if not symbol:
             return _mcp_response(
                 {"success": False, "error": "symbol parameter is required"}
             )
 
+        # Story #659: Overfetch when reranking is requested so the reranker
+        # has a larger candidate pool; truncate back to requested_limit after reranking.
+        fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
+
         # Delegate to SCIPQueryService (Story #40)
         service = _get_scip_query_service()
         results_dicts = service.find_references(
             symbol=symbol,
-            limit=limit,
+            limit=fetch_limit,
             exact=exact,
             repository_alias=repository_alias,
             username=user.username,
@@ -5192,12 +5266,35 @@ def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         # Story #50: Truncation functions are now sync
         results_dicts = _apply_scip_payload_truncation(results_dicts)
 
+        # Story #659: Apply cross-encoder reranking after retrieval, before return.
+        # Guard: skip entirely when no rerank_query to avoid overhead.
+        if rerank_query:
+            results_dicts, _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=results_dicts,
+                rerank_query=rerank_query,
+                rerank_instruction=rerank_instruction,
+                content_extractor=lambda r: r.get("context") or "",
+                requested_limit=requested_limit,
+                config_service=get_config_service(),
+            )
+        else:
+            _rerank_meta = {
+                "reranker_used": False,
+                "reranker_provider": None,
+                "rerank_time_ms": 0,
+            }
+
         return _mcp_response(
             {
                 "success": True,
                 "symbol": symbol,
                 "total_results": len(results_dicts),
                 "results": results_dicts,
+                "query_metadata": {
+                    "reranker_used": _rerank_meta["reranker_used"],
+                    "reranker_provider": _rerank_meta["reranker_provider"],
+                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+                },
             }
         )
     except Exception as e:
@@ -7651,13 +7748,41 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         assert repo_path is not None  # narrowed by error_msg check above
 
         # Story #686: Updated default limit to 50, added offset parameter
-        limit = _coerce_int(args.get("limit"), 50)
+        # Story #660: Extract reranking parameters and compute fetch limit
+        requested_limit = max(1, _coerce_int(args.get("limit"), 50))
+        rerank_query = args.get("rerank_query") or None
+        fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
         offset = _coerce_int(args.get("offset"), 0)
         since_date = args.get("since_date")
         result = git_operations_service.git_log(
-            Path(repo_path), limit=limit, offset=offset, since_date=since_date
+            Path(repo_path), limit=fetch_limit, offset=offset, since_date=since_date
         )
+
+        # Story #660: Apply reranking after retrieval, before response.
+        if rerank_query:
+            result["commits"], _rerank_meta = _mcp_reranking._apply_reranking_sync(
+                results=result["commits"],
+                rerank_query=rerank_query,
+                rerank_instruction=args.get("rerank_instruction"),
+                content_extractor=lambda r: r.get("message") or "",
+                requested_limit=requested_limit,
+                config_service=get_config_service(),
+            )
+        else:
+            _rerank_meta = {
+                "reranker_used": False,
+                "reranker_provider": None,
+                "rerank_time_ms": 0,
+            }
+
+        # Update commits_returned unconditionally (reranking may truncate)
+        result["commits_returned"] = len(result["commits"])
         result["success"] = True
+        result["query_metadata"] = {
+            "reranker_used": _rerank_meta["reranker_used"],
+            "reranker_provider": _rerank_meta["reranker_provider"],
+            "rerank_time_ms": _rerank_meta["rerank_time_ms"],
+        }
         return _mcp_response(result)
 
     except GitCommandError as e:
@@ -15939,12 +16064,12 @@ def _provider_index_job(
         stderr_out = "".join(all_stderr)
         return {
             "success": True,
-            "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
-            if stdout_out
-            else "",
-            "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
-            if stderr_out
-            else "",
+            "stdout": (
+                stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else ""
+            ),
+            "stderr": (
+                stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else ""
+            ),
         }
     except IndexingSubprocessError as exc:
         logger.warning(
@@ -16106,12 +16231,12 @@ def _provider_temporal_index_job(
         return {
             "success": True,
             "provider": provider_name,
-            "stdout": stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
-            if stdout_out
-            else "",
-            "stderr": stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:]
-            if stderr_out
-            else "",
+            "stdout": (
+                stdout_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stdout_out else ""
+            ),
+            "stderr": (
+                stderr_out[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:] if stderr_out else ""
+            ),
         }
     except IndexingSubprocessError as exc:
         logger.warning(

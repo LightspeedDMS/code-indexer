@@ -72,7 +72,7 @@ def _build_registry() -> Dict[str, Dict[str, Any]]:
 
     docs_dir = Path(__file__).parent / "tool_docs"
     loader = ToolDocLoader(docs_dir)
-    return loader.build_tool_registry()
+    return loader.build_tool_registry()  # type: ignore[no-any-return]
 
 
 # Build TOOL_REGISTRY at module load time
