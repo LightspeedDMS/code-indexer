@@ -152,9 +152,9 @@ class TestServerConfigBackwardCompatibility:
 
             assert config is not None, "Old config should load successfully"
             # Story #15: anthropic_api_key moved to claude_integration_config
-            assert config.claude_integration_config.anthropic_api_key is None, (
-                "Missing anthropic_api_key should default to None"
-            )
+            assert (
+                config.claude_integration_config.anthropic_api_key is None  # type: ignore[union-attr]
+            ), "Missing anthropic_api_key should default to None"
 
     def test_deserialize_old_config_without_max_concurrent_claude_cli(self):
         """
@@ -185,9 +185,9 @@ class TestServerConfigBackwardCompatibility:
 
             assert config is not None, "Old config should load successfully"
             # Story #15: max_concurrent_claude_cli moved to claude_integration_config
-            assert config.claude_integration_config.max_concurrent_claude_cli == 4, (
-                "Missing max_concurrent_claude_cli should default to 4"
-            )
+            assert (
+                config.claude_integration_config.max_concurrent_claude_cli == 4  # type: ignore[union-attr]
+            ), "Missing max_concurrent_claude_cli should default to 4"
 
     def test_deserialize_old_config_without_description_refresh_interval_hours(self):
         """
@@ -219,7 +219,7 @@ class TestServerConfigBackwardCompatibility:
             assert config is not None, "Old config should load successfully"
             # Story #15: description_refresh_interval_hours moved to claude_integration_config
             assert (
-                config.claude_integration_config.description_refresh_interval_hours
+                config.claude_integration_config.description_refresh_interval_hours  # type: ignore[union-attr]
                 == 24
             ), "Missing description_refresh_interval_hours should default to 24"
 
@@ -254,10 +254,10 @@ class TestServerConfigBackwardCompatibility:
             assert loaded_config is not None, "Config should reload successfully"
             # Story #15: access via claude_integration_config
             assert (
-                loaded_config.claude_integration_config.max_concurrent_claude_cli == 8
+                loaded_config.claude_integration_config.max_concurrent_claude_cli == 8  # type: ignore[union-attr]
             ), "max_concurrent_claude_cli should be preserved"
             assert (
-                loaded_config.claude_integration_config.description_refresh_interval_hours
+                loaded_config.claude_integration_config.description_refresh_interval_hours  # type: ignore[union-attr]
                 == 48
             ), "description_refresh_interval_hours should be preserved"
 

@@ -161,7 +161,7 @@ class TestFTSDisplayFix:
         Empty results should not crash and should call semantic display by default.
         """
         # Arrange: Empty results
-        empty_results = []
+        empty_results = []  # type: ignore[var-annotated]
         console = Mock()
 
         # Act: Display empty results
@@ -324,7 +324,7 @@ class TestIntegrationWithRealDisplayFunctions:
         _display_fts_results(fts_results, quiet=False, console=console)
 
         # Assert: No crash, output generated
-        output = console.file.getvalue()
+        output = console.file.getvalue()  # type: ignore[attr-defined]
         assert "auth.py" in output
         assert "authenticate" in output
         # Check for line number (may have ANSI codes around it)
@@ -360,7 +360,7 @@ class TestIntegrationWithRealDisplayFunctions:
         )
 
         # Assert: No crash, output generated
-        output = console.file.getvalue()
+        output = console.file.getvalue()  # type: ignore[attr-defined]
         assert "config.py" in output
         assert "0.85" in output or "85" in output  # Score display
 

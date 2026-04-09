@@ -182,7 +182,7 @@ class TestMigrateFlat:
             migrate_flat_file_to_sqlite,
         )
 
-        log_entry = {
+        log_entry = {  # type: ignore[var-annotated]
             "event_type": "password_change_success",
             "username": "testuser",
             "ip_address": "127.0.0.1",

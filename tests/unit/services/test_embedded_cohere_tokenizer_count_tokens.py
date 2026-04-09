@@ -43,7 +43,7 @@ def patched_env_with_tokenizer(tmp_path, mock_tokenizer):
     stub = ModuleType("tokenizers")
     stub_class = MagicMock()
     stub_class.from_pretrained.return_value = mock_tokenizer
-    stub.Tokenizer = stub_class
+    stub.Tokenizer = stub_class  # type: ignore[attr-defined]
 
     with patch(
         "code_indexer.services.embedded_cohere_tokenizer._get_cache_dir",

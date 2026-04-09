@@ -18,8 +18,8 @@ class TestQueryParameterCompatibility:
     @pytest.fixture
     def mock_client(self):
         """Create a remote query client with mocked authentication."""
-        client = RemoteQueryClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RemoteQueryClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio
@@ -171,8 +171,8 @@ class TestParameterValidation:
 
     @pytest.fixture
     def mock_client(self):
-        client = RemoteQueryClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RemoteQueryClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio

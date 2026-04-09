@@ -273,7 +273,7 @@ class TestMetricsTableRendering:
     def test_table_has_required_columns(self):
         from report_sections import render_metrics_table
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         table = render_metrics_table("semantic_search_tries", scenario_data)
 
         assert "Concurrency" in table
@@ -286,7 +286,7 @@ class TestMetricsTableRendering:
     def test_table_has_one_row_per_level(self):
         from report_sections import render_metrics_table
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         table = render_metrics_table("semantic_search_tries", scenario_data)
 
         # 6 concurrency levels → 6 data rows (plus header + separator)
@@ -301,7 +301,7 @@ class TestMetricsTableRendering:
     def test_response_times_rounded_to_one_decimal(self):
         from report_sections import render_metrics_table
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         table = render_metrics_table("semantic_search_tries", scenario_data)
 
         # 120.0 ms should appear as "120.0" (1 decimal place)
@@ -310,7 +310,7 @@ class TestMetricsTableRendering:
     def test_inflection_row_is_bold(self):
         from report_sections import render_metrics_table
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         # inflection_level = 20
         table = render_metrics_table("semantic_search_tries", scenario_data)
 
@@ -329,7 +329,7 @@ class TestMetricsTableRendering:
     def test_no_inflection_row_without_inflection(self):
         from report_sections import render_metrics_table
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_flask"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_flask"]  # type: ignore[index]
         # inflection_level = None
         table = render_metrics_table("semantic_search_flask", scenario_data)
 
@@ -346,7 +346,7 @@ class TestMetricsTableRendering:
     def test_table_is_valid_markdown(self):
         from report_sections import render_metrics_table
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["fts_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["fts_search_tries"]  # type: ignore[index]
         table = render_metrics_table("fts_search_tries", scenario_data)
 
         lines = table.splitlines()
@@ -369,7 +369,7 @@ class TestAsciiBarChartRendering:
     def test_chart_uses_equals_characters(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
         assert "=" in chart
@@ -377,7 +377,7 @@ class TestAsciiBarChartRendering:
     def test_chart_labels_include_concurrency_level(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
         # Each level should appear as a label
@@ -387,7 +387,7 @@ class TestAsciiBarChartRendering:
     def test_chart_shows_p50_values(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
         # p50 = 120.0 at level 1 should appear
@@ -396,7 +396,7 @@ class TestAsciiBarChartRendering:
     def test_chart_marks_inflection_level(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         # inflection_level = 20
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
@@ -405,7 +405,7 @@ class TestAsciiBarChartRendering:
     def test_chart_wrapped_in_code_block(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
         assert "```" in chart
@@ -413,7 +413,7 @@ class TestAsciiBarChartRendering:
     def test_chart_bars_normalized_to_max_width(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_tries"]  # type: ignore[index]
         chart = render_ascii_chart("semantic_search_tries", scenario_data)
 
         lines = chart.splitlines()
@@ -425,7 +425,7 @@ class TestAsciiBarChartRendering:
     def test_chart_stable_scenario_has_no_inflection_marker(self):
         from report_sections import render_ascii_chart
 
-        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_flask"]
+        scenario_data = SAMPLE_RAW_METRICS["scenarios"]["semantic_search_flask"]  # type: ignore[index]
         # inflection_level = None
         chart = render_ascii_chart("semantic_search_flask", scenario_data)
 

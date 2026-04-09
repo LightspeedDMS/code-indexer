@@ -239,7 +239,7 @@ def test_empty_exclusion_list_behaves_like_no_filter(tmp_path, test_vectors):
     store.upsert_points(collection_name, points)
 
     # Search with empty must_not
-    filter_conditions = {"must_not": []}
+    filter_conditions = {"must_not": []}  # type: ignore[var-annotated]
 
     query_vector = test_vectors[0].tolist()
     mock_embedding_provider = Mock()

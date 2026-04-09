@@ -114,8 +114,8 @@ class TestRealJWTTokenManagerNetworkIntegration:
         import threading
         import queue
 
-        results = queue.Queue()
-        errors = queue.Queue()
+        results = queue.Queue()  # type: ignore[var-annotated]
+        errors = queue.Queue()  # type: ignore[var-annotated]
 
         def validate_token_worker():
             """Worker function for concurrent token validation."""

@@ -603,6 +603,7 @@ class TestHNSWCacheEdgeCases:
         # Loader called once
         assert load_count == 1, f"Loader called {load_count} times, expected 1"
         # All got same index
-        assert all(r[0] is mock_index for r in results), (
-            "All threads must get same index"
-        )
+        assert all(
+            r[0] is mock_index  # type: ignore[index]  # r is Optional but guaranteed non-None: all threads completed successfully
+            for r in results
+        ), "All threads must get same index"

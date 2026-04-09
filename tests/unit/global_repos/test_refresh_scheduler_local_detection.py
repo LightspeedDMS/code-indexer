@@ -246,7 +246,7 @@ class TestExecuteRefreshLocalRepoMtimeDetection:
         with patch.object(
             scheduler,
             "_has_local_changes",
-            side_effect=lambda *a: mtime_calls.append(a) or False,
+            side_effect=lambda *a: mtime_calls.append(a) or False,  # type: ignore[func-returns-value]
         ):
             with patch(
                 "code_indexer.global_repos.refresh_scheduler.GitPullUpdater",

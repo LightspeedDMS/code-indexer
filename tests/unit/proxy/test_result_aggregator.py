@@ -106,7 +106,7 @@ class TestParallelResultAggregator(unittest.TestCase):
 
     def test_aggregate_empty_results(self):
         """Test aggregation with empty results dictionary."""
-        results = {}
+        results = {}  # type: ignore[var-annotated]
 
         output, exit_code = self.aggregator.aggregate(results)
 

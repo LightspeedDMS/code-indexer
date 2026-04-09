@@ -137,7 +137,7 @@ class TestGetIndexStatusTool:
         tool = TOOL_REGISTRY["get_index_status"]
         schema = tool["inputSchema"]
 
-        invalid_input = {}
+        invalid_input = {}  # type: ignore[var-annotated]
 
         with pytest.raises(ValidationError):
             validate(instance=invalid_input, schema=schema)

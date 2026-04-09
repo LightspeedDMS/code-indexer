@@ -32,7 +32,7 @@ from code_indexer.server.auth.user_manager import User, UserRole
 def _make_user(
     username: str,
     role: UserRole = UserRole.NORMAL_USER,
-    email: str = None,
+    email: str = None,  # type: ignore[assignment]
 ) -> User:
     """Create a real User object for testing."""
     return User(
@@ -46,7 +46,7 @@ def _make_user(
 
 def _make_access_service(
     is_admin: bool = False,
-    accessible_repos_by_user: dict = None,
+    accessible_repos_by_user: dict = None,  # type: ignore[assignment]
 ) -> Mock:
     """Create a mock AccessFilteringService with per-user repo sets.
 
@@ -67,7 +67,7 @@ def _make_access_service(
     return service
 
 
-def _make_user_manager(users_by_email: dict = None) -> Mock:
+def _make_user_manager(users_by_email: dict = None) -> Mock:  # type: ignore[assignment]
     """Create a mock UserManager with get_user_by_email support.
 
     Args:

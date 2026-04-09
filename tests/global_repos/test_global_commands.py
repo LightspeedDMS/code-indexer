@@ -52,7 +52,7 @@ class TestGlobalListCommand:
             ["cidx", "global", "list"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         # Command should succeed
@@ -81,7 +81,7 @@ class TestGlobalListCommand:
             ["cidx", "global", "list"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         # Command should succeed
@@ -118,7 +118,7 @@ class TestGlobalListCommand:
             ["cidx", "global", "list"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0
@@ -144,7 +144,7 @@ class TestGlobalListCommand:
             ["cidx", "global", "list"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0
@@ -177,7 +177,7 @@ class TestGlobalStatusCommand:
             ["cidx", "global", "status", "test-repo-global"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0, f"Command failed: {result.stderr}"
@@ -204,7 +204,7 @@ class TestGlobalStatusCommand:
             ["cidx", "global", "status", "test-repo-global"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0
@@ -242,7 +242,7 @@ class TestGlobalStatusCommand:
             ["cidx", "global", "status", "test-repo-global"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0
@@ -263,7 +263,7 @@ class TestGlobalStatusCommand:
             ["cidx", "global", "status", "nonexistent-repo"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         # Should fail
@@ -292,7 +292,7 @@ class TestGlobalStatusCommand:
             ["cidx", "global", "status", "test-repo-global"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0

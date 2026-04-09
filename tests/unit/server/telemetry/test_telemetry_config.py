@@ -168,9 +168,9 @@ class TestServerConfigTelemetryIntegration:
         Then telemetry_config.enabled should be False
         """
         config = ServerConfig(server_dir="/tmp/test")
-        assert config.telemetry_config.enabled is False, (
-            "Telemetry should be disabled by default in ServerConfig"
-        )
+        assert (
+            config.telemetry_config.enabled is False  # type: ignore[union-attr]
+        ), "Telemetry should be disabled by default in ServerConfig"
 
 
 # =============================================================================
@@ -249,17 +249,17 @@ class TestTelemetryConfigSerialization:
             config = manager.load_config()
 
             assert config is not None
-            assert config.telemetry_config.enabled is True
-            assert config.telemetry_config.collector_endpoint == "http://collector:4317"
-            assert config.telemetry_config.collector_protocol == "http"
-            assert config.telemetry_config.service_name == "test-service"
-            assert config.telemetry_config.export_traces is True
-            assert config.telemetry_config.export_metrics is False
-            assert config.telemetry_config.export_logs is True
-            assert config.telemetry_config.machine_metrics_enabled is False
-            assert config.telemetry_config.machine_metrics_interval_seconds == 30
-            assert config.telemetry_config.trace_sample_rate == 0.75
-            assert config.telemetry_config.deployment_environment == "production"
+            assert config.telemetry_config.enabled is True  # type: ignore[union-attr]
+            assert config.telemetry_config.collector_endpoint == "http://collector:4317"  # type: ignore[union-attr]
+            assert config.telemetry_config.collector_protocol == "http"  # type: ignore[union-attr]
+            assert config.telemetry_config.service_name == "test-service"  # type: ignore[union-attr]
+            assert config.telemetry_config.export_traces is True  # type: ignore[union-attr]
+            assert config.telemetry_config.export_metrics is False  # type: ignore[union-attr]
+            assert config.telemetry_config.export_logs is True  # type: ignore[union-attr]
+            assert config.telemetry_config.machine_metrics_enabled is False  # type: ignore[union-attr]
+            assert config.telemetry_config.machine_metrics_interval_seconds == 30  # type: ignore[union-attr]
+            assert config.telemetry_config.trace_sample_rate == 0.75  # type: ignore[union-attr]
+            assert config.telemetry_config.deployment_environment == "production"  # type: ignore[union-attr]
 
     def test_telemetry_config_backward_compatibility(self):
         """
@@ -288,9 +288,9 @@ class TestTelemetryConfigSerialization:
             assert hasattr(config, "telemetry_config"), (
                 "Should have telemetry_config field"
             )
-            assert config.telemetry_config.enabled is False, (
-                "Telemetry should be disabled for old configs"
-            )
+            assert (
+                config.telemetry_config.enabled is False  # type: ignore[union-attr]
+            ), "Telemetry should be disabled for old configs"
 
     def test_telemetry_config_roundtrip(self):
         """
@@ -322,45 +322,45 @@ class TestTelemetryConfigSerialization:
             loaded = manager.load_config()
 
             assert loaded is not None
-            assert loaded.telemetry_config.enabled == original.telemetry_config.enabled
+            assert loaded.telemetry_config.enabled == original.telemetry_config.enabled  # type: ignore[union-attr]
             assert (
-                loaded.telemetry_config.collector_endpoint
+                loaded.telemetry_config.collector_endpoint  # type: ignore[union-attr]
                 == original.telemetry_config.collector_endpoint
             )
             assert (
-                loaded.telemetry_config.collector_protocol
+                loaded.telemetry_config.collector_protocol  # type: ignore[union-attr]
                 == original.telemetry_config.collector_protocol
             )
             assert (
-                loaded.telemetry_config.service_name
+                loaded.telemetry_config.service_name  # type: ignore[union-attr]
                 == original.telemetry_config.service_name
             )
             assert (
-                loaded.telemetry_config.export_traces
+                loaded.telemetry_config.export_traces  # type: ignore[union-attr]
                 == original.telemetry_config.export_traces
             )
             assert (
-                loaded.telemetry_config.export_metrics
+                loaded.telemetry_config.export_metrics  # type: ignore[union-attr]
                 == original.telemetry_config.export_metrics
             )
             assert (
-                loaded.telemetry_config.export_logs
+                loaded.telemetry_config.export_logs  # type: ignore[union-attr]
                 == original.telemetry_config.export_logs
             )
             assert (
-                loaded.telemetry_config.machine_metrics_enabled
+                loaded.telemetry_config.machine_metrics_enabled  # type: ignore[union-attr]
                 == original.telemetry_config.machine_metrics_enabled
             )
             assert (
-                loaded.telemetry_config.machine_metrics_interval_seconds
+                loaded.telemetry_config.machine_metrics_interval_seconds  # type: ignore[union-attr]
                 == original.telemetry_config.machine_metrics_interval_seconds
             )
             assert (
-                loaded.telemetry_config.trace_sample_rate
+                loaded.telemetry_config.trace_sample_rate  # type: ignore[union-attr]
                 == original.telemetry_config.trace_sample_rate
             )
             assert (
-                loaded.telemetry_config.deployment_environment
+                loaded.telemetry_config.deployment_environment  # type: ignore[union-attr]
                 == original.telemetry_config.deployment_environment
             )
 
@@ -385,14 +385,14 @@ class TestTelemetryConfigEnvOverrides:
             os.environ["CIDX_TELEMETRY_ENABLED"] = "true"
 
             config = ServerConfig(server_dir="/tmp/test")
-            assert config.telemetry_config.enabled is False
+            assert config.telemetry_config.enabled is False  # type: ignore[union-attr]
 
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.enabled is True, (
-                "CIDX_TELEMETRY_ENABLED=true should enable telemetry"
-            )
+            assert (
+                config.telemetry_config.enabled is True  # type: ignore[union-attr]
+            ), "CIDX_TELEMETRY_ENABLED=true should enable telemetry"
         finally:
             os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
 
@@ -413,9 +413,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.enabled is False, (
-                "CIDX_TELEMETRY_ENABLED=false should disable telemetry"
-            )
+            assert (
+                config.telemetry_config.enabled is False  # type: ignore[union-attr]
+            ), "CIDX_TELEMETRY_ENABLED=false should disable telemetry"
         finally:
             os.environ.pop("CIDX_TELEMETRY_ENABLED", None)
 
@@ -435,7 +435,7 @@ class TestTelemetryConfigEnvOverrides:
             config = manager.apply_env_overrides(config)
 
             assert (
-                config.telemetry_config.collector_endpoint
+                config.telemetry_config.collector_endpoint  # type: ignore[union-attr]
                 == "http://env-collector:4317"
             ), "CIDX_OTEL_COLLECTOR_ENDPOINT should override endpoint"
         finally:
@@ -456,9 +456,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.collector_protocol == "http", (
-                "CIDX_OTEL_COLLECTOR_PROTOCOL should override protocol"
-            )
+            assert (
+                config.telemetry_config.collector_protocol == "http"  # type: ignore[union-attr]
+            ), "CIDX_OTEL_COLLECTOR_PROTOCOL should override protocol"
         finally:
             os.environ.pop("CIDX_OTEL_COLLECTOR_PROTOCOL", None)
 
@@ -477,9 +477,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.service_name == "env-service-name", (
-                "CIDX_OTEL_SERVICE_NAME should override service_name"
-            )
+            assert (
+                config.telemetry_config.service_name == "env-service-name"  # type: ignore[union-attr]
+            ), "CIDX_OTEL_SERVICE_NAME should override service_name"
         finally:
             os.environ.pop("CIDX_OTEL_SERVICE_NAME", None)
 
@@ -498,9 +498,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.trace_sample_rate == 0.5, (
-                "CIDX_OTEL_TRACE_SAMPLE_RATE should override trace_sample_rate"
-            )
+            assert (
+                config.telemetry_config.trace_sample_rate == 0.5  # type: ignore[union-attr]
+            ), "CIDX_OTEL_TRACE_SAMPLE_RATE should override trace_sample_rate"
         finally:
             os.environ.pop("CIDX_OTEL_TRACE_SAMPLE_RATE", None)
 
@@ -519,9 +519,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.deployment_environment == "production", (
-                "CIDX_DEPLOYMENT_ENVIRONMENT should override deployment_environment"
-            )
+            assert (
+                config.telemetry_config.deployment_environment == "production"  # type: ignore[union-attr]
+            ), "CIDX_DEPLOYMENT_ENVIRONMENT should override deployment_environment"
         finally:
             os.environ.pop("CIDX_DEPLOYMENT_ENVIRONMENT", None)
 
@@ -540,9 +540,9 @@ class TestTelemetryConfigEnvOverrides:
             manager = ServerConfigManager("/tmp/test")
             config = manager.apply_env_overrides(config)
 
-            assert config.telemetry_config.trace_sample_rate == 1.0, (
-                "Invalid trace_sample_rate should keep default"
-            )
+            assert (
+                config.telemetry_config.trace_sample_rate == 1.0  # type: ignore[union-attr]
+            ), "Invalid trace_sample_rate should keep default"
         finally:
             os.environ.pop("CIDX_OTEL_TRACE_SAMPLE_RATE", None)
 

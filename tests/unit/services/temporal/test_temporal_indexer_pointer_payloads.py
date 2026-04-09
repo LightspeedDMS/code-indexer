@@ -122,7 +122,7 @@ class TestTemporalIndexerPointerPayloads:
             upserted_points.extend(points)
             return {"status": "ok", "count": len(points)}
 
-        vector_store.upsert_points = capture_upsert
+        vector_store.upsert_points = capture_upsert  # type: ignore[assignment, method-assign]
 
         # Create indexer and index the add commit
         indexer = TemporalIndexer(config_manager, vector_store)

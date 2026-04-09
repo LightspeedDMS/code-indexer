@@ -137,7 +137,7 @@ def test_delete_file_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "delete_file",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         rest_params_explicit=["file_path", "content_hash"],
     )
 
@@ -151,7 +151,11 @@ def test_git_status_parameter_parity(mcp_tool_registry):
 
     # GET request with no body
     assert_schema_parity(
-        "git_status", mcp_schema, None, path_params=[], optional_in_rest=[]
+        "git_status",
+        mcp_schema,
+        None,  # type: ignore[arg-type]  # None intentional: GET endpoint has no request body model
+        path_params=[],
+        optional_in_rest=[],  # type: ignore[arg-type]  # empty list intentional: no optional REST fields for this endpoint
     )
 
 
@@ -163,7 +167,7 @@ def test_git_diff_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "git_diff",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         rest_params_explicit=[
             "context_lines",
             "from_revision",
@@ -184,7 +188,7 @@ def test_git_log_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "git_log",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         rest_params_explicit=[
             "limit",
             "offset",
@@ -306,7 +310,11 @@ def test_git_merge_abort_parameter_parity(mcp_tool_registry):
 
     # POST with no body (no request model)
     assert_schema_parity(
-        "git_merge_abort", mcp_schema, None, path_params=[], optional_in_rest=[]
+        "git_merge_abort",
+        mcp_schema,
+        None,  # type: ignore[arg-type]  # None intentional: endpoint has no request body model
+        path_params=[],
+        optional_in_rest=[],  # type: ignore[arg-type]  # empty list intentional: no optional REST fields for this endpoint
     )
 
 
@@ -334,7 +342,11 @@ def test_git_branch_list_parameter_parity(mcp_tool_registry):
 
     # GET with no parameters
     assert_schema_parity(
-        "git_branch_list", mcp_schema, None, path_params=[], optional_in_rest=[]
+        "git_branch_list",
+        mcp_schema,
+        None,  # type: ignore[arg-type]  # None intentional: GET endpoint has no request body model
+        path_params=[],
+        optional_in_rest=[],  # type: ignore[arg-type]  # empty list intentional: no optional REST fields for this endpoint
     )
 
 
@@ -361,7 +373,7 @@ def test_git_branch_switch_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "git_branch_switch",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         path_params=["branch_name"],
         optional_in_rest=[],
     )
@@ -375,7 +387,7 @@ def test_git_branch_delete_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "git_branch_delete",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         rest_params_explicit=["branch_name", "confirmation_token"],
     )
 
@@ -391,7 +403,7 @@ def test_scip_definition_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "scip_definition",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         rest_params_explicit=["symbol", "exact", "project"],
     )
 
@@ -404,6 +416,6 @@ def test_scip_references_parameter_parity(mcp_tool_registry):
     assert_schema_parity(
         "scip_references",
         mcp_schema,
-        None,
+        None,  # type: ignore[arg-type]
         rest_params_explicit=["symbol", "limit", "exact", "project"],
     )

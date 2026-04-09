@@ -247,7 +247,7 @@ class ConfigurationValidator:
 
         codebase_dir = self.detect_correct_codebase_dir()
         file_identifier = FileIdentifier(codebase_dir)
-        return file_identifier.get_project_id()
+        return file_identifier.get_project_id()  # type: ignore[no-any-return]
 
     def validate_config(self, config: Config) -> List[ConfigFix]:
         """Validate configuration and suggest fixes."""

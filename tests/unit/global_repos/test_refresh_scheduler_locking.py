@@ -112,7 +112,7 @@ def test_concurrent_refreshes_different_repos_no_interference(
         mock_updater_class.return_value = mock_git_pull_updater()
 
         # Track when each refresh starts and completes
-        refresh_events = {"repo1": [], "repo2": []}
+        refresh_events = {"repo1": [], "repo2": []}  # type: ignore[var-annotated]
 
         def slow_index_source(alias_name, source_path, progress_callback=None):
             """Simulate slow indexing to test concurrency."""

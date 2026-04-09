@@ -77,7 +77,7 @@ class TestGetWikiUserHybridRedirectBehavior:
             with pytest.raises(HTTPException) as exc_info:
                 get_wiki_user_hybrid(request)
 
-        location = exc_info.value.headers["Location"]
+        location = exc_info.value.headers["Location"]  # type: ignore[index]
         assert location.startswith("/login?redirect_to=")
 
     def test_redirect_preserves_full_wiki_path(self):
@@ -94,7 +94,7 @@ class TestGetWikiUserHybridRedirectBehavior:
             with pytest.raises(HTTPException) as exc_info:
                 get_wiki_user_hybrid(request)
 
-        location = exc_info.value.headers["Location"]
+        location = exc_info.value.headers["Location"]  # type: ignore[index]
         # The redirect_to param must contain the full path (URL-encoded)
         assert (
             "/wiki/sf-kb-wiki/Customer/some-article" in location
@@ -116,7 +116,7 @@ class TestGetWikiUserHybridRedirectBehavior:
             with pytest.raises(HTTPException) as exc_info:
                 get_wiki_user_hybrid(request)
 
-        location = exc_info.value.headers["Location"]
+        location = exc_info.value.headers["Location"]  # type: ignore[index]
         # The full URL (path + query) must be preserved in redirect_to
         assert "version%3D2" in location or "version=2" in location
 
@@ -223,7 +223,7 @@ class TestGetWikiUserHybridRealCallPath:
     with a minimal fake request to verify the function produces a 303 redirect (not a 500).
     """
 
-    def _make_minimal_request(self, path: str, cookies: dict = None) -> MagicMock:
+    def _make_minimal_request(self, path: str, cookies: dict = None) -> MagicMock:  # type: ignore[assignment]
         """Build a mock Request with no session cookie, no auth header."""
         request = MagicMock()
         request.url.path = path
@@ -287,7 +287,7 @@ class TestGetWikiUserHybridRealCallPath:
                     get_wiki_user_hybrid(request)
 
         assert exc_info.value.status_code == status.HTTP_303_SEE_OTHER
-        location = exc_info.value.headers["Location"]
+        location = exc_info.value.headers["Location"]  # type: ignore[index]
         assert "/login" in location
         assert "redirect_to" in location
 

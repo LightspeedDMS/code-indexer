@@ -56,13 +56,13 @@ class _MinimalUserManager:
         user = self._backend.get_user(username)
         if user is None:
             return []
-        return user.get("mcp_credentials", [])
+        return user.get("mcp_credentials", [])  # type: ignore[no-any-return]
 
     def get_mcp_credential_by_client_id(
         self, client_id: str
     ) -> Optional[Tuple[str, dict]]:
         """Direct SQL lookup — delegates to backend."""
-        return self._backend.get_mcp_credential_by_client_id(client_id)
+        return self._backend.get_mcp_credential_by_client_id(client_id)  # type: ignore[no-any-return]
 
     def add_mcp_credential(
         self,
@@ -86,7 +86,7 @@ class _MinimalUserManager:
     def update_mcp_credential_last_used(
         self, username: str, credential_id: str
     ) -> bool:
-        return self._backend.update_mcp_credential_last_used(username, credential_id)
+        return self._backend.update_mcp_credential_last_used(username, credential_id)  # type: ignore[no-any-return]
 
     def close(self) -> None:
         self._backend.close()
@@ -111,7 +111,7 @@ class _IterationOnlyUserManager:
 
     def get_mcp_credentials_with_secrets(self, username: str) -> list:
         user = self._users.get(username, {})
-        return user.get("mcp_credentials", [])
+        return user.get("mcp_credentials", [])  # type: ignore[no-any-return]
 
     def add_credential_for_user(
         self, username: str, client_id: str, secret_hash: str, credential_id: str

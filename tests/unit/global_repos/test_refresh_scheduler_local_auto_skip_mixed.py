@@ -165,7 +165,7 @@ class TestStartupReconciliationSkipsLocalRepos:
         with patch.object(
             sched,
             "_restore_master_from_versioned",
-            side_effect=lambda a, p: restore_calls.append(a) or False,
+            side_effect=lambda a, p: restore_calls.append(a) or False,  # type: ignore[func-returns-value]
         ):
             sched.reconcile_golden_repos()
 
@@ -201,7 +201,7 @@ class TestStartupReconciliationSkipsLocalRepos:
         with patch.object(
             sched,
             "_restore_master_from_versioned",
-            side_effect=lambda a, p: restore_calls.append(a) or False,
+            side_effect=lambda a, p: restore_calls.append(a) or False,  # type: ignore[func-returns-value]
         ):
             sched.reconcile_golden_repos()
 
@@ -237,7 +237,7 @@ class TestStartupReconciliationSkipsLocalRepos:
         with patch.object(
             sched,
             "_restore_master_from_versioned",
-            side_effect=lambda a, p: restore_calls.append(a) or False,
+            side_effect=lambda a, p: restore_calls.append(a) or False,  # type: ignore[func-returns-value]
         ):
             sched.reconcile_golden_repos()
 

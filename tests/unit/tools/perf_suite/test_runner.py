@@ -301,7 +301,7 @@ class TestRunScenarioEscalation:
         """Warmup requests do not appear in the measurement metrics."""
         from escalation import run_scenario_escalation
 
-        call_times = []
+        call_times = []  # type: ignore[var-annotated]
 
         async def tracking_execute(perf_client, http_client, scenario):
             call_times.append(len(call_times))

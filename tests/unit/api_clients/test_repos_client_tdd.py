@@ -521,7 +521,7 @@ class TestDataModels:
             "conflict_details": None,
         }
 
-        repo = ActivatedRepository(**repo_data)
+        repo = ActivatedRepository(**repo_data)  # type: ignore[arg-type]
 
         assert repo.alias == "test-repo"
         assert repo.current_branch == "main"
@@ -539,7 +539,7 @@ class TestDataModels:
             "last_updated": "2024-01-15T12:00:00Z",
         }
 
-        repo = GoldenRepository(**repo_data)
+        repo = GoldenRepository(**repo_data)  # type: ignore[arg-type]
 
         assert repo.alias == "golden-repo"
         assert repo.description == "A golden repository"
@@ -566,7 +566,7 @@ class TestDataModels:
             "access_errors": [],
         }
 
-        result = RepositoryDiscoveryResult(**discovery_data)
+        result = RepositoryDiscoveryResult(**discovery_data)  # type: ignore[arg-type]
 
         assert len(result.discovered_repositories) == 1
         assert result.source == "github.com/user"
@@ -588,7 +588,7 @@ class TestDataModels:
             "recommendations": ["Test recommendation"],
         }
 
-        summary = RepositoryStatusSummary(**summary_data)
+        summary = RepositoryStatusSummary(**summary_data)  # type: ignore[arg-type]
 
         assert summary.activated_repositories.total_count == 2
         assert summary.available_repositories.total_count == 8

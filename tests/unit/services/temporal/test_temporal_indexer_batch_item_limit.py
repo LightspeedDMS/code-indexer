@@ -108,7 +108,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
             parent_commit_hash="parent-hash",
         )
 
-        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]
+        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]  # type: ignore[attr-defined]
 
         # Mock chunker to return exactly 1,331 small chunks for file diff, 1 for commit message
         def mock_chunk_many_small(content, path):
@@ -131,7 +131,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
                 for j in range(1331)  # Exact count from production error
             ]
 
-        self.indexer.chunker.chunk_text.side_effect = mock_chunk_many_small
+        self.indexer.chunker.chunk_text.side_effect = mock_chunk_many_small  # type: ignore[attr-defined]
 
         # Track batch sizes submitted to API
         submitted_batch_sizes = []
@@ -149,7 +149,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
                 )
 
             # Create mock future with embeddings
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             mock_result = Mock()
             mock_result.embeddings = [[0.1] * 1024 for _ in chunk_texts]
             mock_result.error = None
@@ -272,7 +272,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
             parent_commit_hash="parent-hash",
         )
 
-        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]
+        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]  # type: ignore[attr-defined]
 
         # Mock chunker to return 2,500 small chunks for file diff, 1 for commit message
         def mock_chunk_2500(content, path):
@@ -291,7 +291,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
                 for j in range(2500)
             ]
 
-        self.indexer.chunker.chunk_text.side_effect = mock_chunk_2500
+        self.indexer.chunker.chunk_text.side_effect = mock_chunk_2500  # type: ignore[attr-defined]
 
         submitted_batch_sizes = []
 
@@ -302,7 +302,7 @@ class TestTemporalIndexerBatchItemLimit(unittest.TestCase):
             if batch_size > 1000:
                 raise RuntimeError(f"Batch size {batch_size} exceeds 1,000 limit")
 
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             mock_result = Mock()
             mock_result.embeddings = [[0.1] * 1024 for _ in chunk_texts]
             mock_result.error = None

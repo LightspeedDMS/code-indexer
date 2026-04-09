@@ -202,7 +202,7 @@ class HNSWHealthService:
         # Level 1: File exists?
         if not os.path.exists(index_path):
             elapsed_ms = (time.time() - start_time) * 1000
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=False,
                 file_exists=False,
                 readable=False,
@@ -219,7 +219,7 @@ class HNSWHealthService:
             file_mtime = datetime.fromtimestamp(stat_info.st_mtime, tz=timezone.utc)
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=False,
                 file_exists=True,
                 readable=False,
@@ -235,7 +235,7 @@ class HNSWHealthService:
                 f.read(1)  # Try reading 1 byte
         except PermissionError:
             elapsed_ms = (time.time() - start_time) * 1000
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=False,
                 file_exists=True,
                 readable=False,
@@ -248,7 +248,7 @@ class HNSWHealthService:
             )
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=False,
                 file_exists=True,
                 readable=False,
@@ -269,7 +269,7 @@ class HNSWHealthService:
             index.load_index(index_path)
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=False,
                 file_exists=True,
                 readable=True,
@@ -288,7 +288,7 @@ class HNSWHealthService:
             elapsed_ms = (time.time() - start_time) * 1000
 
             # check_integrity() returns a dictionary
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=integrity_result["valid"],
                 file_exists=True,
                 readable=True,
@@ -305,7 +305,7 @@ class HNSWHealthService:
             )
         except Exception as e:
             elapsed_ms = (time.time() - start_time) * 1000
-            return HealthCheckResult(
+            return HealthCheckResult(  # type: ignore[call-arg]
                 valid=False,
                 file_exists=True,
                 readable=True,

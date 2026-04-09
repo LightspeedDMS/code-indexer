@@ -154,7 +154,7 @@ class TestProviderIndexJobProgress:
 
         def capture_run_with_popen(*args, **kwargs):
             captured_call_args.update(kwargs)
-            return original_run_with_popen(*args, **kwargs)
+            return original_run_with_popen(*args, **kwargs)  # type: ignore[misc]
 
         import code_indexer.services.progress_subprocess_runner as runner_module
 

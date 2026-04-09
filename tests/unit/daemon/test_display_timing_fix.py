@@ -43,7 +43,7 @@ class TestDaemonDisplayTimingFix(unittest.TestCase):
         )
         self.assertIsNotNone(match, "_index_via_daemon function not found")
 
-        function_body = match.group(1)
+        function_body = match.group(1)  # type: ignore[union-attr]
 
         # Find positions of key calls
         start_display_pos = function_body.find(
@@ -91,7 +91,7 @@ class TestDaemonDisplayTimingFix(unittest.TestCase):
         )
         self.assertIsNotNone(match, "_index_via_daemon function not found")
 
-        function_body = match.group(1)
+        function_body = match.group(1)  # type: ignore[union-attr]
 
         # VERIFY: display_initialized variable is NOT in function
         self.assertNotIn(
@@ -120,7 +120,7 @@ class TestDaemonDisplayTimingFix(unittest.TestCase):
         )
         self.assertIsNotNone(match, "progress_callback not found")
 
-        callback_body = match.group(1)
+        callback_body = match.group(1)  # type: ignore[union-attr]
 
         # VERIFY: Setup message handling exists
         self.assertIn(

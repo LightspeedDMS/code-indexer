@@ -186,7 +186,7 @@ class TestRebuildFTSIndexE2E:
             # Create progress file with NO completed files
             config_dir = project_dir / ".code-indexer"
             config_dir.mkdir(exist_ok=True)
-            progress_data = {
+            progress_data = {  # type: ignore[var-annotated]
                 "current_session": None,
                 "file_records": {},
             }

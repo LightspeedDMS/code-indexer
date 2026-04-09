@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 try:
-    from pysqlite3 import dbapi2 as sqlite3
+    from pysqlite3 import dbapi2 as sqlite3  # type: ignore[no-redef]
 except ImportError:
     import sqlite3
 

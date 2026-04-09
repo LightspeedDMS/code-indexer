@@ -43,11 +43,11 @@ def _save_job(
     operation_type: str = "sync_repository",
     username: str = "admin",
     repo_alias: str = "my-repo",
-    created_at: str = None,
-    started_at: str = None,
-    completed_at: str = None,
+    created_at: str = None,  # type: ignore[assignment]
+    started_at: str = None,  # type: ignore[assignment]
+    completed_at: str = None,  # type: ignore[assignment]
     progress: int = 100,
-    error: str = None,
+    error: str = None,  # type: ignore[assignment]
 ) -> None:
     """Helper to save a job with sensible defaults."""
     now = datetime.now(timezone.utc)

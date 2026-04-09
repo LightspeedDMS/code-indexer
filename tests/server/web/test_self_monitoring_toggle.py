@@ -31,7 +31,7 @@ def test_toggling_enabled_on_starts_service(
     mock_service.stop = Mock()
 
     # Inject mock service into app state
-    app.state.self_monitoring_service = mock_service
+    app.state.self_monitoring_service = mock_service  # type: ignore[attr-defined]
 
     # Get CSRF token
     get_response = authenticated_client.get("/admin/self-monitoring")
@@ -78,7 +78,7 @@ def test_toggling_enabled_off_stops_service(
     mock_service.stop = Mock()
 
     # Inject mock service into app state
-    app.state.self_monitoring_service = mock_service
+    app.state.self_monitoring_service = mock_service  # type: ignore[attr-defined]
 
     # Get CSRF token
     get_response = authenticated_client.get("/admin/self-monitoring")

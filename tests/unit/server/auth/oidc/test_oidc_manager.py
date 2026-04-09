@@ -468,9 +468,9 @@ class TestOIDCManager:
                     pass
 
                 user = MockUser()
-                user.username = username
-                user.role = role
-                user.email = email
+                user.username = username  # type: ignore[attr-defined]
+                user.role = role  # type: ignore[attr-defined]
+                user.email = email  # type: ignore[attr-defined]
                 self.users[username] = user
                 self.oidc_users_created.append(username)
                 return user
@@ -522,7 +522,7 @@ class TestOIDCManager:
                 "SELECT COUNT(*) FROM oidc_identity_links WHERE username = ?",
                 ("deleteduser",),
             )
-            count = (await cursor.fetchone())[0]
+            count = (await cursor.fetchone())[0]  # type: ignore[index]
             assert count == 0, "Stale OIDC link should have been deleted"
 
         # Verify new link was created for new user

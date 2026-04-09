@@ -140,7 +140,7 @@ class TelemetryManager:
                     insecure=True,
                 )
             else:
-                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore[assignment]
                     OTLPSpanExporter,
                 )
 
@@ -150,7 +150,7 @@ class TelemetryManager:
                     endpoint = f"{endpoint.rstrip('/')}/v1/traces"
                 exporter = OTLPSpanExporter(endpoint=endpoint)
 
-            self._tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
+            self._tracer_provider.add_span_processor(BatchSpanProcessor(exporter))  # type: ignore[attr-defined]
 
         except Exception as e:
             logger.warning(
@@ -175,7 +175,7 @@ class TelemetryManager:
                     insecure=True,
                 )
             else:
-                from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                from opentelemetry.exporter.otlp.proto.http.metric_exporter import (  # type: ignore[assignment]
                     OTLPMetricExporter,
                 )
 
@@ -257,7 +257,7 @@ class TelemetryManager:
         """
         from opentelemetry import metrics
 
-        return metrics.get_meter(name, version)
+        return metrics.get_meter(name, version)  # type: ignore[arg-type]
 
     def shutdown(self) -> None:
         """Shutdown telemetry, flushing any pending data."""
@@ -266,11 +266,11 @@ class TelemetryManager:
 
         try:
             if self._tracer_provider is not None:
-                self._tracer_provider.shutdown()
+                self._tracer_provider.shutdown()  # type: ignore[attr-defined]
                 logger.debug("TracerProvider shutdown complete")
 
             if self._meter_provider is not None:
-                self._meter_provider.shutdown()
+                self._meter_provider.shutdown()  # type: ignore[attr-defined]
                 logger.debug("MeterProvider shutdown complete")
 
             logger.info("OpenTelemetry shutdown complete")

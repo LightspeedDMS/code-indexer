@@ -37,7 +37,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
         content = mcp_response["content"][0]
         if "text" in content:
             try:
-                return json.loads(content["text"])
+                return json.loads(content["text"])  # type: ignore[no-any-return]
             except json.JSONDecodeError:
                 return {"text": content["text"]}
     return mcp_response
@@ -263,4 +263,4 @@ class TestFileContentTruncationE2E:
                 break
             page += 1
 
-        return full_content
+        return full_content  # type: ignore[no-any-return]

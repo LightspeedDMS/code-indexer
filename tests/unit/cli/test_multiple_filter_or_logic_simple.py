@@ -120,7 +120,7 @@ def test_multiple_path_filters_or_logic():
         filter_conditions = {"must": [{"should": path_filters}]}
     else:
         # Single path filter: use directly
-        filter_conditions = {"must": path_filters}
+        filter_conditions = {"must": path_filters}  # type: ignore[dict-item]
 
     # Verify structure
     assert "must" in filter_conditions

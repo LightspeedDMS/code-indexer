@@ -152,7 +152,7 @@ class TestRegisterLocalRepoCidxInit:
                 mock_activator = MagicMock()
 
                 def track_activation(*args, **kwargs):
-                    call_order.append(("activation",))
+                    call_order.append(("activation",))  # type: ignore[arg-type]
 
                 mock_activator.activate_golden_repo.side_effect = track_activation
                 mock_activator_class.return_value = mock_activator

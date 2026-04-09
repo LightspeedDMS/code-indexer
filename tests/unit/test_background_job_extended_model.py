@@ -392,7 +392,7 @@ class TestExtendedBackgroundJobModel:
             }
         }
 
-        extended_error = {
+        extended_error = {  # type: ignore[var-annotated]
             "original_error": "test error",
             "claude_analysis": "test analysis",
             "attempts_history": [],

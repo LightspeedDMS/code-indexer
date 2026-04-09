@@ -81,7 +81,7 @@ class TestWorkerExceptionHandling:
         - exc_info=True is passed to include full stack trace
         """
         # Mock diff scanner to return one diff
-        self.indexer.diff_scanner.get_diffs_for_commit = Mock(
+        self.indexer.diff_scanner.get_diffs_for_commit = Mock(  # type: ignore[method-assign]
             return_value=[
                 Mock(
                     file_path="test.py",
@@ -128,7 +128,7 @@ class TestWorkerExceptionHandling:
             "src.code_indexer.services.temporal.temporal_indexer.logger"
         ) as mock_logger:
             # Mock _count_tokens to avoid import
-            self.indexer._count_tokens = Mock(return_value=100)
+            self.indexer._count_tokens = Mock(return_value=100)  # type: ignore[method-assign]
 
             # Call _process_commits_parallel with one commit - should propagate exception
             with pytest.raises(RuntimeError, match="projection matrix missing"):
@@ -167,7 +167,7 @@ class TestWorkerExceptionHandling:
         - Original exception type and message are preserved
         """
         # Mock diff scanner to return one diff
-        self.indexer.diff_scanner.get_diffs_for_commit = Mock(
+        self.indexer.diff_scanner.get_diffs_for_commit = Mock(  # type: ignore[method-assign]
             return_value=[
                 Mock(
                     file_path="test.py",
@@ -208,7 +208,7 @@ class TestWorkerExceptionHandling:
         self.indexer.progressive_metadata = Mock()
 
         # Mock _count_tokens to avoid import
-        self.indexer._count_tokens = Mock(return_value=100)
+        self.indexer._count_tokens = Mock(return_value=100)  # type: ignore[method-assign]
 
         # Call _process_commits_parallel - should propagate the ValueError
         with pytest.raises(ValueError, match="test error"):
@@ -228,7 +228,7 @@ class TestWorkerExceptionHandling:
         - Finally block works correctly
         """
         # Mock diff scanner to return one diff
-        self.indexer.diff_scanner.get_diffs_for_commit = Mock(
+        self.indexer.diff_scanner.get_diffs_for_commit = Mock(  # type: ignore[method-assign]
             return_value=[
                 Mock(
                     file_path="test.py",
@@ -269,7 +269,7 @@ class TestWorkerExceptionHandling:
         self.indexer.progressive_metadata = Mock()
 
         # Mock _count_tokens to avoid import
-        self.indexer._count_tokens = Mock(return_value=100)
+        self.indexer._count_tokens = Mock(return_value=100)  # type: ignore[method-assign]
 
         # Track slot operations by mocking CleanSlotTracker
         mock_slot_tracker = Mock()
@@ -322,7 +322,7 @@ class TestWorkerExceptionHandling:
         - Error message is descriptive and actionable
         """
         # Mock diff scanner to return one diff
-        self.indexer.diff_scanner.get_diffs_for_commit = Mock(
+        self.indexer.diff_scanner.get_diffs_for_commit = Mock(  # type: ignore[method-assign]
             return_value=[
                 Mock(
                     file_path="test.py",
@@ -363,7 +363,7 @@ class TestWorkerExceptionHandling:
         self.indexer.progressive_metadata = Mock()
 
         # Mock _count_tokens to avoid import
-        self.indexer._count_tokens = Mock(return_value=100)
+        self.indexer._count_tokens = Mock(return_value=100)  # type: ignore[method-assign]
 
         # Mock logger to capture error message
         with patch(

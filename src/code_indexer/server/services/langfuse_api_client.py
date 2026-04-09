@@ -38,7 +38,7 @@ class LangfuseApiClient:
         )
         projects = response.json().get("data", [])
         if projects:
-            return projects[0]
+            return projects[0]  # type: ignore[no-any-return]
         return {"name": "unknown"}
 
     def fetch_traces_page(self, page: int, from_time: datetime) -> list:
@@ -49,7 +49,7 @@ class LangfuseApiClient:
             params={"limit": 100, "page": page, "fromTimestamp": from_time.isoformat()},
             timeout=30,
         )
-        return response.json().get("data", [])
+        return response.json().get("data", [])  # type: ignore[no-any-return]
 
     def fetch_observations(self, trace_id: str) -> list:
         """

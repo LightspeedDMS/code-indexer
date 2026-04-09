@@ -49,7 +49,7 @@ class TestMultiProjectManagerUtilities:
 
         # Create project directories
         for project in self.projects.values():
-            project["path"].mkdir(parents=True, exist_ok=True)
+            project["path"].mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
 
     def teardown_method(self):
         """Clean up test fixtures."""
@@ -147,7 +147,7 @@ class TestMultiProjectManagerUtilities:
 
         # Test cleanup on project with only config directory (no credential files)
         empty_project = self.projects["mobile_app"]
-        config_dir = empty_project["path"] / ".code-indexer"
+        config_dir = empty_project["path"] / ".code-indexer"  # type: ignore[operator]
         config_dir.mkdir(mode=0o700, exist_ok=True)
 
         cleanup_results = cleanup_project_credentials(empty_project["path"])
@@ -188,7 +188,7 @@ class TestMultiProjectManagerUtilities:
         token_manager.store_token(test_token)
 
         # Add some additional hidden files
-        config_dir = test_project["path"] / ".code-indexer"
+        config_dir = test_project["path"] / ".code-indexer"  # type: ignore[operator]
         extra_file = config_dir / ".extra_sensitive_data"
         with open(extra_file, "w") as f:
             f.write("sensitive test data")
@@ -225,7 +225,7 @@ class TestMultiProjectManagerUtilities:
         store_encrypted_credentials(test_project["path"], encrypted_data)
 
         # Manually make credentials file insecure
-        creds_file = test_project["path"] / ".code-indexer" / ".creds"
+        creds_file = test_project["path"] / ".code-indexer" / ".creds"  # type: ignore[operator]
         creds_file.chmod(0o644)  # Insecure permissions
 
         projects_to_validate = {

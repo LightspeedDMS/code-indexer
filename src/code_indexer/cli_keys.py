@@ -91,8 +91,8 @@ def keys_create(
     try:
         config = _load_remote_config_for_keys()
         client = SSHAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.create_key(
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.create_key(  # type: ignore[arg-type]
                 name=name,
                 email=email,
                 key_type=key_type,
@@ -133,7 +133,7 @@ def keys_list(json_output: bool):
     try:
         config = _load_remote_config_for_keys()
         client = SSHAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.list_keys())
+        result = asyncio.run(client.list_keys())  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -194,7 +194,7 @@ def keys_delete(name: str, yes: bool, json_output: bool):
     try:
         config = _load_remote_config_for_keys()
         client = SSHAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.delete_key(name))
+        result = asyncio.run(client.delete_key(name))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -225,7 +225,7 @@ def keys_show_public(name: str, json_output: bool):
     try:
         config = _load_remote_config_for_keys()
         client = SSHAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.show_public_key(name))
+        result = asyncio.run(client.show_public_key(name))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -259,7 +259,7 @@ def keys_assign(name: str, hostname: str, force: bool, json_output: bool):
     try:
         config = _load_remote_config_for_keys()
         client = SSHAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.assign_key(name, hostname, force=force))
+        result = asyncio.run(client.assign_key(name, hostname, force=force))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))

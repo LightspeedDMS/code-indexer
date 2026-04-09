@@ -93,7 +93,7 @@ class TestActivatedRepoManagerTypeErrors(unittest.TestCase):
 
     def test_get_current_branch_fallback(self):
         """Verify fallback also returns str."""
-        repo_data = {}
+        repo_data = {}  # type: ignore[var-annotated]
 
         # Even with fallback, should return str
         branch: str = repo_data.get("current_branch", "main")

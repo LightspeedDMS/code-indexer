@@ -46,7 +46,7 @@ class TestAdminAPIClientGoldenRepos:
         }
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = expected_response
@@ -86,7 +86,7 @@ class TestAdminAPIClientGoldenRepos:
         }
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = expected_response
@@ -120,7 +120,7 @@ class TestAdminAPIClientGoldenRepos:
         }
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = expected_response
@@ -153,7 +153,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 400
         mock_response.json.return_value = {"detail": "Invalid Git URL format"}
@@ -176,7 +176,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "existing-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 409
         mock_response.json.return_value = {
@@ -204,7 +204,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 403
         mock_response.json.return_value = {"detail": "Insufficient privileges"}
@@ -229,7 +229,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.json.return_value = {"detail": "Internal server error"}
@@ -254,7 +254,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method to raise NetworkError
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         admin_client._authenticated_request.side_effect = NetworkError(
             "Connection failed"
         )
@@ -275,7 +275,7 @@ class TestAdminAPIClientGoldenRepos:
         alias = "example-repo"
 
         # Mock the _authenticated_request method to raise unexpected error
-        admin_client._authenticated_request = MagicMock()
+        admin_client._authenticated_request = MagicMock()  # type: ignore[method-assign]
         admin_client._authenticated_request.side_effect = Exception("Unexpected error")
 
         # Act & Assert

@@ -391,7 +391,7 @@ class TestRRFUnchanged:
         from code_indexer.services.query_strategy import RRF_K
 
         primary = [_make_result("a.py", 0.5), _make_result("b.py", 0.4)]
-        secondary = []
+        secondary = []  # type: ignore[var-annotated]
         fused = fuse_rrf(primary, secondary, limit=10)
         expected_a = 1.0 / (RRF_K + 1)
         expected_b = 1.0 / (RRF_K + 2)

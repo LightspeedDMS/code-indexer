@@ -36,7 +36,7 @@ def _make_real_user(username: str, role: UserRole) -> User:
 
 def _make_app(
     authenticated_user: User,
-    actual_repo_path: str = None,
+    actual_repo_path: str = None,  # type: ignore[assignment]
     user_accessible_repos=None,
     wiki_enabled: bool = True,
     is_admin_group: bool = False,

@@ -57,7 +57,7 @@ class TestRAGWorkflow:
             ["cidx", "global", "init-meta"],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
         assert result.returncode == 0, f"init-meta failed: {result.stderr}"
 
@@ -88,7 +88,7 @@ class TestRAGWorkflow:
             ],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
         assert result.returncode == 0, f"Query failed: {result.stderr}"
 
@@ -186,7 +186,7 @@ def validate_jwt_token(token):
         subprocess.run(
             ["cidx", "global", "init-meta"],
             capture_output=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         meta_dir = golden_repos_dir / "cidx-meta"
@@ -205,7 +205,7 @@ def validate_jwt_token(token):
             ],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert discovery_result.returncode == 0, (
@@ -234,7 +234,7 @@ def validate_jwt_token(token):
             ],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert targeted_result.returncode == 0, (
@@ -301,7 +301,7 @@ def validate_jwt_token(token):
         subprocess.run(
             ["cidx", "global", "init-meta"],
             capture_output=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         meta_dir = golden_repos_dir / "cidx-meta"
@@ -322,7 +322,7 @@ def validate_jwt_token(token):
             ],
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, **env},
+            env={**subprocess.os.environ, **env},  # type: ignore[attr-defined]
         )
 
         assert result.returncode == 0, f"Query failed: {result.stderr}"

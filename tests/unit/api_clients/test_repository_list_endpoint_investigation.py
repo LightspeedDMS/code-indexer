@@ -309,7 +309,7 @@ class TestRepositoryListEndpointDeepInvestigation:
                     repository_client.list_user_repositories()
             else:
                 # Should raise ActivationError
-                with pytest.raises(ActivationError) as exc_info:
+                with pytest.raises(ActivationError) as exc_info:  # type: ignore[assignment]
                     repository_client.list_user_repositories()
 
             error_msg = str(exc_info.value)

@@ -48,7 +48,7 @@ class TestBuildSidebarTree:
             (hidden / "notes.md").write_text("# Hidden")
             tree = svc.build_sidebar_tree(repo_dir, "test-repo")
             # Story #288: all articles normalized into categories; collect from all categories
-            all_titles = []
+            all_titles = []  # type: ignore[var-annotated]
             for group in tree:
                 for cat_articles in group["categories"].values():
                     all_titles.extend(a["title"] for a in cat_articles)

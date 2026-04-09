@@ -37,9 +37,9 @@ def fake_app_module(monkeypatch):
     def is_token_blacklisted(jti: str) -> bool:
         return jti in token_blacklist
 
-    fake_app.blacklist_token = blacklist_token
-    fake_app.is_token_blacklisted = is_token_blacklisted
-    fake_app.token_blacklist = token_blacklist
+    fake_app.blacklist_token = blacklist_token  # type: ignore[attr-defined]
+    fake_app.is_token_blacklisted = is_token_blacklisted  # type: ignore[attr-defined]
+    fake_app.token_blacklist = token_blacklist  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "code_indexer.server.app", fake_app)
     try:
@@ -202,8 +202,8 @@ class TestNonSsoRestrictionEnabled:
 
         with pytest.raises(Exception) as exc_info:
             deps_module.get_current_user(request=request, credentials=credentials)
-        assert exc_info.value.status_code == 403
-        assert "restricted to Web UI" in exc_info.value.detail
+        assert exc_info.value.status_code == 403  # type: ignore[attr-defined]
+        assert "restricted to Web UI" in exc_info.value.detail  # type: ignore[attr-defined]
 
     def test_non_sso_user_denied_via_cookie_when_enabled(
         self, setup_auth_env, user_manager
@@ -219,8 +219,8 @@ class TestNonSsoRestrictionEnabled:
 
         with pytest.raises(Exception) as exc_info:
             deps_module.get_current_user(request=request, credentials=None)
-        assert exc_info.value.status_code == 403
-        assert "restricted to Web UI" in exc_info.value.detail
+        assert exc_info.value.status_code == 403  # type: ignore[attr-defined]
+        assert "restricted to Web UI" in exc_info.value.detail  # type: ignore[attr-defined]
 
     def test_sso_user_allowed_via_bearer_when_enabled(
         self, setup_auth_env, user_manager
@@ -252,7 +252,7 @@ class TestNonSsoRestrictionEnabled:
 
         with pytest.raises(Exception) as exc_info:
             deps_module.get_current_user(request=request, credentials=credentials)
-        assert exc_info.value.status_code == 403
+        assert exc_info.value.status_code == 403  # type: ignore[attr-defined]
 
 
 class TestNonSsoRestrictionMcpEndpoint:
@@ -274,8 +274,8 @@ class TestNonSsoRestrictionMcpEndpoint:
             asyncio.get_event_loop().run_until_complete(
                 deps_module.get_current_user_for_mcp(request=request)
             )
-        assert exc_info.value.status_code == 403
-        assert "restricted to Web UI" in exc_info.value.detail
+        assert exc_info.value.status_code == 403  # type: ignore[attr-defined]
+        assert "restricted to Web UI" in exc_info.value.detail  # type: ignore[attr-defined]
 
     def test_sso_user_allowed_via_mcp_when_enabled(self, setup_auth_env, user_manager):
         """SSO user can access MCP endpoint even when toggle is ON."""

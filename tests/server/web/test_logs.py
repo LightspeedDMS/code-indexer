@@ -348,9 +348,9 @@ class TestLogsExport:
 
         csv_data = response.text.lstrip("\ufeff")
         reader = csv.DictReader(io.StringIO(csv_data))
-        assert "timestamp" in reader.fieldnames, "Expected timestamp column"
-        assert "level" in reader.fieldnames, "Expected level column"
-        assert "message" in reader.fieldnames, "Expected message column"
+        assert "timestamp" in reader.fieldnames, "Expected timestamp column"  # type: ignore[operator]
+        assert "level" in reader.fieldnames, "Expected level column"  # type: ignore[operator]
+        assert "message" in reader.fieldnames, "Expected message column"  # type: ignore[operator]
 
     def test_export_with_filters(self, authenticated_client: TestClient):
         """

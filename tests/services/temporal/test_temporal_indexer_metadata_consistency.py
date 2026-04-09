@@ -131,7 +131,7 @@ def test_temporal_payload_file_extension_format_matches_regular_indexing():
                     # Directly call the worker function
                     from concurrent.futures import Future
 
-                    mock_future = Future()
+                    mock_future = Future()  # type: ignore[var-annotated]
                     mock_result = MagicMock()
                     mock_result.embeddings = [[0.1] * 1536]
                     mock_future.set_result(mock_result)

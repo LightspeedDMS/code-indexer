@@ -30,7 +30,7 @@ def test_update_user_with_new_email():
 
         # Verify email was saved
         user = user_manager.get_user("john")
-        assert user.email == "john@example.com"
+        assert user.email == "john@example.com"  # type: ignore[union-attr]
     finally:
         os.unlink(temp_file.name)
 
@@ -58,7 +58,7 @@ def test_update_user_clear_email_with_none():
 
         # Verify email was cleared
         user = user_manager.get_user("john")
-        assert user.email is None
+        assert user.email is None  # type: ignore[union-attr]
     finally:
         os.unlink(temp_file.name)
 
@@ -86,7 +86,7 @@ def test_update_user_no_email_parameter_does_not_change():
 
         # Verify email unchanged
         user = user_manager.get_user("john")
-        assert user.email == "john@example.com"
+        assert user.email == "john@example.com"  # type: ignore[union-attr]
     finally:
         os.unlink(temp_file.name)
 
@@ -146,6 +146,6 @@ def test_update_user_same_email_on_same_user_succeeds():
 
         # Verify email unchanged
         user = user_manager.get_user("john")
-        assert user.email == "john@example.com"
+        assert user.email == "john@example.com"  # type: ignore[union-attr]
     finally:
         os.unlink(temp_file.name)

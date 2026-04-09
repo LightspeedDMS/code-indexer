@@ -239,7 +239,7 @@ class TestCIDXServer:
             Base URL of the started server
         """
         if self.server_process is not None:
-            return self.base_url
+            return self.base_url  # type: ignore[return-value]
 
         self.actual_port = self._find_available_port()
         self.base_url = f"http://localhost:{self.actual_port}"
@@ -777,7 +777,9 @@ class TestCIDXServer:
 
         # Filter by minimum score
         filtered_results = [
-            r for r in mock_results if r["similarity_score"] >= query_request.min_score
+            r
+            for r in mock_results
+            if r["similarity_score"] >= query_request.min_score  # type: ignore[operator]
         ]
 
         # Apply limit
@@ -873,12 +875,16 @@ class TestCIDXServer:
         if path:
             # Simple path matching - in real implementation would be more sophisticated
             mock_results = [
-                r for r in mock_results if path.replace("*", "") in r["file_path"]
+                r
+                for r in mock_results
+                if path.replace("*", "") in r["file_path"]  # type: ignore[operator]
             ]
 
         # Filter by minimum score
         filtered_results = [
-            r for r in mock_results if r["similarity_score"] >= min_score
+            r
+            for r in mock_results
+            if r["similarity_score"] >= min_score  # type: ignore[operator]
         ]
 
         # Apply limit

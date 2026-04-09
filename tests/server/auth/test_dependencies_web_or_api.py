@@ -35,9 +35,9 @@ def fake_app_module(monkeypatch):
     def is_token_blacklisted(jti: str) -> bool:
         return jti in token_blacklist
 
-    fake_app.blacklist_token = blacklist_token
-    fake_app.is_token_blacklisted = is_token_blacklisted
-    fake_app.token_blacklist = token_blacklist
+    fake_app.blacklist_token = blacklist_token  # type: ignore[attr-defined]
+    fake_app.is_token_blacklisted = is_token_blacklisted  # type: ignore[attr-defined]
+    fake_app.token_blacklist = token_blacklist  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "code_indexer.server.app", fake_app)
     try:
@@ -326,7 +326,8 @@ class TestAuthenticationFailures:
 
         assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
         assert "www-authenticate" in {
-            k.lower(): v for k, v in exc.value.headers.items()
+            k.lower(): v
+            for k, v in exc.value.headers.items()  # type: ignore[union-attr]
         }
 
     def test_invalid_web_session_falls_back_to_jwt(self, setup_auth_env, user_manager):

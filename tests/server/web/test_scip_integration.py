@@ -54,7 +54,7 @@ class TestSCIPIndexDetection:
                     "alias": "test-scip-repo",
                     "repo_url": str(temp_repo_dir),
                     "default_branch": "main",
-                    "csrf_token": csrf_token,
+                    "csrf_token": csrf_token,  # type: ignore[dict-item]
                 },
                 follow_redirects=True,
             )
@@ -145,7 +145,7 @@ class TestSCIPQueryViaWebUI:
                     "scip_query_type": "definition",
                     "scip_exact": "false",
                     "limit": "10",
-                    "csrf_token": csrf_token,
+                    "csrf_token": csrf_token,  # type: ignore[dict-item]
                 },
             )
 
@@ -190,7 +190,7 @@ class TestSCIPQueryViaWebUI:
                     "scip_query_type": "references",
                     "scip_exact": "false",
                     "limit": "10",
-                    "csrf_token": csrf_token,
+                    "csrf_token": csrf_token,  # type: ignore[dict-item]
                 },
             )
 

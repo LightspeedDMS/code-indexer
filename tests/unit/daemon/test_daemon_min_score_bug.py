@@ -7,6 +7,7 @@ When users call with min_score=0.8, daemon extracts score_threshold → gets Non
 These tests verify daemon correctly extracts min_score (not score_threshold) from kwargs.
 """
 
+from typing import Dict, Any
 from unittest.mock import Mock, patch
 from code_indexer.daemon.service import CIDXDaemonService
 
@@ -162,7 +163,7 @@ class TestDaemonMinScoreParameterExtraction:
             mock_backend_factory.create.return_value = mock_backend
 
             # Execute without min_score
-            kwargs = {}  # No min_score provided
+            kwargs: Dict[str, Any] = {}  # No min_score provided
 
             results, timing = service._execute_semantic_search(
                 project_path="/tmp/test_project", query="test query", limit=10, **kwargs

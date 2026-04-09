@@ -85,7 +85,7 @@ class TestRepoPatternMatcher:
     def test_empty_repo_list(self):
         """Test filtering empty repository list."""
         matcher = RepoPatternMatcher(["*"])
-        repos = []
+        repos = []  # type: ignore[var-annotated]
 
         matched = matcher.filter_repos(repos)
 

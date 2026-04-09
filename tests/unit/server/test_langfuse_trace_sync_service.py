@@ -12,6 +12,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Dict
 from unittest.mock import Mock
 
 import pytest
@@ -119,7 +120,7 @@ class TestBuildCanonicalJson:
     def test_keys_sorted_in_output(self):
         """All keys should be sorted in canonical JSON."""
         trace = {"z_field": "last", "a_field": "first", "m_field": "middle"}
-        observations = []
+        observations = []  # type: ignore[var-annotated]
 
         result = LangfuseTraceSyncService._build_canonical_json(trace, observations)
 
@@ -141,7 +142,7 @@ class TestBuildCanonicalJson:
     def test_empty_observations(self):
         """Should handle empty observations list."""
         trace = {"id": "t1", "name": "test"}
-        observations = []
+        observations = []  # type: ignore[var-annotated]
 
         result = LangfuseTraceSyncService._build_canonical_json(trace, observations)
         parsed = json.loads(result)
@@ -230,7 +231,7 @@ class TestGetTraceFolder:
     def test_no_user_no_session(self):
         """Trace without both should use both defaults."""
         service = LangfuseTraceSyncService(lambda: _mock_config(), "/data")
-        trace = {}
+        trace = {}  # type: ignore[var-annotated]
 
         folder = service._get_trace_folder("my-project", trace)
 
@@ -374,7 +375,7 @@ class TestWriteTrace:
             folder = Path(tmpdir) / "level1" / "level2" / "level3"
             filename = "001_turn_trace123.json"
             trace = {"id": "trace123"}
-            observations = []
+            observations = []  # type: ignore[var-annotated]
 
             service._write_trace(folder, filename, trace, observations)
 
@@ -395,7 +396,7 @@ class TestWriteTrace:
 
             # Overwrite
             trace = {"id": "trace123", "new": "data"}
-            observations = []
+            observations = []  # type: ignore[var-annotated]
             service._write_trace(folder, filename, trace, observations)
 
             content = trace_file.read_text()
@@ -652,7 +653,7 @@ class TestBackwardCompatHashMigration:
         trace_hashes = trace_hashes_old.copy()
         for tid, val in list(trace_hashes.items()):
             if isinstance(val, str):
-                trace_hashes[tid] = {"updated_at": "", "content_hash": val}
+                trace_hashes[tid] = {"updated_at": "", "content_hash": val}  # type: ignore[assignment]
 
         # After migration, should be new format
         assert isinstance(trace_hashes["t1"], dict)
@@ -712,8 +713,8 @@ class TestBackwardCompatHashMigration:
         assert trace_hashes["t3"]["updated_at"] == ""
 
         # t2 should be unchanged
-        assert trace_hashes["t2"]["updated_at"] == "2024-01-01T00:00:00+00:00"
-        assert trace_hashes["t2"]["content_hash"] == "hash2"
+        assert trace_hashes["t2"]["updated_at"] == "2024-01-01T00:00:00+00:00"  # type: ignore[index]
+        assert trace_hashes["t2"]["content_hash"] == "hash2"  # type: ignore[index]
 
 
 class TestHashPruning:
@@ -1085,7 +1086,7 @@ class TestTwoPhaseHashCheck:
             mock_api_client.fetch_observations.return_value = []
 
             trace = {"id": "t_new", "updatedAt": "2024-01-01T00:00:00+00:00"}
-            trace_hashes = {}  # Empty - new trace
+            trace_hashes: Dict[str, str] = {}  # Empty - new trace
             SyncMetrics()
 
             service._process_trace(mock_api_client, trace, "test-project", trace_hashes)
@@ -1230,7 +1231,7 @@ class TestSequentialNaming:
                 "userId": "test_user",
                 "sessionId": "test_session",
             }
-            trace_hashes = {}
+            trace_hashes = {}  # type: ignore[var-annotated]
             SyncMetrics()
 
             # Phase 1: Process trace (writes temp file, returns rename metadata)
@@ -1271,7 +1272,7 @@ class TestSequentialNaming:
                 "userId": "test_user",
                 "sessionId": "test_session",
             }
-            trace_hashes = {}
+            trace_hashes = {}  # type: ignore[var-annotated]
             SyncMetrics()
 
             # Phase 1 and 2
@@ -1299,7 +1300,7 @@ class TestSequentialNaming:
             mock_api_client = Mock()
             mock_api_client.fetch_observations.return_value = []
 
-            trace_hashes = {}
+            trace_hashes = {}  # type: ignore[var-annotated]
             SyncMetrics()
             pending_renames = []
 
@@ -1349,7 +1350,7 @@ class TestSequentialNaming:
                 "userId": "test_user",
                 "sessionId": "test_session",
             }
-            trace_hashes = {}
+            trace_hashes = {}  # type: ignore[var-annotated]
             SyncMetrics()
 
             # Initial trace: Phase 1 + 2
@@ -1507,7 +1508,7 @@ class TestChronologicalTraceOrdering:
                 ],
             ]
 
-            processed_trace_ids = []
+            processed_trace_ids = []  # type: ignore[var-annotated]
             original_init, cleanup = self._mock_langfuse_api(
                 pages_data, processed_trace_ids
             )
@@ -1609,7 +1610,7 @@ class TestChronologicalTraceOrdering:
                 ],
             ]
 
-            processed_trace_ids = []
+            processed_trace_ids = []  # type: ignore[var-annotated]
             original_init, cleanup = self._mock_langfuse_api(
                 pages_data, processed_trace_ids
             )
@@ -1695,7 +1696,7 @@ class TestChronologicalTraceOrdering:
             }
             service._save_sync_state("test-project", state)
 
-            processed_trace_ids = []
+            processed_trace_ids = []  # type: ignore[var-annotated]
             original_init, cleanup = self._mock_langfuse_api(
                 pages_data, processed_trace_ids
             )

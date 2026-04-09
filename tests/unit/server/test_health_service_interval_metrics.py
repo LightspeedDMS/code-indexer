@@ -155,7 +155,7 @@ class TestHealthServiceCpuIntervalAveraged:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 service._get_system_info()
 
@@ -191,7 +191,7 @@ class TestHealthServiceDiskIO:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 result = service._get_system_info()
 
@@ -233,7 +233,7 @@ class TestHealthServiceDiskIO:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 # First call - establishes baseline
                 service._get_system_info()
@@ -281,7 +281,7 @@ class TestHealthServiceDiskIO:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 # First call
                 service._get_system_info()
@@ -326,7 +326,7 @@ class TestHealthServiceNetworkIO:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 result = service._get_system_info()
 
@@ -366,7 +366,7 @@ class TestHealthServiceNetworkIO:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 # First call - establishes baseline
                 service._get_system_info()
@@ -416,7 +416,7 @@ class TestHealthServiceNetworkIO:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 # First call
                 service._get_system_info()
@@ -580,7 +580,7 @@ class TestHealthServiceStatePersistence:
                 service._last_disk_time = None
                 service._last_net_counters = None
                 service._last_net_time = None
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 # First call
                 service._get_system_info()
@@ -620,7 +620,7 @@ class TestHealthServiceStatePersistence:
                     bytes_recv=1000000, bytes_sent=500000
                 )
                 service._last_net_time = time.time()  # Current time = 0 elapsed
-                service._get_active_jobs_count = lambda: 0
+                service._get_active_jobs_count = lambda: 0  # type: ignore[method-assign]
 
                 # Should not raise ZeroDivisionError
                 result = service._get_system_info()

@@ -464,7 +464,7 @@ def get_confirmation_token(client):
             f"Expected requires_confirmation=True: {data}"
         )
 
-        return data["token"]
+        return data["token"]  # type: ignore[no-any-return]
 
     return _get_token
 

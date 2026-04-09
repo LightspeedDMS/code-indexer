@@ -411,8 +411,8 @@ class TestIdentifyAffectedDomainsReadsFromVersionedPath:
 
             # Changed repos: my-repo changed
             changed_repos = [{"alias": "my-repo"}]
-            new_repos = []
-            removed_repos = []
+            new_repos = []  # type: ignore[var-annotated]
+            removed_repos = []  # type: ignore[var-annotated]
 
             affected = service.identify_affected_domains(
                 changed_repos, new_repos, removed_repos

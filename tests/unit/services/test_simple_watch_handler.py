@@ -561,7 +561,7 @@ class TestSimpleWatchHandlerTemporaryFileFiltering:
 
         # Verify only regular file triggered callback
         if len(callback_invocations) > 0:
-            all_files = []
+            all_files = []  # type: ignore[var-annotated]
             for invocation in callback_invocations:
                 all_files.extend(invocation["files"])
 

@@ -22,13 +22,13 @@ class TestQueryAggregation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test repositories with different code content."""
-        cls.test_dir = Path(tempfile.mkdtemp(prefix="query_aggregation_test_"))
+        cls.test_dir = Path(tempfile.mkdtemp(prefix="query_aggregation_test_"))  # type: ignore[attr-defined]
 
         # Create 3 test repositories with different content
-        cls.repos = []
+        cls.repos = []  # type: ignore[attr-defined]
 
         # Repo 1: Authentication code
-        repo1 = cls.test_dir / "auth-service"
+        repo1 = cls.test_dir / "auth-service"  # type: ignore[attr-defined]
         repo1.mkdir(parents=True)
         (repo1 / "auth.py").write_text(
             """
@@ -51,10 +51,10 @@ def login(user):
 """
         )
         cls._init_git_repo(repo1)
-        cls.repos.append(str(repo1))
+        cls.repos.append(str(repo1))  # type: ignore[attr-defined]
 
         # Repo 2: User management code
-        repo2 = cls.test_dir / "user-service"
+        repo2 = cls.test_dir / "user-service"  # type: ignore[attr-defined]
         repo2.mkdir(parents=True)
         (repo2 / "user.py").write_text(
             """
@@ -70,10 +70,10 @@ class User:
 """
         )
         cls._init_git_repo(repo2)
-        cls.repos.append(str(repo2))
+        cls.repos.append(str(repo2))  # type: ignore[attr-defined]
 
         # Repo 3: API layer code
-        repo3 = cls.test_dir / "api-service"
+        repo3 = cls.test_dir / "api-service"  # type: ignore[attr-defined]
         repo3.mkdir(parents=True)
         (repo3 / "api.py").write_text(
             """
@@ -89,7 +89,7 @@ def authenticate_request(username, password):
 """
         )
         cls._init_git_repo(repo3)
-        cls.repos.append(str(repo3))
+        cls.repos.append(str(repo3))  # type: ignore[attr-defined]
 
     @classmethod
     def _init_git_repo(cls, repo_path: Path):
@@ -120,8 +120,8 @@ def authenticate_request(username, password):
     @classmethod
     def tearDownClass(cls):
         """Clean up test repositories."""
-        if cls.test_dir.exists():
-            shutil.rmtree(cls.test_dir)
+        if cls.test_dir.exists():  # type: ignore[attr-defined]
+            shutil.rmtree(cls.test_dir)  # type: ignore[attr-defined]
 
     def test_aggregate_results_from_mock_outputs(self):
         """Test aggregating results from multiple repositories (mock outputs).
@@ -131,7 +131,9 @@ def authenticate_request(username, password):
         """
         # Mock query outputs from 3 repositories
         repo_outputs = {
-            self.repos[0]: """0.95 {}/auth.py:2-7
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.95 {}/auth.py:2-7
   2: def authenticate(username, password):
   3:     \"\"\"Authenticate user with credentials.\"\"\"
   4:     if not username or not password:
@@ -143,14 +145,21 @@ def authenticate_request(username, password):
   2: def login(user):
   3:     \"\"\"Login user to system.\"\"\"
   4:     return authenticate(user.name, user.password)""".format(
-                self.repos[0], self.repos[0]
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[0],  # type: ignore[attr-defined]
             ),
-            self.repos[1]: """0.92 {}/user.py:8-11
+            self.repos[  # type: ignore[attr-defined]
+                1
+            ]: """0.92 {}/user.py:8-11
   8:     def authenticate(self):
   9:         \"\"\"Mark user as authenticated.\"\"\"
   10:         self.authenticated = True
-  11:""".format(self.repos[1]),
-            self.repos[2]: """0.88 {}/api.py:2-6
+  11:""".format(
+                self.repos[1]  # type: ignore[attr-defined]
+            ),
+            self.repos[  # type: ignore[attr-defined]
+                2
+            ]: """0.88 {}/api.py:2-6
   2: def auth_endpoint(request):
   3:     \"\"\"Authentication API endpoint.\"\"\"
   4:     username = request.get('username')
@@ -161,7 +170,10 @@ def authenticate_request(username, password):
   8: def authenticate_request(username, password):
   9:     \"\"\"Process authentication request.\"\"\"
   10:     return {{'authenticated': True}}
-  11:""".format(self.repos[2], self.repos[2]),
+  11:""".format(
+                self.repos[2],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[2],  # type: ignore[attr-defined]
+            ),
         }
 
         # Story 3.1-3.4: Aggregate results
@@ -193,9 +205,9 @@ def authenticate_request(username, password):
         )
 
         # Story 3.4: Verify repository context preserved
-        self.assertIn(self.repos[0], output, "Repo 1 path missing from output")
-        self.assertIn(self.repos[1], output, "Repo 2 path missing from output")
-        self.assertIn(self.repos[2], output, "Repo 3 path missing from output")
+        self.assertIn(self.repos[0], output, "Repo 1 path missing from output")  # type: ignore[attr-defined]
+        self.assertIn(self.repos[1], output, "Repo 2 path missing from output")  # type: ignore[attr-defined]
+        self.assertIn(self.repos[2], output, "Repo 3 path missing from output")  # type: ignore[attr-defined]
 
         # Verify code content preserved
         self.assertIn("def authenticate", output)
@@ -206,21 +218,36 @@ def authenticate_request(username, password):
         """Test that --limit applies to total results, not per repository (Story 3.3)."""
         # Create mock outputs with 2 results per repo (6 total)
         repo_outputs = {
-            self.repos[0]: """0.95 {}/auth.py:2-5
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.95 {}/auth.py:2-5
   2: code1
 
 0.90 {}/auth.py:8-10
-  8: code2""".format(self.repos[0], self.repos[0]),
-            self.repos[1]: """0.92 {}/user.py:2-5
+  8: code2""".format(
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+            ),
+            self.repos[  # type: ignore[attr-defined]
+                1
+            ]: """0.92 {}/user.py:2-5
   2: code3
 
 0.88 {}/user.py:8-10
-  8: code4""".format(self.repos[1], self.repos[1]),
-            self.repos[2]: """0.85 {}/api.py:2-5
+  8: code4""".format(
+                self.repos[1],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[1],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+            ),
+            self.repos[  # type: ignore[attr-defined]
+                2
+            ]: """0.85 {}/api.py:2-5
   2: code5
 
 0.80 {}/api.py:8-10
-  8: code6""".format(self.repos[2], self.repos[2]),
+  8: code6""".format(
+                self.repos[2],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[2],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+            ),
         }
 
         # Apply limit of 3
@@ -247,13 +274,22 @@ def authenticate_request(username, password):
     def test_interleaved_results_not_grouped_by_repo(self):
         """Test that results are interleaved by score, not grouped by repository (Story 3.2)."""
         repo_outputs = {
-            self.repos[0]: """0.95 {}/file1.py:1-5
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.95 {}/file1.py:1-5
   1: high score repo1
 
 0.75 {}/file2.py:1-5
-  1: low score repo1""".format(self.repos[0], self.repos[0]),
-            self.repos[1]: """0.85 {}/file3.py:1-5
-  1: medium score repo2""".format(self.repos[1]),
+  1: low score repo1""".format(
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+            ),
+            self.repos[  # type: ignore[attr-defined]
+                1
+            ]: """0.85 {}/file3.py:1-5
+  1: medium score repo2""".format(
+                self.repos[1]  # type: ignore[attr-defined]
+            ),
         }
 
         aggregator = QueryResultAggregator()
@@ -265,9 +301,9 @@ def authenticate_request(username, password):
 
         repo_order = []
         for line in score_lines:
-            if self.repos[0] in line:
+            if self.repos[0] in line:  # type: ignore[attr-defined]
                 repo_order.append("repo1")
-            elif self.repos[1] in line:
+            elif self.repos[1] in line:  # type: ignore[attr-defined]
                 repo_order.append("repo2")
 
         # Should be interleaved: repo1 (0.95), repo2 (0.85), repo1 (0.75)
@@ -281,11 +317,19 @@ def authenticate_request(username, password):
     def test_handle_empty_repository_results(self):
         """Test handling repositories with no query results (Story 3.1)."""
         repo_outputs = {
-            self.repos[0]: """0.9 {}/file.py:1-5
-  1: code""".format(self.repos[0]),
-            self.repos[1]: "",  # Empty output
-            self.repos[2]: """0.8 {}/file.py:1-5
-  1: code""".format(self.repos[2]),
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.9 {}/file.py:1-5
+  1: code""".format(
+                self.repos[0]  # type: ignore[attr-defined]
+            ),
+            self.repos[1]: "",  # type: ignore[attr-defined]
+            self.repos[  # type: ignore[attr-defined]
+                2
+            ]: """0.8 {}/file.py:1-5
+  1: code""".format(
+                self.repos[2]  # type: ignore[attr-defined]
+            ),
         }
 
         aggregator = QueryResultAggregator()
@@ -302,11 +346,19 @@ def authenticate_request(username, password):
     def test_handle_error_outputs(self):
         """Test skipping repositories with error outputs (Story 3.1)."""
         repo_outputs = {
-            self.repos[0]: """0.9 {}/file.py:1-5
-  1: code""".format(self.repos[0]),
-            self.repos[1]: "Error: Failed to connect to service",
-            self.repos[2]: """0.8 {}/file.py:1-5
-  1: code""".format(self.repos[2]),
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.9 {}/file.py:1-5
+  1: code""".format(
+                self.repos[0]  # type: ignore[attr-defined]
+            ),
+            self.repos[1]: "Error: Failed to connect to service",  # type: ignore[attr-defined]
+            self.repos[  # type: ignore[attr-defined]
+                2
+            ]: """0.8 {}/file.py:1-5
+  1: code""".format(
+                self.repos[2]  # type: ignore[attr-defined]
+            ),
         }
 
         aggregator = QueryResultAggregator()
@@ -320,13 +372,22 @@ def authenticate_request(username, password):
     def test_no_limit_returns_all_results(self):
         """Test that limit=None returns all results (Story 3.3)."""
         repo_outputs = {
-            self.repos[0]: """0.9 {}/a.py:1-5
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.9 {}/a.py:1-5
   1: a
 
 0.8 {}/b.py:1-5
-  1: b""".format(self.repos[0], self.repos[0]),
-            self.repos[1]: """0.85 {}/c.py:1-5
-  1: c""".format(self.repos[1]),
+  1: b""".format(
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+                self.repos[0],  # type: ignore[attr-defined]  # repos is a dynamically-set E2E test attribute
+            ),
+            self.repos[  # type: ignore[attr-defined]
+                1
+            ]: """0.85 {}/c.py:1-5
+  1: c""".format(
+                self.repos[1]  # type: ignore[attr-defined]
+            ),
         }
 
         aggregator = QueryResultAggregator()
@@ -341,12 +402,16 @@ def authenticate_request(username, password):
     def test_preserve_code_content_and_formatting(self):
         """Test that code content and formatting are preserved (Story 3.4)."""
         repo_outputs = {
-            self.repos[0]: """0.9 {}/auth.py:1-5
+            self.repos[  # type: ignore[attr-defined]
+                0
+            ]: """0.9 {}/auth.py:1-5
   1: class Authentication:
   2:     def __init__(self):
   3:         self.users = {{}}
   4:     def login(self, user):
-  5:         return user in self.users""".format(self.repos[0])
+  5:         return user in self.users""".format(
+                self.repos[0]  # type: ignore[attr-defined]
+            )
         }
 
         aggregator = QueryResultAggregator()

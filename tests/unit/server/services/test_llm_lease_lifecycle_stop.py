@@ -77,11 +77,11 @@ def _make_service(
     def default_handler(request: httpx.Request) -> httpx.Response:
         if "/checkout" in str(request.url):
             if checkout_handler is not None:
-                return checkout_handler(request)
+                return checkout_handler(request)  # type: ignore[no-any-return]
             return _checkout_response()
         if "/checkin" in str(request.url):
             if checkin_handler is not None:
-                return checkin_handler(request)
+                return checkin_handler(request)  # type: ignore[no-any-return]
             return _checkin_response()
         return httpx.Response(404, text="Not found")
 
@@ -246,7 +246,7 @@ def _make_api_key_service(
             return _api_key_checkout_response()
         if "/checkin" in str(request.url):
             if checkin_handler is not None:
-                return checkin_handler(request)
+                return checkin_handler(request)  # type: ignore[no-any-return]
             return _checkin_response()
         return httpx.Response(404, text="Not found")
 

@@ -187,7 +187,7 @@ class TestDashboardPlaceholderHealth:
             status=HealthStatus.HEALTHY,
             timestamp=datetime.now(timezone.utc),
             services={
-                "database": ServiceHealthInfo(
+                "database": ServiceHealthInfo(  # type: ignore[call-arg]
                     status=HealthStatus.HEALTHY,
                     response_time_ms=5,
                 )
@@ -230,7 +230,7 @@ class TestDashboardPlaceholderHealth:
 
         mock_job_counts = JobCounts(running=2, queued=1, completed_24h=5, failed_24h=0)
         mock_repo_counts = RepoCounts(golden=10, activated=3)
-        mock_recent_jobs = []
+        mock_recent_jobs = []  # type: ignore[var-annotated]
 
         with (
             patch.object(service, "_get_job_counts", return_value=mock_job_counts),

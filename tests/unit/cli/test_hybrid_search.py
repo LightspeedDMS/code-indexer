@@ -215,8 +215,8 @@ class TestGracefulDegradation:
 
         # Assert
         assert adjusted_mode == "semantic"
-        assert "FTS index not available" in warning
-        assert "falling back to semantic" in warning.lower()
+        assert "FTS index not available" in warning  # type: ignore[operator]
+        assert "falling back to semantic" in warning.lower()  # type: ignore[union-attr]
 
     def test_fts_only_fails_when_fts_missing(self):
         """Test that FTS-only mode returns error when FTS index is missing."""
@@ -232,8 +232,8 @@ class TestGracefulDegradation:
 
         # Assert
         assert adjusted_mode is None
-        assert "FTS index not found" in message
-        assert "cidx index --fts" in message
+        assert "FTS index not found" in message  # type: ignore[operator]
+        assert "cidx index --fts" in message  # type: ignore[operator]
 
     def test_semantic_only_fails_when_semantic_missing(self):
         """Test that semantic mode returns error when semantic index is missing."""
@@ -249,8 +249,8 @@ class TestGracefulDegradation:
 
         # Assert
         assert adjusted_mode is None
-        assert "Semantic index not found" in message
-        assert "cidx index" in message
+        assert "Semantic index not found" in message  # type: ignore[operator]
+        assert "cidx index" in message  # type: ignore[operator]
 
     def test_no_adjustment_when_all_indexes_available(self):
         """Test that no adjustment happens when all required indexes are available."""

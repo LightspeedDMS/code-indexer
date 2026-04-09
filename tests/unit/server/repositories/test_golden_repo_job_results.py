@@ -100,7 +100,7 @@ def test_add_golden_repo_result_contains_alias(managers, temp_dirs):
         if job and job.status.value in ["completed", "failed"]:
             break
         time.sleep(0.1)
-        waited += 0.1
+        waited += 0.1  # type: ignore[assignment]
 
     # Verify job completed successfully
     job = managers["job_manager"].jobs.get(job_id)

@@ -176,7 +176,7 @@ class TestGitPushMigrationTrigger:
         )
         real_git_service_with_mocked_migration.git_push_with_pat = MagicMock(
             side_effect=lambda *args, **kwargs: (
-                call_order.append("git_push_with_pat"),
+                call_order.append("git_push_with_pat"),  # type: ignore[func-returns-value]
                 {"success": True, "pushed_commits": 1},
             )[1]
         )
@@ -265,7 +265,7 @@ class TestGitPullMigrationTrigger:
         original_git_pull = real_git_service_with_mocked_migration.git_pull
         real_git_service_with_mocked_migration.git_pull = MagicMock(
             side_effect=lambda *args, **kwargs: (
-                call_order.append("git_pull"),
+                call_order.append("git_pull"),  # type: ignore[func-returns-value]
                 original_git_pull(*args, **kwargs),
             )[1]
         )
@@ -334,7 +334,7 @@ class TestGitFetchMigrationTrigger:
         original_git_fetch = real_git_service_with_mocked_migration.git_fetch
         real_git_service_with_mocked_migration.git_fetch = MagicMock(
             side_effect=lambda *args, **kwargs: (
-                call_order.append("git_fetch"),
+                call_order.append("git_fetch"),  # type: ignore[func-returns-value]
                 original_git_fetch(*args, **kwargs),
             )[1]
         )

@@ -127,7 +127,7 @@ def files_create(
     try:
         config = _load_remote_config_for_files()
         client = FileAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.create_file(repository, path, file_content))
+        result = asyncio.run(client.create_file(repository, path, file_content))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -183,8 +183,8 @@ def files_edit(
     try:
         config = _load_remote_config_for_files()
         client = FileAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.edit_file(
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.edit_file(  # type: ignore[arg-type]
                 repository,
                 path,
                 old_string=old,
@@ -250,8 +250,8 @@ def files_delete(
     try:
         config = _load_remote_config_for_files()
         client = FileAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.delete_file(repository, path, content_hash=content_hash)
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.delete_file(repository, path, content_hash=content_hash)  # type: ignore[arg-type]
         )
 
         if json_output:

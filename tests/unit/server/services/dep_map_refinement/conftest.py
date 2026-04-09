@@ -96,9 +96,9 @@ def make_config(
 
 def make_service(
     tmp_path: Path,
-    mock_analyzer: Mock = None,
+    mock_analyzer: Mock = None,  # type: ignore[assignment]
     config: ClaudeIntegrationConfig = None,
-    tracking_data: dict = None,
+    tracking_data: dict = None,  # type: ignore[assignment]
 ) -> DependencyMapService:
     """Create a DependencyMapService with mock dependencies for unit testing."""
     if mock_analyzer is None:

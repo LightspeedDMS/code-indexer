@@ -150,7 +150,7 @@ class TestGitLabProviderSearchFilter:
     async def test_search_no_matches(self, gitlab_provider):
         """Test that server-side search returns empty when no matches."""
         # Server-side: API returns empty when no matches
-        projects = []
+        projects = []  # type: ignore[var-annotated]
         mock_response = create_mock_response(projects)
 
         with patch.object(
@@ -485,7 +485,7 @@ class TestGitHubProviderSearchFilter:
     async def test_search_no_matches(self, github_provider):
         """Test that server-side search returns empty when no matches."""
         # Server-side: Search API returns empty when no matches
-        repos = []
+        repos = []  # type: ignore[var-annotated]
         mock_response = create_github_mock_response(repos, is_search=True)
 
         with patch.object(

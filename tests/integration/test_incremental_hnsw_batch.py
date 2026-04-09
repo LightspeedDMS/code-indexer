@@ -149,17 +149,17 @@ class {prefix.capitalize()}Class{i}:
         self.git_commit("Delete some files")
 
         # Re-index with deletions
-        result = subprocess.run(["cidx", "index"], capture_output=True, text=True)
+        result = subprocess.run(["cidx", "index"], capture_output=True, text=True)  # type: ignore[assignment]
         assert result.returncode == 0
 
         # Verify deleted files don't appear in search results
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "query", "test_function_5", "--limit", "5"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "test_file_5.py" not in result.stdout
+        assert "test_file_5.py" not in result.stdout  # type: ignore[operator]
 
     # === Temporal Indexing Tests ===
 
@@ -181,7 +181,7 @@ class {prefix.capitalize()}Class{i}:
         result = subprocess.run(["cidx", "init"], capture_output=True)
         assert result.returncode == 0
 
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "index", "--all"],
             capture_output=True,
             text=True,
@@ -198,7 +198,7 @@ class {prefix.capitalize()}Class{i}:
 
         # Incremental temporal index
         start_time = time.time()
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "index", "--start", "HEAD~5", "--end", "HEAD"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -215,13 +215,13 @@ class {prefix.capitalize()}Class{i}:
         )
 
         # Verify temporal query returns recent commits
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "query", "recent_func", "--limit", "5"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "recent" in result.stdout.lower()
+        assert "recent" in result.stdout.lower()  # type: ignore[operator]
 
     @pytest.mark.skip(reason="Temporal command not yet available in current branch")
     def test_cidx_temporal_index_first_run_uses_full_rebuild(self, tmpdir):
@@ -241,7 +241,7 @@ class {prefix.capitalize()}Class{i}:
         result = subprocess.run(["cidx", "init"], capture_output=True)
         assert result.returncode == 0
 
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "index", "--all"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -253,7 +253,7 @@ class {prefix.capitalize()}Class{i}:
         # First temporal index should use full rebuild
         output = result.stdout
         # Should NOT see incremental messages on first temporal index
-        assert "INCREMENTAL HNSW UPDATE PATH" not in output
+        assert "INCREMENTAL HNSW UPDATE PATH" not in output  # type: ignore[operator]
 
     @pytest.mark.skip(reason="Temporal command not yet available in current branch")
     def test_temporal_large_history_incremental(self, tmpdir):
@@ -287,7 +287,7 @@ class Module{i}Handler{j}:
         assert result.returncode == 0
 
         print("Indexing initial 50 commits...")
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "index", "--all"],
             capture_output=True,
             text=True,
@@ -305,7 +305,7 @@ class Module{i}Handler{j}:
         # Incremental temporal index should be MUCH faster
         print("Running incremental temporal index for last 5 commits...")
         start_time = time.time()
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "index", "--start", "HEAD~5", "--end", "HEAD"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -321,13 +321,13 @@ class Module{i}Handler{j}:
         assert incremental_time < 5, f"Expected < 5s but took {incremental_time:.2f}s"
 
         # Verify new commits are searchable
-        result = subprocess.run(
+        result = subprocess.run(  # type: ignore[assignment]
             ["cidx", "temporal", "query", "new_feature_52", "--limit", "3"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "new_module" in result.stdout
+        assert "new_module" in result.stdout  # type: ignore[operator]
 
     def test_performance_comparison(self, tmpdir):
         """Compare performance of full rebuild vs incremental update."""
@@ -343,7 +343,7 @@ class Module{i}Handler{j}:
 
         # First index (full rebuild)
         start_time = time.time()
-        result = subprocess.run(["cidx", "index"], capture_output=True, text=True)
+        result = subprocess.run(["cidx", "index"], capture_output=True, text=True)  # type: ignore[assignment]
         full_index_time = time.time() - start_time
         assert result.returncode == 0
 
@@ -353,7 +353,7 @@ class Module{i}Handler{j}:
 
         # Incremental index
         start_time = time.time()
-        result = subprocess.run(["cidx", "index"], capture_output=True, text=True)
+        result = subprocess.run(["cidx", "index"], capture_output=True, text=True)  # type: ignore[assignment]
         incremental_time = time.time() - start_time
         assert result.returncode == 0
 

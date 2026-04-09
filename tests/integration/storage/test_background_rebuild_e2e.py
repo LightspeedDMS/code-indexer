@@ -104,7 +104,7 @@ class TestBackgroundRebuildE2EScenarios:
                     query_times.append(elapsed_ms)
                     query_results.append(len(result_ids))
                 except Exception as e:
-                    query_results.append(f"ERROR: {e}")
+                    query_results.append(f"ERROR: {e}")  # type: ignore[arg-type]
 
                 time.sleep(0.01)  # 10ms between queries
 
@@ -348,7 +348,7 @@ class TestBackgroundRebuildE2EScenarios:
                     index = manager.load_index(tmp_path)
                     load_results.append(len(index))
                 except Exception as e:
-                    load_results.append(f"ERROR: {e}")
+                    load_results.append(f"ERROR: {e}")  # type: ignore[arg-type]
 
                 time.sleep(0.01)
 

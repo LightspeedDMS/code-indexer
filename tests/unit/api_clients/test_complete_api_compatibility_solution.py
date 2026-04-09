@@ -131,7 +131,7 @@ class TestCompleteAPICompatibilitySolution:
 
         repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
-        with pytest.raises(ActivationError) as exc_info:
+        with pytest.raises(ActivationError) as exc_info:  # type: ignore[assignment]
             repository_client.list_user_repositories()
 
         # ✅ VERIFY: Now clearly identified as access issue
@@ -145,7 +145,7 @@ class TestCompleteAPICompatibilitySolution:
 
         repository_client._authenticated_request = MagicMock(return_value=mock_response)
 
-        with pytest.raises(ActivationError) as exc_info:
+        with pytest.raises(ActivationError) as exc_info:  # type: ignore[assignment]
             repository_client.list_user_repositories()
 
         # ✅ VERIFY: True 404s now have endpoint-specific message
@@ -309,10 +309,10 @@ class TestCompleteAPICompatibilitySolution:
         # ✅ Each issue has complete solution documentation
         for issue_key, issue_data in solution_summary.items():
             if issue_key != "validation":
-                assert "problem" in issue_data
-                assert "solution" in issue_data
-                assert "impact" in issue_data
-                assert "files_changed" in issue_data
+                assert "problem" in issue_data  # type: ignore[operator]
+                assert "solution" in issue_data  # type: ignore[operator]
+                assert "impact" in issue_data  # type: ignore[operator]
+                assert "files_changed" in issue_data  # type: ignore[operator]
 
         print("🎯 API COMPATIBILITY SOLUTION COMPLETE:")
         print("✅ Issue #1: Repository activation parameter mismatch → RESOLVED")

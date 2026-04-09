@@ -47,7 +47,7 @@ class TestBranchFallbackMatcher:
     def sample_repositories_with_main_branch(self):
         """Sample repositories that only have main branch, no feature branch."""
         return [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="repo-auth-user1",
                 repository_type="activated",
                 display_name="Authentication Service",
@@ -55,7 +55,7 @@ class TestBranchFallbackMatcher:
                 git_url="https://github.com/company/auth-service.git",
                 available_branches=["main", "develop"],
             ),
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="auth-service-golden",
                 repository_type="golden",
                 display_name="Authentication Service (Golden)",
@@ -339,7 +339,7 @@ class TestGitMergeBaseAnalysis:
         # This should fail until we implement branch ancestry analysis for fallback
         with pytest.raises(AttributeError):
             # Method doesn't exist yet in our matcher
-            git_service.analyze_parent_branches("feature/auth-improvements")
+            git_service.analyze_parent_branches("feature/auth-improvements")  # type: ignore[attr-defined]
 
 
 class TestBranchHierarchyPrioritization:
@@ -397,7 +397,7 @@ class TestFallbackIntegrationScenarios:
     def multi_branch_repositories(self):
         """Sample repositories with multiple long-lived branches."""
         return [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="repo-auth-user1",
                 repository_type="activated",
                 display_name="Authentication Service",
@@ -405,7 +405,7 @@ class TestFallbackIntegrationScenarios:
                 git_url="https://github.com/company/auth-service.git",
                 available_branches=["main", "develop", "master", "release/v1.0"],
             ),
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="auth-service-golden",
                 repository_type="golden",
                 display_name="Authentication Service (Golden)",
@@ -443,12 +443,12 @@ class TestFallbackIntegrationScenarios:
             activated_repositories=[multi_branch_repositories[0]],
             total_matches=2,
         )
-        exact_branch_matcher.repository_client.discover_repositories.return_value = (
+        exact_branch_matcher.repository_client.discover_repositories.return_value = (  # type: ignore[attr-defined]
             discovery_response
         )
 
         # Execute the method - should return None until fallback is implemented
-        result = await exact_branch_matcher.find_exact_branch_match(
+        result = await exact_branch_matcher.find_exact_branch_match(  # type: ignore[misc]
             tmp_path, "https://github.com/company/auth-service.git"
         )
 

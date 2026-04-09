@@ -224,7 +224,7 @@ class TestGitRetryLogic:
                     )
 
         # Read log file
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         # Should have 2 log entries (one for each attempt)

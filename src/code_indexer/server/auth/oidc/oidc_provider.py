@@ -75,7 +75,7 @@ class OIDCProvider:
 
         # Build full authorization URL
         query_string = urlencode(params)
-        auth_url = f"{self._metadata.authorization_endpoint}?{query_string}"
+        auth_url = f"{self._metadata.authorization_endpoint}?{query_string}"  # type: ignore[union-attr]
 
         return auth_url
 
@@ -95,7 +95,7 @@ class OIDCProvider:
         # Exchange code for tokens
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(self._metadata.token_endpoint, data=data)
+                response = await client.post(self._metadata.token_endpoint, data=data)  # type: ignore[union-attr]
                 response.raise_for_status()  # Raise HTTPStatusError for 4xx/5xx
                 tokens = response.json()  # Not async in httpx
         except httpx.HTTPStatusError as e:

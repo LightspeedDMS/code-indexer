@@ -33,22 +33,22 @@ try:
     )
 except ImportError:
     # These don't exist yet - we'll implement them
-    class NetworkConnectionError(NetworkError):
+    class NetworkConnectionError(NetworkError):  # type: ignore[no-redef]
         pass
 
-    class NetworkTimeoutError(NetworkError):
+    class NetworkTimeoutError(NetworkError):  # type: ignore[no-redef]
         pass
 
-    class DNSResolutionError(NetworkError):
+    class DNSResolutionError(NetworkError):  # type: ignore[no-redef]
         pass
 
-    class SSLCertificateError(NetworkError):
+    class SSLCertificateError(NetworkError):  # type: ignore[no-redef]
         pass
 
-    class ServerError(NetworkError):
+    class ServerError(NetworkError):  # type: ignore[no-redef]
         pass
 
-    class RateLimitError(NetworkError):
+    class RateLimitError(NetworkError):  # type: ignore[no-redef]
         pass
 
 
@@ -61,13 +61,13 @@ try:
     )
 except ImportError:
     # These don't exist yet - we'll implement them
-    class NetworkErrorHandler:
+    class NetworkErrorHandler:  # type: ignore[no-redef]
         pass
 
-    class RetryConfig:
+    class RetryConfig:  # type: ignore[no-redef]
         pass
 
-    class UserGuidanceProvider:
+    class UserGuidanceProvider:  # type: ignore[no-redef]
         pass
 
 
@@ -129,7 +129,7 @@ class TestNetworkErrorClassification:
 
         # Test read timeout
         with pytest.raises(NetworkTimeoutError) as exc_info:
-            httpx_error = httpx.ReadTimeout("Read timeout")
+            httpx_error = httpx.ReadTimeout("Read timeout")  # type: ignore[assignment]
             handler.classify_network_error(httpx_error)
 
         assert "Request timed out" in str(exc_info.value)

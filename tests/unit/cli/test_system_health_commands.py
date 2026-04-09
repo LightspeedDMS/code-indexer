@@ -23,7 +23,7 @@ class TestSystemHealthCLICommands:
         return CliRunner()
 
     @pytest.fixture
-    def temp_project_dir(self) -> Path:
+    def temp_project_dir(self) -> Path:  # type: ignore[misc]
         """Create temporary project directory with remote config."""
         with tempfile.TemporaryDirectory() as temp_dir:
             project_path = Path(temp_dir)

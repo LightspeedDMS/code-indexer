@@ -119,7 +119,7 @@ class TestPayloadCacheConfigValidation:
             "/admin/config/cache",
             data={
                 "payload_preview_size_chars": "invalid",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -155,7 +155,7 @@ class TestPayloadCacheConfigValidation:
             "/admin/config/cache",
             data={
                 "payload_preview_size_chars": "-100",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -202,7 +202,7 @@ class TestPayloadCacheConfigSave:
                 "payload_max_fetch_size_chars": "8000",
                 "payload_cache_ttl_seconds": "1200",
                 "payload_cleanup_interval_seconds": "90",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -250,7 +250,7 @@ class TestPayloadCacheConfigSave:
                 "payload_max_fetch_size_chars": "9500",  # Distinctive value
                 "payload_cache_ttl_seconds": "1500",  # Distinctive value
                 "payload_cleanup_interval_seconds": "75",  # Distinctive value
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

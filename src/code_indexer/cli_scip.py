@@ -87,7 +87,7 @@ def _get_remote_config() -> dict:
 
     try:
         with open(config_file) as f:
-            return json.load(f)
+            return json.load(f)  # type: ignore[no-any-return]
     except json.JSONDecodeError as e:
         raise click.ClickException(f"Invalid JSON in config file: {e}")
 

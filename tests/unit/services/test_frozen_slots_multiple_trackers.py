@@ -54,7 +54,7 @@ class TestFrozenSlotsMultipleTrackers:
         # BUGGY BEHAVIOR: Client calls slot_tracker.get_concurrent_files_data()
         slot_tracker = kwargs_from_daemon.get("slot_tracker")
         if slot_tracker is not None:
-            buggy_concurrent_files = slot_tracker.get_concurrent_files_data()
+            buggy_concurrent_files = slot_tracker.get_concurrent_files_data()  # type: ignore[attr-defined]
         else:
             buggy_concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
@@ -67,11 +67,11 @@ class TestFrozenSlotsMultipleTrackers:
         correct_concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
         # FIX VERIFIED: Client gets FRESH data from kwargs
-        assert len(correct_concurrent_files) == 2, (
-            "Fixed code gets fresh data from kwargs"
-        )
-        assert correct_concurrent_files[0]["file_path"] == "/active/file1.py"
-        assert correct_concurrent_files[1]["file_path"] == "/active/file2.py"
+        assert (
+            len(correct_concurrent_files) == 2  # type: ignore[arg-type]
+        ), "Fixed code gets fresh data from kwargs"
+        assert correct_concurrent_files[0]["file_path"] == "/active/file1.py"  # type: ignore[index]
+        assert correct_concurrent_files[1]["file_path"] == "/active/file2.py"  # type: ignore[index]
 
     def test_no_tracker_fallback_to_kwargs(self):
         """
@@ -88,7 +88,7 @@ class TestFrozenSlotsMultipleTrackers:
         # When slot_tracker is None, must use concurrent_files from kwargs
         slot_tracker = kwargs_from_daemon.get("slot_tracker")
         if slot_tracker is not None:
-            concurrent_files = slot_tracker.get_concurrent_files_data()
+            concurrent_files = slot_tracker.get_concurrent_files_data()  # type: ignore[attr-defined]
         else:
             concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
@@ -119,7 +119,7 @@ class TestFrozenSlotsMultipleTrackers:
         slot_tracker = kwargs_from_daemon.get("slot_tracker")
         if slot_tracker is not None:
             try:
-                buggy_concurrent_files = slot_tracker.get_concurrent_files_data()
+                buggy_concurrent_files = slot_tracker.get_concurrent_files_data()  # type: ignore[attr-defined]
             except Exception:
                 buggy_concurrent_files = []  # Fallback to empty
         else:
@@ -132,8 +132,8 @@ class TestFrozenSlotsMultipleTrackers:
         correct_concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
         # FIX: Gets valid data from kwargs
-        assert len(correct_concurrent_files) == 1
-        assert correct_concurrent_files[0]["file_path"] == "/valid/file.py"
+        assert len(correct_concurrent_files) == 1  # type: ignore[arg-type]
+        assert correct_concurrent_files[0]["file_path"] == "/valid/file.py"  # type: ignore[index]
 
     def test_kwargs_always_has_fresh_data(self):
         """
@@ -156,6 +156,6 @@ class TestFrozenSlotsMultipleTrackers:
         # Client should ALWAYS use this data
         concurrent_files = kwargs_from_daemon.get("concurrent_files", [])
 
-        assert len(concurrent_files) == 2
-        assert concurrent_files[0]["file_path"] == "/fresh/file1.py"
-        assert concurrent_files[1]["file_path"] == "/fresh/file2.py"
+        assert len(concurrent_files) == 2  # type: ignore[arg-type]
+        assert concurrent_files[0]["file_path"] == "/fresh/file1.py"  # type: ignore[index]
+        assert concurrent_files[1]["file_path"] == "/fresh/file2.py"  # type: ignore[index]

@@ -46,7 +46,7 @@ def _make_mock_tool_registry(tool_name: str, permission: str = "query_repos") ->
     }
 
 
-def _make_mock_handler(return_value: dict = None) -> Mock:
+def _make_mock_handler(return_value: dict = None) -> Mock:  # type: ignore[assignment]
     """Build a mock sync handler returning given value."""
     if return_value is None:
         return_value = {
@@ -61,7 +61,7 @@ def _make_raising_handler(exc: Exception) -> Mock:
     return handler
 
 
-def _standard_patches(mock_app_state: Mock = None):
+def _standard_patches(mock_app_state: Mock = None):  # type: ignore[assignment]
     """Return the standard patch context managers needed for handle_tools_call tests."""
     if mock_app_state is None:
         access_service = Mock()

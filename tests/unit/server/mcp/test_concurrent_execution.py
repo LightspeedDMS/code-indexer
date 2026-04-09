@@ -203,7 +203,7 @@ class TestConcurrentExecutionNoRaceConditions:
             # Extract the repository alias from the request to determine query_id
             request = args[0] if args else kwargs.get("request")
             repos = (
-                request.repositories
+                request.repositories  # type: ignore[union-attr]
                 if hasattr(request, "repositories")
                 else ["unknown"]
             )

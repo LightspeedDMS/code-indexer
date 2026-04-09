@@ -97,7 +97,7 @@ class TestRPyCDaemon(TestCase):
                 # Verify indexes were loaded
                 mock_load.assert_called_once()
                 self.assertIsNotNone(service.cache_entry)
-                self.assertEqual(service.cache_entry.hnsw_index, mock_hnsw_index)
+                self.assertEqual(service.cache_entry.hnsw_index, mock_hnsw_index)  # type: ignore[union-attr]
 
                 # Second query (cache hit) - measure performance
                 start_time = time.perf_counter()
@@ -316,7 +316,7 @@ class TestRPyCDaemon(TestCase):
         self.assertIsNotNone(service.cache_entry)
 
         # Simulate time passing (11 minutes)
-        service.cache_entry.last_accessed = datetime.now() - timedelta(minutes=11)
+        service.cache_entry.last_accessed = datetime.now() - timedelta(minutes=11)  # type: ignore[union-attr]
 
         # Run eviction check
         eviction_thread = CacheEvictionThread(service)
@@ -348,7 +348,7 @@ class TestRPyCDaemon(TestCase):
         # Inject the mock into the daemon module
         import src.code_indexer.services.rpyc_daemon
 
-        src.code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class
+        src.code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class  # type: ignore[attr-defined]
 
         result = service.exposed_clean(str(self.project_path))
 
@@ -365,7 +365,7 @@ class TestRPyCDaemon(TestCase):
         # Test exposed_clean_data
         # Re-setup the mock
         mock_cleanup_instance.clean_data.return_value = {"status": "data_cleaned"}
-        src.code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class
+        src.code_indexer.services.rpyc_daemon.CleanupService = mock_cleanup_class  # type: ignore[attr-defined]
 
         result = service.exposed_clean_data(str(self.project_path))
 
@@ -395,9 +395,9 @@ class TestRPyCDaemon(TestCase):
                 # First FTS query - loads index
                 service.exposed_query_fts(str(self.project_path), "test")
 
-                self.assertIsNotNone(service.cache_entry.tantivy_index)
-                self.assertIsNotNone(service.cache_entry.tantivy_searcher)
-                self.assertTrue(service.cache_entry.fts_available)
+                self.assertIsNotNone(service.cache_entry.tantivy_index)  # type: ignore[union-attr]
+                self.assertIsNotNone(service.cache_entry.tantivy_searcher)  # type: ignore[union-attr]
+                self.assertTrue(service.cache_entry.fts_available)  # type: ignore[union-attr]
 
                 # Second FTS query - uses cache
                 with patch("tantivy.Index.open") as mock_open:

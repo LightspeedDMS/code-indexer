@@ -380,7 +380,7 @@ class TestBackgroundJobManagerConcurrencyLimit:
         # Verify all jobs completed
         for job_id in job_ids:
             status = self.manager.get_job_status(job_id, username="test_user")
-            assert status["status"] == "completed"
+            assert status["status"] == "completed"  # type: ignore[index]
 
 
 class TestBackgroundJobManagerConcurrencyIntegration:
@@ -442,7 +442,7 @@ class TestBackgroundJobManagerConcurrencyIntegration:
         # Verify job2 is pending
         time.sleep(0.2)
         job2_status = self.manager.get_job_status(job2_id, username="test_user")
-        assert job2_status["status"] == "pending"
+        assert job2_status["status"] == "pending"  # type: ignore[index]
 
         # Cancel job1
         result = self.manager.cancel_job(job1_id, username="test_user")
@@ -453,7 +453,7 @@ class TestBackgroundJobManagerConcurrencyIntegration:
 
         # Verify job2 completed
         job2_status = self.manager.get_job_status(job2_id, username="test_user")
-        assert job2_status["status"] == "completed"
+        assert job2_status["status"] == "completed"  # type: ignore[index]
 
     def test_failed_job_frees_slot(self):
         """A failed job should free a slot for pending jobs."""
@@ -491,11 +491,11 @@ class TestBackgroundJobManagerConcurrencyIntegration:
 
         # Verify job1 failed
         job1_status = self.manager.get_job_status(job1_id, username="test_user")
-        assert job1_status["status"] == "failed"
+        assert job1_status["status"] == "failed"  # type: ignore[index]
 
         # Verify job2 completed (it got the slot after job1 failed)
         job2_status = self.manager.get_job_status(job2_id, username="test_user")
-        assert job2_status["status"] == "completed"
+        assert job2_status["status"] == "completed"  # type: ignore[index]
 
     def test_shutdown_with_queued_jobs(self):
         """Shutdown should handle running jobs gracefully.
@@ -545,7 +545,7 @@ class TestBackgroundJobManagerConcurrencyIntegration:
             job3 = self.manager.jobs.get(job3_id)
 
             # Running job should be cancelled
-            assert job1.status == JobStatus.CANCELLED
+            assert job1.status == JobStatus.CANCELLED  # type: ignore[union-attr]
 
             # With semaphore-based concurrency, when job1 is cancelled it releases
             # its slot, allowing waiting jobs to acquire it and run. Since waiting
@@ -553,8 +553,8 @@ class TestBackgroundJobManagerConcurrencyIntegration:
             # Acceptable states: CANCELLED (if shutdown caught them), COMPLETED (if
             # they acquired slot and finished), or PENDING (if still waiting).
             valid_states = [JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.PENDING]
-            assert job2.status in valid_states, f"job2 status: {job2.status}"
-            assert job3.status in valid_states, f"job3 status: {job3.status}"
+            assert job2.status in valid_states, f"job2 status: {job2.status}"  # type: ignore[union-attr]
+            assert job3.status in valid_states, f"job3 status: {job3.status}"  # type: ignore[union-attr]
 
         # Prevent double shutdown
-        self.manager = None
+        self.manager = None  # type: ignore[assignment]

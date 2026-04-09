@@ -231,7 +231,7 @@ class RefreshTokenManager:
             """
             )
 
-        self._conn_manager.execute_atomic(_do_init)
+        self._conn_manager.execute_atomic(_do_init)  # type: ignore[union-attr]
 
     def create_token_family(self, username: str) -> str:
         """

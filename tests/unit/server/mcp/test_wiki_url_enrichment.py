@@ -95,7 +95,7 @@ class TestEnrichWithWikiUrl:
         """AC1: wiki_url is added for .md file from wiki-enabled repo."""
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         wiki_enabled_repos = {"sf-kb-wiki"}
         _enrich_with_wiki_url(
             result_dict,
@@ -111,7 +111,7 @@ class TestEnrichWithWikiUrl:
         """AC4: wiki_url is NOT added for non-.md files."""
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         wiki_enabled_repos = {"sf-kb-wiki"}
         _enrich_with_wiki_url(
             result_dict, "src/auth.py", "sf-kb-wiki-global", wiki_enabled_repos
@@ -123,7 +123,7 @@ class TestEnrichWithWikiUrl:
         """AC3/AC4: wiki_url is NOT added for repos not in wiki_enabled_repos set."""
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         wiki_enabled_repos = {"sf-kb-wiki"}  # code-indexer is NOT in this set
         _enrich_with_wiki_url(
             result_dict, "docs/overview.md", "code-indexer-global", wiki_enabled_repos
@@ -136,19 +136,19 @@ class TestEnrichWithWikiUrl:
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
         # Case 1: non-.md file
-        result1 = {}
+        result1 = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(
             result1, "README.txt", "sf-kb-wiki-global", {"sf-kb-wiki"}
         )
         assert "wiki_url" not in result1  # Key must not exist at all
 
         # Case 2: non-wiki repo
-        result2 = {}
+        result2 = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(result2, "docs.md", "code-indexer-global", {"sf-kb-wiki"})
         assert "wiki_url" not in result2  # Key must not exist at all
 
         # Case 3: empty file_path
-        result3 = {}
+        result3 = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(result3, "", "sf-kb-wiki-global", {"sf-kb-wiki"})
         assert "wiki_url" not in result3  # Key must not exist at all
 
@@ -156,7 +156,7 @@ class TestEnrichWithWikiUrl:
         """AC1: wiki_url strips .md extension from file path."""
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(
             result_dict, "index.md", "docs-repo-global", {"docs-repo"}
         )
@@ -168,7 +168,7 @@ class TestEnrichWithWikiUrl:
         """wiki_url uses alias WITHOUT -global suffix (matches wiki route pattern)."""
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(
             result_dict, "article.md", "sf-kb-wiki-global", {"sf-kb-wiki"}
         )
@@ -181,7 +181,7 @@ class TestEnrichWithWikiUrl:
         """wiki_url preserves nested directory structure."""
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(
             result_dict,
             "Customer/Support/ticket-management.md",
@@ -199,17 +199,17 @@ class TestEnrichWithWikiUrl:
         from code_indexer.server.mcp.handlers import _enrich_with_wiki_url
 
         # None file_path
-        result1 = {}
+        result1 = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(result1, None, "sf-kb-wiki-global", {"sf-kb-wiki"})
         assert "wiki_url" not in result1
 
         # None repository_alias
-        result2 = {}
+        result2 = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(result2, "article.md", None, {"sf-kb-wiki"})
         assert "wiki_url" not in result2
 
         # Empty set
-        result3 = {}
+        result3 = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(result3, "article.md", "sf-kb-wiki-global", set())
         assert "wiki_url" not in result3
 
@@ -389,9 +389,9 @@ class TestRegexSearchWikiUrlEnrichment:
         )
 
         assert "wiki_url" in match_dict
-        assert "/wiki/sf-kb-wiki/" in match_dict["wiki_url"]
-        assert "Customer/faq" in match_dict["wiki_url"]
-        assert not match_dict["wiki_url"].endswith(".md")
+        assert "/wiki/sf-kb-wiki/" in match_dict["wiki_url"]  # type: ignore[operator]
+        assert "Customer/faq" in match_dict["wiki_url"]  # type: ignore[operator]
+        assert not match_dict["wiki_url"].endswith(".md")  # type: ignore[attr-defined]
 
 
 # ============================================================================
@@ -542,7 +542,7 @@ class TestOnlyGoldenReposGetWikiUrl:
 
         # Simulate a user-activated repo (not in wiki_enabled_repos)
         activated_alias = "my-personal-docs"  # Not a golden repo
-        result_dict = {}
+        result_dict = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(
             result_dict, "README.md", activated_alias, wiki_enabled_repos_set
         )
@@ -551,7 +551,7 @@ class TestOnlyGoldenReposGetWikiUrl:
         assert "wiki_url" not in result_dict
 
         # Golden repo with wiki enabled gets wiki_url
-        golden_result = {}
+        golden_result = {}  # type: ignore[var-annotated]
         _enrich_with_wiki_url(
             golden_result, "README.md", "sf-kb-wiki-global", wiki_enabled_repos_set
         )

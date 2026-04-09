@@ -200,7 +200,7 @@ class TestSCIPAPIClientDependencies:
     @pytest.mark.asyncio
     async def test_dependencies_passes_depth_as_max_depth(self, scip_client):
         """Test dependencies() passes depth parameter as max_depth."""
-        mock_response = {"results": {}, "metadata": {}, "errors": {}}
+        mock_response = {"results": {}, "metadata": {}, "errors": {}}  # type: ignore[var-annotated]
 
         mock_request = MagicMock(
             return_value=MagicMock(status_code=200, json=lambda: mock_response)
@@ -248,7 +248,7 @@ class TestSCIPAPIClientImpact:
     @pytest.mark.asyncio
     async def test_impact_caps_depth_at_10(self, scip_client):
         """Test impact() caps depth at 10 even when higher value passed."""
-        mock_response = {"results": {}, "metadata": {}, "errors": {}}
+        mock_response = {"results": {}, "metadata": {}, "errors": {}}  # type: ignore[var-annotated]
 
         mock_request = MagicMock(
             return_value=MagicMock(status_code=200, json=lambda: mock_response)

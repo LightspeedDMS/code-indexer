@@ -298,7 +298,7 @@ def test_multi_provider_dispatches_to_all(tmp_path):
     result_a = _make_result("a.py", score=0.9)
     result_b = _make_result("b.py", score=0.8)
 
-    call_count = []
+    call_count = []  # type: ignore[var-annotated]
 
     def make_service(*args, **kwargs):
         instance = MagicMock()

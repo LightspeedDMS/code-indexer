@@ -403,7 +403,7 @@ class TestModuleEntryPoint:
         )
         assert spec is not None, "runner module must be importable"
 
-        runner_path = Path(spec.origin)
+        runner_path = Path(spec.origin)  # type: ignore[arg-type]
         content = runner_path.read_text()
         assert '__name__ == "__main__"' in content or "if __name__ ==" in content, (
             "runner.py must have a __main__ entry point"

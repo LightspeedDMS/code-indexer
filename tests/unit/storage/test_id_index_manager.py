@@ -25,7 +25,7 @@ class TestIDIndexManagerBinary:
     def test_empty_index_serialization(self):
         """Test serialization of empty index."""
         # Given: Empty ID index
-        id_index = {}
+        id_index = {}  # type: ignore[var-annotated]
 
         # When: Save empty index
         self.manager.save_index(self.temp_dir, id_index)
@@ -285,7 +285,7 @@ class TestIDIndexManagerThreadSafety:
         import threading
 
         # Given: Initial empty index
-        id_index = {}
+        id_index = {}  # type: ignore[var-annotated]
         self.manager.save_index(self.temp_dir, id_index)
 
         # When: Multiple threads update concurrently

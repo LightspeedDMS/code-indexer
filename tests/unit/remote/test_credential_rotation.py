@@ -137,7 +137,7 @@ class TestCredentialRotationCore:
 
         # Add repository links to config
         config_with_links = self.original_config.copy()
-        config_with_links["repository_links"] = [
+        config_with_links["repository_links"] = [  # type: ignore[assignment]
             {"name": "main", "branch": "master", "active": True},
             {"name": "dev", "branch": "develop", "active": False},
         ]

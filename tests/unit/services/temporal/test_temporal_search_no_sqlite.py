@@ -144,14 +144,14 @@ class TestTemporalSearchNoSQLite(unittest.TestCase):
         self.assertIsNotNone(result)
 
         # Should have required fields for CLI display
-        self.assertIn("hash", result)
-        self.assertIn("date", result)
-        self.assertIn("author_name", result)
-        self.assertIn("author_email", result)
-        self.assertIn("message", result)
+        self.assertIn("hash", result)  # type: ignore[arg-type]
+        self.assertIn("date", result)  # type: ignore[arg-type]
+        self.assertIn("author_name", result)  # type: ignore[arg-type]
+        self.assertIn("author_email", result)  # type: ignore[arg-type]
+        self.assertIn("message", result)  # type: ignore[arg-type]
 
         # Should indicate it's placeholder data
-        self.assertEqual(result["hash"], "abc123")
+        self.assertEqual(result["hash"], "abc123")  # type: ignore[index]
 
     def test_unused_sqlite_methods_removed(self):
         """Verify SQLite-dependent helper methods are removed or stubbed."""

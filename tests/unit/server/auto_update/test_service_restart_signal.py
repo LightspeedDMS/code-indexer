@@ -520,7 +520,7 @@ class TestSignalCheckedBeforeRedeployMarker:
 
         mock_signal_path = MagicMock()
         mock_signal_path.exists.side_effect = lambda: (
-            call_order.append("signal_check") or True
+            call_order.append("signal_check") or True  # type: ignore[func-returns-value]
         )
         mock_signal_path.__truediv__ = signal_file.__truediv__
 

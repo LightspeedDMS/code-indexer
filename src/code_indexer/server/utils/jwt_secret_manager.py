@@ -81,7 +81,7 @@ class JWTSecretManager:
                 "Install it with: pip install psycopg"
             ) from exc
 
-        conn = psycopg.connect(self._pg_dsn)
+        conn = psycopg.connect(self._pg_dsn)  # type: ignore[arg-type]
         try:
             yield conn
         finally:

@@ -174,7 +174,7 @@ class TestValidationErrorHandling:
         """Test that validation errors return 400 Bad Request status."""
         validation_error = None
         try:
-            ValidationTestModel(name="", age=-1)
+            ValidationTestModel(name="", age=-1)  # type: ignore[call-arg]
         except PydanticValidationError as e:
             validation_error = e
 
@@ -279,7 +279,7 @@ class TestValidationErrorHandling:
         """Test that each validation error gets a unique correlation ID."""
         validation_error = None
         try:
-            ValidationTestModel(name="", age=-1)
+            ValidationTestModel(name="", age=-1)  # type: ignore[call-arg]
         except PydanticValidationError as e:
             validation_error = e
 
@@ -306,7 +306,7 @@ class TestValidationErrorHandling:
 
         validation_error = None
         try:
-            ValidationTestModel(name="", age=-1)
+            ValidationTestModel(name="", age=-1)  # type: ignore[call-arg]
         except PydanticValidationError as e:
             validation_error = e
 

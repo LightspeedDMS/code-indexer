@@ -230,9 +230,10 @@ class TestResearchAssistantAutoScroll:
 
         # Verify it's the target for HTMX swaps
         assert "class" in chat_messages.attrs, "chat-messages must have class attribute"
-        assert "chat-messages" in chat_messages.get("class", []), (
-            "Element must have chat-messages class"
-        )
+        assert "chat-messages" in chat_messages.get(  # type: ignore[operator]
+            "class",
+            [],  # type: ignore[arg-type]
+        ), "Element must have chat-messages class"
 
     def test_initial_scroll_to_bottom_on_load(self, research_assistant_page_content):
         """Test: Page must scroll to bottom on initial load."""

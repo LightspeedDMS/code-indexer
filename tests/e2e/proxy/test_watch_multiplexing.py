@@ -26,48 +26,48 @@ class TestWatchMultiplexing(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test repositories."""
-        cls.test_dir = Path(tempfile.mkdtemp(prefix="watch_multiplex_test_"))
+        cls.test_dir = Path(tempfile.mkdtemp(prefix="watch_multiplex_test_"))  # type: ignore[attr-defined]
 
         # Create 3 test repositories
-        cls.repos = []
+        cls.repos = []  # type: ignore[attr-defined]
         for i in range(1, 4):
-            repo_path = cls.test_dir / f"repo{i}"
+            repo_path = cls.test_dir / f"repo{i}"  # type: ignore[attr-defined]
             repo_path.mkdir(parents=True)
             (repo_path / "test.py").write_text(f"# Test file {i}")
-            cls.repos.append(str(repo_path))
+            cls.repos.append(str(repo_path))  # type: ignore[attr-defined]
 
     @classmethod
     def tearDownClass(cls):
         """Clean up test repositories."""
-        if cls.test_dir.exists():
-            shutil.rmtree(cls.test_dir)
+        if cls.test_dir.exists():  # type: ignore[attr-defined]
+            shutil.rmtree(cls.test_dir)  # type: ignore[attr-defined]
 
     def test_parallel_watch_manager_initialization(self):
         """Test ParallelWatchManager initializes correctly (Story 5.1)."""
-        manager = ParallelWatchManager(self.repos)
+        manager = ParallelWatchManager(self.repos)  # type: ignore[attr-defined]
 
-        self.assertEqual(manager.repositories, self.repos)
+        self.assertEqual(manager.repositories, self.repos)  # type: ignore[attr-defined]
         self.assertEqual(manager.processes, {})
         self.assertTrue(manager.running)
 
     def test_watch_manager_process_spawning(self):
         """Test watch manager spawns processes for all repositories (Story 5.1)."""
-        manager = ParallelWatchManager(self.repos)
+        manager = ParallelWatchManager(self.repos)  # type: ignore[attr-defined]
 
         with patch.object(manager, "_start_watch_process") as mock_start:
             # Mock process creation
-            mock_processes = [Mock() for _ in self.repos]
+            mock_processes = [Mock() for _ in self.repos]  # type: ignore[attr-defined]
             mock_start.side_effect = mock_processes
 
             manager.start_all_watchers()
 
             # Verify process started for each repository
-            self.assertEqual(mock_start.call_count, len(self.repos))
-            self.assertEqual(len(manager.processes), len(self.repos))
+            self.assertEqual(mock_start.call_count, len(self.repos))  # type: ignore[attr-defined]
+            self.assertEqual(len(manager.processes), len(self.repos))  # type: ignore[attr-defined]
 
     def test_watch_manager_process_isolation(self):
         """Test failed process doesn't affect others (Story 5.1)."""
-        manager = ParallelWatchManager(self.repos)
+        manager = ParallelWatchManager(self.repos)  # type: ignore[attr-defined]
 
         with patch.object(manager, "_start_watch_process") as mock_start:
             # First succeeds, second fails, third succeeds
@@ -83,7 +83,7 @@ class TestWatchMultiplexing(unittest.TestCase):
 
     def test_watch_manager_health_monitoring(self):
         """Test health monitoring detects dead processes (Story 5.1)."""
-        manager = ParallelWatchManager(self.repos[:2])
+        manager = ParallelWatchManager(self.repos[:2])  # type: ignore[attr-defined]
 
         # Create mock processes - one running, one dead
         running_proc = Mock()
@@ -92,22 +92,22 @@ class TestWatchMultiplexing(unittest.TestCase):
         dead_proc.poll = Mock(return_value=1)
 
         manager.processes = {
-            self.repos[0]: running_proc,
-            self.repos[1]: dead_proc,
+            self.repos[0]: running_proc,  # type: ignore[attr-defined]
+            self.repos[1]: dead_proc,  # type: ignore[attr-defined]
         }
 
         dead_processes = manager.check_process_health()
 
         # Should detect dead process
         self.assertEqual(len(dead_processes), 1)
-        self.assertIn(self.repos[1], dead_processes)
+        self.assertIn(self.repos[1], dead_processes)  # type: ignore[attr-defined]
 
     def test_watch_manager_graceful_shutdown(self):
         """Test watch manager stops all processes gracefully (Story 5.1)."""
-        manager = ParallelWatchManager(self.repos)
+        manager = ParallelWatchManager(self.repos)  # type: ignore[attr-defined]
 
         # Create mock processes
-        for repo in self.repos:
+        for repo in self.repos:  # type: ignore[attr-defined]
             proc = Mock()
             proc.terminate = Mock()
             proc.wait = Mock()
@@ -125,7 +125,7 @@ class TestWatchMultiplexing(unittest.TestCase):
 
     def test_output_multiplexer_initialization(self):
         """Test OutputMultiplexer initializes correctly (Story 5.2)."""
-        processes = {repo: Mock() for repo in self.repos}
+        processes = {repo: Mock() for repo in self.repos}  # type: ignore[attr-defined]
         multiplexer = OutputMultiplexer(processes)
 
         self.assertEqual(multiplexer.processes, processes)
@@ -135,7 +135,7 @@ class TestWatchMultiplexing(unittest.TestCase):
     def test_output_multiplexer_thread_creation(self):
         """Test multiplexer creates reader threads for each process (Story 5.2)."""
         processes = {}
-        for repo in self.repos:
+        for repo in self.repos:  # type: ignore[attr-defined]
             proc = Mock()
             proc.stdout = StringIO("Line 1\nLine 2\n")
             processes[repo] = proc
@@ -147,7 +147,7 @@ class TestWatchMultiplexing(unittest.TestCase):
         time.sleep(0.1)
 
         # Should create reader thread for each repository
-        self.assertEqual(len(multiplexer.reader_threads), len(self.repos))
+        self.assertEqual(len(multiplexer.reader_threads), len(self.repos))  # type: ignore[attr-defined]
 
         # All threads should be daemon threads
         for thread in multiplexer.reader_threads:
@@ -193,7 +193,7 @@ class TestWatchMultiplexing(unittest.TestCase):
     def test_output_multiplexer_interleaved_output(self):
         """Test output from multiple repos is interleaved (Story 5.2)."""
         processes = {}
-        for i, repo in enumerate(self.repos[:2]):
+        for i, repo in enumerate(self.repos[:2]):  # type: ignore[attr-defined]
             proc = Mock()
             proc.stdout = StringIO(
                 f"Line 1 from repo{i + 1}\nLine 2 from repo{i + 1}\n"
@@ -237,14 +237,14 @@ class TestWatchMultiplexing(unittest.TestCase):
 
     def test_repository_prefix_formatter_initialization(self):
         """Test RepositoryPrefixFormatter initializes correctly (Story 5.4)."""
-        formatter = RepositoryPrefixFormatter(self.test_dir)
+        formatter = RepositoryPrefixFormatter(self.test_dir)  # type: ignore[attr-defined]
 
-        self.assertEqual(formatter.proxy_root, self.test_dir.resolve())
+        self.assertEqual(formatter.proxy_root, self.test_dir.resolve())  # type: ignore[attr-defined]
 
     def test_repository_prefix_formatter_relative_path(self):
         """Test formatter uses relative paths (Story 5.4)."""
-        formatter = RepositoryPrefixFormatter(self.test_dir)
-        repo_path = self.test_dir / "repo1"
+        formatter = RepositoryPrefixFormatter(self.test_dir)  # type: ignore[attr-defined]
+        repo_path = self.test_dir / "repo1"  # type: ignore[attr-defined]
 
         prefix = formatter.format_prefix(str(repo_path))
 
@@ -253,8 +253,8 @@ class TestWatchMultiplexing(unittest.TestCase):
 
     def test_repository_prefix_formatter_output_line(self):
         """Test formatter creates complete output lines (Story 5.4)."""
-        formatter = RepositoryPrefixFormatter(self.test_dir)
-        repo_path = self.test_dir / "repo1"
+        formatter = RepositoryPrefixFormatter(self.test_dir)  # type: ignore[attr-defined]
+        repo_path = self.test_dir / "repo1"  # type: ignore[attr-defined]
         content = "Change detected: test.py"
 
         output_line = formatter.format_output_line(str(repo_path), content)
@@ -264,8 +264,8 @@ class TestWatchMultiplexing(unittest.TestCase):
 
     def test_repository_prefix_formatter_nested_paths(self):
         """Test formatter handles nested repository paths (Story 5.4)."""
-        formatter = RepositoryPrefixFormatter(self.test_dir)
-        nested_repo = self.test_dir / "backend" / "auth-service"
+        formatter = RepositoryPrefixFormatter(self.test_dir)  # type: ignore[attr-defined]
+        nested_repo = self.test_dir / "backend" / "auth-service"  # type: ignore[attr-defined]
         nested_repo.mkdir(parents=True)
 
         prefix = formatter.format_prefix(str(nested_repo))
@@ -274,9 +274,9 @@ class TestWatchMultiplexing(unittest.TestCase):
 
     def test_repository_prefix_formatter_unique_prefixes(self):
         """Test different repos get unique prefixes (Story 5.4)."""
-        formatter = RepositoryPrefixFormatter(self.test_dir)
+        formatter = RepositoryPrefixFormatter(self.test_dir)  # type: ignore[attr-defined]
 
-        prefixes = [formatter.format_prefix(repo) for repo in self.repos]
+        prefixes = [formatter.format_prefix(repo) for repo in self.repos]  # type: ignore[attr-defined]
 
         # All prefixes should be unique
         self.assertEqual(len(prefixes), len(set(prefixes)))
@@ -286,12 +286,12 @@ class TestWatchMultiplexing(unittest.TestCase):
         # This test validates the complete integration of all three stories
 
         # Create watch manager (Story 5.1)
-        manager = ParallelWatchManager(self.repos)
+        manager = ParallelWatchManager(self.repos)  # type: ignore[attr-defined]
 
         with patch.object(manager, "_start_watch_process") as mock_start:
             # Create mock processes with output
             mock_processes = []
-            for i, repo in enumerate(self.repos):
+            for i, repo in enumerate(self.repos):  # type: ignore[attr-defined]
                 proc = Mock()
                 proc.stdout = StringIO(f"[{repo}] Watch started\n")
                 proc.poll = Mock(return_value=None)  # Running
@@ -303,19 +303,19 @@ class TestWatchMultiplexing(unittest.TestCase):
             manager.start_all_watchers()
 
             # Verify processes started (Story 5.1)
-            self.assertEqual(len(manager.processes), len(self.repos))
+            self.assertEqual(len(manager.processes), len(self.repos))  # type: ignore[attr-defined]
 
             # Create output multiplexer (Story 5.2)
             multiplexer = OutputMultiplexer(manager.processes)
 
             # Verify multiplexer initialized
-            self.assertEqual(len(multiplexer.processes), len(self.repos))
+            self.assertEqual(len(multiplexer.processes), len(self.repos))  # type: ignore[attr-defined]
 
             # Create repository formatter (Story 5.4)
-            formatter = RepositoryPrefixFormatter(self.test_dir)
+            formatter = RepositoryPrefixFormatter(self.test_dir)  # type: ignore[attr-defined]
 
             # Format output for each repository
-            for repo in self.repos:
+            for repo in self.repos:  # type: ignore[attr-defined]
                 formatted = formatter.format_output_line(repo, "Change detected")
                 # Verify repository identification (Story 5.4)
                 self.assertIn("[", formatted)
@@ -336,7 +336,7 @@ class TestWatchMultiplexing(unittest.TestCase):
     def test_output_multiplexer_concurrent_reads(self):
         """Test multiplexer handles concurrent reads safely (Story 5.2)."""
         processes = {}
-        for repo in self.repos:
+        for repo in self.repos:  # type: ignore[attr-defined]
             proc = Mock()
             proc.stdout = StringIO("Line 1\nLine 2\nLine 3\n")
             processes[repo] = proc

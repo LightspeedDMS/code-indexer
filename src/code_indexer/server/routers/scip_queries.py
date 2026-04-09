@@ -116,7 +116,7 @@ def _apply_scip_payload_truncation(
         _apply_scip_payload_truncation as mcp_truncate,
     )
 
-    return mcp_truncate(results)
+    return mcp_truncate(results)  # type: ignore[no-any-return]
 
 
 @router.get("/definition")

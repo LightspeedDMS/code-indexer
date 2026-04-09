@@ -201,7 +201,7 @@ class TestGlobalQueryE2E:
 
             # CRITICAL: Set CIDX_GOLDEN_REPOS_DIR env var so cidx knows where to find global repos
             env = {
-                **subprocess.os.environ,
+                **subprocess.os.environ,  # type: ignore[attr-defined]
                 "CIDX_GOLDEN_REPOS_DIR": str(golden_repos_dir),
             }
 

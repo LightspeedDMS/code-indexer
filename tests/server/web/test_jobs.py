@@ -511,7 +511,8 @@ class TestCancelJobEndpoint:
 
         # Try to cancel a nonexistent job
         response = client.post(
-            "/admin/jobs/nonexistent-job-id/cancel", data={"csrf_token": csrf_token}
+            "/admin/jobs/nonexistent-job-id/cancel",
+            data={"csrf_token": csrf_token},  # type: ignore[dict-item]
         )
 
         # Should return an error or redirect with error message

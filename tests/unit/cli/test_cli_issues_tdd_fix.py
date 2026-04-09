@@ -85,7 +85,8 @@ class TestCLIIssuesFix:
                 repositories_data = mock_server_response_data["repositories"]
                 # This will fail because field names and required fields don't match
                 return [
-                    ActivatedRepository(**repo_data) for repo_data in repositories_data
+                    ActivatedRepository(**repo_data)
+                    for repo_data in repositories_data  # type: ignore[attr-defined]
                 ]
             except Exception as e:
                 # Convert to the actual error pattern we see in production

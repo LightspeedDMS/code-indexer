@@ -67,11 +67,11 @@ def _mock_git_diff_result(num_files=1, lines_per_hunk=10):
     @dataclass
     class MockFileDiff:
         path: str
-        old_path: str = None
+        old_path: str = None  # type: ignore[assignment]
         status: str = "modified"
         insertions: int = 0
         deletions: int = 5
-        hunks: list = None
+        hunks: list = None  # type: ignore[assignment]
 
         def __post_init__(self):
             if self.hunks is None:
@@ -82,7 +82,7 @@ def _mock_git_diff_result(num_files=1, lines_per_hunk=10):
     class MockGitDiffResult:
         from_revision: str = "abc123"
         to_revision: str = "def456"
-        files: list = None
+        files: list = None  # type: ignore[assignment]
         total_insertions: int = 0
         total_deletions: int = 0
         stat_summary: str = ""
@@ -193,9 +193,9 @@ class TestGitDiffTruncationWithCacheHandle:
             assert data.get("cache_handle") == "cache-handle-diff-123"
             assert data.get("truncated") is True
             assert data.get("has_more") is True
-            assert data.get("total_tokens") > 0
-            assert data.get("preview_tokens") > 0
-            assert data.get("total_pages") >= 1
+            assert data.get("total_tokens") > 0  # type: ignore[operator]
+            assert data.get("preview_tokens") > 0  # type: ignore[operator]
+            assert data.get("total_pages") >= 1  # type: ignore[operator]
 
     def test_small_diff_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small diff returns no cache_handle when not truncated.

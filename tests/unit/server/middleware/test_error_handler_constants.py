@@ -207,8 +207,8 @@ class TestCodePatternCompliance:
 
                         # Check if this is part of a constant assignment line
                         lines = content.split("\n")
-                        if line_num != "unknown" and line_num <= len(lines):
-                            line_content = lines[line_num - 1].strip()
+                        if line_num != "unknown" and line_num <= len(lines):  # type: ignore[operator]
+                            line_content = lines[line_num - 1].strip()  # type: ignore[operator]
                             # If line contains an uppercase assignment, it's likely a constant
                             if "=" in line_content and any(
                                 part.strip().isupper()

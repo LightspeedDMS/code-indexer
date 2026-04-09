@@ -62,7 +62,7 @@ class TestTemporalTimeRangeAllLimitOptimization(unittest.TestCase):
             FilesystemVectorStore,
         )
 
-        self.vector_store.__class__ = FilesystemVectorStore
+        self.vector_store.__class__ = FilesystemVectorStore  # type: ignore[assignment]
         self.vector_store.search.return_value = ([], {})  # Empty results
 
         # Act
@@ -106,7 +106,7 @@ class TestTemporalTimeRangeAllLimitOptimization(unittest.TestCase):
             FilesystemVectorStore,
         )
 
-        self.vector_store.__class__ = FilesystemVectorStore
+        self.vector_store.__class__ = FilesystemVectorStore  # type: ignore[assignment]
         self.vector_store.search.return_value = ([], {})
 
         # Act
@@ -150,7 +150,7 @@ class TestTemporalTimeRangeAllLimitOptimization(unittest.TestCase):
             FilesystemVectorStore,
         )
 
-        self.vector_store.__class__ = FilesystemVectorStore
+        self.vector_store.__class__ = FilesystemVectorStore  # type: ignore[assignment]
         self.vector_store.search.return_value = ([], {})
 
         # Act

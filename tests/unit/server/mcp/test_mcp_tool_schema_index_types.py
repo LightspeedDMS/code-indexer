@@ -123,7 +123,7 @@ class TestAllToolsSchemasConsistency:
         """
         Ensure no MCP tool schema uses deprecated semantic_fts in enum values.
         """
-        tools_with_semantic_fts = []
+        tools_with_semantic_fts = []  # type: ignore[var-annotated]
 
         for tool_name, tool_def in TOOL_REGISTRY.items():
             input_schema = tool_def.get("inputSchema", {})

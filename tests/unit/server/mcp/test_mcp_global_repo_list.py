@@ -224,7 +224,7 @@ class TestListRepositoriesWithGlobalRepos:
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             _setup_mock_app(mock_app, activated_repos=mock_activated_repos)
 
-            mock_repos_list = []
+            mock_repos_list = []  # type: ignore[var-annotated]
 
             with patch(
                 "code_indexer.server.mcp.handlers._list_global_repos",
@@ -317,7 +317,7 @@ class TestListRepositoriesWithGlobalRepos:
             _setup_mock_app(mock_app, activated_repos=[], disable_access_filter=False)
             mock_app.app.state.access_filtering_service = None
 
-            mock_repos_list = []
+            mock_repos_list = []  # type: ignore[var-annotated]
 
             with patch(
                 "code_indexer.server.mcp.handlers._list_global_repos",

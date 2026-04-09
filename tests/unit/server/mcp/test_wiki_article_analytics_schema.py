@@ -30,7 +30,7 @@ def _load_tool_doc_meta() -> Dict[str, Any]:
     """Load and parse YAML front matter from the tool doc file."""
     content = TOOL_DOC_PATH.read_text()
     parts = content.split("---", 2)
-    return yaml.safe_load(parts[1])
+    return yaml.safe_load(parts[1])  # type: ignore[no-any-return]
 
 
 # ============================================================================

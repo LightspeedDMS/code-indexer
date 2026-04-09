@@ -294,7 +294,7 @@ class TestGitPushHandlerSetUpstream:
 
     def test_handler_passes_set_upstream_true_to_service(self):
         """git_push handler extracts set_upstream=True from args and passes to service."""
-        captured_kwargs = {}
+        captured_kwargs = {}  # type: ignore[var-annotated]
         mock_push_with_pat, mock_user = self._make_handler_patches(captured_kwargs)
 
         with patch(
@@ -330,7 +330,7 @@ class TestGitPushHandlerSetUpstream:
 
     def test_handler_passes_set_upstream_false_to_service(self):
         """git_push handler extracts set_upstream=False from args and passes to service."""
-        captured_kwargs = {}
+        captured_kwargs = {}  # type: ignore[var-annotated]
         mock_push_with_pat, mock_user = self._make_handler_patches(captured_kwargs)
 
         with patch(
@@ -361,7 +361,7 @@ class TestGitPushHandlerSetUpstream:
 
     def test_handler_defaults_set_upstream_true_when_not_provided(self):
         """git_push handler passes set_upstream=True when not in args (default)."""
-        captured_kwargs = {}
+        captured_kwargs = {}  # type: ignore[var-annotated]
         mock_push_with_pat, mock_user = self._make_handler_patches(captured_kwargs)
 
         with patch(

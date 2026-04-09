@@ -532,7 +532,7 @@ class TestRestApiEmptyResults(TestRestApiQueryTruncation):
         app_module.app.state.payload_cache = cache_100_chars
 
         try:
-            results = []
+            results = []  # type: ignore[var-annotated]
             truncated = _apply_rest_semantic_truncation(results, cache_100_chars)
             assert truncated == []
         finally:
@@ -552,7 +552,7 @@ class TestRestApiEmptyResults(TestRestApiQueryTruncation):
         app_module.app.state.payload_cache = cache_100_chars
 
         try:
-            results = []
+            results = []  # type: ignore[var-annotated]
             truncated = _apply_rest_fts_truncation(results, cache_100_chars)
             assert truncated == []
         finally:

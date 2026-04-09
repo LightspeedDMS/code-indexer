@@ -73,7 +73,7 @@ def _post_consent(
     return app.post(
         "/oauth/authorize/consent",
         data=data,
-        cookies=cookies,
+        cookies=cookies,  # type: ignore[arg-type]
         follow_redirects=False,
     )
 
@@ -197,8 +197,8 @@ class TestBug624StateOptional:
 
         response = _get_authorize(app, registered_client["client_id"], code_challenge)
 
-        assert response.status_code != status.HTTP_422_UNPROCESSABLE_CONTENT, (
-            f"HTTP 422 means state is still required. It must be optional per OAuth 2.1 PKCE. "
+        assert response.status_code != status.HTTP_422_UNPROCESSABLE_CONTENT, (  # type: ignore[attr-defined]
+            f"HTTP 422 means state is still required. It must be optional per OAuth 2.1 PKCE. "  # type: ignore[attr-defined]
             f"Response: {response.text}"
         )
 
@@ -212,9 +212,9 @@ class TestBug624StateOptional:
             app, registered_client["client_id"], code_challenge, state="csrf_token_xyz"
         )
 
-        assert response.status_code != status.HTTP_422_UNPROCESSABLE_CONTENT, (
-            f"HTTP 422 with state provided — regression: {response.text}"
-        )
+        assert (
+            response.status_code != status.HTTP_422_UNPROCESSABLE_CONTENT  # type: ignore[attr-defined]
+        ), f"HTTP 422 with state provided — regression: {response.text}"  # type: ignore[attr-defined]
 
     # --- POST /oauth/authorize/consent tests ---
 
@@ -232,8 +232,8 @@ class TestBug624StateOptional:
             app, registered_client["client_id"], code_challenge, session_cookies
         )
 
-        assert response.status_code != status.HTTP_422_UNPROCESSABLE_CONTENT, (
-            f"HTTP 422 means state is still required. It must be optional per OAuth 2.1 PKCE. "
+        assert response.status_code != status.HTTP_422_UNPROCESSABLE_CONTENT, (  # type: ignore[attr-defined]
+            f"HTTP 422 means state is still required. It must be optional per OAuth 2.1 PKCE. "  # type: ignore[attr-defined]
             f"Response: {response.text}"
         )
 
@@ -251,10 +251,10 @@ class TestBug624StateOptional:
             app, registered_client["client_id"], code_challenge, session_cookies
         )
 
-        assert response.status_code == status.HTTP_302_FOUND, (
-            f"Expected redirect 302, got {response.status_code}: {response.text}"
-        )
-        location = response.headers.get("location", "")
+        assert (
+            response.status_code == status.HTTP_302_FOUND  # type: ignore[attr-defined]
+        ), f"Expected redirect 302, got {response.status_code}: {response.text}"  # type: ignore[attr-defined]
+        location = response.headers.get("location", "")  # type: ignore[attr-defined]
         assert "state=" not in location, (
             f"Redirect URL must not contain 'state=' when state was not provided: {location}"
         )
@@ -277,10 +277,10 @@ class TestBug624StateOptional:
             state=provided_state,
         )
 
-        assert response.status_code == status.HTTP_302_FOUND, (
-            f"Expected redirect 302, got {response.status_code}: {response.text}"
-        )
-        location = response.headers.get("location", "")
+        assert (
+            response.status_code == status.HTTP_302_FOUND  # type: ignore[attr-defined]
+        ), f"Expected redirect 302, got {response.status_code}: {response.text}"  # type: ignore[attr-defined]
+        location = response.headers.get("location", "")  # type: ignore[attr-defined]
         assert f"state={provided_state}" in location, (
             f"Redirect URL must echo back state when provided: {location}"
         )
@@ -486,7 +486,7 @@ class TestBug624MfaVerifyStateOptional:
         past_code = totp.at(int(time_mod.time()) - 30)
         result = totp_service.activate_mfa(_TEST_USERNAME, past_code)
         assert result is True
-        return secret
+        return secret  # type: ignore[no-any-return]
 
     def _get_totp_code(self, secret: str) -> str:
         import pyotp
@@ -500,7 +500,7 @@ class TestBug624MfaVerifyStateOptional:
         from code_indexer.server.auth.mfa_challenge import mfa_challenge_manager
 
         _, code_challenge = pkce_pair
-        return mfa_challenge_manager.create_challenge(
+        return mfa_challenge_manager.create_challenge(  # type: ignore[no-any-return]
             username=_TEST_USERNAME,
             role=UserRole.NORMAL_USER.value,
             client_ip="testclient",

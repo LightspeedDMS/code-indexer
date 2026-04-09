@@ -237,21 +237,21 @@ class TestBranchChangeBinaryFiltering:
 
         # Hundreds of binary junk files (should NOT be indexed)
         for i in range(20):
-            files[f"code/3dparty/metro/lib{i}.jar"] = BINARY_CONTENT
+            files[f"code/3dparty/metro/lib{i}.jar"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(10):
-            files[f"code/lib/vendor{i}.jar"] = BINARY_CONTENT
+            files[f"code/lib/vendor{i}.jar"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(5):
-            files[f"code/clientside/tool{i}.exe"] = BINARY_CONTENT
+            files[f"code/clientside/tool{i}.exe"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(5):
-            files[f"code/clientside/lib{i}.dll"] = BINARY_CONTENT
+            files[f"code/clientside/lib{i}.dll"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(3):
-            files[f"code/clientside/archive{i}.zip"] = BINARY_CONTENT
+            files[f"code/clientside/archive{i}.zip"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(10):
-            files[f"MediaResources/photoshop.old/design{i}.psd"] = BINARY_CONTENT
+            files[f"MediaResources/photoshop.old/design{i}.psd"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(5):
-            files[f"MediaResources/photoshop.old/art{i}.xcf"] = BINARY_CONTENT
+            files[f"MediaResources/photoshop.old/art{i}.xcf"] = BINARY_CONTENT  # type: ignore[assignment]
         for i in range(5):
-            files[f"buildtools/exe4j/tool{i}.exe"] = BINARY_CONTENT
+            files[f"buildtools/exe4j/tool{i}.exe"] = BINARY_CONTENT  # type: ignore[assignment]
 
         _create_branch_with_files(repo, "feature", files, "mixed changes")
         _switch_branch(repo, "master")

@@ -168,7 +168,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        repositories = await service._fetch_repositories()
+        repositories = await service._fetch_repositories()  # type: ignore[misc]
 
         # Verify empty list returned on failure
         assert repositories == []
@@ -185,7 +185,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.side_effect = Exception("Network error")
 
         # Execute
-        repositories = await service._fetch_repositories()
+        repositories = await service._fetch_repositories()  # type: ignore[misc]
 
         # Verify empty list returned on exception
         assert repositories == []
@@ -318,7 +318,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        timestamps = await repository_service._get_repository_timestamps(
+        timestamps = await repository_service._get_repository_timestamps(  # type: ignore[misc]
             "repo1", "main"
         )
 
@@ -346,7 +346,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        timestamps = await repository_service._get_repository_timestamps(
+        timestamps = await repository_service._get_repository_timestamps(  # type: ignore[misc]
             "repo1", "main"
         )
 
@@ -399,7 +399,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        analysis = await repository_service.get_repository_analysis(
+        analysis = await repository_service.get_repository_analysis(  # type: ignore[misc]
             "https://github.com/user/repo1.git", "main"
         )
 
@@ -433,7 +433,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        details = await repository_service.get_repository_details("repo1")
+        details = await repository_service.get_repository_details("repo1")  # type: ignore[misc]
 
         # Verify
         assert details is not None
@@ -457,7 +457,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        details = await repository_service.get_repository_details("repo1")
+        details = await repository_service.get_repository_details("repo1")  # type: ignore[misc]
 
         # Verify
         assert details is None
@@ -481,7 +481,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        branches = await repository_service.get_repository_branches("repo1")
+        branches = await repository_service.get_repository_branches("repo1")  # type: ignore[misc]
 
         # Verify
         assert branches == ["main", "develop", "feature/test"]
@@ -503,7 +503,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.return_value = mock_response
 
         # Execute
-        branches = await repository_service.get_repository_branches("repo1")
+        branches = await repository_service.get_repository_branches("repo1")  # type: ignore[misc]
 
         # Verify
         assert branches == []
@@ -522,7 +522,7 @@ class TestRemoteRepositoryService:
         mock_api_client.get.side_effect = Exception("Network error")
 
         # Execute
-        branches = await repository_service.get_repository_branches("repo1")
+        branches = await repository_service.get_repository_branches("repo1")  # type: ignore[misc]
 
         # Verify
         assert branches == []

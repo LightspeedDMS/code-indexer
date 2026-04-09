@@ -40,7 +40,7 @@ def _exercise_write(manager, tmp_dir: str, cohere_key) -> dict:
         manager._write_embedding_providers_to_config(tmp_dir)
 
     config_file = Path(tmp_dir) / ".code-indexer" / "config.json"
-    return json.loads(config_file.read_text())
+    return json.loads(config_file.read_text())  # type: ignore[no-any-return]
 
 
 class TestWriteEmbeddingProvidersToConfig:

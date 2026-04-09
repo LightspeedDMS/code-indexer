@@ -414,7 +414,7 @@ class RealAuthenticatedHTTPClient(RealHTTPClient):
         if auth_response.status_code != 200:
             raise httpx.HTTPStatusError(
                 f"Authentication failed: HTTP {auth_response.status_code}",
-                request=auth_response.request,  # type: ignore[arg-type]
+                request=auth_response.request,  # type: ignore[arg-type, attr-defined]
                 response=auth_response,  # type: ignore[arg-type]
             )
 
@@ -461,7 +461,7 @@ class RealAuthenticatedHTTPClient(RealHTTPClient):
         if refresh_response.status_code != 200:
             raise httpx.HTTPStatusError(
                 f"Token refresh failed: HTTP {refresh_response.status_code}",
-                request=refresh_response.request,  # type: ignore[arg-type]
+                request=refresh_response.request,  # type: ignore[arg-type, attr-defined]
                 response=refresh_response,  # type: ignore[arg-type]
             )
 
@@ -508,7 +508,7 @@ class RealAuthenticatedHTTPClient(RealHTTPClient):
             # If 401 Unauthorized, try to refresh token and retry
             if hasattr(e, "response") and e.response.status_code == 401:
                 if self._refresh_token:
-                    self.refresh_token()
+                    self.refresh_token()  # type: ignore[unused-coroutine]
                     return await self.request(method, endpoint, **kwargs)
                 else:
                     # No refresh token, re-authenticate

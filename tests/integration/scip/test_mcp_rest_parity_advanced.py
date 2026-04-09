@@ -19,7 +19,7 @@ def _extract_mcp_response_data(mcp_response: Dict[str, Any]) -> Dict[str, Any]:
     assert "content" in mcp_response, "MCP response missing 'content' key"
     assert len(mcp_response["content"]) >= 1, "MCP response content array is empty"
     assert mcp_response["content"][0]["type"] == "text", "MCP response not 'text'"
-    return json.loads(mcp_response["content"][0]["text"])
+    return json.loads(mcp_response["content"][0]["text"])  # type: ignore[no-any-return]
 
 
 class TestSCIPImpactParity:

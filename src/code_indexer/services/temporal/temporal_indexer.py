@@ -653,7 +653,7 @@ class TemporalIndexer:
         start_time = time.time()
 
         # Create queue and add commits
-        commit_queue = Queue()
+        commit_queue = Queue()  # type: ignore[var-annotated]
         for commit in commits:
             commit_queue.put(commit)
 
@@ -808,7 +808,7 @@ class TemporalIndexer:
 
                             # First, calculate all batch indices (don't submit yet)
                             batch_indices_list = []
-                            current_batch_indices = []
+                            current_batch_indices = []  # type: ignore[var-annotated]
                             current_tokens = 0
 
                             for i, chunk_data in enumerate(all_chunks_data):
@@ -1151,7 +1151,7 @@ class TemporalIndexer:
 
                         # Update shared state with last completed work
                         last_completed_commit[0] = commit.hash
-                        last_completed_file[0] = last_file_for_commit
+                        last_completed_file[0] = last_file_for_commit  # type: ignore[call-overload]
 
                         # Capture bytes for KB/s calculation
                         bytes_processed_snapshot = total_bytes_processed[0]
@@ -1219,7 +1219,7 @@ class TemporalIndexer:
                     raise
                 finally:
                     # Release slot
-                    commit_slot_tracker.release_slot(slot_id)
+                    commit_slot_tracker.release_slot(slot_id)  # type: ignore[arg-type]
 
                 commit_queue.task_done()
 

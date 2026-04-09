@@ -165,7 +165,7 @@ class TestMultipleExclusionPatterns:
 
         matcher = PathPatternMatcher()
 
-        patterns = []
+        patterns = []  # type: ignore[var-annotated]
 
         # Empty pattern list should match nothing
         assert not matcher.matches_any_pattern("src/tests/test.py", patterns)

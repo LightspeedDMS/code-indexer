@@ -145,7 +145,7 @@ class TestServerConfigClaudeIntegrationAccess:
         config = ServerConfig(server_dir="/tmp/test")
         claude_config = config.claude_integration_config
 
-        assert claude_config.anthropic_api_key is None
+        assert claude_config.anthropic_api_key is None  # type: ignore[union-attr]
         # Story #24: Default changed from 4 to 2
-        assert claude_config.max_concurrent_claude_cli == 2
-        assert claude_config.description_refresh_interval_hours == 24
+        assert claude_config.max_concurrent_claude_cli == 2  # type: ignore[union-attr]
+        assert claude_config.description_refresh_interval_hours == 24  # type: ignore[union-attr]

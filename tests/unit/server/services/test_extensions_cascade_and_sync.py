@@ -22,7 +22,7 @@ from code_indexer.server.services.config_service import (
 )
 
 
-def _write_cidx_config(repo_path: str, file_extensions: list, extra: dict = None):
+def _write_cidx_config(repo_path: str, file_extensions: list, extra: dict = None):  # type: ignore[assignment]
     """Helper: write a .code-indexer/config.json in repo_path."""
     cidx_dir = Path(repo_path) / ".code-indexer"
     cidx_dir.mkdir(parents=True, exist_ok=True)
@@ -37,7 +37,7 @@ def _read_cidx_config(repo_path: str) -> dict:
     """Helper: read .code-indexer/config.json from repo_path."""
     cidx_config_path = Path(repo_path) / ".code-indexer" / "config.json"
     with open(cidx_config_path, "r") as f:
-        return json.load(f)
+        return json.load(f)  # type: ignore[no-any-return]
 
 
 class TestCascadeToGoldenRepos:

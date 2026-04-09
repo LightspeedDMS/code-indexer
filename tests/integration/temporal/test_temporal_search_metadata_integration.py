@@ -79,7 +79,7 @@ class TestTemporalSearchMetadataIntegration:
             assert len(results) > 0, "Search should return results"
 
             # Verify at least one result has the expected point_id
-            point_ids = {r["id"] for r in results}
+            point_ids = {r["id"] for r in results}  # type: ignore[call-overload]
             assert (
                 "project:diff:abc123:auth.py:0" in point_ids
                 or "project:diff:def456:database.py:0" in point_ids
@@ -88,8 +88,8 @@ class TestTemporalSearchMetadataIntegration:
             # Verify payloads are loaded correctly
             for result in results:
                 assert "payload" in result
-                assert "path" in result["payload"]
-                assert len(result["payload"]["path"]) > 0
+                assert "path" in result["payload"]  # type: ignore[call-overload]
+                assert len(result["payload"]["path"]) > 0  # type: ignore[call-overload]
 
     def test_search_with_long_point_ids_uses_metadata_mapping(self):
         """Search with long point_ids correctly uses metadata mapping (v2 format necessity)."""
@@ -148,8 +148,8 @@ class TestTemporalSearchMetadataIntegration:
 
             # Then: Should return result with correct point_id (resolved via metadata)
             assert len(results) > 0
-            assert results[0]["id"] == long_point_id
-            assert results[0]["payload"]["path"] == long_path
+            assert results[0]["id"] == long_point_id  # type: ignore[call-overload]
+            assert results[0]["payload"]["path"] == long_path  # type: ignore[call-overload]
 
     def test_search_metadata_integration_preserves_commit_info(self):
         """Search results include commit information from metadata store."""
@@ -188,9 +188,9 @@ class TestTemporalSearchMetadataIntegration:
             # Then: Results should include commit information
             assert len(results) > 0
             result = results[0]
-            assert result["id"] == "project:diff:commit789:file.py:0"
-            assert result["payload"]["commit_hash"] == "commit789"
-            assert result["payload"]["path"] == "file.py"
+            assert result["id"] == "project:diff:commit789:file.py:0"  # type: ignore[call-overload]
+            assert result["payload"]["commit_hash"] == "commit789"  # type: ignore[call-overload]
+            assert result["payload"]["path"] == "file.py"  # type: ignore[call-overload]
 
     def test_search_empty_temporal_collection_returns_empty_results(self):
         """Search on empty temporal collection (with metadata db) returns empty results."""

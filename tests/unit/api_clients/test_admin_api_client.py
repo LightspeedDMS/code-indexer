@@ -29,7 +29,7 @@ class TestAdminAPIClientRealServer:
         """Start real CIDX server for testing."""
         context = CIDXServerTestContext()
         server = await context.__aenter__()
-        server.server_url = context.base_url  # Add server_url to server object
+        server.server_url = context.base_url  # type: ignore[attr-defined]  # dynamic attr for test fixture
 
         try:
             yield server

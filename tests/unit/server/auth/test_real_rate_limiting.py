@@ -115,7 +115,7 @@ class TestRealRateLimiting:
             # Test User 1 login attempts (DISCOVERY: no rate limiting on login endpoint)
             user1_attempts = 0
             for attempt in range(10):  # Try more than any reasonable limit
-                response = infrastructure.client.post(
+                response = infrastructure.client.post(  # type: ignore[union-attr]
                     "/auth/login",
                     json={"username": "user1", "password": "WrongPassword123!"},
                 )
@@ -130,7 +130,7 @@ class TestRealRateLimiting:
             assert user1_attempts > 5  # Proves no rate limiting on login
 
             # User 2 should still be able to login (rate limiting is per-user)
-            response = infrastructure.client.post(
+            response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={"username": "user2", "password": "AnotherSecurePassword456@"},
             )
@@ -157,7 +157,7 @@ class TestRealRateLimiting:
             # Test exactly 5 failed attempts should work
             failed_attempts = 0
             for attempt in range(5):
-                response = infrastructure.client.post(
+                response = infrastructure.client.post(  # type: ignore[union-attr]
                     "/auth/login",
                     json={"username": "boundaryuser", "password": "WrongPassword123!"},
                 )
@@ -171,7 +171,7 @@ class TestRealRateLimiting:
             assert failed_attempts == 5
 
             # 6th attempt - behavior depends on actual rate limiter implementation
-            response = infrastructure.client.post(
+            response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={"username": "boundaryuser", "password": "WrongPassword123!"},
             )
@@ -184,7 +184,7 @@ class TestRealRateLimiting:
 
             # Test with correct password - should work if not rate limited
             if response.status_code == 401:  # Not rate limited yet
-                response = infrastructure.client.post(
+                response = infrastructure.client.post(  # type: ignore[union-attr]
                     "/auth/login",
                     json={
                         "username": "boundaryuser",
@@ -222,7 +222,7 @@ class TestRealRateLimiting:
 
             # Make a few failed password change attempts (but not enough to trigger rate limiting)
             for attempt in range(3):
-                response = infrastructure.client.put(
+                response = infrastructure.client.put(  # type: ignore[union-attr]
                     "/api/users/change-password",
                     headers=auth_headers,
                     json={
@@ -233,7 +233,7 @@ class TestRealRateLimiting:
                 assert response.status_code in [400, 401]  # Failed but not rate limited
 
             # Now make a successful password change
-            response = infrastructure.client.put(
+            response = infrastructure.client.put(  # type: ignore[union-attr]
                 "/api/users/change-password",
                 headers=auth_headers,
                 json={
@@ -265,7 +265,7 @@ class TestRealRateLimiting:
             # Simulate rapid concurrent requests (as might happen in real attack)
             responses = []
             for attempt in range(10):  # Make rapid requests
-                response = infrastructure.client.post(
+                response = infrastructure.client.post(  # type: ignore[union-attr]
                     "/auth/login",
                     json={
                         "username": "concurrentuser",

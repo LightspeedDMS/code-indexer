@@ -161,7 +161,7 @@ def format_timestamp(ts):
     def test_hybrid_display_with_empty_fts_results(self):
         """Test hybrid display when FTS returns no results but semantic does."""
         # Arrange
-        fts_results = []
+        fts_results = []  # type: ignore[var-annotated]
         semantic_results = [
             {
                 "score": 0.75,
@@ -205,7 +205,7 @@ def format_timestamp(ts):
                 "language": "python",
             }
         ]
-        semantic_results = []
+        semantic_results = []  # type: ignore[var-annotated]
 
         string_io = io.StringIO()
         console = Console(file=string_io, width=100)
@@ -272,8 +272,8 @@ def format_timestamp(ts):
     def test_hybrid_display_with_both_empty(self):
         """Test hybrid display when both searches return no results."""
         # Arrange
-        fts_results = []
-        semantic_results = []
+        fts_results = []  # type: ignore[var-annotated]
+        semantic_results = []  # type: ignore[var-annotated]
 
         string_io = io.StringIO()
         console = Console(file=string_io, width=100)

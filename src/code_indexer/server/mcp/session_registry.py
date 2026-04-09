@@ -72,6 +72,13 @@ class SessionRegistry:
     _instance: Optional["SessionRegistry"] = None
     _init_lock: Lock = Lock()
 
+    # Instance attributes declared here for mypy — values are set in __new__
+    _sessions: Dict[str, MCPSessionState]
+    _lock: Lock
+    _cleanup_task: Optional["asyncio.Task[None]"]
+    _ttl_seconds: int
+    _cleanup_interval_seconds: int
+
     def __new__(cls) -> "SessionRegistry":
         """Create or return singleton instance (thread-safe)."""
         if cls._instance is None:
@@ -79,10 +86,10 @@ class SessionRegistry:
                 # Double-check locking pattern
                 if cls._instance is None:
                     instance = super().__new__(cls)
-                    instance._sessions: Dict[str, MCPSessionState] = {}
+                    instance._sessions = {}
                     instance._lock = Lock()
                     # TTL cleanup attributes (Story #731)
-                    instance._cleanup_task: Optional[asyncio.Task] = None
+                    instance._cleanup_task = None
                     instance._ttl_seconds = DEFAULT_SESSION_TTL_SECONDS
                     instance._cleanup_interval_seconds = (
                         DEFAULT_CLEANUP_INTERVAL_SECONDS

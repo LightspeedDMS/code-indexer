@@ -61,7 +61,7 @@ async def github_list_runs(
         "branch": branch,
         "limit": limit,
     }
-    return await handle_gh_actions_list_runs(args, user)
+    return await handle_gh_actions_list_runs(args, user)  # type: ignore[no-any-return]
 
 
 @router.get("/github/{owner}/{repo}/runs/{run_id}")
@@ -80,7 +80,7 @@ async def github_get_run(
         "repository": f"{owner}/{repo}",
         "run_id": run_id,
     }
-    return await handle_gh_actions_get_run(args, user)
+    return await handle_gh_actions_get_run(args, user)  # type: ignore[no-any-return]
 
 
 @router.get("/github/{owner}/{repo}/runs/{run_id}/logs")
@@ -101,7 +101,7 @@ async def github_search_logs(
         "run_id": run_id,
         "pattern": query or ".*",  # Default to match all if no query
     }
-    return await handle_gh_actions_search_logs(args, user)
+    return await handle_gh_actions_search_logs(args, user)  # type: ignore[no-any-return]
 
 
 @router.get("/github/{owner}/{repo}/jobs/{job_id}/logs")
@@ -120,7 +120,7 @@ async def github_get_job_logs(
         "repository": f"{owner}/{repo}",
         "job_id": job_id,
     }
-    return await handle_gh_actions_get_job_logs(args, user)
+    return await handle_gh_actions_get_job_logs(args, user)  # type: ignore[no-any-return]
 
 
 @router.post("/github/{owner}/{repo}/runs/{run_id}/retry")
@@ -139,7 +139,7 @@ async def github_retry_run(
         "repository": f"{owner}/{repo}",
         "run_id": run_id,
     }
-    return await handle_gh_actions_retry_run(args, user)
+    return await handle_gh_actions_retry_run(args, user)  # type: ignore[no-any-return]
 
 
 @router.post("/github/{owner}/{repo}/runs/{run_id}/cancel")
@@ -158,7 +158,7 @@ async def github_cancel_run(
         "repository": f"{owner}/{repo}",
         "run_id": run_id,
     }
-    return await handle_gh_actions_cancel_run(args, user)
+    return await handle_gh_actions_cancel_run(args, user)  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -185,7 +185,7 @@ async def gitlab_list_pipelines(
         "ref": ref,
         "limit": limit,
     }
-    return await handle_gitlab_ci_list_pipelines(args, user)
+    return await handle_gitlab_ci_list_pipelines(args, user)  # type: ignore[no-any-return]
 
 
 @router.get("/gitlab/{project_id}/pipelines/{pipeline_id}")
@@ -203,7 +203,7 @@ async def gitlab_get_pipeline(
         "project_id": project_id,
         "pipeline_id": pipeline_id,
     }
-    return await handle_gitlab_ci_get_pipeline(args, user)
+    return await handle_gitlab_ci_get_pipeline(args, user)  # type: ignore[no-any-return]
 
 
 @router.get("/gitlab/{project_id}/pipelines/{pipeline_id}/logs")
@@ -223,7 +223,7 @@ async def gitlab_search_logs(
         "pipeline_id": pipeline_id,
         "pattern": query or ".*",  # Default to match all if no query
     }
-    return await handle_gitlab_ci_search_logs(args, user)
+    return await handle_gitlab_ci_search_logs(args, user)  # type: ignore[no-any-return]
 
 
 @router.get("/gitlab/{project_id}/jobs/{job_id}/logs")
@@ -241,7 +241,7 @@ async def gitlab_get_job_logs(
         "project_id": project_id,
         "job_id": job_id,
     }
-    return await handle_gitlab_ci_get_job_logs(args, user)
+    return await handle_gitlab_ci_get_job_logs(args, user)  # type: ignore[no-any-return]
 
 
 @router.post("/gitlab/{project_id}/pipelines/{pipeline_id}/retry")
@@ -259,7 +259,7 @@ async def gitlab_retry_pipeline(
         "project_id": project_id,
         "pipeline_id": pipeline_id,
     }
-    return await handle_gitlab_ci_retry_pipeline(args, user)
+    return await handle_gitlab_ci_retry_pipeline(args, user)  # type: ignore[no-any-return]
 
 
 @router.post("/gitlab/{project_id}/pipelines/{pipeline_id}/cancel")
@@ -277,4 +277,4 @@ async def gitlab_cancel_pipeline(
         "project_id": project_id,
         "pipeline_id": pipeline_id,
     }
-    return await handle_gitlab_ci_cancel_pipeline(args, user)
+    return await handle_gitlab_ci_cancel_pipeline(args, user)  # type: ignore[no-any-return]

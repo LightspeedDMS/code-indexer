@@ -416,7 +416,7 @@ class TestGitPushWithPatErrorHandling:
 
         def mock_create(token):
             script = MagicMock()
-            script.__str__ = lambda s: "/tmp/fake_askpass.sh"
+            script.__str__ = lambda s: "/tmp/fake_askpass.sh"  # type: ignore[assignment, method-assign, misc]
             created_scripts.append(script)
             return script
 

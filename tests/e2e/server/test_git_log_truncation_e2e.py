@@ -38,7 +38,7 @@ def _extract_response_data(mcp_response: dict) -> dict:
         content = mcp_response["content"][0]
         if "text" in content:
             try:
-                return json.loads(content["text"])
+                return json.loads(content["text"])  # type: ignore[no-any-return]
             except json.JSONDecodeError:
                 return {"text": content["text"]}
     return mcp_response
@@ -268,9 +268,9 @@ class TestGitLogTruncationE2E:
 
             assert cache_handle is not None, "Expected cache_handle for large log"
             assert truncated is True, "Expected truncated=True for large log"
-            assert total_tokens > 100, (
-                f"Expected total_tokens > 100, got {total_tokens}"
-            )
+            assert (
+                total_tokens > 100  # type: ignore[operator]
+            ), f"Expected total_tokens > 100, got {total_tokens}"
             assert has_more is True, "Expected has_more=True for truncated log"
 
             # Verify backward-compatible fields still present

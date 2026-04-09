@@ -40,7 +40,7 @@ def _get_request_body(httpx_mock: HTTPXMock) -> Dict[str, Any]:
     """Return the parsed JSON body of the first captured request."""
     requests = httpx_mock.get_requests()
     assert len(requests) >= 1, "Expected at least one HTTP request to be captured"
-    return json.loads(requests[0].content)
+    return json.loads(requests[0].content)  # type: ignore[no-any-return]
 
 
 def _add_rerank_response(
@@ -686,7 +686,7 @@ def _get_cohere_request_body(httpx_mock: HTTPXMock) -> Dict[str, Any]:
     """Return the parsed JSON body of the first captured Cohere request."""
     requests = httpx_mock.get_requests()
     assert len(requests) >= 1, "Expected at least one HTTP request to be captured"
-    return json.loads(requests[0].content)
+    return json.loads(requests[0].content)  # type: ignore[no-any-return]
 
 
 @pytest.fixture

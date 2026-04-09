@@ -58,8 +58,8 @@ class TestRunWithPopenProgress:
             'print(json.dumps({"current": 4, "total": 4, "info": "done"}))\n'
         )
         command = [sys.executable, "-c", script]
-        all_stdout = []
-        all_stderr = []
+        all_stdout = []  # type: ignore[var-annotated]
+        all_stderr = []  # type: ignore[var-annotated]
 
         run_with_popen_progress(
             command=command,
@@ -115,8 +115,8 @@ class TestRunWithPopenProgress:
             'print(json.dumps({"current": 1, "total": 1, "info": "done"}))\n'
         )
         command = [sys.executable, "-c", script]
-        all_stdout = []
-        all_stderr = []
+        all_stdout = []  # type: ignore[var-annotated]
+        all_stderr = []  # type: ignore[var-annotated]
 
         run_with_popen_progress(
             command=command,
@@ -163,8 +163,8 @@ class TestRunWithPopenProgress:
             'import sys\nsys.stderr.write("something went wrong\\n")\nsys.exit(1)\n'
         )
         command = [sys.executable, "-c", script]
-        all_stdout = []
-        all_stderr = []
+        all_stdout = []  # type: ignore[var-annotated]
+        all_stderr = []  # type: ignore[var-annotated]
 
         with pytest.raises(IndexingSubprocessError) as exc_info:
             run_with_popen_progress(
@@ -238,8 +238,8 @@ class TestRunWithPopenProgress:
 
         script = 'import json; print(json.dumps({"current": 1, "total": 1}))'
         command = [sys.executable, "-c", script]
-        all_stdout = []
-        all_stderr = []
+        all_stdout = []  # type: ignore[var-annotated]
+        all_stderr = []  # type: ignore[var-annotated]
 
         # Must not raise
         run_with_popen_progress(

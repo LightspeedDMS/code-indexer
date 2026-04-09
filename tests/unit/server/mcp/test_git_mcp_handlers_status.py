@@ -17,7 +17,7 @@ All tests use mocked GitOperationsService to avoid real git operations.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Dict, Any, cast
 from unittest.mock import patch
 import pytest
 
@@ -94,7 +94,9 @@ class TestGitStatusHandler:
         """Test git status with missing repository_alias parameter."""
         from code_indexer.server.mcp import handlers
 
-        params = {}  # Missing repository_alias
+        params: Dict[
+            str, Any
+        ] = {}  # Missing repository_alias — Dict[str, Any] matches git handler signatures
 
         mcp_response = handlers.git_status(params, mock_user)
         data = _extract_response_data(mcp_response)
@@ -175,7 +177,9 @@ class TestGitDiffHandler:
         """Test git diff with missing repository_alias parameter."""
         from code_indexer.server.mcp import handlers
 
-        params = {}  # Missing repository_alias
+        params: Dict[
+            str, Any
+        ] = {}  # Missing repository_alias — Dict[str, Any] matches git handler signatures
 
         mcp_response = handlers.git_diff(params, mock_user)
         data = _extract_response_data(mcp_response)
@@ -257,7 +261,9 @@ class TestGitLogHandler:
         """Test git log with missing repository_alias parameter."""
         from code_indexer.server.mcp import handlers
 
-        params = {}  # Missing repository_alias
+        params: Dict[
+            str, Any
+        ] = {}  # Missing repository_alias — Dict[str, Any] matches git handler signatures
 
         mcp_response = handlers.git_log(params, mock_user)
         data = _extract_response_data(mcp_response)
@@ -304,7 +310,7 @@ class TestGitStageHandler:
         assert "Missing required parameter: repository_alias" in data["error"]
 
         # Missing file_paths
-        params = {"repository_alias": "test-repo"}
+        params = {"repository_alias": "test-repo"}  # type: ignore[dict-item]
         mcp_response = handlers.git_stage(params, mock_user)
         data = _extract_response_data(mcp_response)
         assert data["success"] is False
@@ -361,7 +367,9 @@ class TestGitUnstageHandler:
         """Test git unstage with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
-        params = {}  # Missing both parameters
+        params: Dict[
+            str, Any
+        ] = {}  # Missing both parameters — Dict[str, Any] matches git handler signatures
         mcp_response = handlers.git_unstage(params, mock_user)
         data = _extract_response_data(mcp_response)
 
@@ -431,7 +439,9 @@ class TestGitCommitHandler:
         """Test git commit with missing required parameters."""
         from code_indexer.server.mcp import handlers
 
-        params = {}  # Missing both parameters
+        params: Dict[
+            str, Any
+        ] = {}  # Missing both parameters — Dict[str, Any] matches git handler signatures
         mcp_response = handlers.git_commit(params, mock_user)
         data = _extract_response_data(mcp_response)
 

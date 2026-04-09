@@ -35,7 +35,7 @@ def _make_pool() -> MagicMock:
 
 def _get_conn(pool: MagicMock) -> MagicMock:
     """Return the mock connection from the pool context manager."""
-    return pool.connection.return_value.__enter__.return_value
+    return pool.connection.return_value.__enter__.return_value  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------

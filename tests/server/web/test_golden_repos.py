@@ -202,7 +202,7 @@ class TestAddRepoForm:
                 "alias": "test-repo",
                 "repo_url": "/tmp/test-repo",  # Local path for testing
                 "default_branch": "main",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -244,7 +244,7 @@ class TestAddRepoForm:
                 "alias": "duplicate-test",
                 "repo_url": "/tmp/test-repo-1",
                 "default_branch": "main",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -260,7 +260,7 @@ class TestAddRepoForm:
                 "alias": "duplicate-test",
                 "repo_url": "/tmp/test-repo-2",
                 "default_branch": "main",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -298,7 +298,7 @@ class TestAddRepoForm:
                 "alias": "invalid-path-test",
                 "repo_url": "/nonexistent/path/that/does/not/exist",
                 "default_branch": "main",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -345,7 +345,7 @@ class TestDeleteRepo:
         response = client.post(
             "/admin/golden-repos/test-repo/delete",
             data={
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -386,7 +386,7 @@ class TestRefreshRepo:
         response = client.post(
             "/admin/golden-repos/test-repo/refresh",
             data={
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

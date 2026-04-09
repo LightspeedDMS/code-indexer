@@ -145,7 +145,7 @@ class MockOIDCServer:
         self.server = uvicorn.Server(config)
 
         def run_server():
-            asyncio.run(self.server.serve())
+            asyncio.run(self.server.serve())  # type: ignore[union-attr]
 
         self.thread = threading.Thread(target=run_server, daemon=True)
         self.thread.start()

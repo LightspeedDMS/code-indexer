@@ -108,7 +108,7 @@ class SCIPAuditRepository:
             """
             )
 
-        self._conn_manager.execute_atomic(_do_init)
+        self._conn_manager.execute_atomic(_do_init)  # type: ignore[union-attr]
 
     def create_audit_record(
         self,

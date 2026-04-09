@@ -105,7 +105,7 @@ class TestBatchRetryLogic:
                     """Simulate timeout on first 2 attempts, success on 3rd."""
                     from concurrent.futures import Future
 
-                    future = Future()
+                    future = Future()  # type: ignore[var-annotated]
                     attempt_count[0] += 1
 
                     if attempt_count[0] <= 2:

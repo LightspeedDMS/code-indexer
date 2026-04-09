@@ -47,7 +47,7 @@ class TestUserDeletionOIDCCleanup:
                 "SELECT COUNT(*) FROM oidc_identity_links WHERE username = ?",
                 ("testuser",),
             )
-            count = (await cursor.fetchone())[0]
+            count = (await cursor.fetchone())[0]  # type: ignore[index]
             assert count == 1, "OIDC link should exist before deletion"
 
         # Mock OIDC manager for cleanup code
@@ -75,7 +75,7 @@ class TestUserDeletionOIDCCleanup:
                     "SELECT COUNT(*) FROM oidc_identity_links WHERE username = ?",
                     ("testuser",),
                 )
-                count = (await cursor.fetchone())[0]
+                count = (await cursor.fetchone())[0]  # type: ignore[index]
                 assert count == 0, "OIDC link should be deleted after user deletion"
         finally:
             # Restore original manager

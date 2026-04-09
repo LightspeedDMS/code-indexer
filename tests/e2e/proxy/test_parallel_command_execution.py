@@ -21,12 +21,12 @@ class TestParallelCommandExecution(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Set up test repositories with real CIDX initialization."""
-        cls.test_dir = Path(tempfile.mkdtemp(prefix="parallel_exec_test_"))
+        cls.test_dir = Path(tempfile.mkdtemp(prefix="parallel_exec_test_"))  # type: ignore[attr-defined]
 
         # Create 3 test repositories
-        cls.repos = []
+        cls.repos = []  # type: ignore[attr-defined]
         for i in range(1, 4):
-            repo_path = cls.test_dir / f"repo{i}"
+            repo_path = cls.test_dir / f"repo{i}"  # type: ignore[attr-defined]
             repo_path.mkdir(parents=True)
 
             # Create some test files
@@ -59,17 +59,17 @@ class TestParallelCommandExecution(unittest.TestCase):
                 capture_output=True,
             )
 
-            cls.repos.append(str(repo_path))
+            cls.repos.append(str(repo_path))  # type: ignore[attr-defined]
 
     @classmethod
     def tearDownClass(cls):
         """Clean up test repositories."""
-        if cls.test_dir.exists():
-            shutil.rmtree(cls.test_dir)
+        if cls.test_dir.exists():  # type: ignore[attr-defined]
+            shutil.rmtree(cls.test_dir)  # type: ignore[attr-defined]
 
     def test_parallel_status_execution(self):
         """Test parallel status command execution across repositories."""
-        executor = ParallelCommandExecutor(self.repos)
+        executor = ParallelCommandExecutor(self.repos)  # type: ignore[attr-defined]
 
         # Execute status in parallel
         results = executor.execute_parallel("status", [])
@@ -78,7 +78,7 @@ class TestParallelCommandExecution(unittest.TestCase):
         self.assertEqual(len(results), 3)
 
         # Verify each repository returned results
-        for repo in self.repos:
+        for repo in self.repos:  # type: ignore[attr-defined]
             self.assertIn(repo, results)
             stdout, stderr, exit_code = results[repo]
 
@@ -91,7 +91,7 @@ class TestParallelCommandExecution(unittest.TestCase):
     def test_parallel_execution_timing(self):
         """Test that parallel execution is faster than sequential."""
         # This test uses status command which is safe and quick
-        executor = ParallelCommandExecutor(self.repos)
+        executor = ParallelCommandExecutor(self.repos)  # type: ignore[attr-defined]
 
         # Measure parallel execution time
         start_parallel = time.time()
@@ -101,7 +101,7 @@ class TestParallelCommandExecution(unittest.TestCase):
         # Measure sequential execution time
         start_sequential = time.time()
         results_sequential = {}
-        for repo in self.repos:
+        for repo in self.repos:  # type: ignore[attr-defined]
             stdout, stderr, code = executor._execute_single(repo, "status", [])
             results_sequential[repo] = (stdout, stderr, code)
         time_sequential = time.time() - start_sequential
@@ -126,9 +126,9 @@ class TestParallelCommandExecution(unittest.TestCase):
         """Test result aggregation when all commands succeed."""
         # Create mock results (all success)
         results = {
-            self.repos[0]: ("Output 1", "", 0),
-            self.repos[1]: ("Output 2", "", 0),
-            self.repos[2]: ("Output 3", "", 0),
+            self.repos[0]: ("Output 1", "", 0),  # type: ignore[attr-defined]
+            self.repos[1]: ("Output 2", "", 0),  # type: ignore[attr-defined]
+            self.repos[2]: ("Output 3", "", 0),  # type: ignore[attr-defined]
         }
 
         aggregator = ParallelResultAggregator()
@@ -146,9 +146,9 @@ class TestParallelCommandExecution(unittest.TestCase):
         """Test result aggregation with mixed success/failure."""
         # Create mock results (mixed)
         results = {
-            self.repos[0]: ("Output 1", "", 0),
-            self.repos[1]: ("", "Error in repo2", 1),
-            self.repos[2]: ("Output 3", "", 0),
+            self.repos[0]: ("Output 1", "", 0),  # type: ignore[attr-defined]
+            self.repos[1]: ("", "Error in repo2", 1),  # type: ignore[attr-defined]
+            self.repos[2]: ("Output 3", "", 0),  # type: ignore[attr-defined]
         }
 
         aggregator = ParallelResultAggregator()
@@ -159,7 +159,7 @@ class TestParallelCommandExecution(unittest.TestCase):
         self.assertIn("Output 3", output)
 
         # Verify error included with repo path
-        self.assertIn(f"ERROR in {self.repos[1]}", output)
+        self.assertIn(f"ERROR in {self.repos[1]}", output)  # type: ignore[attr-defined]
         self.assertIn("Error in repo2", output)
 
         # Verify exit code is 2 (partial success)
@@ -168,7 +168,7 @@ class TestParallelCommandExecution(unittest.TestCase):
     def test_parallel_execution_error_isolation(self):
         """Test that error in one repo doesn't crash entire execution."""
         # Create executor with invalid repo path mixed with valid ones
-        invalid_repos = [self.repos[0], "/nonexistent/repo", self.repos[2]]
+        invalid_repos = [self.repos[0], "/nonexistent/repo", self.repos[2]]  # type: ignore[attr-defined]
         executor = ParallelCommandExecutor(invalid_repos)
 
         # Execute - should handle invalid repo gracefully
@@ -178,8 +178,8 @@ class TestParallelCommandExecution(unittest.TestCase):
         self.assertEqual(len(results), 3)
 
         # Verify valid repos executed
-        self.assertIn(self.repos[0], results)
-        self.assertIn(self.repos[2], results)
+        self.assertIn(self.repos[0], results)  # type: ignore[attr-defined]
+        self.assertIn(self.repos[2], results)  # type: ignore[attr-defined]
 
         # Verify invalid repo captured error
         self.assertIn("/nonexistent/repo", results)
@@ -191,15 +191,15 @@ class TestParallelCommandExecution(unittest.TestCase):
         """Test that output format is clear and shows repo context."""
         # Create results with errors
         results = {
-            self.repos[0]: ("Success output", "", 0),
-            self.repos[1]: ("", "Failed to connect", 1),
+            self.repos[0]: ("Success output", "", 0),  # type: ignore[attr-defined]
+            self.repos[1]: ("", "Failed to connect", 1),  # type: ignore[attr-defined]
         }
 
         aggregator = ParallelResultAggregator()
         output, exit_code = aggregator.aggregate(results)
 
         # Verify error includes repo path for context
-        self.assertIn(self.repos[1], output)
+        self.assertIn(self.repos[1], output)  # type: ignore[attr-defined]
         self.assertIn("ERROR", output)
         self.assertIn("Failed to connect", output)
 
@@ -217,13 +217,13 @@ class TestParallelCommandExecution(unittest.TestCase):
 
     def test_single_repository_execution(self):
         """Test parallel execution with single repository."""
-        executor = ParallelCommandExecutor([self.repos[0]])
+        executor = ParallelCommandExecutor([self.repos[0]])  # type: ignore[attr-defined]
 
         results = executor.execute_parallel("status", [])
 
         # Should execute single repo successfully
         self.assertEqual(len(results), 1)
-        self.assertIn(self.repos[0], results)
+        self.assertIn(self.repos[0], results)  # type: ignore[attr-defined]
 
     def test_worker_count_respected(self):
         """Test that MAX_WORKERS limit is respected."""
@@ -239,16 +239,16 @@ class TestParallelCommandExecution(unittest.TestCase):
 
     def test_concurrent_completion_handling(self):
         """Test that results collected as they complete."""
-        executor = ParallelCommandExecutor(self.repos)
+        executor = ParallelCommandExecutor(self.repos)  # type: ignore[attr-defined]
 
         # Execute command
         results = executor.execute_parallel("status", [])
 
         # Verify all results collected despite different completion times
-        self.assertEqual(len(results), len(self.repos))
+        self.assertEqual(len(results), len(self.repos))  # type: ignore[attr-defined]
 
         # Verify all repos present in results
-        for repo in self.repos:
+        for repo in self.repos:  # type: ignore[attr-defined]
             self.assertIn(repo, results)
 
 

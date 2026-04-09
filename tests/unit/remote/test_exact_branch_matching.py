@@ -67,7 +67,7 @@ class TestExactBranchMatcher:
     def sample_activated_repositories(self):
         """Sample activated repositories with different branches."""
         return [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="repo-auth-user1",
                 repository_type="activated",
                 display_name="Authentication Service",
@@ -75,7 +75,7 @@ class TestExactBranchMatcher:
                 git_url="https://github.com/company/auth-service.git",
                 available_branches=["main", "develop", "feature/auth-improvements"],
             ),
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="repo-payment-user1",
                 repository_type="activated",
                 display_name="Payment Service",
@@ -89,7 +89,7 @@ class TestExactBranchMatcher:
     def sample_golden_repositories(self):
         """Sample golden repositories with different branches."""
         return [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="auth-service-golden",
                 repository_type="golden",
                 display_name="Authentication Service (Golden)",
@@ -102,7 +102,7 @@ class TestExactBranchMatcher:
                     "release/v2.0",
                 ],
             ),
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="analytics-service-golden",
                 repository_type="golden",
                 display_name="Analytics Service (Golden)",
@@ -265,7 +265,7 @@ class TestExactBranchMatcher:
 
         # Mock repository discovery response - repositories without main/develop
         repositories_without_common_branches = [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="isolated-repo",
                 repository_type="golden",
                 display_name="Isolated Service",

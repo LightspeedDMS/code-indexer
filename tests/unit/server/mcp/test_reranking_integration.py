@@ -679,7 +679,7 @@ def _run_search_code_with_rerank_meta(rerank_meta: dict) -> dict:
         }
         response = search_code(params, user)
 
-    return json.loads(response["content"][0]["text"])
+    return json.loads(response["content"][0]["text"])  # type: ignore[no-any-return]
 
 
 class TestSearchCodeHandlerTelemetryFields:

@@ -219,7 +219,7 @@ class EmbeddingProviderFactory:
             or (
                 hasattr(config, "voyage_ai")
                 and config.voyage_ai
-                and config.voyage_ai.api_key
+                and config.voyage_ai.api_key  # type: ignore[attr-defined]
             )  # type: ignore[union-attr]
             or (hasattr(config, "voyageai_api_key") and config.voyageai_api_key)  # type: ignore[union-attr]
         )

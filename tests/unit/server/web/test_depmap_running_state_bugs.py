@@ -193,7 +193,7 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
         """
         fake_dir = Path("/fake/dep-map-output")
         unhealthy_report = self._make_unhealthy_report("needs_repair")
-        idle_status = {
+        idle_status = {  # type: ignore[var-annotated]
             "health": "Healthy",
             "color": "GREEN",
             "status": "idle",

@@ -109,8 +109,8 @@ def github_list(
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.github_list_runs(owner, repo, status, branch, limit)
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.github_list_runs(owner, repo, status, branch, limit)  # type: ignore[arg-type]
         )
 
         if json_output:
@@ -182,7 +182,7 @@ def github_show(repository: str, run_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_get_run(owner, repo, run_id))
+        result = asyncio.run(client.github_get_run(owner, repo, run_id))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -248,7 +248,7 @@ def github_logs(repository: str, run_id: int, query: Optional[str], json_output:
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_search_logs(owner, repo, run_id, query))
+        result = asyncio.run(client.github_search_logs(owner, repo, run_id, query))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -300,7 +300,7 @@ def github_job_logs(repository: str, job_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_get_job_logs(owner, repo, job_id))
+        result = asyncio.run(client.github_get_job_logs(owner, repo, job_id))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -343,7 +343,7 @@ def github_retry(repository: str, run_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_retry_run(owner, repo, run_id))
+        result = asyncio.run(client.github_retry_run(owner, repo, run_id))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -382,7 +382,7 @@ def github_cancel(repository: str, run_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_cancel_run(owner, repo, run_id))
+        result = asyncio.run(client.github_cancel_run(owner, repo, run_id))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -424,8 +424,8 @@ def gitlab_list(
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.gitlab_list_pipelines(project_id, status, ref, limit)
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.gitlab_list_pipelines(project_id, status, ref, limit)  # type: ignore[arg-type]
         )
 
         if json_output:
@@ -482,7 +482,7 @@ def gitlab_show(project_id: str, pipeline_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_get_pipeline(project_id, pipeline_id))
+        result = asyncio.run(client.gitlab_get_pipeline(project_id, pipeline_id))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -530,7 +530,7 @@ def gitlab_logs(
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_search_logs(project_id, pipeline_id, query))
+        result = asyncio.run(client.gitlab_search_logs(project_id, pipeline_id, query))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -566,7 +566,7 @@ def gitlab_job_logs(project_id: str, job_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_get_job_logs(project_id, job_id))
+        result = asyncio.run(client.gitlab_get_job_logs(project_id, job_id))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -594,7 +594,7 @@ def gitlab_retry(project_id: str, pipeline_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        asyncio.run(client.gitlab_retry_pipeline(project_id, pipeline_id))
+        asyncio.run(client.gitlab_retry_pipeline(project_id, pipeline_id))  # type: ignore[arg-type]
 
         if json_output:
             console.print(
@@ -622,7 +622,7 @@ def gitlab_cancel(project_id: str, pipeline_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        asyncio.run(client.gitlab_cancel_pipeline(project_id, pipeline_id))
+        asyncio.run(client.gitlab_cancel_pipeline(project_id, pipeline_id))  # type: ignore[arg-type]
 
         if json_output:
             console.print(

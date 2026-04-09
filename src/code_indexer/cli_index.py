@@ -115,8 +115,8 @@ def index_trigger(
     try:
         config = _load_remote_config_for_index()
         client = IndexAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.trigger(
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.trigger(  # type: ignore[arg-type]
                 repository=repository,
                 clear=clear,
                 index_types=types,
@@ -160,7 +160,7 @@ def index_status(repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_index()
         client = IndexAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.status(repository))
+        result = asyncio.run(client.status(repository))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -233,7 +233,7 @@ def index_add_type(repository: str, type: str, json_output: bool):
     try:
         config = _load_remote_config_for_index()
         client = IndexAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.add_type(repository, type))
+        result = asyncio.run(client.add_type(repository, type))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))

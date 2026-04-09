@@ -80,7 +80,7 @@ async def execute_multi_repo_query(
     credentials = _get_decrypted_credentials(project_root)
 
     # Execute multi-repo query
-    async with RemoteQueryClient(
+    async with RemoteQueryClient(  # type: ignore[attr-defined]
         server_url=server_url, credentials=credentials
     ) as query_client:
         # Build request parameters

@@ -13,7 +13,7 @@ All tests use mocked GitOperationsService to avoid real git operations.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Dict, Any, cast
 from unittest.mock import patch
 import pytest
 
@@ -236,7 +236,9 @@ class TestGitCleanHandler:
 
     def test_git_clean_missing_repository(self, mock_user):
         """Test git clean with missing repository_alias parameter."""
-        params = {}  # Missing repository_alias
+        params: Dict[
+            str, Any
+        ] = {}  # Missing repository_alias — Dict[str, Any] matches git handler signatures
 
         mcp_response = handlers.git_clean(params, mock_user)
         data = _extract_response_data(mcp_response)
@@ -289,7 +291,9 @@ class TestGitMergeAbortHandler:
 
     def test_git_merge_abort_missing_repository(self, mock_user):
         """Test git merge abort with missing repository_alias parameter."""
-        params = {}  # Missing repository_alias
+        params: Dict[
+            str, Any
+        ] = {}  # Missing repository_alias — Dict[str, Any] matches git handler signatures
 
         mcp_response = handlers.git_merge_abort(params, mock_user)
         data = _extract_response_data(mcp_response)

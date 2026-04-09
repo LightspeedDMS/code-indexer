@@ -58,7 +58,7 @@ class BranchService:
             except InvalidGitRepositoryError as e:
                 raise ValueError(f"Invalid git repository: {e}")
         else:
-            self.repo = None
+            self.repo = None  # type: ignore[assignment]
 
     def list_branches(self, include_remote: bool = False) -> List[BranchInfo]:
         """List all branches in the repository.

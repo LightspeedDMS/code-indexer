@@ -92,7 +92,7 @@ function calculateProduct(a, b) {
             cwd=repo_path,
             capture_output=True,
             text=True,
-            env={**subprocess.os.environ, "VOYAGE_API_KEY": "PLACEHOLDER"},
+            env={**subprocess.os.environ, "VOYAGE_API_KEY": "PLACEHOLDER"},  # type: ignore[attr-defined]
         )
         assert result.returncode == 0, f"Init failed: {result.stderr}"
 
@@ -124,7 +124,7 @@ function calculateProduct(a, b) {
         if collection_path.exists():
             # Read some points to verify metadata format
             points_found = False
-            for root, dirs, files in collection_path.walk():
+            for root, dirs, files in collection_path.walk():  # type: ignore[attr-defined]
                 for file in files:
                     if file.endswith(".json") and not file == "collection_meta.json":
                         with open(root / file) as f:

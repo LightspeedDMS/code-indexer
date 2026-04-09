@@ -47,7 +47,7 @@ class TestEnrichRepositoriesWithCommits:
     def test_enriches_single_repository(self, gitlab_provider, monkeypatch):
         """Should enrich repository with commit info from GraphQL."""
         repos = [
-            DiscoveredRepository(
+            DiscoveredRepository(  # type: ignore[call-arg]
                 platform="gitlab",
                 name="group/repo1",
                 description="Test repo",
@@ -97,7 +97,7 @@ class TestEnrichRepositoriesWithCommits:
     def test_enriches_multiple_repositories(self, gitlab_provider, monkeypatch):
         """Should enrich multiple repositories with commit info."""
         repos = [
-            DiscoveredRepository(
+            DiscoveredRepository(  # type: ignore[call-arg]
                 platform="gitlab",
                 name="group/repo1",
                 description="Repo 1",
@@ -107,7 +107,7 @@ class TestEnrichRepositoriesWithCommits:
                 last_activity=datetime(2024, 1, 15, tzinfo=timezone.utc),
                 is_private=False,
             ),
-            DiscoveredRepository(
+            DiscoveredRepository(  # type: ignore[call-arg]
                 platform="gitlab",
                 name="group/repo2",
                 description="Repo 2",
@@ -165,7 +165,7 @@ class TestEnrichRepositoriesWithCommits:
         """Should batch GraphQL requests for >10 repositories (GitLab query limit)."""
         # Create 25 repositories (should require 3 batches with batch size 10)
         repos = [
-            DiscoveredRepository(
+            DiscoveredRepository(  # type: ignore[call-arg]
                 platform="gitlab",
                 name=f"group/repo{i}",
                 description=f"Repo {i}",
@@ -228,7 +228,7 @@ class TestEnrichRepositoriesWithCommits:
     ):
         """Should continue with N/A values on GraphQL failure."""
         repos = [
-            DiscoveredRepository(
+            DiscoveredRepository(  # type: ignore[call-arg]
                 platform="gitlab",
                 name="group/repo1",
                 description="Test repo",

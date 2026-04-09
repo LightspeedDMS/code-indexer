@@ -70,7 +70,7 @@ class TestSystemHealthMonitoringE2E:
             }
 
             # Execute health check
-            result = await system_client.check_basic_health()
+            result = await system_client.check_basic_health()  # type: ignore[misc]
 
             # Verify complete workflow
             assert result["status"] == "ok"
@@ -126,7 +126,7 @@ class TestSystemHealthMonitoringE2E:
             }
 
             # Execute detailed health check
-            result = await system_client.check_detailed_health()
+            result = await system_client.check_detailed_health()  # type: ignore[misc]
 
             # Verify complete detailed workflow
             assert result["status"] == "healthy"
@@ -193,7 +193,7 @@ class TestSystemHealthMonitoringE2E:
             )
 
             with pytest.raises(AuthenticationError) as exc_info:
-                await system_client.check_basic_health()
+                await system_client.check_basic_health()  # type: ignore[misc]
 
             assert "Token expired" in str(exc_info.value)
             assert exc_info.value.status_code == 401
@@ -204,8 +204,8 @@ class TestSystemHealthMonitoringE2E:
                 "Service unavailable", status_code=503
             )
 
-            with pytest.raises(APIClientError) as exc_info:
-                await system_client.check_detailed_health()
+            with pytest.raises(APIClientError) as exc_info:  # type: ignore[assignment]
+                await system_client.check_detailed_health()  # type: ignore[misc]
 
             assert "Service unavailable" in str(exc_info.value)
             assert exc_info.value.status_code == 503
@@ -239,7 +239,7 @@ class TestSystemHealthMonitoringE2E:
             import time
 
             start_time = time.time()
-            result = await system_client.check_basic_health()
+            result = await system_client.check_basic_health()  # type: ignore[misc]
             end_time = time.time()
 
             # Verify response time measurement accuracy
@@ -306,7 +306,7 @@ class TestSystemHealthMonitoringE2E:
             # Run multiple concurrent health checks
             tasks = [system_client.check_basic_health() for _ in range(5)]
 
-            results = await asyncio.gather(*tasks)
+            results = await asyncio.gather(*tasks)  # type: ignore[call-overload]
 
             # Verify all requests succeeded
             assert len(results) == 5

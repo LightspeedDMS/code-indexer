@@ -225,7 +225,7 @@ class TestFilterCombinations:
         assert path_filter["key"] == "path"
 
         # Verify language exclusions
-        excluded_exts = {f["match"]["value"] for f in filter_conditions["must_not"]}
+        excluded_exts = {f["match"]["value"] for f in filter_conditions["must_not"]}  # type: ignore[index]
         assert excluded_exts == {"js", "jsx"}
 
     def test_combine_multiple_inclusions_and_exclusions(self):
@@ -239,7 +239,7 @@ class TestFilterCombinations:
         path_builder = PathFilterBuilder()
 
         # Build language inclusions (Python OR Go)
-        filter_conditions = {"must": []}
+        filter_conditions = {"must": []}  # type: ignore[var-annotated]
 
         # Add Python
         python_filter = mapper.build_language_filter("python")
@@ -279,7 +279,7 @@ class TestFilterCombinations:
         WHEN filters are combined
         THEN result should be empty or have no conditions
         """
-        filter_conditions = {}
+        filter_conditions = {}  # type: ignore[var-annotated]
 
         # No filters added
 
@@ -438,7 +438,7 @@ class TestFilterPerformance:
         start = time.perf_counter()
 
         # Build complex filter
-        filter_conditions = {"must": [], "must_not": []}
+        filter_conditions = {"must": [], "must_not": []}  # type: ignore[var-annotated]
 
         # Multiple language inclusions
         for lang in ["python", "javascript", "go"]:

@@ -55,7 +55,7 @@ class TestGoldenRepoGlobalActivationIntegration:
                         if job_status and job_status["status"] == "completed":
                             break
                         time.sleep(0.1)
-                        elapsed += 0.1
+                        elapsed += 0.1  # type: ignore[assignment]
 
             # Verify golden repo was added
             assert manager.golden_repo_exists("test-repo")
@@ -136,7 +136,7 @@ class TestGoldenRepoGlobalActivationIntegration:
                             ]:
                                 break
                             time.sleep(0.1)
-                            elapsed += 0.1
+                            elapsed += 0.1  # type: ignore[assignment]
 
             # Verify golden repo was STILL added despite global activation failure
             assert manager.golden_repo_exists("test-repo")
@@ -182,7 +182,7 @@ class TestGoldenRepoGlobalActivationIntegration:
                             if job_status and job_status["status"] == "completed":
                                 break
                             time.sleep(0.1)
-                            elapsed += 0.1
+                            elapsed += 0.1  # type: ignore[assignment]
 
             # Verify all repos were added
             assert len(manager.list_golden_repos()) == 3

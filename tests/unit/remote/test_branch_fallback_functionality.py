@@ -86,7 +86,7 @@ class TestBranchFallbackFunctionality:
     def sample_repositories_with_main_develop(self):
         """Sample repositories that have main and develop branches but no feature branches."""
         return [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="repo-auth-user1",
                 repository_type="activated",
                 display_name="Authentication Service",
@@ -94,7 +94,7 @@ class TestBranchFallbackFunctionality:
                 git_url="https://github.com/company/auth-service.git",
                 available_branches=["main", "develop", "master"],
             ),
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="auth-service-golden",
                 repository_type="golden",
                 display_name="Authentication Service (Golden)",
@@ -176,7 +176,7 @@ class TestBranchFallbackFunctionality:
         """Test finding parent branch match falls back to golden repositories."""
         # Only golden repository available
         golden_only_repos = [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="auth-service-golden",
                 repository_type="golden",
                 display_name="Authentication Service (Golden)",
@@ -332,7 +332,7 @@ class TestExactBranchMatcherFallbackIntegration:
     def repositories_with_main_only(self):
         """Repositories that only have main branch, no feature branches."""
         return [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="repo-auth-user1",
                 repository_type="activated",
                 display_name="Authentication Service",
@@ -407,7 +407,7 @@ class TestExactBranchMatcherFallbackIntegration:
 
         # Both activated and golden repositories available with main branch
         mixed_repositories = [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="payments-golden",  # Golden repository
                 repository_type="golden",
                 display_name="Payments Service (Golden)",
@@ -415,7 +415,7 @@ class TestExactBranchMatcherFallbackIntegration:
                 git_url="https://github.com/company/payments.git",
                 available_branches=["main", "develop"],
             ),
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="payments-user1",  # Activated repository
                 repository_type="activated",
                 display_name="Payments Service",
@@ -465,7 +465,7 @@ class TestExactBranchMatcherFallbackIntegration:
 
         # Repository with branches that don't match ancestry
         no_match_repositories = [
-            ClientRepositoryMatch(
+            ClientRepositoryMatch(  # type: ignore[call-arg]
                 alias="different-repo",
                 repository_type="golden",
                 display_name="Different Service",

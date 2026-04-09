@@ -314,7 +314,7 @@ class TestGetGoldenRepoIndexes:
         with patch("code_indexer.server.mcp.handlers._utils.app_module") as mock_app:
             mock_app.app.state.golden_repos_dir = "/mock/golden-repos"
 
-            args = {}
+            args = {}  # type: ignore[var-annotated]
             result = handle_get_golden_repo_indexes(args, mock_admin_user)
 
             response_data = json.loads(result["content"][0]["text"])

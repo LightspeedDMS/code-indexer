@@ -34,7 +34,7 @@ class TestCallChainTracing:
 
         # Mock the SCIP database file discovery
         mock_scip_file = Mock(spec=Path)
-        mock_scip_file.__str__ = Mock(return_value="/fake/scip/index.scip.db")
+        mock_scip_file.__str__ = Mock(return_value="/fake/scip/index.scip.db")  # type: ignore[method-assign]
         mock_scip_file.stat.return_value = Mock(st_size=1024)  # Non-zero size
 
         # Create mock dependency results with realistic SCIP method symbols:

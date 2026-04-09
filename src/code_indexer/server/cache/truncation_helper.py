@@ -78,7 +78,7 @@ class TruncationHelper:
         if not content:
             return 0
         # Floor division (//) returns int when both operands are int
-        return len(content) // self.content_limits.chars_per_token
+        return len(content) // self.content_limits.chars_per_token  # type: ignore[no-any-return]
 
     def _get_max_tokens_for_type(self, content_type: str) -> int:
         """Get the maximum token limit for a content type.

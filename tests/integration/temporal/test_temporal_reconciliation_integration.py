@@ -374,7 +374,7 @@ class TestTemporalReconciliationIntegration:
         # Note: This will fail to create embeddings because we don't have real API key,
         # but it should still call reconciliation and end_indexing
         try:
-            result = temporal_indexer.index_commits(reconcile=True)
+            result = temporal_indexer.index_commits(reconcile=True)  # type: ignore[assignment]
         except Exception:
             # Expected to fail on embedding creation, but should have called reconciliation
             # The key is that reconciliation logic ran before the failure

@@ -138,13 +138,13 @@ class TestTemporalDiffContentIntegration:
             )
 
             # Now test search functionality
-            search_service = TemporalSearchService(
+            search_service = TemporalSearchService(  # type: ignore[call-arg]
                 config=config,
                 project_root=tmpdir_path,
             )
 
             # Search for login function that was added
-            results = search_service.search(
+            results = search_service.search(  # type: ignore[attr-defined]
                 query="login function",
                 collection_name=collection_name,
                 limit=5,

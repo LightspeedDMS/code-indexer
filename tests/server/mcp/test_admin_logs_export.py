@@ -279,10 +279,10 @@ class TestAdminLogsExportCSVFormat:
         rows = list(reader)
 
         assert len(rows) == 3
-        assert "timestamp" in reader.fieldnames
-        assert "level" in reader.fieldnames
-        assert "source" in reader.fieldnames
-        assert "message" in reader.fieldnames
+        assert "timestamp" in reader.fieldnames  # type: ignore[operator]
+        assert "level" in reader.fieldnames  # type: ignore[operator]
+        assert "source" in reader.fieldnames  # type: ignore[operator]
+        assert "message" in reader.fieldnames  # type: ignore[operator]
 
     @pytest.mark.asyncio
     async def test_csv_export_bom(self, log_db_path, admin_user, monkeypatch):

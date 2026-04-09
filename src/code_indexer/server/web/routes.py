@@ -4944,7 +4944,7 @@ async def _reload_oidc_configuration():
         hasattr(app_module.app.state, "group_manager")
         and app_module.app.state.group_manager
     ):
-        oidc_manager.group_manager = app_module.app.state.group_manager
+        oidc_manager.group_manager = app_module.app.state.group_manager  # type: ignore[attr-defined]
         logger.info(
             "GroupAccessManager injected into reloaded OIDCManager for SSO auto-provisioning",
             extra={"correlation_id": get_correlation_id()},

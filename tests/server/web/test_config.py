@@ -186,7 +186,7 @@ class TestConfigFieldTypes:
             "/admin/config/server",
             data={
                 "port": "99999",  # Invalid port
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -296,7 +296,7 @@ class TestValidationFeedback:
             "/admin/config/server",
             data={
                 "port": "99999",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -353,7 +353,7 @@ class TestConfigReset:
         authenticated_client.post(
             "/admin/config/mcp_session",
             data={
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
                 "session_ttl_seconds": "9999",
                 "cleanup_interval_seconds": "8888",
             },
@@ -371,7 +371,7 @@ class TestConfigReset:
         csrf_token = web_infrastructure.extract_csrf_token(config_page.text)
         response = authenticated_client.post(
             "/admin/config/reset",
-            data={"csrf_token": csrf_token},
+            data={"csrf_token": csrf_token},  # type: ignore[dict-item]
         )
 
         # Verify reset
@@ -513,7 +513,7 @@ class TestOIDCConfig:
                 "require_email_verification": "true",
                 "enable_jit_provisioning": "true",
                 "default_role": "normal_user",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

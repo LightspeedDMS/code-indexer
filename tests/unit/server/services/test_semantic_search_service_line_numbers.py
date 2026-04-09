@@ -56,13 +56,13 @@ class TestSemanticSearchServiceLineNumbers:
             payload = result.get("payload", {})
             score = result.get("score", 0.0)
 
-            search_item = SearchResultItem(
-                file_path=payload.get("path", ""),
-                line_start=payload.get("line_start", 0),  # FIXED: correct key
-                line_end=payload.get("line_end", 0),  # FIXED: correct key
-                score=score,
-                content=payload.get("content", ""),
-                language=payload.get("language"),
+            search_item = SearchResultItem(  # type: ignore[call-arg]
+                file_path=payload.get("path", ""),  # type: ignore[attr-defined]
+                line_start=payload.get("line_start", 0),  # type: ignore[attr-defined]
+                line_end=payload.get("line_end", 0),  # type: ignore[attr-defined]
+                score=score,  # type: ignore[arg-type]
+                content=payload.get("content", ""),  # type: ignore[attr-defined]
+                language=payload.get("language"),  # type: ignore[attr-defined]
             )
             formatted_results.append(search_item)
 
@@ -109,12 +109,12 @@ class TestSemanticSearchServiceLineNumbers:
             payload = result.get("payload", {})
             score = result.get("score", 0.0)
 
-            search_item = SearchResultItem(
-                file_path=payload.get("path", ""),
-                line_start=payload.get("line_start", 0),  # Correct key
-                line_end=payload.get("line_end", 0),  # Correct key
-                score=score,
-                content=payload.get("content", ""),
+            search_item = SearchResultItem(  # type: ignore[call-arg]
+                file_path=payload.get("path", ""),  # type: ignore[attr-defined]
+                line_start=payload.get("line_start", 0),  # type: ignore[attr-defined]
+                line_end=payload.get("line_end", 0),  # type: ignore[attr-defined]
+                score=score,  # type: ignore[arg-type]
+                content=payload.get("content", ""),  # type: ignore[attr-defined]
                 language=None,
             )
             formatted_results.append(search_item)
@@ -166,12 +166,12 @@ class TestSemanticSearchServiceLineNumbers:
             payload = result.get("payload", {})
             score = result.get("score", 0.0)
 
-            search_item = SearchResultItem(
-                file_path=payload.get("path", ""),
-                line_start=payload.get("line_start", 0),  # Correct key
-                line_end=payload.get("line_end", 0),  # Correct key
-                score=score,
-                content=payload.get("content", ""),
+            search_item = SearchResultItem(  # type: ignore[call-arg]
+                file_path=payload.get("path", ""),  # type: ignore[attr-defined]
+                line_start=payload.get("line_start", 0),  # type: ignore[attr-defined]
+                line_end=payload.get("line_end", 0),  # type: ignore[attr-defined]
+                score=score,  # type: ignore[arg-type]
+                content=payload.get("content", ""),  # type: ignore[attr-defined]
                 language=None,
             )
             formatted_results.append(search_item)

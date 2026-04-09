@@ -99,7 +99,7 @@ def create_group_via_api(client: TestClient, name: str, description: str) -> int
         json={"name": name, "description": description},
     )
     assert response.status_code == status.HTTP_201_CREATED
-    return response.json()["id"]
+    return response.json()["id"]  # type: ignore[no-any-return]
 
 
 class TestAC5CannotDeleteDefaultGroups:

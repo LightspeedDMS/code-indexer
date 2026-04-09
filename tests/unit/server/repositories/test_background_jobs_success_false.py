@@ -171,9 +171,10 @@ class TestSuccessFalseMarkedFailed:
 
         job = self._run_job_and_wait(failing_job)
         assert job is not None
-        assert job.result == {"success": False, "error": "disk full"}, (
-            f"Expected result dict preserved, got {job.result}"
-        )
+        assert job.result == {
+            "success": False,
+            "error": "disk full",
+        }, f"Expected result dict preserved, got {job.result}"
 
     # ------------------------------------------------------------------
     # Test 7 — Non-bool falsy value: success=0 is NOT `is False`, so COMPLETED

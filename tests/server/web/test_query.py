@@ -250,7 +250,7 @@ class TestQueryExecution:
             "/admin/query",
             data={
                 "query_text": "",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -528,7 +528,7 @@ class TestQueryExecutionEndpoint:
                 "query_text": "authentication",
                 "repository": "",  # No repo selected
                 "limit": "10",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -558,7 +558,7 @@ class TestQueryExecutionEndpoint:
             "/admin/partials/query-results",
             data={
                 "query_text": "test",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

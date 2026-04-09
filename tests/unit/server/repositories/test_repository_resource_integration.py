@@ -155,8 +155,8 @@ class TestGoldenRepoManagerResourceIntegration:
 
         # Even with exception, resources should be cleaned up
         clone_dir, git_file = temp_resources
-        assert not Path(clone_dir).exists()
-        assert git_file.closed
+        assert not Path(clone_dir).exists()  # type: ignore[arg-type]
+        assert git_file.closed  # type: ignore[attr-defined]
 
 
 class TestActivatedRepoManagerResourceIntegration:
@@ -548,12 +548,12 @@ class TestResourceManagerServerLifecycleIntegration:
             assert len(rm.tracked_connections) == 3
 
         # After server startup context, initialization resources should be cleaned up
-        assert startup_resources["config_cache"].closed
-        assert startup_resources["startup_log"].closed
-        assert not Path(startup_resources["init_dir"]).exists()
+        assert startup_resources["config_cache"].closed  # type: ignore[attr-defined]
+        assert startup_resources["startup_log"].closed  # type: ignore[attr-defined]
+        assert not Path(startup_resources["init_dir"]).exists()  # type: ignore[arg-type]
 
         # Database connections should be closed
-        for conn in startup_resources["connections"].values():
+        for conn in startup_resources["connections"].values():  # type: ignore[attr-defined]
             conn.close.assert_called_once()
 
     def test_server_shutdown_comprehensive_cleanup(self):

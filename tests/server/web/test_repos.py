@@ -291,7 +291,7 @@ class TestDeactivateRepo:
         response = client.post(
             "/admin/repos/test-user/test-repo/deactivate",
             data={
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

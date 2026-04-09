@@ -120,14 +120,14 @@ def populated_db(temp_db):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                log["timestamp"],
-                log["level"],
-                log["source"],
-                log["message"],
-                log["correlation_id"],
-                log["user_id"],
-                log["request_path"],
-                log["extra_data"],
+                log["timestamp"],  # type: ignore[index]
+                log["level"],  # type: ignore[index]
+                log["source"],  # type: ignore[index]
+                log["message"],  # type: ignore[index]
+                log["correlation_id"],  # type: ignore[index]
+                log["user_id"],  # type: ignore[index]
+                log["request_path"],  # type: ignore[index]
+                log["extra_data"],  # type: ignore[index]
             ),
         )
 

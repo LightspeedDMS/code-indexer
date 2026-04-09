@@ -87,11 +87,11 @@ class TestGetMethodsReturnCachedValues:
 
         with patch(
             "psutil.cpu_percent",
-            side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0,
+            side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0,  # type: ignore[func-returns-value]
         ):
             with patch(
                 "psutil.virtual_memory",
-                side_effect=lambda: psutil_calls.append("mem")
+                side_effect=lambda: psutil_calls.append("mem")  # type: ignore[func-returns-value]
                 or MagicMock(percent=50.0, used=1000),
             ):
                 metrics = collector.get_all_metrics()
@@ -111,7 +111,7 @@ class TestGetMethodsReturnCachedValues:
         psutil_calls = []
         with patch(
             "psutil.cpu_percent",
-            side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0,
+            side_effect=lambda **kw: psutil_calls.append("cpu") or 10.0,  # type: ignore[func-returns-value]
         ):
             cpu = collector.get_cpu_usage()
 
@@ -128,7 +128,7 @@ class TestGetMethodsReturnCachedValues:
         psutil_calls = []
         with patch(
             "psutil.virtual_memory",
-            side_effect=lambda: psutil_calls.append("mem")
+            side_effect=lambda: psutil_calls.append("mem")  # type: ignore[func-returns-value]
             or MagicMock(percent=50.0, used=1000),
         ):
             mem = collector.get_memory_usage()

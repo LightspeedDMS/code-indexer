@@ -289,7 +289,7 @@ class TestBatchRetryLogic(unittest.TestCase):
         # Spy on _classify_batch_error to verify it's called
         original_classify = indexer._classify_batch_error
         classify_spy = Mock(side_effect=original_classify)
-        indexer._classify_batch_error = classify_spy
+        indexer._classify_batch_error = classify_spy  # type: ignore[method-assign]
 
         # Create minimal test scenario with batch error
         # This will fail because retry logic doesn't exist yet

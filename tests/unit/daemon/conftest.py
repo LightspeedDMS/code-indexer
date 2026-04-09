@@ -53,7 +53,7 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         embedding = rng.random(self.VECTOR_DIM).astype(np.float32)
         # Normalize to unit length (important for cosine similarity)
         embedding = embedding / np.linalg.norm(embedding)
-        return embedding.tolist()
+        return embedding.tolist()  # type: ignore[no-any-return]
 
     def get_embedding(self, text: str, model: Optional[str] = None) -> List[float]:
         """Generate embedding for a single text."""

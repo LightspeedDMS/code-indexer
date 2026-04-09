@@ -636,9 +636,11 @@ class TestFTSCacheEdgeCases:
         assert all(e is None for e in errors), f"FTS errors: {[e for e in errors if e]}"
         assert all(r is not None for r in results), "All FTS threads must get results"
         assert load_count == 1, f"FTS loader called {load_count} times, expected 1"
-        assert all(r[0] is mock_index for r in results), (
-            "All threads must get same FTS index"
-        )
-        assert all(r[1] is mock_schema for r in results), (
-            "All threads must get same schema"
-        )
+        assert all(
+            r[0] is mock_index  # type: ignore[index]  # r is Optional but guaranteed non-None: preceding assert confirmed all threads got results
+            for r in results
+        ), "All threads must get same FTS index"
+        assert all(
+            r[1] is mock_schema  # type: ignore[index]  # r is Optional but guaranteed non-None: preceding assert confirmed all threads got results
+            for r in results
+        ), "All threads must get same schema"

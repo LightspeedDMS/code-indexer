@@ -45,8 +45,8 @@ def _make_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> User:
 
 def _make_access_service(
     is_admin: bool = False,
-    accessible_repos: set = None,
-    filter_listing_result: list = None,
+    accessible_repos: set = None,  # type: ignore[assignment]
+    filter_listing_result: list = None,  # type: ignore[assignment]
 ) -> Mock:
     """Create a mock AccessFilteringService with configurable access.
 
@@ -234,7 +234,7 @@ class TestAC9FailClosedGuard:
 
         # Access should raise AttributeError
         with pytest.raises(AttributeError):
-            _ = fake_state.access_filtering_service
+            _ = fake_state.access_filtering_service  # type: ignore[attr-defined]
 
         # The guard in handle_tools_call currently CATCHES this and continues.
         # AC9 says: when repo param present, it must DENY access.

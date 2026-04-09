@@ -146,4 +146,17 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _write_mode_strip_global,
     _is_write_mode_active,
     _post_provider_index_snapshot,
+    # CI/CD handlers (Story #745)
+    handle_gh_actions_list_runs,
+    handle_gh_actions_get_run,
+    handle_gh_actions_search_logs,
+    handle_gh_actions_get_job_logs,
+    handle_gh_actions_retry_run,
+    handle_gh_actions_cancel_run,
+    handle_gitlab_ci_list_pipelines,
+    handle_gitlab_ci_get_pipeline,
+    handle_gitlab_ci_search_logs,
+    handle_gitlab_ci_get_job_logs,
+    handle_gitlab_ci_retry_pipeline,
+    handle_gitlab_ci_cancel_pipeline,
 )

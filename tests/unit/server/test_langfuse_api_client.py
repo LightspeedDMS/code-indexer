@@ -358,12 +358,12 @@ class TestRequestWithRetry:
 
         # First attempt: ConnectionError, second attempt: success
         def side_effect(*args, **kwargs):
-            if side_effect.call_count == 0:
-                side_effect.call_count += 1
+            if side_effect.call_count == 0:  # type: ignore[attr-defined]
+                side_effect.call_count += 1  # type: ignore[attr-defined]
                 raise requests.ConnectionError("Connection failed")
             return Mock(status_code=200)
 
-        side_effect.call_count = 0
+        side_effect.call_count = 0  # type: ignore[attr-defined]
 
         with patch("requests.request", side_effect=side_effect):
             with patch("time.sleep"):

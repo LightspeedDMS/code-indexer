@@ -173,7 +173,7 @@ class TestCleanupOrphanScipDatabases:
         orphan_db = orphan_dir / "index.scip.db"
         orphan_db.write_bytes(b"fake")
 
-        discovered = []  # No live projects
+        discovered: list[str] = []  # No live projects
 
         result = generator._cleanup_orphan_scip_databases(discovered)
 

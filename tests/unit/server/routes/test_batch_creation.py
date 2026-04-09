@@ -198,7 +198,7 @@ class TestBatchCreateLogic:
         """Test handling of empty repository list."""
         from code_indexer.server.web.routes import _batch_create_repos
 
-        repos = []
+        repos = []  # type: ignore[var-annotated]
 
         results = _batch_create_repos(repos, "admin", mock_golden_repo_manager)
 

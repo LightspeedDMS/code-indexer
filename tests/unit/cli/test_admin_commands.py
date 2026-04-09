@@ -56,7 +56,7 @@ class AsyncServerWrapper:
 
             async def _stop():
                 try:
-                    await self._context.__aexit__(None, None, None)
+                    await self._context.__aexit__(None, None, None)  # type: ignore[union-attr]
                 except Exception:
                     # Suppress cleanup errors that occur during shutdown
                     pass

@@ -73,10 +73,10 @@ class TestFileCountLogicBug:
             if not diffs:
                 pass  # Line 603-604
             else:
-                files_in_this_commit_buggy = len(diffs)  # Line 615 (WRONG LOCATION)
+                files_in_this_commit_buggy = len(diffs)  # type: ignore[arg-type]
 
             # ACT: Simulate CORRECT implementation (after fix)
-            files_in_this_commit_fixed = len(diffs)  # Should be at line 600
+            files_in_this_commit_fixed = len(diffs)  # type: ignore[arg-type]
             if not diffs:
                 pass
             else:

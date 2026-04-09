@@ -123,7 +123,7 @@ class TemporalDiffScanner:
             List of DiffInfo objects
         """
 
-        diffs = []
+        diffs = []  # type: ignore[var-annotated]
         lines = diff_output.split("\n")
 
         # OPTIMIZATION: Detect if we need parent commit (Issue #1 fix)
@@ -139,7 +139,7 @@ class TemporalDiffScanner:
         current_diff_type = None
         current_blob_hash = None
         current_old_blob_hash = None
-        current_diff_content = []
+        current_diff_content = []  # type: ignore[var-annotated]
         in_diff_content = False
 
         for line in lines:

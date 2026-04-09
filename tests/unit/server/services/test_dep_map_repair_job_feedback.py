@@ -938,7 +938,7 @@ class TestNoneComponentsGracefulDegradation:
             executor = _Mock(spec=DepMapRepairExecutor)
             executor.execute.return_value = real_result
             executor.execute.side_effect = lambda *a, **kw: (
-                completed_flag.append(True) or real_result
+                completed_flag.append(True) or real_result  # type: ignore[func-returns-value]
             )
             mock_build.return_value = executor
 

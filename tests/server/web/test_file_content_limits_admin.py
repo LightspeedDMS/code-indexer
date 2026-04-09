@@ -243,7 +243,7 @@ class TestFileContentLimitsUpdate:
             data={
                 "max_tokens_per_request": "10000",
                 "chars_per_token": "4",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -319,7 +319,7 @@ class TestFileContentLimitsValidation:
             data={
                 "max_tokens_per_request": "500",  # Below min (1000)
                 "chars_per_token": "4",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -354,7 +354,7 @@ class TestFileContentLimitsValidation:
             data={
                 "max_tokens_per_request": "25000",  # Above max (20000)
                 "chars_per_token": "4",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -389,7 +389,7 @@ class TestFileContentLimitsValidation:
             data={
                 "max_tokens_per_request": "10000",
                 "chars_per_token": "10",  # Invalid (must be 3-5)
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -433,7 +433,7 @@ class TestFileContentLimitsFeedback:
             data={
                 "max_tokens_per_request": "8000",
                 "chars_per_token": "5",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -469,7 +469,7 @@ class TestFileContentLimitsFeedback:
             data={
                 "max_tokens_per_request": "100",  # Invalid
                 "chars_per_token": "4",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -516,7 +516,7 @@ class TestFileContentLimitsPersistence:
             data={
                 "max_tokens_per_request": "15000",
                 "chars_per_token": "3",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

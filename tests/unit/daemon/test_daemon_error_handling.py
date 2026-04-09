@@ -219,7 +219,7 @@ class TestDisplayResultsErrorHandling:
         console = Console(file=output, force_terminal=True, width=120)
 
         # Response with no error, just empty results
-        response = {
+        response = {  # type: ignore[var-annotated]
             "results": [],
             "timing": {},
         }

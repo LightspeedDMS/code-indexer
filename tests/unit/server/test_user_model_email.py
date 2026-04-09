@@ -204,7 +204,7 @@ def test_create_oidc_user_includes_email():
 
         # Verify it's persisted
         loaded_user = user_manager.get_user("oidcuser")
-        assert loaded_user.email == "oidc@example.com"
+        assert loaded_user.email == "oidc@example.com"  # type: ignore[union-attr]
     finally:
         os.unlink(temp_file.name)
 

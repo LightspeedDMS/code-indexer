@@ -276,7 +276,7 @@ class TestBackendErrorHandling:
 
     def test_partial_key_data_missing_private_key(self, tmp_path: Path) -> None:
         # Key with no private_key — only public key present
-        key = {
+        key = {  # type: ignore[var-annotated]
             "name": "pub_only",
             "private_key": None,
             "public_key": "ssh-ed25519 AAAA",

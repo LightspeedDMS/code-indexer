@@ -31,7 +31,7 @@ class TestRepositoryActivationEndpointMismatch:
         }
         client = RepositoryLinkingClient("http://localhost:8000", credentials)
         # Mock the authenticated request method to control responses
-        client._authenticated_request = AsyncMock()
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio
@@ -103,8 +103,8 @@ class TestBranchListingEndpointMismatch:
     @pytest.fixture
     def mock_client(self):
         """Create a repository linking client with mocked authentication."""
-        client = RepositoryLinkingClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RepositoryLinkingClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio
@@ -139,15 +139,15 @@ class TestRepositoryListingEndpointMismatch:
     @pytest.fixture
     def mock_query_client(self):
         """Create a remote query client with mocked authentication."""
-        client = RemoteQueryClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RemoteQueryClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.fixture
     def mock_linking_client(self):
         """Create a repository linking client with mocked authentication."""
-        client = RepositoryLinkingClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RepositoryLinkingClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio
@@ -207,8 +207,8 @@ class TestRepositoryDeactivationEndpointMismatch:
 
     @pytest.fixture
     def mock_client(self):
-        client = RepositoryLinkingClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RepositoryLinkingClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio
@@ -240,8 +240,8 @@ class TestMissingEndpoints:
 
     @pytest.fixture
     def mock_client(self):
-        client = RemoteQueryClient("http://localhost:8000", "fake-token")
-        client._authenticated_request = AsyncMock()
+        client = RemoteQueryClient("http://localhost:8000", "fake-token")  # type: ignore[arg-type]
+        client._authenticated_request = AsyncMock()  # type: ignore[method-assign]
         return client
 
     @pytest.mark.asyncio

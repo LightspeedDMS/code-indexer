@@ -65,7 +65,7 @@ class TestSCIPAuditLogAPI:
         mock_audit_repo.query_audit_records.return_value = (mock_records, 1)
 
         # Call handler (now sync after Epic #48)
-        params = {}
+        params = {}  # type: ignore[var-annotated]
         response = get_scip_audit_log(params, admin_user)
 
         # Verify response structure
@@ -86,7 +86,7 @@ class TestSCIPAuditLogAPI:
         self, normal_user, mock_audit_repo
     ):
         """Test that non-admin users are denied access."""
-        params = {}
+        params = {}  # type: ignore[var-annotated]
         response = get_scip_audit_log(params, normal_user)
 
         # Parse response
@@ -187,7 +187,7 @@ class TestSCIPAuditLogAPI:
         """Test default pagination values."""
         mock_audit_repo.query_audit_records.return_value = ([], 0)
 
-        params = {}
+        params = {}  # type: ignore[var-annotated]
         get_scip_audit_log(params, admin_user)
 
         # Verify defaults
@@ -225,7 +225,7 @@ class TestSCIPAuditLogAPI:
         # Mock repository to raise exception
         mock_audit_repo.query_audit_records.side_effect = Exception("Database error")
 
-        params = {}
+        params = {}  # type: ignore[var-annotated]
         response = get_scip_audit_log(params, admin_user)
 
         # Verify error response

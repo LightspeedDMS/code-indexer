@@ -20,7 +20,7 @@ class TestBlobCodeCleanup:
             config_manager=mock_config_manager,
             project_root=Path("/tmp/test_project"),
         )
-        service.commits_db_path = Path("/tmp/test_commits.db")
+        service.commits_db_path = Path("/tmp/test_commits.db")  # type: ignore[attr-defined]
 
         # Create semantic results with new diff-based payload
         # NEW FORMAT: chunk_text at root level

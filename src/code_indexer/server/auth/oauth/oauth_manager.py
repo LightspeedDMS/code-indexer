@@ -121,7 +121,7 @@ class OAuthManager:
                 ),
             )
 
-        self._conn_manager.execute_atomic(_do_init)
+        self._conn_manager.execute_atomic(_do_init)  # type: ignore[union-attr]
 
     def get_discovery_metadata(self) -> Dict[str, Any]:
         return {

@@ -173,7 +173,7 @@ class LeaderElectionService:
                 acquired = bool(row[0]) if row else False
 
             if acquired:
-                self._lock_conn = conn
+                self._lock_conn = conn  # type: ignore[assignment]
                 was_leader = self._is_leader_event.is_set()
                 self._is_leader_event.set()
                 logger.info(

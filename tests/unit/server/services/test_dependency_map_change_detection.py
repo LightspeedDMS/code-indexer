@@ -266,8 +266,8 @@ class TestAffectedDomainIdentification:
         changed_repos = [
             {"alias": "repo2", "clone_path": str(tmp_golden_repos_root / "repo2")}
         ]
-        new_repos = []
-        removed_repos = []
+        new_repos = []  # type: ignore[var-annotated]
+        removed_repos = []  # type: ignore[var-annotated]
 
         affected = dependency_map_service.identify_affected_domains(
             changed_repos, new_repos, removed_repos
@@ -282,11 +282,11 @@ class TestAffectedDomainIdentification:
         self, dependency_map_service, tmp_golden_repos_root
     ):
         """Test that new repo not in index triggers domain discovery."""
-        changed_repos = []
+        changed_repos = []  # type: ignore[var-annotated]
         new_repos = [
             {"alias": "repo4", "clone_path": str(tmp_golden_repos_root / "repo4")}
         ]
-        removed_repos = []
+        removed_repos = []  # type: ignore[var-annotated]
 
         affected = dependency_map_service.identify_affected_domains(
             changed_repos, new_repos, removed_repos
@@ -297,8 +297,8 @@ class TestAffectedDomainIdentification:
 
     def test_identify_affected_domains_for_removed_repo(self, dependency_map_service):
         """Test that removed repo maps to its domains for cleanup."""
-        changed_repos = []
-        new_repos = []
+        changed_repos = []  # type: ignore[var-annotated]
+        new_repos = []  # type: ignore[var-annotated]
         removed_repos = ["repo3"]
 
         affected = dependency_map_service.identify_affected_domains(

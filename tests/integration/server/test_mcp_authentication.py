@@ -108,7 +108,7 @@ def mcp_credential(client):
     Depends on client fixture to ensure managers are set up first.
     Uses the MCP manager from dependencies that was configured by client fixture.
     """
-    result = dependencies.mcp_credential_manager.generate_credential(
+    result = dependencies.mcp_credential_manager.generate_credential(  # type: ignore[union-attr]
         "testuser", name="Test Auth Credential"
     )
     return result

@@ -224,7 +224,7 @@ class TestGetAppStateDependency:
         # Attach AppState instance to mock app.state
         app_state = AppState()
         app_state.golden_repos_dir = "/test/path"
-        MockRequest.app.state.app_state = app_state
+        MockRequest.app.state.app_state = app_state  # type: ignore[attr-defined]
 
         result = get_app_state(MockRequest())
         assert result is app_state

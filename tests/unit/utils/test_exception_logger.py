@@ -40,11 +40,11 @@ class TestExceptionLoggerInitialization:
         logger = ExceptionLogger.initialize(project_root, mode="cli")
 
         # Verify log file created in project's .code-indexer directory
-        assert logger.log_file_path.parent == project_root / ".code-indexer"
-        assert logger.log_file_path.exists()
+        assert logger.log_file_path.parent == project_root / ".code-indexer"  # type: ignore[union-attr]
+        assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
         # Verify filename format: error_<timestamp>_<pid>.log
-        filename = logger.log_file_path.name
+        filename = logger.log_file_path.name  # type: ignore[union-attr]
         assert filename.startswith("error_")
         assert filename.endswith(".log")
 
@@ -62,8 +62,8 @@ class TestExceptionLoggerInitialization:
         logger = ExceptionLogger.initialize(project_root, mode="daemon")
 
         # Daemon mode uses same location as CLI
-        assert logger.log_file_path.parent == project_root / ".code-indexer"
-        assert logger.log_file_path.exists()
+        assert logger.log_file_path.parent == project_root / ".code-indexer"  # type: ignore[union-attr]
+        assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
     def test_server_mode_creates_log_file_in_home_directory(self, tmp_path):
         """Test that Server mode creates error log in ~/.cidx-server/logs/."""
@@ -78,8 +78,8 @@ class TestExceptionLoggerInitialization:
 
             # Server mode uses ~/.cidx-server/logs/
             expected_log_dir = tmp_path / ".cidx-server" / "logs"
-            assert logger.log_file_path.parent == expected_log_dir
-            assert logger.log_file_path.exists()
+            assert logger.log_file_path.parent == expected_log_dir  # type: ignore[union-attr]
+            assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
     def test_log_directory_created_if_not_exists(self, tmp_path):
         """Test that log directory is created if it doesn't exist."""
@@ -96,7 +96,7 @@ class TestExceptionLoggerInitialization:
 
         # Directory should now exist
         assert code_indexer_dir.exists()
-        assert logger.log_file_path.exists()
+        assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
     def test_filename_contains_timestamp_and_pid(self, tmp_path):
         """Test that log filename contains timestamp and PID for uniqueness."""
@@ -109,7 +109,7 @@ class TestExceptionLoggerInitialization:
         logger = ExceptionLogger.initialize(project_root, mode="cli")
         datetime.now()
 
-        filename = logger.log_file_path.name
+        filename = logger.log_file_path.name  # type: ignore[union-attr]
         pid = os.getpid()
 
         # Filename format: error_YYYYMMDD_HHMMSS_<pid>.log
@@ -150,7 +150,7 @@ class TestExceptionLogging:
             logger.log_exception(e, context={"test": "data"})
 
         # Read and verify log file contents
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         # Should contain JSON
@@ -187,7 +187,7 @@ class TestExceptionLogging:
 
         after = datetime.now()
 
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         log_data = json.loads(content.split("\n---\n")[0])
@@ -213,7 +213,7 @@ class TestExceptionLogging:
         except KeyError as e:
             logger.log_exception(e, thread_name="TestThread")
 
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         log_data = json.loads(content.split("\n---\n")[0])
@@ -241,7 +241,7 @@ class TestExceptionLogging:
         except ZeroDivisionError as e:
             logger.log_exception(e)
 
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         log_data = json.loads(content.split("\n---\n")[0])
@@ -277,7 +277,7 @@ class TestExceptionLogging:
         except RuntimeError as e:
             logger.log_exception(e)
 
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         # Split by separator
@@ -350,7 +350,7 @@ class TestThreadExceptionHook:
         time.sleep(0.1)  # Brief delay for log write
 
         # Verify exception was logged
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         assert "ValueError" in content

@@ -37,7 +37,7 @@ def _make_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> User:
 
 def _make_access_service(
     is_admin: bool = False,
-    accessible_repos: set = None,
+    accessible_repos: set = None,  # type: ignore[assignment]
 ) -> Mock:
     """Create a mock AccessFilteringService."""
     service = Mock()
@@ -58,7 +58,7 @@ def _make_mock_tool_registry(tool_name: str, permission: str = "query_repos") ->
     }
 
 
-def _make_mock_handler(return_value: dict = None) -> Mock:
+def _make_mock_handler(return_value: dict = None) -> Mock:  # type: ignore[assignment]
     """Build a mock sync handler returning given value."""
     if return_value is None:
         return_value = {

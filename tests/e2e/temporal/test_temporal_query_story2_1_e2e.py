@@ -15,23 +15,25 @@ class TestTemporalQueryStory21E2E:
     @classmethod
     def setup_class(cls):
         """Set up test repository with temporal index."""
-        cls.test_dir = tempfile.mkdtemp(prefix="test_temporal_story21_")
-        cls.repo_path = Path(cls.test_dir) / "test_repo"
-        cls.repo_path.mkdir()
+        cls.test_dir = tempfile.mkdtemp(prefix="test_temporal_story21_")  # type: ignore[attr-defined]
+        cls.repo_path = Path(cls.test_dir) / "test_repo"  # type: ignore[attr-defined]
+        cls.repo_path.mkdir()  # type: ignore[attr-defined]
 
         # Initialize git repo
-        subprocess.run(["git", "init"], cwd=cls.repo_path, check=True)
+        subprocess.run(["git", "init"], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
             ["git", "config", "user.email", "test@example.com"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
         subprocess.run(
-            ["git", "config", "user.name", "Test User"], cwd=cls.repo_path, check=True
+            ["git", "config", "user.name", "Test User"],
+            cwd=cls.repo_path,  # type: ignore[attr-defined]  # repo_path set dynamically in setUpClass, not declared as class attribute
+            check=True,  # type: ignore[attr-defined]  # repo_path set dynamically in setUpClass, not declared as class attribute
         )
 
         # Create initial file
-        (cls.repo_path / "auth.py").write_text(
+        (cls.repo_path / "auth.py").write_text(  # type: ignore[attr-defined]
             """def validate_token(token):
     if not token:
         return False
@@ -43,15 +45,15 @@ class TestTemporalQueryStory21E2E:
 """
         )
 
-        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
             ["git", "commit", "-m", "Initial commit: Add token validation"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
 
         # Modify file (introduce bug fix)
-        (cls.repo_path / "auth.py").write_text(
+        (cls.repo_path / "auth.py").write_text(  # type: ignore[attr-defined]
             """def validate_token(token):
     if not token:
         return False
@@ -64,7 +66,7 @@ class TestTemporalQueryStory21E2E:
 """
         )
 
-        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
             [
                 "git",
@@ -72,17 +74,17 @@ class TestTemporalQueryStory21E2E:
                 "-m",
                 "Fix JWT validation bug\\n\\nNow properly logs warnings and raises TokenExpiredError\\ninstead of silently returning False.",
             ],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
 
         # Initialize cidx and create temporal index (CLI mode, no daemon)
-        subprocess.run(["cidx", "init"], cwd=cls.repo_path, check=True)
+        subprocess.run(["cidx", "init"], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
 
         # Index with commits (uses direct CLI, no daemon needed)
         subprocess.run(
             ["cidx", "index", "--index-commits", "--clear"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
             timeout=60,
         )
@@ -91,7 +93,7 @@ class TestTemporalQueryStory21E2E:
     def teardown_class(cls):
         """Clean up test repository."""
         # No daemon to stop - using CLI mode only
-        shutil.rmtree(cls.test_dir, ignore_errors=True)
+        shutil.rmtree(cls.test_dir, ignore_errors=True)  # type: ignore[attr-defined]
 
     def test_temporal_query_shows_chunk_with_diff(self):
         """Test that temporal query shows chunk content with diff, not entire blob."""
@@ -106,7 +108,7 @@ class TestTemporalQueryStory21E2E:
                 "--limit",
                 "5",
             ],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=30,
@@ -142,7 +144,7 @@ class TestTemporalQueryStory21E2E:
                 "--limit",
                 "5",
             ],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=30,
@@ -175,7 +177,7 @@ class TestTemporalQueryStory21E2E:
                 "--limit",
                 "10",
             ],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=30,
@@ -210,21 +212,23 @@ class TestTemporalQueryStory21E2E:
         # We can verify by checking that chunks show content fetched from git
 
         # Create a file with distinctive content
-        test_file = self.repo_path / "test_unique.py"
+        test_file = self.repo_path / "test_unique.py"  # type: ignore[attr-defined]
         unique_content = (
             f"# UNIQUE_MARKER_{time.time()}\ndef test_function():\n    pass"
         )
         test_file.write_text(unique_content)
 
-        subprocess.run(["git", "add", "."], cwd=self.repo_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=self.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
-            ["git", "commit", "-m", "Add test file"], cwd=self.repo_path, check=True
+            ["git", "commit", "-m", "Add test file"],
+            cwd=self.repo_path,  # type: ignore[attr-defined]  # repo_path set dynamically in setUpClass, not declared as class attribute
+            check=True,
         )
 
         # Re-index (increased timeout for larger repositories)
         subprocess.run(
             ["cidx", "index", "--index-commits", "--clear"],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             check=True,
             timeout=180,
         )
@@ -238,7 +242,7 @@ class TestTemporalQueryStory21E2E:
                 "--time-range",
                 "2020-01-01..2030-01-01",
             ],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=30,
@@ -259,8 +263,8 @@ class TestTemporalQueryStory21E2E:
     def test_temporal_query_shows_full_commit_message(self):
         """Test that full commit message is shown, not truncated."""
         # Add a commit with a long message
-        (self.repo_path / "long_msg.py").write_text("# Test file")
-        subprocess.run(["git", "add", "."], cwd=self.repo_path, check=True)
+        (self.repo_path / "long_msg.py").write_text("# Test file")  # type: ignore[attr-defined]
+        subprocess.run(["git", "add", "."], cwd=self.repo_path, check=True)  # type: ignore[attr-defined]
 
         long_message = """Add comprehensive authentication system
 
@@ -277,13 +281,15 @@ This commit introduces a complete authentication system with the following featu
 The implementation follows OWASP best practices and includes extensive test coverage."""
 
         subprocess.run(
-            ["git", "commit", "-m", long_message], cwd=self.repo_path, check=True
+            ["git", "commit", "-m", long_message],
+            cwd=self.repo_path,  # type: ignore[attr-defined]  # repo_path set dynamically in setUpClass, not declared as class attribute
+            check=True,
         )
 
         # Re-index (increased timeout for larger repositories)
         subprocess.run(
             ["cidx", "index", "--index-commits", "--clear"],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             check=True,
             timeout=180,
         )
@@ -297,7 +303,7 @@ The implementation follows OWASP best practices and includes extensive test cove
                 "--time-range",
                 "2020-01-01..2030-01-01",
             ],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=30,

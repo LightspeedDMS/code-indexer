@@ -34,7 +34,7 @@ class TestGlobalActivateCommand:
 
             # Test: Run cidx global activate
             env = {
-                **subprocess.os.environ,
+                **subprocess.os.environ,  # type: ignore[attr-defined]
                 "CIDX_GOLDEN_REPOS_DIR": str(golden_repos_dir),
             }
 
@@ -63,7 +63,7 @@ class TestGlobalActivateCommand:
             golden_repos_dir = Path(tmpdir) / "golden-repos"
 
             env = {
-                **subprocess.os.environ,
+                **subprocess.os.environ,  # type: ignore[attr-defined]
                 "CIDX_GOLDEN_REPOS_DIR": str(golden_repos_dir),
             }
 

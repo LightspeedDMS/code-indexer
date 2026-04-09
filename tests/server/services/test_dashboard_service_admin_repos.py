@@ -119,12 +119,12 @@ class TestDashboardServiceAdminRepoVisibility:
         """
         dashboard_service = DashboardService()
         original_method = dashboard_service._get_activated_repo_manager
-        dashboard_service._get_activated_repo_manager = lambda: activated_repo_manager
+        dashboard_service._get_activated_repo_manager = lambda: activated_repo_manager  # type: ignore[method-assign]
 
         yield dashboard_service
 
         # Restore original method
-        dashboard_service._get_activated_repo_manager = original_method
+        dashboard_service._get_activated_repo_manager = original_method  # type: ignore[method-assign]
 
     def test_admin_sees_all_activated_repos(
         self, dashboard_service_with_test_manager, setup_multi_user_repos

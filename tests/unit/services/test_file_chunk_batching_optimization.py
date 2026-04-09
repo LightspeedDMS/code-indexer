@@ -114,8 +114,8 @@ def file_chunking_manager(
     )
 
     # TOKEN COUNTING FIX: Mock the voyage client count_tokens method
-    manager.voyage_client = Mock()
-    manager.voyage_client.count_tokens.return_value = 100  # Return fixed token count
+    manager.voyage_client = Mock()  # type: ignore[attr-defined]
+    manager.voyage_client.count_tokens.return_value = 100  # type: ignore[attr-defined]
 
     return manager
 

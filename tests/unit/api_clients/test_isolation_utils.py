@@ -275,7 +275,7 @@ class RetryWithBackoff:
                     break
 
         # All retries failed
-        raise last_exception
+        raise last_exception  # type: ignore[misc]
 
     def retry_sync(self, operation, *args, **kwargs):
         """Retry a sync operation with exponential backoff."""
@@ -296,7 +296,7 @@ class RetryWithBackoff:
                     break
 
         # All retries failed
-        raise last_exception
+        raise last_exception  # type: ignore[misc]
 
 
 # Test helper functions for common isolation patterns

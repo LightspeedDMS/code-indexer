@@ -426,7 +426,7 @@ class TestReadmeGeneratorCalledFromCallback:
         config = _make_config(tmp_path)
         data_dir = tmp_path / "data"
 
-        generator_calls = []
+        generator_calls = []  # type: ignore[var-annotated]
 
         def on_complete_with_generator():
             # Simulate what lifespan.py _on_langfuse_sync_complete does:

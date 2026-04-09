@@ -108,4 +108,4 @@ class TestTemplateIntegration:
         # Verify structure matches what JavaScript expects
         assert "health" in repo_data
         assert "valid" in repo_data["health"]
-        assert isinstance(repo_data["health"]["errors"], list)
+        assert isinstance(repo_data["health"]["errors"], list)  # type: ignore[index]

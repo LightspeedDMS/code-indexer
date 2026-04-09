@@ -90,7 +90,7 @@ class TestTemporalFieldNameBug:
                 captured_points.extend(points)
                 return original_upsert(collection_name, points)
 
-            vector_store.upsert_points = capture_upsert
+            vector_store.upsert_points = capture_upsert  # type: ignore[assignment, method-assign]
 
             # Mock diff scanner to return diffs
             from src.code_indexer.services.temporal.temporal_diff_scanner import (

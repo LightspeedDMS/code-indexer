@@ -156,7 +156,10 @@ class TestMonotonicDualProviderSequence:
                 f"{offset_currents[idx - 1]} → {offset_currents[idx]}"
             )
 
-        assert sink[-1][:2] == (OFFSET_TOTAL, OFFSET_TOTAL), (
+        assert sink[-1][:2] == (
+            OFFSET_TOTAL,
+            OFFSET_TOTAL,
+        ), (
             f"Final emission must be ({OFFSET_TOTAL}, {OFFSET_TOTAL}), got {sink[-1][:2]}"
         )
 
@@ -169,12 +172,14 @@ class TestMonotonicDualProviderSequence:
         cb0(TOTAL, TOTAL)  # Provider 0 last step
         cb1(0, TOTAL)  # Provider 1 first step — the bug scenario
 
-        assert sink[0][:2] == (TOTAL, OFFSET_TOTAL), (
-            f"Provider 0 end: expected ({TOTAL}, {OFFSET_TOTAL}), got {sink[0][:2]}"
-        )
-        assert sink[1][:2] == (TOTAL, OFFSET_TOTAL), (
-            f"Provider 1 start: expected ({TOTAL}, {OFFSET_TOTAL}), got {sink[1][:2]}"
-        )
+        assert sink[0][:2] == (
+            TOTAL,
+            OFFSET_TOTAL,
+        ), f"Provider 0 end: expected ({TOTAL}, {OFFSET_TOTAL}), got {sink[0][:2]}"
+        assert sink[1][:2] == (
+            TOTAL,
+            OFFSET_TOTAL,
+        ), f"Provider 1 start: expected ({TOTAL}, {OFFSET_TOTAL}), got {sink[1][:2]}"
 
     def test_kwargs_are_forwarded(self, collector):
         """Extra kwargs (info, item_type, etc.) must reach the base callback unchanged."""

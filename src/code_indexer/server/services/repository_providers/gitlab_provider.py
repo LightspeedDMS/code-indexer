@@ -400,7 +400,7 @@ class GitLabProvider(RepositoryProviderBase):
         last_commit_hash = project.get("_last_commit_hash")
         last_commit_author = project.get("_last_commit_author")
 
-        return DiscoveredRepository(
+        return DiscoveredRepository(  # type: ignore[call-arg]
             platform="gitlab",
             name=project.get("path_with_namespace", ""),
             description=project.get("description"),

@@ -152,7 +152,7 @@ class TestHybridQuietModeMatchNumbers:
         """Hybrid quiet mode should display: 1. score path"""
         from code_indexer.cli import _display_hybrid_results
 
-        fts_results = []
+        fts_results = []  # type: ignore[var-annotated]
         semantic_results = [
             {
                 "score": 0.850,

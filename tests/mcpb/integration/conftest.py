@@ -117,13 +117,13 @@ class TestMcpServer:
         config = uvicorn.Config(
             self.app, host="127.0.0.1", port=self.port, log_level="error"
         )
-        self.server = uvicorn.Server(config)
+        self.server = uvicorn.Server(config)  # type: ignore[assignment]
 
         def run_server():
-            asyncio.run(self.server.serve())
+            asyncio.run(self.server.serve())  # type: ignore[attr-defined]
 
-        self.thread = threading.Thread(target=run_server, daemon=True)
-        self.thread.start()
+        self.thread = threading.Thread(target=run_server, daemon=True)  # type: ignore[assignment]
+        self.thread.start()  # type: ignore[attr-defined]
 
         # Wait for server to be ready
         import time as time_module

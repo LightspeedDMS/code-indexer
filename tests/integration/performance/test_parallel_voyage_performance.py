@@ -63,7 +63,7 @@ class TestParallelVoyagePerformance:
 
         # Create a minimal config for VoyageAI
         cls.config = Config(
-            codebase_dir=str(get_local_tmp_dir() / "test"),
+            codebase_dir=str(get_local_tmp_dir() / "test"),  # type: ignore[arg-type]
             embedding_provider="voyage-ai",
         )
 

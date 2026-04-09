@@ -232,7 +232,7 @@ class TestHandleEnterWriteMode:
     ):
         """Returns error when repo_alias is missing."""
         user = _make_user()
-        params = {}
+        params = {}  # type: ignore[var-annotated]
 
         result = self._call_handler(
             params, user, mock_refresh_scheduler, golden_repos_dir

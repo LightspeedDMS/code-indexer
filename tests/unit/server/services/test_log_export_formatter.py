@@ -88,7 +88,7 @@ class TestLogExportFormatterJSON:
                 "request_path": "/auth/login",
             }
         ]
-        filters = {}
+        filters = {}  # type: ignore[var-annotated]
 
         result = formatter.to_json(logs, filters)
         parsed = json.loads(result)
@@ -123,7 +123,7 @@ class TestLogExportFormatterJSON:
                 "request_path": None,
             }
         ]
-        filters = {}
+        filters = {}  # type: ignore[var-annotated]
 
         result = formatter.to_json(logs, filters)
 
@@ -134,7 +134,7 @@ class TestLogExportFormatterJSON:
     def test_to_json_handles_empty_logs(self):
         """to_json() handles empty logs list gracefully."""
         formatter = LogExportFormatter()
-        logs = []
+        logs = []  # type: ignore[var-annotated]
         filters = {"search": "nonexistent"}
 
         result = formatter.to_json(logs, filters)
@@ -179,7 +179,7 @@ class TestLogExportFormatterJSON:
                 "request_path": None,
             },
         ]
-        filters = {}
+        filters = {}  # type: ignore[var-annotated]
 
         result = formatter.to_json(logs, filters)
         parsed = json.loads(result)
@@ -316,7 +316,7 @@ class TestLogExportFormatterCSV:
     def test_to_csv_handles_empty_logs(self):
         """to_csv() handles empty logs list gracefully."""
         formatter = LogExportFormatter()
-        logs = []
+        logs = []  # type: ignore[var-annotated]
 
         result = formatter.to_csv(logs)
 

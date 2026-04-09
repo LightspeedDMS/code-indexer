@@ -19,7 +19,7 @@ from code_indexer.server.services.job_reconciliation_service import (
 def _make_deadlock_error():
     """Create a mock exception with sqlstate='40P01' (deadlock_detected)."""
     exc = Exception("deadlock detected")
-    exc.sqlstate = "40P01"
+    exc.sqlstate = "40P01"  # type: ignore[attr-defined]
     return exc
 
 

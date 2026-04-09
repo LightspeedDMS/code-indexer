@@ -22,8 +22,8 @@ def test_manual_trigger_route_auto_detects_repo_root(
     repo_root_path = (
         Path(__file__).resolve().parent.parent.parent.parent
     )  # project root
-    authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)
-    authenticated_client.app.state.self_monitoring_github_repo = "owner/repo"
+    authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)  # type: ignore[attr-defined]
+    authenticated_client.app.state.self_monitoring_github_repo = "owner/repo"  # type: ignore[attr-defined]
 
     # Mock CSRF validation to bypass known test infrastructure issue
     with patch(
@@ -76,8 +76,8 @@ def test_manual_trigger_route_auto_detects_github_repo(
     repo_root_path = (
         Path(__file__).resolve().parent.parent.parent.parent
     )  # project root
-    authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)
-    authenticated_client.app.state.self_monitoring_github_repo = "test-owner/test-repo"
+    authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)  # type: ignore[attr-defined]
+    authenticated_client.app.state.self_monitoring_github_repo = "test-owner/test-repo"  # type: ignore[attr-defined]
 
     # Mock CSRF validation to bypass known test infrastructure issue
     with patch(
@@ -130,8 +130,8 @@ def test_manual_trigger_route_does_not_use_environment_variable(
 
     # Set app.state to known values
     repo_root_path = Path(__file__).resolve().parent.parent.parent.parent
-    authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)
-    authenticated_client.app.state.self_monitoring_github_repo = (
+    authenticated_client.app.state.self_monitoring_repo_root = str(repo_root_path)  # type: ignore[attr-defined]
+    authenticated_client.app.state.self_monitoring_github_repo = (  # type: ignore[attr-defined]
         "correct-owner/correct-repo"
     )
 

@@ -87,7 +87,7 @@ def _build_mock_pg_conn(rowcount: int = 1) -> MagicMock:
     mock_cursor.__exit__ = MagicMock(return_value=False)
     mock_cursor.rowcount = rowcount
     mock_conn.cursor.return_value = mock_cursor
-    return mock_conn, mock_cursor
+    return mock_conn, mock_cursor  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------

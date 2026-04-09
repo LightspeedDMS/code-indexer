@@ -39,7 +39,7 @@ class TestDaemonDelegationPathFilterConversion(TestCase):
 
         # Mock daemon connection
         mock_conn = MagicMock()
-        mock_result = {
+        mock_result = {  # type: ignore[var-annotated]
             "results": [],
             "query": "test",
             "filter_type": None,

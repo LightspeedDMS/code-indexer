@@ -204,7 +204,7 @@ class TestHealthIndicatorLogic:
         """Health should be unknown when no metrics available."""
         from code_indexer.server.services.dashboard_service import DashboardService
 
-        metrics = {}
+        metrics = {}  # type: ignore[var-annotated]
 
         # H2: Use production method
         service = DashboardService()

@@ -29,7 +29,7 @@ def _unwrap_mcp(result: dict) -> dict:
     content = result.get("content", [])
     if content and isinstance(content, list):
         text = content[0].get("text", "{}")
-        return json.loads(text)
+        return json.loads(text)  # type: ignore[no-any-return]
     return result
 
 

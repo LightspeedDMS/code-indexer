@@ -254,7 +254,7 @@ class TestToolsCallHandler:
             role=UserRole.POWER_USER,
             created_at=__import__("datetime").datetime.now(),
         )
-        params = {"arguments": {}}
+        params = {"arguments": {}}  # type: ignore[var-annotated]
 
         with pytest.raises(ValueError) as exc_info:
             await handle_tools_call(params, user)
@@ -354,7 +354,7 @@ class TestBatchRequests:
             role=UserRole.POWER_USER,
             created_at=__import__("datetime").datetime.now(),
         )
-        batch = []
+        batch = []  # type: ignore[var-annotated]
 
         responses = await process_batch_request(batch, user)
 

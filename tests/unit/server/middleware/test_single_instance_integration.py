@@ -169,8 +169,8 @@ class TestSingleInstanceIntegration:
 
         # Try to access middleware stack if available
         if hasattr(app, "middleware_stack") and app.middleware_stack is not None:
-            assert len(app.middleware_stack) > 0
-            middleware_types = [middleware.cls for middleware in app.middleware_stack]
+            assert len(app.middleware_stack) > 0  # type: ignore[arg-type]
+            middleware_types = [middleware.cls for middleware in app.middleware_stack]  # type: ignore[attr-defined]
             assert GlobalErrorHandler in middleware_types
         else:
             # Alternative check - middleware was added without error
@@ -205,7 +205,7 @@ class TestSingleInstanceIntegration:
 
         # Check middleware was added (FastAPI version independent)
         if hasattr(app, "middleware_stack") and app.middleware_stack is not None:
-            assert len(app.middleware_stack) > 0
+            assert len(app.middleware_stack) > 0  # type: ignore[arg-type]
 
         # This test mainly documents the issue rather than testing a solution
 

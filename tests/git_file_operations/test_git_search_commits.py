@@ -42,7 +42,7 @@ def create_searchable_commits(
     Returns:
         List of commit hashes created (most recent first)
     """
-    commit_hashes = []
+    commit_hashes = []  # type: ignore[var-annotated]
     for i in range(count):
         test_file = repo_path / f"search_commit_{prefix}_{i}.txt"
         test_file.write_text(f"Content for {prefix} commit {i}\n")

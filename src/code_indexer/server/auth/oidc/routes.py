@@ -53,7 +53,7 @@ async def sso_callback(code: str, state: str, request: Request):
         "code_verifier"
     )
 
-    tokens = await oidc_manager.provider.exchange_code_for_token(
+    tokens = await oidc_manager.provider.exchange_code_for_token(  # type: ignore[union-attr]
         code, code_verifier, callback_url
     )
 
@@ -61,7 +61,7 @@ async def sso_callback(code: str, state: str, request: Request):
     if "id_token" not in tokens:
         raise HTTPException(status_code=500, detail="ID token not returned by provider")
 
-    user_info = oidc_manager.provider.get_user_info(
+    user_info = oidc_manager.provider.get_user_info(  # type: ignore[union-attr]
         tokens["access_token"], tokens["id_token"]
     )
 

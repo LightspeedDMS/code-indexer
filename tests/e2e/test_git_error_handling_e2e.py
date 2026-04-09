@@ -57,10 +57,10 @@ class TestGitErrorHandlingE2E:
             )
 
         # Verify log file exists
-        assert logger.log_file_path.exists()
+        assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
         # Read and verify log contents
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         # Should have 2 log entries (one for each attempt)
@@ -93,11 +93,11 @@ class TestGitErrorHandlingE2E:
         logger = ExceptionLogger.initialize(project_root, mode="cli")
 
         # Verify log file is in .code-indexer directory
-        assert logger.log_file_path.parent == project_root / ".code-indexer"
-        assert logger.log_file_path.exists()
+        assert logger.log_file_path.parent == project_root / ".code-indexer"  # type: ignore[union-attr]
+        assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
         # Verify filename format
-        filename = logger.log_file_path.name
+        filename = logger.log_file_path.name  # type: ignore[union-attr]
         assert filename.startswith("error_")
         assert str(os.getpid()) in filename
         assert filename.endswith(".log")
@@ -118,8 +118,8 @@ class TestGitErrorHandlingE2E:
 
         # Verify log file is in ~/.cidx-server/logs/
         expected_log_dir = fake_home / ".cidx-server" / "logs"
-        assert logger.log_file_path.parent == expected_log_dir
-        assert logger.log_file_path.exists()
+        assert logger.log_file_path.parent == expected_log_dir  # type: ignore[union-attr]
+        assert logger.log_file_path.exists()  # type: ignore[union-attr]
 
     def test_retry_behavior_e2e(self, tmp_path):
         """Test retry behavior with simulated transient failure."""
@@ -169,7 +169,7 @@ class TestGitErrorHandlingE2E:
             assert call_count == 2  # Initial + 1 retry
 
         # Verify only 1 log entry (for the first failure)
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         entries = [e for e in content.split("\n---\n") if e.strip()]
@@ -206,7 +206,7 @@ class TestGitErrorHandlingE2E:
         time.sleep(0.1)
 
         # Verify exception was logged
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         assert "ValueError" in content
@@ -266,7 +266,7 @@ class TestGitErrorHandlingE2E:
             )
 
         # Verify both retry attempts were logged
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         assert (
@@ -301,7 +301,7 @@ class TestGitErrorHandlingE2E:
                 )
 
         # Verify all operations were logged
-        with open(logger.log_file_path) as f:
+        with open(logger.log_file_path) as f:  # type: ignore[arg-type]
             content = f.read()
 
         # Each operation tries twice, so we should have 6 entries total

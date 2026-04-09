@@ -23,7 +23,7 @@ def voyage_config():
     return VoyageAIConfig(
         model="voyage-multimodal-3.5",
         api_endpoint="https://api.voyageai.com/v1/multimodalembeddings",
-        timeout=30.0,
+        timeout=30.0,  # type: ignore[arg-type]
         max_retries=3,
         retry_delay=1.0,
         exponential_backoff=True,

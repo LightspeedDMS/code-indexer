@@ -19,7 +19,7 @@ def _make_results(n: int) -> List[dict]:
 
 
 def _content_extractor(r: dict) -> str:
-    return r.get("content", "")
+    return r.get("content", "")  # type: ignore[no-any-return]
 
 
 def _make_rerank_result(index: int, score: float):

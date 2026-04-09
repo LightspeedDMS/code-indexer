@@ -37,7 +37,7 @@ def _get_regenerator():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def make_domain_md_content(name: str, repos: list, description: str = None) -> str:
+def make_domain_md_content(name: str, repos: list, description: str = None) -> str:  # type: ignore[assignment]
     """Build a valid domain .md file content with given name and repos."""
     desc = description or f"Domain {name}"
     repos_yaml = "\n".join(f"  - {r}" for r in repos)

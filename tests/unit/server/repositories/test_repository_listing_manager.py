@@ -76,7 +76,7 @@ class TestRepositoryListingManager:
         ]
 
         for repo_data in test_repos:
-            manager.golden_repos[repo_data["alias"]] = GoldenRepo(**repo_data)
+            manager.golden_repos[repo_data["alias"]] = GoldenRepo(**repo_data)  # type: ignore[arg-type]
 
         return manager
 

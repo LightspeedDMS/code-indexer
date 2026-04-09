@@ -140,7 +140,7 @@ def test_exclude_multiple_languages_creates_combined_must_not_filter(
     assert len(must_not_conditions) == 5, "Should have 5 must_not conditions total"
 
     # Verify all expected extensions are present
-    excluded_extensions = {cond["match"]["value"] for cond in must_not_conditions}
+    excluded_extensions = {cond["match"]["value"] for cond in must_not_conditions}  # type: ignore[index]
     expected_extensions = {"js", "jsx", "py", "pyw", "pyi"}
     assert excluded_extensions == expected_extensions, (
         f"Expected {expected_extensions}, got {excluded_extensions}"
@@ -229,11 +229,12 @@ def test_exclude_language_with_path_filter_creates_combined_filters(
     # Verify path filter
     path_filter = filter_conditions["must"][0]
     assert path_filter["key"] == "path"
-    assert path_filter["match"]["text"] == "*/tests/*"
+    assert path_filter["match"]["text"] == "*/tests/*"  # type: ignore[index]
 
     # Verify TypeScript exclusions
     excluded_extensions = {
-        cond["match"]["value"] for cond in filter_conditions["must_not"]
+        cond["match"]["value"]  # type: ignore[index]  # cond is dict at runtime though typed as Collection[str]
+        for cond in filter_conditions["must_not"]
     }
     assert excluded_extensions == {
         "ts",

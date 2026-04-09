@@ -162,10 +162,10 @@ def format_response(status, message):
             from src.code_indexer.config import ConfigManager
 
             config_manager = ConfigManager.create_with_backtrack(self.project_path)
-            chunking_manager = FileChunkingManager(config_manager)
+            chunking_manager = FileChunkingManager(config_manager)  # type: ignore[arg-type, call-arg]
 
             # Index the test files
-            chunking_manager.index_repository(
+            chunking_manager.index_repository(  # type: ignore[attr-defined]
                 repo_path=str(self.project_path), force_reindex=True
             )
 
@@ -266,8 +266,8 @@ def format_response(status, message):
             from src.code_indexer.config import ConfigManager
 
             config_manager = ConfigManager.create_with_backtrack(self.project_path)
-            chunking_manager = FileChunkingManager(config_manager)
-            chunking_manager.index_repository(
+            chunking_manager = FileChunkingManager(config_manager)  # type: ignore[arg-type, call-arg]
+            chunking_manager.index_repository(  # type: ignore[attr-defined]
                 repo_path=str(self.project_path), force_reindex=True
             )
 
@@ -357,8 +357,8 @@ def format_response(status, message):
             from src.code_indexer.config import ConfigManager
 
             config_manager = ConfigManager.create_with_backtrack(self.project_path)
-            chunking_manager = FileChunkingManager(config_manager)
-            chunking_manager.index_repository(
+            chunking_manager = FileChunkingManager(config_manager)  # type: ignore[arg-type, call-arg]
+            chunking_manager.index_repository(  # type: ignore[attr-defined]
                 repo_path=str(self.project_path), force_reindex=True
             )
 
@@ -451,8 +451,8 @@ def new_function():
             from src.code_indexer.config import ConfigManager
 
             config_manager = ConfigManager.create_with_backtrack(self.project_path)
-            chunking_manager = FileChunkingManager(config_manager)
-            chunking_manager.index_repository(
+            chunking_manager = FileChunkingManager(config_manager)  # type: ignore[arg-type, call-arg]
+            chunking_manager.index_repository(  # type: ignore[attr-defined]
                 repo_path=str(self.project_path), force_reindex=True
             )
 
@@ -559,7 +559,7 @@ try:
 except ImportError:
     from typing import Any
 
-    MagicMock: type[Any] = MockMagicMock  # type: ignore[misc]
+    MagicMock: type[Any] = MockMagicMock  # type: ignore[misc, no-redef]
 
 
 if __name__ == "__main__":

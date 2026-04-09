@@ -28,16 +28,16 @@ class RealTokenPair:
 
     def is_access_token_expired(self) -> bool:
         """Check if access token is expired based on creation time."""
-        expiry_time = self.created_at + timedelta(seconds=self.expires_in)
-        return datetime.now(timezone.utc) > expiry_time
+        expiry_time = self.created_at + timedelta(seconds=self.expires_in)  # type: ignore[operator]
+        return datetime.now(timezone.utc) > expiry_time  # type: ignore[operator]
 
     def is_access_token_near_expiry(self, threshold_seconds: int = 60) -> bool:
         """Check if access token is near expiry."""
-        expiry_time = self.created_at + timedelta(seconds=self.expires_in)
+        expiry_time = self.created_at + timedelta(seconds=self.expires_in)  # type: ignore[operator]
         threshold_time = datetime.now(timezone.utc) + timedelta(
             seconds=threshold_seconds
         )
-        return threshold_time > expiry_time
+        return threshold_time > expiry_time  # type: ignore[operator]
 
 
 class RealJWTManager:

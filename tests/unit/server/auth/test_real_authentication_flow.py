@@ -74,14 +74,14 @@ class TestRealAuthenticationFlow:
             )
 
             # Test real protected endpoint (health check with auth)
-            response = infrastructure.client.get("/health", headers=auth_headers)
+            response = infrastructure.client.get("/health", headers=auth_headers)  # type: ignore[union-attr]
 
             # This should succeed with real authentication
             assert response.status_code == status.HTTP_200_OK
 
             # PHASE 5: Verify token contains real user data
             # JWT should contain real username from real database
-            payload = infrastructure.jwt_manager.validate_token(
+            payload = infrastructure.jwt_manager.validate_token(  # type: ignore[union-attr]
                 token_response["access_token"]
             )
             assert payload["username"] == "realuser"
@@ -105,27 +105,27 @@ class TestRealAuthenticationFlow:
             )
 
             # Test 1: Wrong password - should fail through real authentication
-            response = infrastructure.client.post(
+            response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={"username": "testuser", "password": "WrongPassword123!"},
             )
             assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
             # Test 2: Non-existent user - should fail through real user lookup
-            response = infrastructure.client.post(
+            response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={"username": "nonexistent", "password": "AnyPassword123!"},
             )
             assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
             # Test 3: Invalid token - should fail through real JWT validation
-            response = infrastructure.client.get(
+            response = infrastructure.client.get(  # type: ignore[union-attr]
                 "/health", headers={"Authorization": "Bearer invalid.jwt.token"}
             )
             assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
             # Test 4: Missing token - should return 401 per MCP spec (RFC 9728)
-            response = infrastructure.client.get("/health")
+            response = infrastructure.client.get("/health")  # type: ignore[union-attr]
             assert response.status_code == status.HTTP_401_UNAUTHORIZED
             # Should include WWW-Authenticate header per RFC 9728
             assert "www-authenticate" in response.headers
@@ -164,7 +164,7 @@ class TestRealAuthenticationFlow:
             )
 
             # Test normal user accessing admin endpoint - should fail
-            response = infrastructure.client.get(
+            response = infrastructure.client.get(  # type: ignore[union-attr]
                 "/api/admin/users",  # Admin-only endpoint
                 headers=infrastructure.authenticate_request(
                     normal_token["access_token"]
@@ -173,7 +173,7 @@ class TestRealAuthenticationFlow:
             assert response.status_code == status.HTTP_403_FORBIDDEN
 
             # Test admin user accessing admin endpoint - should succeed
-            response = infrastructure.client.get(
+            response = infrastructure.client.get(  # type: ignore[union-attr]
                 "/api/admin/users",
                 headers=infrastructure.authenticate_request(
                     admin_token["access_token"]
@@ -203,7 +203,7 @@ class TestRealAuthenticationFlow:
             )
 
             # Verify token works initially
-            response = infrastructure.client.get(
+            response = infrastructure.client.get(  # type: ignore[union-attr]
                 "/health",
                 headers=infrastructure.authenticate_request(
                     token_response["access_token"]
@@ -213,7 +213,7 @@ class TestRealAuthenticationFlow:
 
             # For this test, we verify the token structure is valid
             # In production, we would wait for expiration or manipulate time
-            payload = infrastructure.jwt_manager.validate_token(
+            payload = infrastructure.jwt_manager.validate_token(  # type: ignore[union-attr]
                 token_response["access_token"]
             )
 

@@ -129,7 +129,7 @@ class MCPCredentialManager:
 
         # Story #269: Use direct SQL lookup when the backend supports it
         if hasattr(self.user_manager, "get_mcp_credential_by_client_id"):
-            return self.user_manager.get_mcp_credential_by_client_id(client_id)
+            return self.user_manager.get_mcp_credential_by_client_id(client_id)  # type: ignore[no-any-return]
 
         # Fallback: iterate all users (non-SQLite backends)
         # Story #702 SQLite migration: Use get_mcp_credentials_with_secrets

@@ -81,8 +81,8 @@ class TestResearchAssistantClaudeRetry:
         # Verify command used --session-id (not --resume)
         assert len(captured_commands) == 1, "Should execute Claude CLI once"
         cmd = captured_commands[0]
-        assert "--session-id" in cmd, "First message must use --session-id"
-        assert "--resume" not in cmd, "First message must NOT use --resume"
+        assert "--session-id" in cmd, "First message must use --session-id"  # type: ignore[operator]
+        assert "--resume" not in cmd, "First message must NOT use --resume"  # type: ignore[operator]
 
     def test_subsequent_message_tries_resume_first(self, research_service):
         """Test Bug #153: Subsequent message tries --resume first."""
@@ -118,10 +118,10 @@ class TestResearchAssistantClaudeRetry:
             "Should execute Claude CLI once (successful resume)"
         )
         cmd = captured_commands[0]
-        assert "--resume" in cmd, "Subsequent message must try --resume first"
-        assert "--session-id" not in cmd, (
-            "Successful resume should not use --session-id"
-        )
+        assert "--resume" in cmd, "Subsequent message must try --resume first"  # type: ignore[operator]
+        assert (
+            "--session-id" not in cmd  # type: ignore[operator]
+        ), "Successful resume should not use --session-id"
 
     def test_retry_logic_on_no_conversation_found(self, research_service):
         """Test Bug #153: Retry with --session-id when --resume fails with 'No conversation found'."""
@@ -145,7 +145,7 @@ class TestResearchAssistantClaudeRetry:
 
             # First call (--resume) fails with "No conversation found"
             if call_count[0] == 1:
-                assert "--resume" in cmd, "First attempt should use --resume"
+                assert "--resume" in cmd, "First attempt should use --resume"  # type: ignore[operator]
                 result.returncode = 1
                 result.stdout = ""
                 result.stderr = "Error: No conversation found for session"
@@ -153,7 +153,7 @@ class TestResearchAssistantClaudeRetry:
 
             # Second call (--session-id) succeeds
             elif call_count[0] == 2:
-                assert "--session-id" in cmd, "Retry should use --session-id"
+                assert "--session-id" in cmd, "Retry should use --session-id"  # type: ignore[operator]
                 result.returncode = 0
                 result.stdout = "Test response"
                 result.stderr = ""
@@ -175,8 +175,8 @@ class TestResearchAssistantClaudeRetry:
         assert len(captured_commands) == 2, (
             "Should execute Claude CLI twice (resume failed, retry succeeded)"
         )
-        assert "--resume" in captured_commands[0], "First attempt must use --resume"
-        assert "--session-id" in captured_commands[1], "Retry must use --session-id"
+        assert "--resume" in captured_commands[0], "First attempt must use --resume"  # type: ignore[operator]
+        assert "--session-id" in captured_commands[1], "Retry must use --session-id"  # type: ignore[operator]
 
         # Verify job completed successfully
         status = research_service.poll_job(_job_id)
@@ -207,7 +207,7 @@ class TestResearchAssistantClaudeRetry:
 
             # First call (--resume) fails with "not found"
             if call_count[0] == 1:
-                assert "--resume" in cmd, "First attempt should use --resume"
+                assert "--resume" in cmd, "First attempt should use --resume"  # type: ignore[operator]
                 result.returncode = 1
                 result.stdout = ""
                 result.stderr = "Session not found"
@@ -215,7 +215,7 @@ class TestResearchAssistantClaudeRetry:
 
             # Second call (--session-id) succeeds
             elif call_count[0] == 2:
-                assert "--session-id" in cmd, "Retry should use --session-id"
+                assert "--session-id" in cmd, "Retry should use --session-id"  # type: ignore[operator]
                 result.returncode = 0
                 result.stdout = "Test response"
                 result.stderr = ""
@@ -235,8 +235,8 @@ class TestResearchAssistantClaudeRetry:
 
         # Verify retry logic was triggered
         assert len(captured_commands) == 2, "Should execute Claude CLI twice"
-        assert "--resume" in captured_commands[0], "First attempt must use --resume"
-        assert "--session-id" in captured_commands[1], "Retry must use --session-id"
+        assert "--resume" in captured_commands[0], "First attempt must use --resume"  # type: ignore[operator]
+        assert "--session-id" in captured_commands[1], "Retry must use --session-id"  # type: ignore[operator]
 
     def test_no_retry_on_successful_resume(self, research_service):
         """Test Bug #153: Successful --resume does NOT trigger retry."""
@@ -273,8 +273,8 @@ class TestResearchAssistantClaudeRetry:
         assert len(captured_commands) == 1, (
             "Should execute Claude CLI ONCE (no retry needed)"
         )
-        assert "--resume" in captured_commands[0], "Should use --resume"
-        assert "--session-id" not in captured_commands[0], "Should NOT use --session-id"
+        assert "--resume" in captured_commands[0], "Should use --resume"  # type: ignore[operator]
+        assert "--session-id" not in captured_commands[0], "Should NOT use --session-id"  # type: ignore[operator]
 
     def test_no_retry_on_other_errors(self, research_service):
         """Test Bug #153: Retry logic does NOT trigger on other errors (only 'not found' errors)."""
@@ -311,7 +311,7 @@ class TestResearchAssistantClaudeRetry:
         assert len(captured_commands) == 1, (
             "Should execute Claude CLI ONCE (no retry on non-'not found' errors)"
         )
-        assert "--resume" in captured_commands[0], "Should use --resume"
+        assert "--resume" in captured_commands[0], "Should use --resume"  # type: ignore[operator]
 
         # Verify job failed
         status = research_service.poll_job(_job_id)

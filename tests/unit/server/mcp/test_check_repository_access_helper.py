@@ -35,7 +35,7 @@ def _make_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> User:
 
 def _make_access_service(
     is_admin: bool = False,
-    accessible_repos: set = None,
+    accessible_repos: set = None,  # type: ignore[assignment]
 ) -> Mock:
     """Create a mock AccessFilteringService."""
     service = Mock()

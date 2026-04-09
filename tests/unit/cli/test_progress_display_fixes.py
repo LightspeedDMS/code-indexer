@@ -33,7 +33,7 @@ class TestNoneValueDefense:
         # Test calling update_complete_state with None current value
         # Should NOT raise exception and should convert None to 0
         progress_manager.update_complete_state(
-            current=None,  # None value
+            current=None,  # type: ignore[arg-type]
             total=100,
             files_per_second=10.0,
             kb_per_second=500.0,
@@ -57,7 +57,7 @@ class TestNoneValueDefense:
         # Should NOT raise exception and should convert None to 0
         progress_manager.update_complete_state(
             current=50,
-            total=None,  # None value
+            total=None,  # type: ignore[arg-type]  # intentional None to test defensive conversion
             files_per_second=10.0,
             kb_per_second=500.0,
             active_threads=12,
@@ -79,8 +79,8 @@ class TestNoneValueDefense:
         # Test calling update_complete_state with both None values
         # Should NOT raise exception
         progress_manager.update_complete_state(
-            current=None,  # None value
-            total=None,  # None value
+            current=None,  # type: ignore[arg-type]  # intentional None to test defensive conversion
+            total=None,  # type: ignore[arg-type]  # intentional None to test defensive conversion
             files_per_second=10.0,
             kb_per_second=500.0,
             active_threads=12,
@@ -266,7 +266,7 @@ class TestIntegrationScenarios:
 
         # Simulate hash phase with None current value (edge case)
         progress_manager.update_complete_state(
-            current=None,  # None value - should convert to 0
+            current=None,  # type: ignore[arg-type]  # intentional None to test defensive conversion
             total=100,
             files_per_second=10.0,
             kb_per_second=500.0,
@@ -305,7 +305,7 @@ class TestIntegrationScenarios:
         for i in range(1, 101):
             current = i if i % 10 != 0 else None  # Inject None every 10th iteration
             progress_manager.update_complete_state(
-                current=current,
+                current=current,  # type: ignore[arg-type]
                 total=100,
                 files_per_second=10.0,
                 kb_per_second=500.0,

@@ -24,7 +24,7 @@ class TestPromptTemplateProcessorRender:
 
         processor = PromptTemplateProcessor()
         template = "Search for authentication code."
-        parameters = {}
+        parameters = {}  # type: ignore[var-annotated]
         user_prompt = "Find login functions"
         impersonation_user = "service_account_1"
 
@@ -85,7 +85,7 @@ class TestPromptTemplateProcessorRender:
 
         processor = PromptTemplateProcessor()
         template = "You are a code assistant.\n\nUser request: {{user_prompt}}"
-        parameters = {}
+        parameters = {}  # type: ignore[var-annotated]
         user_prompt = "Find security bugs in the auth module"
         impersonation_user = "user1"
 
@@ -175,7 +175,7 @@ Step 3: {{action}}"""
 
         processor = PromptTemplateProcessor()
         template = ""
-        parameters = {}
+        parameters = {}  # type: ignore[var-annotated]
         user_prompt = ""
         impersonation_user = "user1"
 
@@ -204,7 +204,7 @@ Step 3: {{action}}"""
 
         processor = PromptTemplateProcessor()
         template = "Do something."
-        parameters = {}
+        parameters = {}  # type: ignore[var-annotated]
         user_prompt = ""
         impersonation_user = "delegated_user"
 
@@ -512,7 +512,7 @@ class TestPromptTemplateProcessorSpaceVariantPlaceholders:
 
         processor = PromptTemplateProcessor()
         template = "User request: {{ user_prompt }}"
-        parameters = {}
+        parameters = {}  # type: ignore[var-annotated]
         user_prompt = "Find security bugs"
 
         result = processor.render(
@@ -539,7 +539,7 @@ class TestPromptTemplateProcessorSpaceVariantPlaceholders:
 
         processor = PromptTemplateProcessor()
         template = "User request: {{  user_prompt  }}"
-        parameters = {}
+        parameters = {}  # type: ignore[var-annotated]
         user_prompt = "Find security bugs"
 
         result = processor.render(

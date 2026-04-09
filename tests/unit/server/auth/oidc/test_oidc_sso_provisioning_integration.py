@@ -78,7 +78,7 @@ def create_test_user(username: str, role: UserRole = UserRole.NORMAL_USER) -> Us
     )
 
 
-def create_user_info(subject: str, email: str, username: str = None) -> OIDCUserInfo:
+def create_user_info(subject: str, email: str, username: str = None) -> OIDCUserInfo:  # type: ignore[assignment]
     """Helper to create OIDCUserInfo for tests."""
     return OIDCUserInfo(
         subject=subject,

@@ -172,7 +172,7 @@ class DatabaseRetryHandler:
                 result = operation()
                 # Support both coroutine functions and regular functions
                 if asyncio.iscoroutine(result):
-                    return await result
+                    return await result  # type: ignore[no-any-return]
                 return result
             except Exception as e:
                 last_exception = e

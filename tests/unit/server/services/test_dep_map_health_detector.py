@@ -103,7 +103,10 @@ def make_domains_json(output_dir: Path, domains: list) -> None:
 
 
 def make_domain_file(
-    output_dir: Path, name: str, content: str = None, size: int = None
+    output_dir: Path,
+    name: str,
+    content: str = None,  # type: ignore[assignment]  # None default intentional: test helper allows omitting content
+    size: int = None,  # type: ignore[assignment]
 ) -> Path:
     """Create a domain .md file with given content or padded to a given size."""
     path = output_dir / f"{name}.md"
@@ -116,7 +119,7 @@ def make_domain_file(
     return path
 
 
-def make_index_md(output_dir: Path, content: str = None) -> Path:
+def make_index_md(output_dir: Path, content: str = None) -> Path:  # type: ignore[assignment]
     """Create _index.md with given content or valid default."""
     path = output_dir / "_index.md"
     path.write_text(content if content is not None else VALID_INDEX_CONTENT)

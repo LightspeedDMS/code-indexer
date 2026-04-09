@@ -184,14 +184,14 @@ class TestInlineReposSyncJobSubmitCall:
                 # We're in the right submit_job block - check for params=
                 block_lines = []
                 for j in range(
-                    max(0, submit_start_line - 2),
-                    min(len(lines), submit_start_line + 10),
+                    max(0, submit_start_line - 2),  # type: ignore[operator]
+                    min(len(lines), submit_start_line + 10),  # type: ignore[operator]
                 ):
                     block_lines.append(lines[j])
                 block_text = "\n".join(block_lines)
 
                 assert 'params={"repo_id"' not in block_text, (
-                    f"Bug #479 not fixed: params= kwarg still present in submit_job "
+                    f"Bug #479 not fixed: params= kwarg still present in submit_job "  # type: ignore[operator]
                     f"call near line {submit_start_line + 1}:\n{block_text}"
                 )
                 in_submit_block = False

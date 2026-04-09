@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 
-from src.code_indexer.server.app import create_app, token_blacklist
+from src.code_indexer.server.app import create_app, token_blacklist  # type: ignore[attr-defined]
 from src.code_indexer.server.auth.jwt_manager import JWTManager
 from src.code_indexer.server.auth.user_manager import User, UserRole
 
@@ -59,7 +59,7 @@ class TestAuthLifecycleIntegration:
             mock_user = User(
                 username="testuser",
                 role=UserRole.NORMAL_USER,
-                created_at="2024-01-01T00:00:00Z",
+                created_at="2024-01-01T00:00:00Z",  # type: ignore[arg-type]
                 email="test@example.com",
                 password_hash="fakehash",
             )

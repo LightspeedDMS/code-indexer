@@ -168,7 +168,7 @@ class TestCreateUserForm:
                 "new_password": "NewUser@123!",
                 "confirm_password": "NewUser@123!",
                 "role": "normal_user",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -211,7 +211,7 @@ class TestCreateUserForm:
                 "new_password": "NewPass@123!",
                 "confirm_password": "NewPass@123!",
                 "role": "normal_user",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -250,7 +250,7 @@ class TestCreateUserForm:
                 "new_password": "Password@123!",
                 "confirm_password": "Different@456!",
                 "role": "normal_user",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -302,7 +302,7 @@ class TestEditUserRole:
             "/admin/users/editroleuser/role",
             data={
                 "role": "power_user",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -339,7 +339,7 @@ class TestEditUserRole:
             f"/admin/users/{admin_user['username']}/role",
             data={
                 "role": "normal_user",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -391,7 +391,7 @@ class TestChangeUserPassword:
             data={
                 "new_password": "NewPass@789!",
                 "confirm_password": "NewPass@789!",
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -449,7 +449,7 @@ class TestDeleteUser:
         response = client.post(
             "/admin/users/deleteuser/delete",
             data={
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )
@@ -495,7 +495,7 @@ class TestDeleteUser:
         response = client.post(
             f"/admin/users/{admin_user['username']}/delete",
             data={
-                "csrf_token": csrf_token,
+                "csrf_token": csrf_token,  # type: ignore[dict-item]
             },
             follow_redirects=True,
         )

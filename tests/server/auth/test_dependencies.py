@@ -32,9 +32,9 @@ def fake_app_module(monkeypatch):
     def is_token_blacklisted(jti: str) -> bool:
         return jti in token_blacklist
 
-    fake_app.blacklist_token = blacklist_token
-    fake_app.is_token_blacklisted = is_token_blacklisted
-    fake_app.token_blacklist = token_blacklist
+    fake_app.blacklist_token = blacklist_token  # type: ignore[attr-defined]
+    fake_app.is_token_blacklisted = is_token_blacklisted  # type: ignore[attr-defined]
+    fake_app.token_blacklist = token_blacklist  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "code_indexer.server.app", fake_app)
     try:
@@ -179,7 +179,7 @@ def test_get_current_user_no_auth_401(setup_auth_env):
 
     assert isinstance(exc.value, HTTPException)
     assert exc.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "www-authenticate" in {k.lower(): v for k, v in exc.value.headers.items()}
+    assert "www-authenticate" in {k.lower(): v for k, v in exc.value.headers.items()}  # type: ignore[union-attr]
 
 
 def test_get_current_user_invalid_cookie_401(setup_auth_env):

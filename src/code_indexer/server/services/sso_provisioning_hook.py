@@ -96,7 +96,7 @@ class SSOProvisioningHook:
                     logger.debug(
                         f"Matched external group '{external_name}' ({external_group_id}) to CIDX group '{cidx_group}'"
                     )
-                    return cidx_group
+                    return cidx_group  # type: ignore[return-value]
 
         # No matches found, use default
         logger.debug(

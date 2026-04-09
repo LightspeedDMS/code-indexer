@@ -35,7 +35,7 @@ class TestRealAuditLogging:
 
         # Audit logs will be in the infrastructure temp directory
         self.audit_log_path = (
-            self.infrastructure.temp_dir / "audit" / "password_changes.log"
+            self.infrastructure.temp_dir / "audit" / "password_changes.log"  # type: ignore[operator]
         )
 
         # Ensure audit directory exists
@@ -86,7 +86,7 @@ class TestRealAuditLogging:
         headers = self._get_auth_headers()
 
         # Make failed password change attempt
-        response = self.client.put(
+        response = self.client.put(  # type: ignore[union-attr]
             "/api/users/change-password",
             headers=headers,
             json={
@@ -129,7 +129,7 @@ class TestRealAuditLogging:
         headers = self._get_auth_headers()
 
         # Make successful password change attempt
-        response = self.client.put(
+        response = self.client.put(  # type: ignore[union-attr]
             "/api/users/change-password",
             headers=headers,
             json={
@@ -169,7 +169,7 @@ class TestRealAuditLogging:
 
         # Exhaust rate limiter (5 failed attempts)
         for i in range(5):
-            response = self.client.put(
+            response = self.client.put(  # type: ignore[union-attr]
                 "/api/users/change-password",
                 headers=headers,
                 json={
@@ -210,7 +210,7 @@ class TestRealAuditLogging:
         tokens = self.infrastructure.get_auth_token(self.test_username, "TestPass123!")
 
         # Use refresh token
-        refresh_response = self.client.post(
+        refresh_response = self.client.post(  # type: ignore[union-attr]
             "/api/auth/refresh", json={"refresh_token": tokens["refresh_token"]}
         )
         assert refresh_response.status_code == 200
@@ -240,7 +240,7 @@ class TestRealAuditLogging:
         GREEN: Test real audit logging for invalid refresh token attempts.
         """
         # Try invalid refresh token
-        response = self.client.post(
+        response = self.client.post(  # type: ignore[union-attr]
             "/api/auth/refresh", json={"refresh_token": "invalid_token_12345"}
         )
         assert response.status_code == 401

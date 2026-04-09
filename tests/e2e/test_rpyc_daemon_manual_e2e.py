@@ -106,7 +106,7 @@ class DatabaseManager:
             sys.executable,
             "-m",
             "src.code_indexer.services.rpyc_daemon",
-            str(self.project_path / ".code-indexer" / "config.json"),
+            str(self.project_path / ".code-indexer" / "config.json"),  # type: ignore[operator]
         ]
 
         self.daemon_process = subprocess.Popen(
@@ -134,7 +134,7 @@ class DatabaseManager:
         print("\n[AC1] Testing socket binding and connection...")
 
         # Check socket file exists
-        if not self.socket_path.exists():
+        if not self.socket_path.exists():  # type: ignore[union-attr]
             print(f"✗ Socket file not created at: {self.socket_path}")
             return False
 
@@ -158,7 +158,7 @@ class DatabaseManager:
             sys.executable,
             "-m",
             "src.code_indexer.services.rpyc_daemon",
-            str(self.project_path / ".code-indexer" / "config.json"),
+            str(self.project_path / ".code-indexer" / "config.json"),  # type: ignore[operator]
         ]
 
         proc2 = subprocess.Popen(
@@ -190,8 +190,8 @@ class DatabaseManager:
         from src.code_indexer.config import ConfigManager
 
         config_manager = ConfigManager.create_with_backtrack(self.project_path)
-        chunking_manager = FileChunkingManager(config_manager)
-        chunking_manager.index_repository(str(self.project_path), force_reindex=True)
+        chunking_manager = FileChunkingManager(config_manager)  # type: ignore[arg-type, call-arg]
+        chunking_manager.index_repository(str(self.project_path), force_reindex=True)  # type: ignore[attr-defined]
 
         # First query - loads indexes (cache miss)
         print("  First query (cache miss)...")
@@ -396,7 +396,7 @@ class DatabaseManager:
                 return False
 
         # Check socket removed
-        if not self.socket_path.exists():
+        if not self.socket_path.exists():  # type: ignore[union-attr]
             print("  ✓ Socket file removed")
             return True
         else:

@@ -66,7 +66,7 @@ class TestMultiProjectCredentialIsolation:
 
         # Create project directories
         for project in self.projects.values():
-            project["path"].mkdir(parents=True, exist_ok=True)
+            project["path"].mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
 
     def teardown_method(self):
         """Clean up test fixtures."""
@@ -92,7 +92,7 @@ class TestMultiProjectCredentialIsolation:
 
         # Verify all projects have their own credential files
         for project_name, config in self.projects.items():
-            credentials_file = config["path"] / ".code-indexer" / ".creds"
+            credentials_file = config["path"] / ".code-indexer" / ".creds"  # type: ignore[operator]
             assert credentials_file.exists(), (
                 f"Credentials not found for {project_name}"
             )
@@ -211,7 +211,7 @@ class TestMultiProjectCredentialIsolation:
         assert mobile_creds.password == mobile_app["password"]
 
         # Remove web_app credentials
-        (web_app["path"] / ".code-indexer" / ".creds").unlink()
+        (web_app["path"] / ".code-indexer" / ".creds").unlink()  # type: ignore[operator]
 
         # Verify web_app credentials are gone
         with pytest.raises(CredentialNotFoundError):
@@ -290,8 +290,8 @@ class TestMultiProjectCredentialIsolation:
         assert mobile_payload["sub"] == "mobiledev"
 
         # Verify tokens are stored in separate files
-        web_token_file = web_app["path"] / ".code-indexer" / ".token"
-        mobile_token_file = mobile_app["path"] / ".code-indexer" / ".token"
+        web_token_file = web_app["path"] / ".code-indexer" / ".token"  # type: ignore[operator]
+        mobile_token_file = mobile_app["path"] / ".code-indexer" / ".token"  # type: ignore[operator]
 
         assert web_token_file.exists()
         assert mobile_token_file.exists()
@@ -334,7 +334,7 @@ class TestMultiProjectCredentialIsolation:
 
         # Create project directories
         for project in projects_same_user.values():
-            project["path"].mkdir(parents=True, exist_ok=True)
+            project["path"].mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
 
         # Store credentials for each server
         encrypted_credentials = {}
@@ -406,9 +406,9 @@ class TestMultiProjectCredentialIsolation:
         token_manager.store_token(test_token)
 
         # Verify files exist before cleanup
-        creds_file = project_path / ".code-indexer" / ".creds"
-        token_file = project_path / ".code-indexer" / ".token"
-        config_dir = project_path / ".code-indexer"
+        creds_file = project_path / ".code-indexer" / ".creds"  # type: ignore[operator]
+        token_file = project_path / ".code-indexer" / ".token"  # type: ignore[operator]
+        config_dir = project_path / ".code-indexer"  # type: ignore[operator]
 
         assert creds_file.exists()
         assert token_file.exists()
@@ -522,7 +522,7 @@ class TestMultiProjectCredentialIsolation:
 
         # Create directories
         for project in security_projects.values():
-            project["path"].mkdir(parents=True, exist_ok=True)
+            project["path"].mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
 
         # Store identical credentials in different project paths
         encrypted_data = {}
@@ -576,7 +576,7 @@ class TestMultiProjectCredentialIsolation:
 
         # Simulate compromise: attacker gets the encrypted credential file
         compromised_creds_file = (
-            compromised_project["path"] / ".code-indexer" / ".creds"
+            compromised_project["path"] / ".code-indexer" / ".creds"  # type: ignore[operator]
         )
         with open(compromised_creds_file, "rb") as f:
             compromised_encrypted_data = f.read()

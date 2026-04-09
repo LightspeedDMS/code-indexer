@@ -494,7 +494,7 @@ class TestSubmitRefreshJobForceReset:
         with patch.object(
             scheduler_with_bjm, "_execute_refresh", return_value={"success": True}
         ) as mock_execute:
-            captured_funcs[0]()
+            captured_funcs[0]()  # type: ignore[misc]
 
         mock_execute.assert_called_once_with(
             alias_name, force_reset=True, progress_callback=None
@@ -537,7 +537,7 @@ class TestSubmitRefreshJobForceReset:
         with patch.object(
             scheduler_with_bjm, "_execute_refresh", return_value={"success": True}
         ) as mock_execute:
-            captured_funcs[0]()
+            captured_funcs[0]()  # type: ignore[misc]
 
         mock_execute.assert_called_once_with(
             alias_name, force_reset=False, progress_callback=None
@@ -573,7 +573,7 @@ class TestSubmitRefreshJobForceReset:
         with patch.object(
             scheduler_with_bjm, "_execute_refresh", return_value={"success": True}
         ) as mock_execute:
-            captured_funcs[0]()
+            captured_funcs[0]()  # type: ignore[misc]
 
         # Default must be force_reset=False
         mock_execute.assert_called_once_with(

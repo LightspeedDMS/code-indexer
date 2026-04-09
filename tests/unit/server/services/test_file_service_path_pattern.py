@@ -54,8 +54,8 @@ class TestPathPatternRecursiveGlob:
     def service(self):
         """Create FileListingService instance without database dependency."""
         service = FileListingService.__new__(FileListingService)
-        service.activated_repo_manager = None
-        service._config_manager = None
+        service.activated_repo_manager = None  # type: ignore[assignment]
+        service._config_manager = None  # type: ignore[attr-defined]
         return service
 
     def test_recursive_glob_pattern_double_star_prefix(self, temp_repo, service):
@@ -65,7 +65,7 @@ class TestPathPatternRecursiveGlob:
         This is the PRIMARY bug case - fnmatch.fnmatch() treats ** as literal
         asterisks, while Path.match() correctly treats ** as "any directories".
         """
-        query_params = FileListQueryParams(
+        query_params = FileListQueryParams(  # type: ignore[call-arg]
             path_pattern="**/*Synchronizer*", page=1, limit=100
         )
 
@@ -90,7 +90,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_recursive_glob_pattern_with_directory_prefix(self, temp_repo, service):
         """Test that src/**/*.py pattern matches Python files under src/ only."""
-        query_params = FileListQueryParams(
+        query_params = FileListQueryParams(  # type: ignore[call-arg]
             path_pattern="src/**/*.py", page=1, limit=100
         )
 
@@ -112,7 +112,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_simple_glob_pattern_backward_compatibility(self, temp_repo, service):
         """Test that simple *.py pattern matches files at any depth (backward compatibility)."""
-        query_params = FileListQueryParams(path_pattern="*.py", page=1, limit=100)
+        query_params = FileListQueryParams(path_pattern="*.py", page=1, limit=100)  # type: ignore[call-arg]
 
         result = service.list_files_by_path(
             repo_path=str(temp_repo), query_params=query_params
@@ -134,7 +134,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_pattern_matches_deeply_nested_files(self, temp_repo, service):
         """Test that **/*.java matches files 5+ levels deep."""
-        query_params = FileListQueryParams(path_pattern="**/*.java", page=1, limit=100)
+        query_params = FileListQueryParams(path_pattern="**/*.java", page=1, limit=100)  # type: ignore[call-arg]
 
         result = service.list_files_by_path(
             repo_path=str(temp_repo), query_params=query_params
@@ -155,7 +155,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_pattern_with_middle_directory_wildcard(self, temp_repo, service):
         """Test pattern src/**/example/*.java matches with middle wildcards."""
-        query_params = FileListQueryParams(
+        query_params = FileListQueryParams(  # type: ignore[call-arg]
             path_pattern="src/**/example/*.java", page=1, limit=100
         )
 
@@ -174,7 +174,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_no_pattern_returns_all_files(self, temp_repo, service):
         """Test that omitting path_pattern returns all files."""
-        query_params = FileListQueryParams(page=1, limit=100)
+        query_params = FileListQueryParams(page=1, limit=100)  # type: ignore[call-arg]
 
         result = service.list_files_by_path(
             repo_path=str(temp_repo), query_params=query_params
@@ -188,7 +188,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_pattern_with_no_matches(self, temp_repo, service):
         """Test that non-matching pattern returns empty results."""
-        query_params = FileListQueryParams(
+        query_params = FileListQueryParams(  # type: ignore[call-arg]
             path_pattern="**/*.cpp",
             page=1,
             limit=100,  # No .cpp files exist
@@ -204,7 +204,7 @@ class TestPathPatternRecursiveGlob:
 
     def test_case_sensitive_pattern_matching(self, temp_repo, service):
         """Test that pattern matching is case-sensitive."""
-        query_params = FileListQueryParams(
+        query_params = FileListQueryParams(  # type: ignore[call-arg]
             path_pattern="**/*synchronizer*",
             page=1,
             limit=100,  # lowercase 's'
@@ -228,8 +228,8 @@ class TestPathPatternEdgeCases:
     def service(self):
         """Create FileListingService instance without database dependency."""
         service = FileListingService.__new__(FileListingService)
-        service.activated_repo_manager = None
-        service._config_manager = None
+        service.activated_repo_manager = None  # type: ignore[assignment]
+        service._config_manager = None  # type: ignore[attr-defined]
         return service
 
     def test_pattern_with_special_characters(self, tmp_path, service):
@@ -239,7 +239,7 @@ class TestPathPatternEdgeCases:
         (tmp_path / "src" / "test-file.py").write_text("content")
         (tmp_path / "src" / "test_file.py").write_text("content")
 
-        query_params = FileListQueryParams(
+        query_params = FileListQueryParams(  # type: ignore[call-arg]
             path_pattern="src/*test*file*.py", page=1, limit=100
         )
 
@@ -258,13 +258,14 @@ class TestPathPatternEdgeCases:
 
         # Query with no pattern
         no_pattern_result = service.list_files_by_path(
-            repo_path=str(tmp_path), query_params=FileListQueryParams(page=1, limit=100)
+            repo_path=str(tmp_path),
+            query_params=FileListQueryParams(page=1, limit=100),  # type: ignore[call-arg]
         )
 
         # Query with empty pattern
         empty_pattern_result = service.list_files_by_path(
             repo_path=str(tmp_path),
-            query_params=FileListQueryParams(path_pattern="", page=1, limit=100),
+            query_params=FileListQueryParams(path_pattern="", page=1, limit=100),  # type: ignore[call-arg]
         )
 
         # Should return same results

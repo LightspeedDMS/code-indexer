@@ -44,8 +44,8 @@ domain: authentication
 Existing analysis content.
 """
         changed_repos = ["repo1"]
-        new_repos = []
-        removed_repos = []
+        new_repos = []  # type: ignore[var-annotated]
+        removed_repos = []  # type: ignore[var-annotated]
         domain_list = ["authentication", "data-processing"]
 
         prompt = analyzer.build_delta_merge_prompt(
@@ -65,8 +65,8 @@ Existing analysis content.
         """Test that merge prompt includes 5 critical self-correction rules."""
         existing_content = "# Domain\n\nContent"
         changed_repos = ["repo1"]
-        new_repos = []
-        removed_repos = []
+        new_repos = []  # type: ignore[var-annotated]
+        removed_repos = []  # type: ignore[var-annotated]
         domain_list = ["authentication"]
 
         prompt = analyzer.build_delta_merge_prompt(
@@ -97,8 +97,8 @@ Existing analysis content.
         """Test that merge prompt explicitly lists changed repos."""
         existing_content = "# Domain"
         changed_repos = ["repo1", "repo2"]
-        new_repos = []
-        removed_repos = []
+        new_repos = []  # type: ignore[var-annotated]
+        removed_repos = []  # type: ignore[var-annotated]
         domain_list = ["authentication"]
 
         prompt = analyzer.build_delta_merge_prompt(
@@ -118,9 +118,9 @@ Existing analysis content.
     def test_build_delta_merge_prompt_lists_new_repos(self, analyzer):
         """Test that merge prompt explicitly lists new repos to incorporate."""
         existing_content = "# Domain"
-        changed_repos = []
+        changed_repos = []  # type: ignore[var-annotated]
         new_repos = ["repo3", "repo4"]
-        removed_repos = []
+        removed_repos = []  # type: ignore[var-annotated]
         domain_list = ["authentication"]
 
         prompt = analyzer.build_delta_merge_prompt(
@@ -140,8 +140,8 @@ Existing analysis content.
     def test_build_delta_merge_prompt_lists_removed_repos(self, analyzer):
         """Test that merge prompt instructs removal of references to removed repos."""
         existing_content = "# Domain"
-        changed_repos = []
-        new_repos = []
+        changed_repos = []  # type: ignore[var-annotated]
+        new_repos = []  # type: ignore[var-annotated]
         removed_repos = ["repo5"]
         domain_list = ["authentication"]
 
@@ -162,8 +162,8 @@ Existing analysis content.
         """Test that merge prompt includes MODULE/SUBSYSTEM granularity guidance."""
         existing_content = "# Domain"
         changed_repos = ["repo1"]
-        new_repos = []
-        removed_repos = []
+        new_repos = []  # type: ignore[var-annotated]
+        removed_repos = []  # type: ignore[var-annotated]
         domain_list = ["authentication"]
 
         prompt = analyzer.build_delta_merge_prompt(

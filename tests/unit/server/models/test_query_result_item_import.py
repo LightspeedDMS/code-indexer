@@ -46,7 +46,7 @@ def test_query_result_item_import_no_server_init():
         _server_key = "src.code_indexer.server"
         _parent_key = "src.code_indexer"
         if _server_key in snapshot and _parent_key in sys.modules:
-            sys.modules[_parent_key].server = snapshot[_server_key]
+            sys.modules[_parent_key].server = snapshot[_server_key]  # type: ignore[attr-defined]
 
 
 def test_query_result_item_has_required_fields():

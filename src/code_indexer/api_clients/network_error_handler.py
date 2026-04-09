@@ -141,7 +141,7 @@ class UserGuidanceProvider:
         guidance_func = self._guidance_mapping.get(
             error_type, self._get_generic_guidance
         )
-        return cast(UserGuidance, guidance_func(error))
+        return cast(UserGuidance, guidance_func(error))  # type: ignore[operator]
 
     def _get_connection_error_guidance(
         self, error: NetworkConnectionError

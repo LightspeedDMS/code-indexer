@@ -24,8 +24,8 @@ def test_file_not_found_error_parity():
     }
 
     # Both should indicate file not found
-    assert "not found" in mcp_error_structure["error"].lower()
-    assert "not found" in rest_error_structure["detail"].lower()
+    assert "not found" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
+    assert "not found" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
 
 
 def test_file_already_exists_error_parity():
@@ -49,8 +49,8 @@ def test_file_already_exists_error_parity():
     }
 
     # Both should indicate file already exists
-    assert "already exists" in mcp_error_structure["error"].lower()
-    assert "already exists" in rest_error_structure["detail"].lower()
+    assert "already exists" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
+    assert "already exists" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
 
 
 def test_hash_mismatch_error_parity():
@@ -75,12 +75,12 @@ def test_hash_mismatch_error_parity():
 
     # Both should indicate hash mismatch
     assert (
-        "hash" in mcp_error_structure["error"].lower()
-        or "modified" in mcp_error_structure["error"].lower()
+        "hash" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
+        or "modified" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
     )
     assert (
-        "hash" in rest_error_structure["detail"].lower()
-        or "modified" in rest_error_structure["detail"].lower()
+        "hash" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
+        or "modified" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
     )
 
 
@@ -106,12 +106,12 @@ def test_permission_denied_error_parity():
 
     # Both should indicate permission denied
     assert (
-        "permission" in mcp_error_structure["error"].lower()
-        or "denied" in mcp_error_structure["error"].lower()
+        "permission" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
+        or "denied" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
     )
     assert (
-        "permission" in rest_error_structure["detail"].lower()
-        or "denied" in rest_error_structure["detail"].lower()
+        "permission" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
+        or "denied" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
     )
 
 
@@ -136,8 +136,8 @@ def test_invalid_parameters_error_parity():
     }
 
     # Both should indicate invalid parameters
-    assert "invalid" in mcp_error_structure["error"].lower()
+    assert "invalid" in mcp_error_structure["error"].lower()  # type: ignore[attr-defined]
     assert (
-        "invalid" in rest_error_structure["detail"].lower()
+        "invalid" in rest_error_structure["detail"].lower()  # type: ignore[attr-defined]
         or rest_error_structure["status_code"] == 400
     )

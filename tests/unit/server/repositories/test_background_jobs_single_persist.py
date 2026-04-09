@@ -75,8 +75,8 @@ class TestSingleJobPersist:
         self.manager._persist_jobs()
 
         # Now track calls to the backend
-        original_get_job = self.manager._sqlite_backend.get_job
-        original_update_job = self.manager._sqlite_backend.update_job
+        original_get_job = self.manager._sqlite_backend.get_job  # type: ignore[union-attr]
+        original_update_job = self.manager._sqlite_backend.update_job  # type: ignore[union-attr]
 
         get_job_calls = []
         update_job_calls = []
@@ -93,9 +93,9 @@ class TestSingleJobPersist:
         def tracking_save_job(**kwargs):
             save_job_calls.append(kwargs.get("job_id"))
 
-        self.manager._sqlite_backend.get_job = tracking_get_job
-        self.manager._sqlite_backend.update_job = tracking_update_job
-        self.manager._sqlite_backend.save_job = tracking_save_job
+        self.manager._sqlite_backend.get_job = tracking_get_job  # type: ignore[union-attr]
+        self.manager._sqlite_backend.update_job = tracking_update_job  # type: ignore[union-attr]
+        self.manager._sqlite_backend.save_job = tracking_save_job  # type: ignore[union-attr]
 
         # Act: Persist only job-50
         self.manager._persist_jobs(job_id="job-50")
@@ -134,7 +134,7 @@ class TestSingleJobPersist:
 
         # Assert: All 5 jobs should be in the database
         for i in range(5):
-            job_data = self.manager._sqlite_backend.get_job(f"job-{i}")
+            job_data = self.manager._sqlite_backend.get_job(f"job-{i}")  # type: ignore[union-attr]
             assert job_data is not None, f"Job job-{i} should be in database"
 
     def test_submit_job_persists_only_new_job(self):
@@ -158,8 +158,8 @@ class TestSingleJobPersist:
         self.manager._persist_jobs()
 
         # Track backend calls from this point
-        original_update_job = self.manager._sqlite_backend.update_job
-        original_save_job = self.manager._sqlite_backend.save_job
+        original_update_job = self.manager._sqlite_backend.update_job  # type: ignore[union-attr]
+        original_save_job = self.manager._sqlite_backend.save_job  # type: ignore[union-attr]
         update_calls = []
         save_calls = []
 
@@ -171,8 +171,8 @@ class TestSingleJobPersist:
             save_calls.append(kwargs.get("job_id"))
             return original_save_job(**kwargs)
 
-        self.manager._sqlite_backend.update_job = tracking_update
-        self.manager._sqlite_backend.save_job = tracking_save
+        self.manager._sqlite_backend.update_job = tracking_update  # type: ignore[union-attr]
+        self.manager._sqlite_backend.save_job = tracking_save  # type: ignore[union-attr]
 
         # Act: Submit a new job
         def dummy_task():
@@ -223,7 +223,7 @@ class TestSingleJobPersist:
             persist_calls.append(job_id)
             return original_persist(job_id=job_id)
 
-        self.manager._persist_jobs = tracking_persist
+        self.manager._persist_jobs = tracking_persist  # type: ignore[method-assign]
 
         # Act: Submit a job with progress callback
         def task_with_progress(progress_callback=None):
@@ -262,7 +262,7 @@ class TestSingleJobPersist:
             persist_calls.append(job_id)
             return original_persist(job_id=job_id)
 
-        self.manager._persist_jobs = tracking_persist
+        self.manager._persist_jobs = tracking_persist  # type: ignore[method-assign]
 
         # Submit a long-running job
         def long_task():

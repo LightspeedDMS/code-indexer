@@ -48,7 +48,7 @@ def create_test_commits(repo_path: Path, count: int = 5) -> List[str]:
     Returns:
         List of commit hashes created (most recent first)
     """
-    commit_hashes = []
+    commit_hashes = []  # type: ignore[var-annotated]
     for i in range(count):
         test_file = repo_path / f"history_test_file_{i}.txt"
         test_file.write_text(f"Content for commit {i}\nLine 2 of file {i}\n")

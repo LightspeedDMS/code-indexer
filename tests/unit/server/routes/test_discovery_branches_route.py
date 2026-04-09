@@ -209,7 +209,7 @@ class TestDiscoveryBranchesResponseFormat:
     def test_error_response_structure(self):
         """Test that error responses have correct structure."""
         # Expected error response structure
-        sample_error_response = {
+        sample_error_response = {  # type: ignore[var-annotated]
             "https://github.com/nonexistent/repo.git": {
                 "branches": [],
                 "default_branch": None,

@@ -51,10 +51,10 @@ def _make_config_manager(config: ClaudeIntegrationConfig):
 
 def _make_tracking_backend(
     status: str = "completed",
-    last_run: str = None,
-    next_run: str = None,
-    error_message: str = None,
-    commit_hashes: str = None,
+    last_run: str = None,  # type: ignore[assignment]
+    next_run: str = None,  # type: ignore[assignment]
+    error_message: str = None,  # type: ignore[assignment]
+    commit_hashes: str = None,  # type: ignore[assignment]
 ):
     """Build a mock tracking backend with the given tracking state."""
     backend = Mock()
@@ -260,7 +260,7 @@ class TestHealthComputation:
         service = DependencyMapDashboardService(
             tracking_backend=_make_tracking_backend(
                 status="pending",
-                last_run=None,
+                last_run=None,  # type: ignore[arg-type]
             ),
             config_manager=_make_config_manager(enabled_config),
             dependency_map_service=_make_dep_map_service(),
@@ -345,8 +345,8 @@ class TestGetJobStatus:
         service = DependencyMapDashboardService(
             tracking_backend=_make_tracking_backend(
                 status="pending",
-                last_run=None,
-                next_run=None,
+                last_run=None,  # type: ignore[arg-type]
+                next_run=None,  # type: ignore[arg-type]
             ),
             config_manager=_make_config_manager(enabled_config),
             dependency_map_service=_make_dep_map_service(),
@@ -390,7 +390,7 @@ class TestErrorMessage:
             tracking_backend=_make_tracking_backend(
                 status="completed",
                 last_run=_hours_ago_iso(1),
-                error_message=None,
+                error_message=None,  # type: ignore[arg-type]
             ),
             config_manager=_make_config_manager(enabled_config),
             dependency_map_service=_make_dep_map_service(),

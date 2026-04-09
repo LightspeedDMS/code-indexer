@@ -148,7 +148,7 @@ def test_worker_exception_is_logged_and_propagated(tmp_path, caplog):
         from types import SimpleNamespace
 
         def mock_submit_batch(texts, metadata):
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             # Create a result with embeddings
             result = SimpleNamespace(
                 embeddings=[[0.1] * 1024 for _ in texts], error=None

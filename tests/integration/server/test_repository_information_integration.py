@@ -24,7 +24,7 @@ async def test_app():
 @pytest.fixture
 async def test_client(test_app):
     """Create test client for API calls."""
-    async with httpx.AsyncClient(app=test_app, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(app=test_app, base_url="http://testserver") as client:  # type: ignore[call-arg]
         yield client
 
 

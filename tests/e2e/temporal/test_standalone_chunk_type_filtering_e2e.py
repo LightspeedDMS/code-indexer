@@ -27,25 +27,25 @@ class TestStandaloneChunkTypeFilteringE2E:
     @classmethod
     def setup_class(cls):
         """Set up test repository with temporal index (daemon disabled)."""
-        cls.test_dir = tempfile.mkdtemp(prefix="test_chunk_type_standalone_")
-        cls.repo_path = Path(cls.test_dir) / "test_repo"
-        cls.repo_path.mkdir()
+        cls.test_dir = tempfile.mkdtemp(prefix="test_chunk_type_standalone_")  # type: ignore[attr-defined]
+        cls.repo_path = Path(cls.test_dir) / "test_repo"  # type: ignore[attr-defined]
+        cls.repo_path.mkdir()  # type: ignore[attr-defined]
 
         # Initialize git repo
-        subprocess.run(["git", "init"], cwd=cls.repo_path, check=True)
+        subprocess.run(["git", "init"], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
             ["git", "config", "user.email", "test@example.com"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test User"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
 
         # Commit 1: Add auth.py with clear commit message
-        (cls.repo_path / "auth.py").write_text(
+        (cls.repo_path / "auth.py").write_text(  # type: ignore[attr-defined]
             """def authenticate(username, password):
     # Basic authentication implementation
     if not username or not password:
@@ -53,15 +53,15 @@ class TestStandaloneChunkTypeFilteringE2E:
     return True
 """
         )
-        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
             ["git", "commit", "-m", "Add authentication module"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
 
         # Commit 2: Modify auth.py with distinctive commit message
-        (cls.repo_path / "auth.py").write_text(
+        (cls.repo_path / "auth.py").write_text(  # type: ignore[attr-defined]
             """def authenticate(username, password):
     # Enhanced authentication with logging
     if not username or not password:
@@ -72,20 +72,20 @@ class TestStandaloneChunkTypeFilteringE2E:
     return validate_credentials(username, password)
 """
         )
-        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
         subprocess.run(
             ["git", "commit", "-m", "Improve authentication logging and validation"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
         )
 
         # Initialize cidx (CLI mode, daemon will be disabled)
-        subprocess.run(["cidx", "init"], cwd=cls.repo_path, check=True)
+        subprocess.run(["cidx", "init"], cwd=cls.repo_path, check=True)  # type: ignore[attr-defined]
 
         # Verify daemon is disabled
         result = subprocess.run(
             ["cidx", "status"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             check=True,
@@ -98,7 +98,7 @@ class TestStandaloneChunkTypeFilteringE2E:
         # Build temporal index
         subprocess.run(
             ["cidx", "index", "--index-commits", "--clear"],
-            cwd=cls.repo_path,
+            cwd=cls.repo_path,  # type: ignore[attr-defined]
             check=True,
             timeout=60,
         )
@@ -106,7 +106,7 @@ class TestStandaloneChunkTypeFilteringE2E:
     @classmethod
     def teardown_class(cls):
         """Clean up test repository."""
-        shutil.rmtree(cls.test_dir, ignore_errors=True)
+        shutil.rmtree(cls.test_dir, ignore_errors=True)  # type: ignore[attr-defined]
 
     def test_chunk_type_commit_diff_filter_standalone(self):
         """Test that --chunk-type commit_diff returns ONLY file diffs in standalone mode.
@@ -128,7 +128,7 @@ class TestStandaloneChunkTypeFilteringE2E:
                 "10",
                 "--quiet",
             ],
-            cwd=self.repo_path,
+            cwd=self.repo_path,  # type: ignore[attr-defined]
             capture_output=True,
             text=True,
             timeout=30,

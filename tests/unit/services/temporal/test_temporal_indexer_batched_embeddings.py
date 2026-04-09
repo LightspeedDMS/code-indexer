@@ -111,7 +111,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             )
             diffs.append(diff)
 
-        self.indexer.diff_scanner.get_diffs_for_commit.return_value = diffs
+        self.indexer.diff_scanner.get_diffs_for_commit.return_value = diffs  # type: ignore[attr-defined]
 
         # Mock chunker to return 5 chunks per diff OR 1 chunk for commit message
         def mock_chunk_text(content, path):
@@ -134,7 +134,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
                 for j in range(5)
             ]
 
-        self.indexer.chunker.chunk_text.side_effect = mock_chunk_text
+        self.indexer.chunker.chunk_text.side_effect = mock_chunk_text  # type: ignore[attr-defined]
 
         # Track API calls to vector manager
         api_call_count = [0]
@@ -146,7 +146,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             submitted_batches.append(chunk_texts)
 
             # Create mock future with embeddings
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             mock_result = Mock()
             mock_result.embeddings = [
                 [0.1] * 1024 for _ in chunk_texts
@@ -244,7 +244,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             parent_commit_hash="parent-hash",
         )
 
-        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]
+        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]  # type: ignore[attr-defined]
 
         # Mock chunker to return 50 large chunks for file diff, 1 chunk for commit message
         def mock_chunk_large(content, path):
@@ -267,7 +267,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
                 for j in range(50)
             ]
 
-        self.indexer.chunker.chunk_text.side_effect = mock_chunk_large
+        self.indexer.chunker.chunk_text.side_effect = mock_chunk_large  # type: ignore[attr-defined]
 
         # Track API calls and batch sizes
         submitted_batches = []
@@ -277,7 +277,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             submitted_batches.append(len(chunk_texts))
 
             # Create mock future with embeddings
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             mock_result = Mock()
             mock_result.embeddings = [[0.1] * 1024 for _ in chunk_texts]
             mock_result.error = None  # No error
@@ -353,7 +353,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             parent_commit_hash="parent-hash",
         )
 
-        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]
+        self.indexer.diff_scanner.get_diffs_for_commit.return_value = [diff]  # type: ignore[attr-defined]
 
         # Mock chunker to return 10 chunks
         def mock_chunk(content, path):
@@ -366,11 +366,11 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
                 for j in range(10)
             ]
 
-        self.indexer.chunker.chunk_text.side_effect = mock_chunk
+        self.indexer.chunker.chunk_text.side_effect = mock_chunk  # type: ignore[attr-defined]
 
         # Mock API to return PARTIAL results (only 7 embeddings for 10 chunks)
         def mock_submit_partial(chunk_texts, metadata):
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             mock_result = Mock()
             # BUG: API returned only 7 embeddings for 10 chunks!
             mock_result.embeddings = [[0.1] * 1024 for _ in range(7)]
@@ -444,7 +444,7 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             ),
         ]
 
-        self.indexer.diff_scanner.get_diffs_for_commit.return_value = diffs
+        self.indexer.diff_scanner.get_diffs_for_commit.return_value = diffs  # type: ignore[attr-defined]
 
         # Mock chunker to handle commit message
         def mock_chunk_text(content, path):
@@ -460,14 +460,14 @@ class TestTemporalIndexerBatchedEmbeddings(unittest.TestCase):
             # For binary/renamed files, return empty list
             return []
 
-        self.indexer.chunker.chunk_text.side_effect = mock_chunk_text
+        self.indexer.chunker.chunk_text.side_effect = mock_chunk_text  # type: ignore[attr-defined]
 
         # Track API calls - should be 1 (commit message only)
         api_call_count = [0]
 
         def mock_submit_batch(chunk_texts, metadata):
             api_call_count[0] += 1
-            future = Future()
+            future = Future()  # type: ignore[var-annotated]
             mock_result = Mock()
             mock_result.embeddings = [[0.1] * 1024 for _ in chunk_texts]
             mock_result.error = None

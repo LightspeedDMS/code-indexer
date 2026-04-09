@@ -65,7 +65,7 @@ def test_daemon_passes_chunk_type_to_search_service():
 
     # Mock daemon connection
     mock_conn = Mock()
-    mock_result = {
+    mock_result = {  # type: ignore[var-annotated]
         "results": [],
         "query": "test",
         "filter_type": None,

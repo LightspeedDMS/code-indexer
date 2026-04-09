@@ -707,7 +707,7 @@ class TestProcessTraceReturnsResult:
         api_client = mock_client_class("https://cloud.langfuse.com", creds)
 
         # Call _process_trace - should return result, not mutate metrics
-        trace_hashes = {}
+        trace_hashes = {}  # type: ignore[var-annotated]
 
         result = service._process_trace(
             api_client,

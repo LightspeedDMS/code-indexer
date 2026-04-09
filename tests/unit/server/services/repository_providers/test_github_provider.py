@@ -492,7 +492,7 @@ class TestGitHubProviderSortingOrder:
         )
 
         # Track the params passed to _make_api_request
-        captured_params = {}
+        captured_params = {}  # type: ignore[var-annotated]
 
         def capture_request(endpoint, params=None):
             captured_params.update(params or {})
@@ -683,7 +683,7 @@ class TestGitHubProviderServerSideSearch:
 
         provider = GitHubProvider(token_manager, golden_repo_manager)
         captured_endpoint = None
-        captured_params = {}
+        captured_params = {}  # type: ignore[var-annotated]
 
         def capture_request(endpoint, params=None):
             nonlocal captured_endpoint, captured_params

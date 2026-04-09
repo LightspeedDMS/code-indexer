@@ -52,7 +52,7 @@ def _parse_mcp_response(response: dict) -> dict:
     """Decode the inner JSON payload from an MCP envelope response."""
     content = response.get("content", [])
     assert len(content) > 0, f"Empty MCP response: {response}"
-    return json.loads(content[0]["text"])
+    return json.loads(content[0]["text"])  # type: ignore[no-any-return]
 
 
 def _make_user(username: str = "testuser") -> MagicMock:
@@ -133,7 +133,7 @@ class TestResolveCicdProjectAccess:
 
     def test_unregistered_project_is_allowed(self):
         """Ad-hoc query for unregistered project must be allowed."""
-        repos = []
+        repos = []  # type: ignore[var-annotated]
         repos = []  # No repos registered
 
         with (
@@ -566,7 +566,7 @@ class TestGitLabListPipelinesGroupAccess:
             ),
             patch(
                 "code_indexer.server.mcp.handlers._resolve_cicd_read_token",
-                side_effect=lambda *a, **kw: token_resolver_called.append(True)
+                side_effect=lambda *a, **kw: token_resolver_called.append(True)  # type: ignore[func-returns-value]
                 or "token",
             ),
         ):

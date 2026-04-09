@@ -610,7 +610,7 @@ class TestGroupMapping:
 
         # And: User has empty external groups list
         user_id = "empty-groups-user"
-        external_groups = []
+        external_groups = []  # type: ignore[var-annotated]
 
         # When: The provisioning hook is called
         hook = SSOProvisioningHook(group_manager, group_mappings)
@@ -624,7 +624,7 @@ class TestGroupMapping:
     def test_no_group_mappings_falls_back_to_users(self, group_manager):
         """Test that user is assigned to 'users' when no mappings configured."""
         # Given: No group mappings (empty list)
-        group_mappings = []
+        group_mappings = []  # type: ignore[var-annotated]
 
         # And: User has external groups
         user_id = "no-mappings-user"

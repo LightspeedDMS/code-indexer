@@ -53,7 +53,7 @@ class TestRepositoryListValidation:
         # This should fail with current implementation
         with pytest.raises((KeyError, TypeError, ValueError)):
             # Try to create ActivatedRepository with server data
-            repo_data = server_response["repositories"][0]
+            repo_data = server_response["repositories"][0]  # type: ignore[index]
             ActivatedRepository(
                 alias=repo_data["alias"],  # KeyError: 'alias' doesn't exist
                 current_branch=repo_data["current_branch"],
@@ -80,7 +80,7 @@ class TestRepositoryListValidation:
         }
 
         # Correct mapping should work
-        repo_data = server_response["repositories"][0]
+        repo_data = server_response["repositories"][0]  # type: ignore[index]
         mapped_repo = ActivatedRepository(
             alias=repo_data["user_alias"],  # Map user_alias -> alias
             current_branch=repo_data["current_branch"],
@@ -301,7 +301,7 @@ class TestIntegratedFixes:
 
         # Fixed mapping logic
         repositories = []
-        for repo_data in server_response["repositories"]:
+        for repo_data in server_response["repositories"]:  # type: ignore[attr-defined]
             # Correct field mapping
             mapped_repo = ActivatedRepository(
                 alias=repo_data["user_alias"],  # Fixed: use user_alias

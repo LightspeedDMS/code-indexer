@@ -36,7 +36,7 @@ class JSONLoadCounter:
                 # Match vector files: vector_point_*.json (but not collection_meta.json)
                 if "vector_point_" in path_str and path_str.endswith(".json"):
                     counter.load_count += 1
-            result = counter.original_open(*args, **kwargs)
+            result = counter.original_open(*args, **kwargs)  # type: ignore[misc]
             return result
 
         builtins.open = counting_open
@@ -46,7 +46,7 @@ class JSONLoadCounter:
         """Restore original open()."""
         import builtins
 
-        builtins.open = self.original_open
+        builtins.open = self.original_open  # type: ignore[assignment]
 
 
 @pytest.fixture

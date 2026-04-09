@@ -103,7 +103,7 @@ class CorrelationBridgeMiddleware(BaseHTTPMiddleware):
             # Add correlation ID to response headers
             response.headers[CORRELATION_ID_HEADER] = correlation_id
 
-            return response
+            return response  # type: ignore[no-any-return]
 
         finally:
             # Reset context variable

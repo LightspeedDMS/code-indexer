@@ -54,7 +54,7 @@ class TestVerifyToolDocs:
         (search_dir / "test_tool.md").write_text(valid_md_content)
 
         # Should fail - registry has 128 tools
-        mock_registry = {f"tool_{i}": {} for i in range(128)}
+        mock_registry = {f"tool_{i}": {} for i in range(128)}  # type: ignore[var-annotated]
         result = verify_file_count(temp_docs_dir, mock_registry)
 
         assert result["success"] is False
@@ -72,7 +72,7 @@ class TestVerifyToolDocs:
             content = valid_md_content.replace("test_tool", f"tool_{i}")
             (search_dir / f"tool_{i}.md").write_text(content)
 
-        mock_registry = {f"tool_{i}": {} for i in range(3)}
+        mock_registry = {f"tool_{i}": {} for i in range(3)}  # type: ignore[var-annotated]
         result = verify_file_count(temp_docs_dir, mock_registry)
 
         assert result["success"] is True
@@ -113,7 +113,7 @@ class TestVerifyToolDocs:
             valid_md_content.replace("test_tool", "existing_tool")
         )
 
-        mock_registry = {"existing_tool": {}, "missing_tool": {}}
+        mock_registry = {"existing_tool": {}, "missing_tool": {}}  # type: ignore[var-annotated]
         result = verify_registry_coverage(temp_docs_dir, mock_registry)
 
         assert result["success"] is False

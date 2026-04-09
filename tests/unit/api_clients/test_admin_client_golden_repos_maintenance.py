@@ -31,7 +31,7 @@ class TestAdminAPIClientGoldenReposMaintenanceRealServer:
         async def _start_server():
             context = CIDXServerTestContext()
             server = await context.__aenter__()
-            server.server_url = context.base_url  # Add server_url to server object
+            server.server_url = context.base_url  # type: ignore[attr-defined]  # dynamic attr for test fixture
             return server, context
 
         async def _stop_server(context):

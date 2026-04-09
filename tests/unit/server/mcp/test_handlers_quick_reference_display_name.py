@@ -22,7 +22,7 @@ def _extract_mcp_data(mcp_response: dict) -> dict:
     """Extract the JSON data from MCP-compliant content array response."""
     content = mcp_response.get("content", [])
     if content and content[0].get("type") == "text":
-        return json.loads(content[0]["text"])
+        return json.loads(content[0]["text"])  # type: ignore[no-any-return]
     return {}
 
 

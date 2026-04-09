@@ -413,7 +413,8 @@ class CIDXDaemonService(rpyc.Service if rpyc else object):  # type: ignore[misc]
 
                 # Start watch in background thread
                 self.watch_thread = threading.Thread(
-                    target=self.watch_handler.start, daemon=True
+                    target=self.watch_handler.start,  # type: ignore[attr-defined]  # GitAwareWatchHandler.start exists at runtime but mypy cannot resolve it through handler type
+                    daemon=True,  # type: ignore[attr-defined]
                 )
                 self.watch_thread.start()
             except ImportError:

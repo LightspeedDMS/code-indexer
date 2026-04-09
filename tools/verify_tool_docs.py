@@ -168,7 +168,7 @@ def verify_all(docs_dir: Path, tool_registry: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def main(argv: List[str] = None) -> int:
+def main(argv: List[str] = None) -> int:  # type: ignore[assignment]
     """Main entry point for CLI usage."""
     parser = argparse.ArgumentParser(description="Verify MCP tool documentation")
     parser.add_argument(

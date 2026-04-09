@@ -140,7 +140,7 @@ class TestQueryTimingDisplay:
         console = Console(file=output, force_terminal=True, width=80)
 
         # Empty timing
-        timing_info = {}
+        timing_info = {}  # type: ignore[var-annotated]
 
         # Should not crash
         _display_query_timing(console, timing_info)

@@ -1,6 +1,7 @@
 """Unit tests for Langfuse tracing MCP handlers."""
 
 import pytest
+from typing import Dict, Any
 from unittest.mock import Mock, patch, MagicMock
 from code_indexer.server.mcp.handlers import (
     handle_start_trace,
@@ -127,7 +128,7 @@ class TestHandleStartTrace:
         """Test start_trace without required name parameter."""
         mock_get_service.return_value = mock_langfuse_service
 
-        args = {}  # Missing name
+        args: Dict[str, Any] = {}  # Missing name
 
         result = handle_start_trace(args, mock_user, session_state=mock_session_state)
 
@@ -244,7 +245,7 @@ class TestHandleEndTrace:
         service.is_enabled = Mock(return_value=False)
         mock_get_service.return_value = service
 
-        args = {}
+        args = {}  # type: ignore[var-annotated]
 
         result = handle_end_trace(args, mock_user, session_state=mock_session_state)
 
@@ -262,7 +263,7 @@ class TestHandleEndTrace:
         """Test end_trace without session context."""
         mock_get_service.return_value = mock_langfuse_service
 
-        args = {}
+        args = {}  # type: ignore[var-annotated]
 
         result = handle_end_trace(args, mock_user, session_state=None)
 
@@ -281,7 +282,7 @@ class TestHandleEndTrace:
         mock_get_service.return_value = mock_langfuse_service
         mock_langfuse_service.trace_manager.get_active_trace.return_value = None
 
-        args = {}
+        args = {}  # type: ignore[var-annotated]
 
         result = handle_end_trace(args, mock_user, session_state=mock_session_state)
 
@@ -306,7 +307,7 @@ class TestHandleEndTrace:
         )
         mock_langfuse_service.trace_manager.end_trace.return_value = True
 
-        args = {}  # No optional parameters
+        args: Dict[str, Any] = {}  # Dict[str, Any] matches handle_end_trace signature
 
         result = handle_end_trace(args, mock_user, session_state=mock_session_state)
 
@@ -342,7 +343,7 @@ class TestHandleEndTrace:
         )
         mock_langfuse_service.trace_manager.end_trace.return_value = False
 
-        args = {}
+        args = {}  # type: ignore[var-annotated]
 
         result = handle_end_trace(args, mock_user, session_state=mock_session_state)
 
@@ -363,7 +364,7 @@ class TestHandleEndTrace:
             "Test error"
         )
 
-        args = {}
+        args = {}  # type: ignore[var-annotated]
 
         result = handle_end_trace(args, mock_user, session_state=mock_session_state)
 

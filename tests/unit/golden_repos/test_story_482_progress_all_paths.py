@@ -503,8 +503,8 @@ class TestPathEActivatedRepoIndexManagerProgress:
             commit_count=10000,
         )
 
-        received_semantic_heavy = []
-        received_temporal_heavy = []
+        received_semantic_heavy = []  # type: ignore[var-annotated]
+        received_temporal_heavy = []  # type: ignore[var-annotated]
 
         def make_cb(store):
             def cb(pct, message=""):

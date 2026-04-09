@@ -46,7 +46,7 @@ class TestCLIDiffTypeAndAuthorFiltering(unittest.TestCase):
         import inspect
 
         # Get the source code of the underlying callback function
-        source = inspect.getsource(query_command.callback)
+        source = inspect.getsource(query_command.callback)  # type: ignore[arg-type]
 
         # Verify that temporal_service.query_temporal is called with diff_types parameter
         assert "query_temporal(" in source, (
@@ -68,7 +68,7 @@ class TestCLIDiffTypeAndAuthorFiltering(unittest.TestCase):
         import inspect
 
         # Get the source code of the underlying callback function
-        source = inspect.getsource(query_command.callback)
+        source = inspect.getsource(query_command.callback)  # type: ignore[arg-type]
 
         # Verify that temporal_service.query_temporal is called with author parameter
         assert "query_temporal(" in source, (

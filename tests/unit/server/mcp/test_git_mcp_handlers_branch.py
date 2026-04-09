@@ -13,7 +13,7 @@ All tests use mocked GitOperationsService to avoid real git operations.
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Dict, Any, cast
 from unittest.mock import patch
 import pytest
 
@@ -84,7 +84,9 @@ class TestGitBranchListHandler:
 
     def test_git_branch_list_missing_repository(self, mock_user):
         """Test git branch list with missing repository_alias parameter."""
-        params = {}  # Missing repository_alias
+        params: Dict[
+            str, Any
+        ] = {}  # Missing repository_alias — Dict[str, Any] matches git branch handler signatures
 
         mcp_response = handlers.git_branch_list(params, mock_user)
         data = _extract_response_data(mcp_response)

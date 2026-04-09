@@ -31,7 +31,7 @@ def fake_tokenizers_module():
     """Return a stub tokenizers module and a mock Tokenizer class."""
     mock_class = MagicMock()
     stub = ModuleType("tokenizers")
-    stub.Tokenizer = mock_class
+    stub.Tokenizer = mock_class  # type: ignore[attr-defined]
     return stub, mock_class
 
 
@@ -111,7 +111,7 @@ class TestGetTokenizerFallbackToNone:
             saved = sys.modules.pop("tokenizers", None)
             # Ensure the module is importable at test-suite level but blocked here
             stub = ModuleType("tokenizers")
-            stub.Tokenizer = property(
+            stub.Tokenizer = property(  # type: ignore[attr-defined]
                 lambda s: (_ for _ in ()).throw(ImportError("no tokenizers"))
             )
             # Instead: block via _import_tokenizer_class

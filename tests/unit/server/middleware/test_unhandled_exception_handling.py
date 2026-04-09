@@ -265,7 +265,7 @@ class TestUnhandledExceptionHandling:
 
         class ProblematicException(Exception):
             @property
-            def args(self):
+            def args(self):  # type: ignore[override]
                 raise RuntimeError("Error accessing exception args")
 
         problematic_exc = ProblematicException("Original error")

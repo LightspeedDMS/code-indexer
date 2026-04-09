@@ -67,7 +67,7 @@ def git_status(repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.status(repository))
+        result = asyncio.run(client.status(repository))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -117,8 +117,8 @@ def git_commit(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(
-            client.commit(repository, message, author_name, author_email)
+        result = asyncio.run(  # type: ignore[var-annotated]
+            client.commit(repository, message, author_name, author_email)  # type: ignore[arg-type]
         )
 
         if json_output:
@@ -174,7 +174,7 @@ def git_reset(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.reset(repository, mode, commit_ref))
+        result = asyncio.run(client.reset(repository, mode, commit_ref))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -208,7 +208,7 @@ def git_diff(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.diff(repository, path, staged, commit))
+        result = asyncio.run(client.diff(repository, path, staged, commit))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -244,7 +244,7 @@ def git_log(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.log(repository, limit, author, path))
+        result = asyncio.run(client.log(repository, limit, author, path))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -284,7 +284,7 @@ def git_show(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.show_commit(repository, commit_hash, include_diff))
+        result = asyncio.run(client.show_commit(repository, commit_hash, include_diff))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -315,7 +315,7 @@ def git_stage(files: tuple, repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.stage(repository, list(files)))
+        result = asyncio.run(client.stage(repository, list(files)))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -341,7 +341,7 @@ def git_unstage(files: tuple, repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.unstage(repository, list(files)))
+        result = asyncio.run(client.unstage(repository, list(files)))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -368,7 +368,7 @@ def git_push(repository: str, remote: str, branch: Optional[str], json_output: b
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.push(repository, remote, branch))
+        result = asyncio.run(client.push(repository, remote, branch))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -394,7 +394,7 @@ def git_pull(repository: str, remote: str, branch: Optional[str], json_output: b
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.pull(repository, remote, branch))
+        result = asyncio.run(client.pull(repository, remote, branch))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -419,7 +419,7 @@ def git_fetch(repository: str, remote: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.fetch(repository, remote))
+        result = asyncio.run(client.fetch(repository, remote))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -456,7 +456,7 @@ def git_clean(repository: str, confirm: bool, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.clean(repository))
+        result = asyncio.run(client.clean(repository))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -485,7 +485,7 @@ def git_merge_abort(repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.merge_abort(repository))
+        result = asyncio.run(client.merge_abort(repository))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -509,7 +509,7 @@ def git_checkout_file(file: str, repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.checkout_file(repository, file))
+        result = asyncio.run(client.checkout_file(repository, file))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -532,7 +532,7 @@ def git_branches(repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branches(repository))
+        result = asyncio.run(client.branches(repository))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -568,7 +568,7 @@ def git_branch_create(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branch_create(repository, name, start_point))
+        result = asyncio.run(client.branch_create(repository, name, start_point))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -594,7 +594,7 @@ def git_branch_switch(name: str, repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branch_switch(repository, name))
+        result = asyncio.run(client.branch_switch(repository, name))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -632,7 +632,7 @@ def git_branch_delete(name: str, repository: str, confirm: bool, json_output: bo
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branch_delete(repository, name))
+        result = asyncio.run(client.branch_delete(repository, name))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -656,7 +656,7 @@ def git_blame(file: str, repository: str, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.blame(repository, file))
+        result = asyncio.run(client.blame(repository, file))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -689,7 +689,7 @@ def git_file_history(file: str, repository: str, limit: int, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.file_history(repository, file, limit))
+        result = asyncio.run(client.file_history(repository, file, limit))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -725,7 +725,7 @@ def git_search_commits(query: str, repository: str, limit: int, json_output: boo
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.search_commits(repository, query, limit))
+        result = asyncio.run(client.search_commits(repository, query, limit))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -761,7 +761,7 @@ def git_search_diffs(pattern: str, repository: str, limit: int, json_output: boo
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.search_diffs(repository, pattern, limit))
+        result = asyncio.run(client.search_diffs(repository, pattern, limit))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))
@@ -797,7 +797,7 @@ def git_cat(file: str, repository: str, revision: Optional[str], json_output: bo
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.cat_file(repository, file, revision))
+        result = asyncio.run(client.cat_file(repository, file, revision))  # type: ignore[arg-type, var-annotated]
 
         if json_output:
             console.print(format_json_success(result))

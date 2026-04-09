@@ -88,12 +88,12 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
             def mock_acquire_slot(file_data):
                 """Track slot acquisition timing."""
                 if start_time[0] is None:
-                    start_time[0] = time.time()
+                    start_time[0] = time.time()  # type: ignore[call-overload]
 
                 slot_id = slot_counter[0]
                 slot_counter[0] += 1
 
-                elapsed_ms = (time.time() - start_time[0]) * 1000
+                elapsed_ms = (time.time() - start_time[0]) * 1000  # type: ignore[operator]
                 with timeline_lock:
                     slot_acquisition_timeline.append((elapsed_ms, slot_id))
 
@@ -192,7 +192,7 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
         thread_count = 8
 
         # Track slot acquisition timing
-        slot_acquisition_timeline = []
+        slot_acquisition_timeline = []  # type: ignore[var-annotated]
         timeline_lock = threading.Lock()
 
         # Mock ConfigManager
@@ -1182,14 +1182,14 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
 
             def mock_acquire_slot(file_data):
                 if start_time[0] is None:
-                    start_time[0] = time.time()
+                    start_time[0] = time.time()  # type: ignore[call-overload]
                 slot_id = slot_counter[0]
                 slot_counter[0] += 1
                 return slot_id
 
             def mock_update_slot(slot_id, status, filename=None, file_size=None):
                 """Capture update_slot calls with timing."""
-                elapsed_ms = (time.time() - start_time[0]) * 1000
+                elapsed_ms = (time.time() - start_time[0]) * 1000  # type: ignore[operator]
                 with timeline_lock:
                     update_slot_timeline.append(
                         {
@@ -1223,10 +1223,10 @@ class TestTemporalIndexerThreadRampup(unittest.TestCase):
             def get_diffs_side_effect(commit_hash):
                 # Initialize start_time if not set (in case get_diffs called before acquire_slot)
                 if start_time[0] is None:
-                    start_time[0] = time.time()
+                    start_time[0] = time.time()  # type: ignore[call-overload]
 
                 # Record timing of get_diffs call
-                elapsed_ms = (time.time() - start_time[0]) * 1000
+                elapsed_ms = (time.time() - start_time[0]) * 1000  # type: ignore[operator]
                 with timeline_lock:
                     get_diffs_timeline.append(
                         {"elapsed_ms": elapsed_ms, "commit_hash": commit_hash}

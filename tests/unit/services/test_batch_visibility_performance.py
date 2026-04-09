@@ -13,7 +13,9 @@ from typing import List, Dict, Any
 
 
 def _make_content_point(
-    point_id: str, file_path: str, hidden_branches: List[str] = None
+    point_id: str,
+    file_path: str,
+    hidden_branches: List[str] = None,  # type: ignore[assignment]
 ) -> Dict[str, Any]:
     """Create a minimal content point dict matching what scroll_points returns."""
     return {

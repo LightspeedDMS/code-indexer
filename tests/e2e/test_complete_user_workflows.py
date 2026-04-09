@@ -57,10 +57,10 @@ class TestCompleteUserWorkflows:
             )
 
             # Create Filesystem environment (for semantic search)
-            filesystem_env = container_manager.create_standard_filesystem_environment()
+            filesystem_env = container_manager.create_standard_filesystem_environment()  # type: ignore[attr-defined]
 
             # Start container services
-            containers_started = container_manager.start_environment(
+            containers_started = container_manager.start_environment(  # type: ignore[attr-defined]
                 "test_env", filesystem_env
             )
 
@@ -87,7 +87,7 @@ class TestCompleteUserWorkflows:
             try:
                 main_server.stop_server()
                 main_server.cleanup_server_files()
-                container_manager.cleanup_all_environments()
+                container_manager.cleanup_all_environments()  # type: ignore[attr-defined]
                 server_manager.cleanup_all_servers()
                 data_factory.cleanup_test_data()
             except Exception as e:

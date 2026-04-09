@@ -203,7 +203,7 @@ class TestProviderIndexJobEnvVars:
         """Verify CO_API_KEY is set in the subprocess env when provider is 'cohere'."""
         repo_path = _make_repo(tmp_path, provider="voyage-ai")
 
-        captured_env = {}
+        captured_env = {}  # type: ignore[var-annotated]
 
         def capture_env(cmd, **kwargs):
             captured_env.update(kwargs.get("env") or {})
@@ -228,7 +228,7 @@ class TestProviderIndexJobEnvVars:
         """Verify VOYAGE_API_KEY is set in the subprocess env when provider is 'voyage-ai'."""
         repo_path = _make_repo(tmp_path, provider="cohere")
 
-        captured_env = {}
+        captured_env = {}  # type: ignore[var-annotated]
 
         def capture_env(cmd, **kwargs):
             captured_env.update(kwargs.get("env") or {})

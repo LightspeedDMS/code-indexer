@@ -732,7 +732,7 @@ class LogScanner:
             response = httpx.get(
                 url,
                 headers=headers,
-                params=params,
+                params=params,  # type: ignore[arg-type]
                 timeout=GITHUB_CLI_TIMEOUT_SECONDS,
             )
 

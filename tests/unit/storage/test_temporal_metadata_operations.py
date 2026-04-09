@@ -270,9 +270,9 @@ class TestTemporalMetadataOperations:
 
             # Verify updated metadata
             metadata = metadata_store.get_metadata(hash_prefix)
-            assert metadata["commit_hash"] == "updated_hash"
-            assert metadata["file_path"] == "updated_path.py"
-            assert metadata["chunk_index"] == 1
+            assert metadata["commit_hash"] == "updated_hash"  # type: ignore[index]
+            assert metadata["file_path"] == "updated_path.py"  # type: ignore[index]
+            assert metadata["chunk_index"] == 1  # type: ignore[index]
 
     def test_metadata_persists_across_store_instances(self):
         """Metadata persists to disk and can be read by new store instance."""

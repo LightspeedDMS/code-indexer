@@ -72,7 +72,7 @@ class TestTemporalIndexerUsesParallel(unittest.TestCase):
 
             # Mock the parallel processing method
             # Returns: (commits_processed, files_processed, vectors_created)
-            indexer._process_commits_parallel = Mock(return_value=(10, 15, 20))
+            indexer._process_commits_parallel = Mock(return_value=(10, 15, 20))  # type: ignore[method-assign]
 
             # Mock commit history and _get_current_branch (to avoid git subprocess calls)
             with (

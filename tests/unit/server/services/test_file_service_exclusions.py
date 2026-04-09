@@ -42,7 +42,7 @@ class TestFileServiceExclusions:
         """Create FileListingService instance."""
         # Create service without relying on database
         service = FileListingService.__new__(FileListingService)
-        service.activated_repo_manager = None
+        service.activated_repo_manager = None  # type: ignore[assignment]
         return service
 
     def test_excludes_code_indexer_directory(self, temp_repo, service):
@@ -331,12 +331,12 @@ class TestListFilesByPath:
         """Create FileListingService instance."""
         # Create service without relying on database
         service = FileListingService.__new__(FileListingService)
-        service.activated_repo_manager = None
+        service.activated_repo_manager = None  # type: ignore[assignment]
         return service
 
     def test_list_files_by_path_with_valid_directory(self, temp_repo, service):
         """Test that list_files_by_path works with a valid directory path."""
-        query_params = FileListQueryParams(page=1, limit=100)
+        query_params = FileListQueryParams(page=1, limit=100)  # type: ignore[call-arg]
 
         result = service.list_files_by_path(
             repo_path=str(temp_repo), query_params=query_params
@@ -353,7 +353,7 @@ class TestListFilesByPath:
 
     def test_list_files_by_path_raises_error_for_nonexistent_path(self, service):
         """Test that list_files_by_path raises FileNotFoundError for nonexistent path."""
-        query_params = FileListQueryParams(page=1, limit=100)
+        query_params = FileListQueryParams(page=1, limit=100)  # type: ignore[call-arg]
 
         with pytest.raises(FileNotFoundError) as exc_info:
             service.list_files_by_path(
@@ -388,7 +388,7 @@ class TestListFilesByPath:
         for i in range(10):
             (temp_repo / f"file_{i}.txt").write_text(f"content {i}")
 
-        query_params = FileListQueryParams(page=1, limit=3)
+        query_params = FileListQueryParams(page=1, limit=3)  # type: ignore[call-arg]
 
         result = service.list_files_by_path(
             repo_path=str(temp_repo), query_params=query_params
@@ -409,7 +409,7 @@ class TestListFilesByPath:
         git_dir.mkdir()
         (git_dir / "config").write_text("[core]")
 
-        query_params = FileListQueryParams(page=1, limit=100)
+        query_params = FileListQueryParams(page=1, limit=100)  # type: ignore[call-arg]
 
         result = service.list_files_by_path(
             repo_path=str(temp_repo), query_params=query_params

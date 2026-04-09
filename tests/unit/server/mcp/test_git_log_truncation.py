@@ -205,9 +205,9 @@ class TestGitLogTruncationWithCacheHandle:
             assert data.get("cache_handle") == "cache-handle-log-123"
             assert data.get("truncated") is True  # TOKEN-based truncation
             assert data.get("has_more") is True
-            assert data.get("total_tokens") > 0
-            assert data.get("preview_tokens") > 0
-            assert data.get("total_pages") >= 1
+            assert data.get("total_tokens") > 0  # type: ignore[operator]
+            assert data.get("preview_tokens") > 0  # type: ignore[operator]
+            assert data.get("total_pages") >= 1  # type: ignore[operator]
 
     def test_small_log_no_truncation(self, mock_user, mock_payload_cache):
         """Verify small log returns no cache_handle when not truncated.

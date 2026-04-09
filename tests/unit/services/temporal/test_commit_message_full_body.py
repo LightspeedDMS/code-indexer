@@ -81,7 +81,7 @@ This is critical functionality for development workflows."""
             check=True,
             capture_output=True,
             env={
-                **subprocess.os.environ,
+                **subprocess.os.environ,  # type: ignore[attr-defined]
                 "GIT_AUTHOR_NAME": "Test User",
                 "GIT_AUTHOR_EMAIL": "test@example.com",
                 "GIT_COMMITTER_NAME": "Test User",

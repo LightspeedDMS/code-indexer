@@ -32,7 +32,7 @@ class TestFilterIntegrationE2E:
         path_builder = PathFilterBuilder()
 
         # Build complex filter structure
-        filter_conditions = {"must": [], "must_not": []}
+        filter_conditions = {"must": [], "must_not": []}  # type: ignore[var-annotated]
 
         # Add language inclusion (Python)
         python_filter = mapper.build_language_filter("python")
@@ -97,7 +97,7 @@ class TestFilterIntegrationE2E:
         path_builder = PathFilterBuilder()
 
         # Build all filter types
-        filter_conditions = {"must": [], "must_not": []}
+        filter_conditions = {"must": [], "must_not": []}  # type: ignore[var-annotated]
 
         # Multiple language inclusions
         for lang in ["python", "go"]:
@@ -136,7 +136,7 @@ class TestFilterIntegrationE2E:
         WHEN filters are built
         THEN result should be empty or have no conditions
         """
-        filter_conditions = {}
+        filter_conditions = {}  # type: ignore[var-annotated]
 
         # No filters added
 
@@ -192,7 +192,7 @@ class TestFilterIntegrationE2E:
         mapper = LanguageMapper()
 
         # Create scenario: include Python, exclude Python
-        filter_conditions = {"must": [], "must_not": []}
+        filter_conditions = {"must": [], "must_not": []}  # type: ignore[var-annotated]
 
         # Add Python inclusion
         python_filter = mapper.build_language_filter("python")

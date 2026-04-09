@@ -26,7 +26,7 @@ def server_config(tmp_path):
     server_dir = tmp_path / "server"
     server_dir.mkdir()
     config = ServerConfig(server_dir=str(server_dir))
-    config.scip_workspace_retention_days = 7
+    config.scip_workspace_retention_days = 7  # type: ignore[attr-defined]
     return config
 
 

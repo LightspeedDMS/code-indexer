@@ -126,7 +126,7 @@ def test_temporal_service_initialization_includes_vector_store_client():
                     import traceback
 
                     print(f"Exception: {result.exception}")
-                    print("".join(traceback.format_tb(result.exc_info[2])))
+                    print("".join(traceback.format_tb(result.exc_info[2])))  # type: ignore[index]
 
             # CRITICAL ASSERTION: Verify TemporalSearchService was initialized with vector_store_client
             mock_temporal_service_class.assert_called_once()

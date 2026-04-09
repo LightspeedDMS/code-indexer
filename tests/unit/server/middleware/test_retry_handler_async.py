@@ -63,7 +63,7 @@ class TestAsyncExecuteWithRetryUsesAsyncioSleep:
         handler = DatabaseRetryHandler(make_config(max_attempts=2, base_delay=0.01))
 
         attempt_count = []
-        sleep_calls = []
+        sleep_calls = []  # type: ignore[var-annotated]
 
         async def failing_then_succeeding():
             attempt_count.append(1)

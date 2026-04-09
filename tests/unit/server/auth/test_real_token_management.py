@@ -56,7 +56,7 @@ class TestRealTokenManagement:
             assert token_response["token_type"] == "bearer"
 
             # Validate token through real JWT manager
-            payload = infrastructure.jwt_manager.validate_token(
+            payload = infrastructure.jwt_manager.validate_token(  # type: ignore[union-attr]
                 token_response["access_token"]
             )
 
@@ -70,7 +70,7 @@ class TestRealTokenManagement:
                 token_response["access_token"]
             )
 
-            response = infrastructure.client.get("/health", headers=auth_headers)
+            response = infrastructure.client.get("/health", headers=auth_headers)  # type: ignore[union-attr]
             assert response.status_code == status.HTTP_200_OK
 
         finally:
@@ -97,7 +97,7 @@ class TestRealTokenManagement:
             )
 
             # Verify token is currently valid
-            payload = infrastructure.jwt_manager.validate_token(
+            payload = infrastructure.jwt_manager.validate_token(  # type: ignore[union-attr]
                 token_response["access_token"]
             )
             assert payload is not None
@@ -141,7 +141,7 @@ class TestRealTokenManagement:
 
             for invalid_token in invalid_tokens:
                 # Try to use invalid token with real API
-                response = infrastructure.client.get(
+                response = infrastructure.client.get(  # type: ignore[union-attr]
                     "/health", headers={"Authorization": f"Bearer {invalid_token}"}
                 )
 
@@ -171,7 +171,7 @@ class TestRealTokenManagement:
             )
 
             # Get initial tokens through real authentication
-            login_response = infrastructure.client.post(
+            login_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={
                     "username": user_data["username"],
@@ -188,7 +188,7 @@ class TestRealTokenManagement:
             assert "token_type" in login_data
 
             # Use refresh token to get new access token
-            refresh_response = infrastructure.client.post(
+            refresh_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/refresh", json={"refresh_token": login_data["refresh_token"]}
             )
 
@@ -208,7 +208,7 @@ class TestRealTokenManagement:
                 refresh_data["access_token"]
             )
 
-            response = infrastructure.client.get("/health", headers=auth_headers)
+            response = infrastructure.client.get("/health", headers=auth_headers)  # type: ignore[union-attr]
             assert response.status_code == status.HTTP_200_OK
 
         finally:
@@ -230,7 +230,7 @@ class TestRealTokenManagement:
             )
 
             # Get tokens
-            login_response = infrastructure.client.post(
+            login_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={
                     "username": user_data["username"],
@@ -241,7 +241,7 @@ class TestRealTokenManagement:
             login_data = login_response.json()
 
             # Test invalid refresh token
-            invalid_refresh_response = infrastructure.client.post(
+            invalid_refresh_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/refresh", json={"refresh_token": "invalid.refresh.token"}
             )
 
@@ -249,7 +249,7 @@ class TestRealTokenManagement:
             assert invalid_refresh_response.status_code == status.HTTP_401_UNAUTHORIZED
 
             # Test empty refresh token
-            empty_refresh_response = infrastructure.client.post(
+            empty_refresh_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/refresh", json={"refresh_token": ""}
             )
 
@@ -257,7 +257,7 @@ class TestRealTokenManagement:
             assert empty_refresh_response.status_code in [400, 401, 422]
 
             # Original valid refresh token should still work
-            valid_refresh_response = infrastructure.client.post(
+            valid_refresh_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/refresh", json={"refresh_token": login_data["refresh_token"]}
             )
 
@@ -282,7 +282,7 @@ class TestRealTokenManagement:
             )
 
             # Get initial tokens
-            login_response = infrastructure.client.post(
+            login_response = infrastructure.client.post(  # type: ignore[union-attr]
                 "/auth/login",
                 json={
                     "username": user_data["username"],
@@ -297,7 +297,7 @@ class TestRealTokenManagement:
             refresh_responses = []
 
             for i in range(3):
-                response = infrastructure.client.post(
+                response = infrastructure.client.post(  # type: ignore[union-attr]
                     "/auth/refresh", json={"refresh_token": login_data["refresh_token"]}
                 )
                 refresh_responses.append(response)
@@ -340,7 +340,7 @@ class TestRealTokenManagement:
             )
 
             # Validate token payload through real JWT manager
-            payload = infrastructure.jwt_manager.validate_token(
+            payload = infrastructure.jwt_manager.validate_token(  # type: ignore[union-attr]
                 token_response["access_token"]
             )
 

@@ -349,12 +349,12 @@ class GitRepoStateManager:
     def get_current_branch(self) -> str:
         """Get current branch name."""
         result = self._run_git(["branch", "--show-current"])
-        return result.stdout.strip()
+        return result.stdout.strip()  # type: ignore[no-any-return]
 
     def get_head_commit(self) -> str:
         """Get current HEAD commit hash."""
         result = self._run_git(["rev-parse", "HEAD"])
-        return result.stdout.strip()
+        return result.stdout.strip()  # type: ignore[no-any-return]
 
     def has_uncommitted_changes(self) -> bool:
         """Check if repository has any uncommitted changes."""

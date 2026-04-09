@@ -78,7 +78,7 @@ class TestCollaborativeValidation:
         ]
         # Only last step is terminal (no one depends on it)
         for i in range(9):
-            steps[i + 1]["depends_on"] = [f"s{i}"]
+            steps[i + 1]["depends_on"] = [f"s{i}"]  # type: ignore[assignment]
 
         result = _validate_open_delegation_params(
             {

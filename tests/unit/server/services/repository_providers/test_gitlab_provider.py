@@ -392,7 +392,7 @@ class TestGitLabProviderSortingOrder:
         )
 
         # Track the params passed to _make_api_request
-        captured_params = {}
+        captured_params = {}  # type: ignore[var-annotated]
 
         def capture_request(endpoint, params=None):
             captured_params.update(params or {})
@@ -537,7 +537,7 @@ class TestGitLabProviderServerSideSearch:
         )
 
         # Track the params passed to _make_api_request
-        captured_params = {}
+        captured_params = {}  # type: ignore[var-annotated]
 
         def capture_request(endpoint, params=None):
             captured_params.update(params or {})
@@ -649,7 +649,7 @@ class TestGitLabProviderServerSideSearch:
         )
 
         # Test with search=None
-        captured_params_none = {}
+        captured_params_none = {}  # type: ignore[var-annotated]
 
         def capture_request_none(endpoint, params=None):
             captured_params_none.update(params or {})
@@ -670,7 +670,7 @@ class TestGitLabProviderServerSideSearch:
         )
 
         # Test with search=""
-        captured_params_empty = {}
+        captured_params_empty = {}  # type: ignore[var-annotated]
 
         def capture_request_empty(endpoint, params=None):
             captured_params_empty.update(params or {})

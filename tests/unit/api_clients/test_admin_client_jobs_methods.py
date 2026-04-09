@@ -14,7 +14,7 @@ class TestAdminAPIClientJobsMethods:
         client = AdminAPIClient(
             server_url="http://test",
             credentials={"username": "admin", "password": "pass"},
-            project_root="/test",
+            project_root="/test",  # type: ignore[arg-type]
         )
 
         # Check method exists
