@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Number of files between periodic progress callbacks during deletion
+PROGRESS_BATCH_SIZE = 100
+
 
 @dataclass
 class ThroughputStats:
@@ -220,20 +223,24 @@ class SmartIndexer(HighThroughputProcessor):
             return False
 
     def _delete_files_from_backend(
-        self, deleted_files: List[str], collection_name: str
+        self,
+        deleted_files: List[str],
+        collection_name: str,
+        progress_callback: Optional[Callable] = None,
     ) -> int:
         """Delete files from vector store backend.
 
         Args:
             deleted_files: List of file paths to delete
             collection_name: Collection name
+            progress_callback: Optional progress callback, called every PROGRESS_BATCH_SIZE files
 
         Returns:
             Number of files successfully deleted
         """
         deleted_count = 0
 
-        for file_path in deleted_files:
+        for i, file_path in enumerate(deleted_files):
             try:
                 # Use the existing branch-aware deletion logic
                 success = self.delete_file_branch_aware(
@@ -246,6 +253,15 @@ class SmartIndexer(HighThroughputProcessor):
                     logger.warning(f"Failed to delete from index: {file_path}")
             except Exception as e:
                 logger.error(f"Error deleting {file_path}: {e}")
+
+            processed = i + 1
+            if progress_callback and processed % PROGRESS_BATCH_SIZE == 0:
+                progress_callback(
+                    processed,
+                    len(deleted_files),
+                    Path(""),
+                    info=f"Deleting files... {processed}/{len(deleted_files)}",
+                )
 
         return deleted_count
 
@@ -986,6 +1002,11 @@ class SmartIndexer(HighThroughputProcessor):
                     f"Git commits: {last_indexed_commit[:8]} -> {current_commit[:8]}"
                 )
 
+                if progress_callback:
+                    progress_callback(
+                        0, 0, Path(""), info="Scanning git history for changes..."
+                    )
+
                 # Get git deltas - this is the KEY improvement for deletion detection
                 git_delta = self._get_git_deltas_since_commit(
                     last_indexed_commit, current_commit
@@ -996,8 +1017,15 @@ class SmartIndexer(HighThroughputProcessor):
                     collection_name = self.vector_store_client.resolve_collection_name(
                         self.config, self.embedding_provider
                     )
+                    if progress_callback:
+                        progress_callback(
+                            0,
+                            len(git_delta.deleted),
+                            Path(""),
+                            info=f"Cleaning up {len(git_delta.deleted)} deleted files...",
+                        )
                     deleted_count = self._delete_files_from_backend(
-                        git_delta.deleted, collection_name
+                        git_delta.deleted, collection_name, progress_callback
                     )
                     logger.info(
                         f"🗑️  Deleted {deleted_count}/{len(git_delta.deleted)} files from index"
@@ -1006,6 +1034,11 @@ class SmartIndexer(HighThroughputProcessor):
                 # Collect committed files that need indexing
                 committed_files = git_delta.added + git_delta.modified
                 deleted_files = git_delta.deleted
+
+        if progress_callback:
+            progress_callback(
+                0, 0, Path(""), info="Scanning filesystem for untracked changes..."
+            )
 
         # TRACK 2: Filesystem timestamp for uncommitted changes
         working_dir_files = list(self.file_finder.find_modified_files(resume_timestamp))
