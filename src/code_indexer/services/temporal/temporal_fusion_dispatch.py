@@ -54,6 +54,7 @@ def execute_temporal_query_with_fusion(
     exclude_path: Optional[str] = None,
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
+    chunk_type: Optional[str] = None,
 ) -> Any:
     """Execute temporal query with multi-provider fusion.
 
@@ -73,6 +74,7 @@ def execute_temporal_query_with_fusion(
         exclude_language: Exclude language (server param)
         evolution_limit: Limit evolution entries (server param, applied by caller)
         exclude_path: Exclude path pattern (server param)
+        chunk_type: Filter by chunk type (e.g. 'function', 'class', 'commit_diff')
 
     Returns:
         TemporalSearchResults with fused results
@@ -117,6 +119,7 @@ def execute_temporal_query_with_fusion(
             exclude_path=exclude_path,
             diff_types=diff_types,
             author=author,
+            chunk_type=chunk_type,
         )
 
     return _query_multi_provider_fusion(
@@ -132,6 +135,7 @@ def execute_temporal_query_with_fusion(
         exclude_path=exclude_path,
         diff_types=diff_types,
         author=author,
+        chunk_type=chunk_type,
     )
 
 
@@ -168,6 +172,7 @@ def _query_single_provider(
     exclude_path: Optional[str] = None,
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
+    chunk_type: Optional[str] = None,
 ) -> Any:
     """Query a single temporal provider directly (no fusion)."""
     import time as _time
@@ -199,6 +204,7 @@ def _query_single_provider(
             exclude_path=[exclude_path] if exclude_path else None,
             diff_types=diff_types,
             author=author,
+            chunk_type=chunk_type,
         )
         record_temporal_success(coll_name, (_time.time() - _t0) * 1000)
     except Exception:
@@ -229,6 +235,7 @@ def _query_multi_provider_fusion(
     exclude_path: Optional[str] = None,
     diff_types: Optional[List[str]] = None,
     author: Optional[str] = None,
+    chunk_type: Optional[str] = None,
 ) -> Any:
     """Query multiple providers in parallel and fuse results."""
     from .temporal_search_service import TemporalSearchResults, ALL_TIME_RANGE
@@ -259,6 +266,7 @@ def _query_multi_provider_fusion(
             exclude_path=[exclude_path] if exclude_path else None,
             diff_types=diff_types,
             author=author,
+            chunk_type=chunk_type,
         )
 
     from .temporal_search_service import TemporalSearchService

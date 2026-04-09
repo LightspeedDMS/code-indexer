@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.4
+
+### Fixes
+
+- fix: Bug #664 — `chunk_type` temporal filter silently dropped. `execute_temporal_query_with_fusion` accepted `chunk_type` from no callers and never forwarded it through the dispatch chain. Added `chunk_type: Optional[str] = None` to `execute_temporal_query_with_fusion`, `_query_single_provider`, and `_query_multi_provider_fusion` in `temporal_fusion_dispatch.py`, and forwarded it to every `service.query_temporal()` call.
+
+- fix: Bug #665 — `author` and `diff_type` temporal filters silently dropped in server/MCP path. `_execute_temporal_query` in `semantic_query_manager.py` was missing `diff_type`, `author`, and `chunk_type` from its signature and never passed them to `execute_temporal_query_with_fusion`. Fixed by adding all three parameters, converting `diff_type` (string or list) to a normalized `diff_types` list, and forwarding all three to the fusion dispatch call. Also wired these parameters from the outer search method call site.
+
 ## v9.14.3
 
 ### Fixes

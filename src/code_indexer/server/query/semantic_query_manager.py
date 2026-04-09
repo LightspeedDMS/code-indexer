@@ -1398,6 +1398,9 @@ class SemanticQueryManager:
                     exclude_language=exclude_language,
                     path_filter=path_filter,
                     exclude_path=exclude_path,
+                    diff_type=diff_type,
+                    author=author,
+                    chunk_type=chunk_type,
                 )
 
             # FTS SEARCH HANDLING (Story #503 - FTS Bug Fix)
@@ -1913,6 +1916,9 @@ class SemanticQueryManager:
         exclude_language: Optional[str] = None,
         path_filter: Optional[str] = None,
         exclude_path: Optional[str] = None,
+        diff_type: Optional[Union[str, List[str]]] = None,
+        author: Optional[str] = None,
+        chunk_type: Optional[str] = None,
     ) -> List[QueryResult]:
         """Execute temporal query using TemporalSearchService.
 
@@ -1971,6 +1977,20 @@ class SemanticQueryManager:
                 # time_range_all, at_commit, or default: query entire git history
                 time_range_tuple = ALL_TIME_RANGE
 
+            # Convert diff_type to list for fusion dispatch
+            diff_types_list: Optional[List[str]] = None
+            if diff_type is not None:
+                if isinstance(diff_type, list):
+                    diff_types_list = [dt.strip() for dt in diff_type if dt.strip()]
+                elif isinstance(diff_type, str):
+                    if "," in diff_type:
+                        diff_types_list = [
+                            dt.strip() for dt in diff_type.split(",") if dt.strip()
+                        ]
+                    else:
+                        val = diff_type.strip()
+                        diff_types_list = [val] if val else None
+
             # Execute temporal query via fusion dispatch (Story #640)
             temporal_results = execute_temporal_query_with_fusion(
                 config=config,
@@ -1987,6 +2007,9 @@ class SemanticQueryManager:
                 exclude_language=exclude_language,
                 evolution_limit=evolution_limit,
                 exclude_path=exclude_path,
+                diff_types=diff_types_list,
+                author=author,
+                chunk_type=chunk_type,
             )
 
             # If fusion dispatch found no temporal index, fall back gracefully
