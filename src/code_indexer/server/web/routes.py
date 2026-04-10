@@ -3592,9 +3592,6 @@ def _create_jobs_page_response(
         page=page,
     )
 
-    # Get queue status
-    queue_status = _get_queue_status()
-
     response = templates.TemplateResponse(
         "jobs.html",
         {
@@ -3612,7 +3609,6 @@ def _create_jobs_page_response(
             "search": search,
             "success_message": success_message,
             "error_message": error_message,
-            "queue_status": queue_status,
         },
     )
 
