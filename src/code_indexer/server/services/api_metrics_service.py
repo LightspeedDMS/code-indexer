@@ -12,6 +12,7 @@ Timestamps older than 24 hours are automatically cleaned up.
 """
 
 import logging
+import queue
 import random
 import socket
 import sqlite3
@@ -19,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple, cast
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -34,6 +35,35 @@ CLEANUP_INTERVAL = 100
 # Retry configuration for database operations
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 0.01  # 10ms base delay
+
+# Background writer queue capacity
+_QUEUE_MAXSIZE = 10_000
+
+# Bucket write cleanup interval (cleanup every N writes)
+_BUCKET_CLEANUP_INTERVAL = 100
+
+# Background writer queue poll timeout (seconds)
+_QUEUE_POLL_TIMEOUT_S = 1.0
+
+
+def _truncate_min1(dt: datetime) -> str:
+    """Truncate datetime to 1-minute bucket boundary (zero seconds + microseconds)."""
+    return dt.replace(second=0, microsecond=0).isoformat()
+
+
+def _truncate_min5(dt: datetime) -> str:
+    """Truncate datetime to 5-minute bucket boundary."""
+    return dt.replace(minute=(dt.minute // 5) * 5, second=0, microsecond=0).isoformat()
+
+
+def _truncate_hour1(dt: datetime) -> str:
+    """Truncate datetime to 1-hour bucket boundary (zero minutes, seconds, microseconds)."""
+    return dt.replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def _truncate_day1(dt: datetime) -> str:
+    """Truncate datetime to 1-day bucket boundary (zero time component)."""
+    return dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
 class ApiMetricsService:
@@ -57,6 +87,9 @@ class ApiMetricsService:
         self._insert_count_lock = threading.Lock()
         self._backend: Optional[Any] = None
         self._node_id: Optional[str] = None
+        self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
+        self._writer_thread: Optional[threading.Thread] = None
+        self._stop_event: threading.Event = threading.Event()
 
     def initialize(
         self,
@@ -88,6 +121,10 @@ class ApiMetricsService:
                 f"ApiMetricsService using injected storage backend "
                 f"(node_id={self._node_id!r})"
             )
+            self._writer_thread = threading.Thread(
+                target=self._writer_loop, daemon=True, name="api-metrics-writer"
+            )
+            self._writer_thread.start()
             return
 
         if not db_path:
@@ -136,6 +173,56 @@ class ApiMetricsService:
 
         logger.debug(f"ApiMetricsService initialized with database: {db_path}")
 
+    def _writer_loop(self) -> None:
+        """Background thread: drain queue and write bucket UPSERTs for all 4 tiers.
+
+        Runs until _stop_event is set. Polls the queue with a bounded timeout so
+        the loop terminates cleanly when the service shuts down.
+        """
+        write_count = 0
+        while not self._stop_event.is_set():
+            try:
+                metric_type, username, timestamp = self._queue.get(
+                    timeout=_QUEUE_POLL_TIMEOUT_S
+                )
+            except queue.Empty:
+                continue
+
+            if self._backend is not None:
+                try:
+                    self._backend.upsert_bucket(
+                        username, "min1", _truncate_min1(timestamp), metric_type
+                    )
+                    self._backend.upsert_bucket(
+                        username, "min5", _truncate_min5(timestamp), metric_type
+                    )
+                    self._backend.upsert_bucket(
+                        username, "hour1", _truncate_hour1(timestamp), metric_type
+                    )
+                    self._backend.upsert_bucket(
+                        username, "day1", _truncate_day1(timestamp), metric_type
+                    )
+                except Exception as e:
+                    logger.warning(
+                        format_error_log(
+                            "APP-GENERAL-050",
+                            f"Failed to upsert bucket for {metric_type}/{username}: {e}",
+                        )
+                    )
+
+                write_count += 1
+                if write_count >= _BUCKET_CLEANUP_INTERVAL:
+                    try:
+                        self._backend.cleanup_expired_buckets()
+                    except Exception as e:
+                        logger.warning(
+                            format_error_log(
+                                "APP-GENERAL-051",
+                                f"Failed to cleanup expired buckets: {e}",
+                            )
+                        )
+                    write_count = 0
+
     def _cleanup_old(self) -> None:
         """Remove timestamps older than 24 hours from the database.
 
@@ -159,28 +246,29 @@ class ApiMetricsService:
 
         self._conn_manager.execute_atomic(_do_delete)
 
-    def _insert_metric(self, metric_type: str) -> None:
+    def _insert_metric(self, metric_type: str, username: str = "_anonymous") -> None:
         """Insert a metric record into the database.
 
         Args:
             metric_type: Type of metric ('semantic', 'other_index', 'regex', 'other_api')
+            username: Username for bucket attribution. Defaults to '_anonymous'.
 
         Note:
-            If not initialized, logs a warning and returns without inserting.
-            Uses retry logic with exponential backoff for database lock errors.
-            Gracefully degrades (logs warning, no crash) if all retries fail.
+            When a storage backend is set, enqueues to the background writer (non-blocking).
+            If the queue is full, the metric is dropped with a warning (never crashes).
+            Falls back to direct SQLite writes when no backend is configured.
         """
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
 
-        # Story #531: Backend delegation path (PG or SQLite via registry)
+        # Story #672: Backend path — enqueue to background writer (non-blocking hot path)
         if self._backend is not None:
             try:
-                self._backend.insert_metric(metric_type, now, self._node_id)
-            except Exception as e:
+                self._queue.put_nowait((metric_type, username, now))
+            except queue.Full:
                 logger.warning(
                     format_error_log(
                         "APP-GENERAL-048",
-                        f"Failed to insert metric {metric_type} via backend: {e}",
+                        f"API metrics queue full, dropping metric {metric_type} for {username}",
                     )
                 )
             return
@@ -199,11 +287,12 @@ class ApiMetricsService:
         # Retry logic for database lock errors
         for attempt in range(MAX_RETRIES):
             try:
+                now_iso = now.isoformat()
 
                 def _do_insert(conn: sqlite3.Connection) -> None:
                     conn.cursor().execute(
                         "INSERT INTO api_metrics (metric_type, timestamp, node_id) VALUES (?, ?, ?)",
-                        (metric_type, now, node_id),
+                        (metric_type, now_iso, node_id),
                     )
 
                 self._conn_manager.execute_atomic(_do_insert)
@@ -230,21 +319,21 @@ class ApiMetricsService:
         if should_cleanup:
             self._cleanup_old()
 
-    def increment_semantic_search(self) -> None:
+    def increment_semantic_search(self, username: str = "_anonymous") -> None:
         """Record a semantic search call timestamp."""
-        self._insert_metric("semantic")
+        self._insert_metric("semantic", username=username)
 
-    def increment_other_index_search(self) -> None:
+    def increment_other_index_search(self, username: str = "_anonymous") -> None:
         """Record an other index search call timestamp (FTS, temporal, hybrid)."""
-        self._insert_metric("other_index")
+        self._insert_metric("other_index", username=username)
 
-    def increment_regex_search(self) -> None:
+    def increment_regex_search(self, username: str = "_anonymous") -> None:
         """Record a regex search call timestamp."""
-        self._insert_metric("regex")
+        self._insert_metric("regex", username=username)
 
-    def increment_other_api_call(self) -> None:
+    def increment_other_api_call(self, username: str = "_anonymous") -> None:
         """Record an other API call timestamp."""
-        self._insert_metric("other_api")
+        self._insert_metric("other_api", username=username)
 
     def set_node_id(self, node_id: str) -> None:
         """Update the node_id used for metric tagging.
@@ -319,6 +408,71 @@ class ApiMetricsService:
             "regex_searches": counts.get("regex", 0),
             "other_api_calls": counts.get("other_api", 0),
         }
+
+    def get_metrics_bucketed(
+        self,
+        period_seconds: int,
+        username: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Return metric totals from api_metrics_buckets for the given period.
+
+        Delegates to the backend when available; returns zero counts otherwise.
+        cast() is used because _backend is Optional[Any] — importing the
+        ApiMetricsBackend protocol here would create a circular dependency since
+        storage-layer tests consume this service.
+
+        Args:
+            period_seconds: Duration in seconds. Must be in PERIOD_TO_TIER.
+            username: When provided, filter to this user's rows only.
+                      When None, aggregate across all users.
+
+        Returns:
+            Dict with keys: semantic, other_index, regex, other_api.
+        """
+        if self._backend is not None:
+            return cast(
+                Dict[str, int],
+                self._backend.get_metrics_bucketed(period_seconds, username),
+            )
+        return {"semantic": 0, "other_index": 0, "regex": 0, "other_api": 0}
+
+    def get_metrics_by_user(self, period_seconds: int) -> Dict[str, Dict[str, int]]:
+        """Return per-user metric totals from api_metrics_buckets for the given period.
+
+        Delegates to the backend when available; returns empty dict otherwise.
+        cast() is used because _backend is Optional[Any] — see get_metrics_bucketed.
+
+        Args:
+            period_seconds: Duration in seconds. Must be in PERIOD_TO_TIER.
+
+        Returns:
+            Dict mapping username to {metric_type: count}.
+        """
+        if self._backend is not None:
+            return cast(
+                Dict[str, Dict[str, int]],
+                self._backend.get_metrics_by_user(period_seconds),
+            )
+        return {}
+
+    def get_metrics_timeseries(self, period_seconds: int) -> List[Tuple[str, str, int]]:
+        """Return timeseries data from api_metrics_buckets for the given period.
+
+        Delegates to the backend when available; returns empty list otherwise.
+        cast() is used because _backend is Optional[Any] — see get_metrics_bucketed.
+
+        Args:
+            period_seconds: Duration in seconds. Must be in PERIOD_TO_TIER.
+
+        Returns:
+            List of (bucket_start, metric_type, count) tuples ordered by bucket_start ASC.
+        """
+        if self._backend is not None:
+            return cast(
+                List[Tuple[str, str, int]],
+                self._backend.get_metrics_timeseries(period_seconds),
+            )
+        return []
 
     def reset(self) -> None:
         """Clear all timestamp data from the database.

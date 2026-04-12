@@ -1,0 +1,40 @@
+<!-- Story #674: Per-User API Usage Breakdown Card -->
+<div class="col-12">
+    <article class="stat-card">
+        <header>
+            <h3>Per-User API Usage</h3>
+        </header>
+        <div class="recent-activity">
+            <table role="grid">
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Semantic</th>
+                        <th>Other Index</th>
+                        <th>Regex</th>
+                        <th>Other API</th>
+                        <th>Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% if per_user_data and per_user_data|length > 0 %}
+                    {% for row in per_user_data %}
+                    <tr>
+                        <td>{{ row.username }}</td>
+                        <td>{{ row.semantic }}</td>
+                        <td>{{ row.other_index }}</td>
+                        <td>{{ row.regex }}</td>
+                        <td>{{ row.other_api }}</td>
+                        <td><strong>{{ row.total }}</strong></td>
+                    </tr>
+                    {% endfor %}
+                    {% else %}
+                    <tr>
+                        <td colspan="6" style="text-align: center;">No activity in selected period.</td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+    </article>
+</div>

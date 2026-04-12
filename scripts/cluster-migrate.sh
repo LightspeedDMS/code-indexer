@@ -32,40 +32,56 @@ ROLLBACK=false
 PYTHON_BIN="python3"
 SRC_DIR=""
 
+# Story #511: Clone backend selection ("ontap" preserves existing behavior)
+CLONE_BACKEND="ontap"
+DAEMON_URL=""
+DAEMON_API_KEY=""
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
 usage() {
     cat >&2 <<EOF
-Usage: $0 --postgres-url URL --ontap-mount PATH [OPTIONS]
+Usage: $0 --postgres-url URL [--ontap-mount PATH | --nfs-mount PATH] [OPTIONS]
 
 Required:
-  --postgres-url URL     PostgreSQL connection URL
-                         (e.g. postgresql://user:pass@host/db)
-  --ontap-mount PATH     Path to shared NFS/ONTAP mount (e.g. /mnt/fsx)
+  --postgres-url URL          PostgreSQL connection URL
+                              (e.g. postgresql://user:pass@host/db)
+
+Storage backend (choose one):
+  --clone-backend TYPE        Clone backend: ontap (default), cow-daemon, local
+  --ontap-mount PATH          Path to shared NFS/ONTAP mount (e.g. /mnt/fsx)
+                              (alias: --nfs-mount)
+  --nfs-mount PATH            Path to NFS mount (primary name, alias for --ontap-mount)
+  --daemon-url URL            CoW daemon URL (required for --clone-backend cow-daemon)
+  --daemon-api-key KEY        CoW daemon API key (required for --clone-backend cow-daemon)
 
 Optional:
-  --cidx-data-dir PATH   CIDX server data directory (default: ~/.cidx-server)
-  --dry-run              Print what would be done without making changes
-  --rollback             Restore from backups created by a previous migration run
-  --python PATH          Path to python3 binary (default: python3)
-  --src-dir PATH         Path to CIDX project root containing src/
-  -h, --help             Show this help message
+  --cidx-data-dir PATH        CIDX server data directory (default: ~/.cidx-server)
+  --dry-run                   Print what would be done without making changes
+  --rollback                  Restore from backups created by a previous migration run
+  --python PATH               Path to python3 binary (default: python3)
+  --src-dir PATH              Path to CIDX project root containing src/
+  -h, --help                  Show this help message
 EOF
     exit 1
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --postgres-url)  POSTGRES_URL="$2";      shift 2 ;;
-        --ontap-mount)   ONTAP_MOUNT="$2";       shift 2 ;;
-        --cidx-data-dir) CIDX_DATA_DIR="$2";     shift 2 ;;
-        --dry-run)       DRY_RUN=true;           shift   ;;
-        --rollback)      ROLLBACK=true;          shift   ;;
-        --python)        PYTHON_BIN="$2";        shift 2 ;;
-        --src-dir)       SRC_DIR="$2";           shift 2 ;;
-        -h|--help)       usage ;;
+        --postgres-url)    POSTGRES_URL="$2";    shift 2 ;;
+        --ontap-mount)     ONTAP_MOUNT="$2";     shift 2 ;;
+        --nfs-mount)       ONTAP_MOUNT="$2";     shift 2 ;;
+        --cidx-data-dir)   CIDX_DATA_DIR="$2";   shift 2 ;;
+        --dry-run)         DRY_RUN=true;         shift   ;;
+        --rollback)        ROLLBACK=true;        shift   ;;
+        --python)          PYTHON_BIN="$2";      shift 2 ;;
+        --src-dir)         SRC_DIR="$2";         shift 2 ;;
+        --clone-backend)   CLONE_BACKEND="$2";   shift 2 ;;
+        --daemon-url)      DAEMON_URL="$2";      shift 2 ;;
+        --daemon-api-key)  DAEMON_API_KEY="$2";  shift 2 ;;
+        -h|--help)         usage ;;
         *) echo "Unknown argument: $1" >&2; usage ;;
     esac
 done
@@ -138,7 +154,9 @@ backup_databases() {
     if $DRY_RUN; then
         log_dry "Would create backup directory: $BACKUP_DIR"
         log_dry "Would backup: $SQLITE_DB, $GROUPS_DB, $CONFIG_JSON"
-        [[ -d "$ALIASES_DIR" ]] && log_dry "Would backup alias JSONs: $ALIASES_DIR"
+        if [[ -d "$ALIASES_DIR" ]]; then
+            log_dry "Would backup alias JSONs: $ALIASES_DIR"
+        fi
         return
     fi
 
@@ -146,7 +164,9 @@ backup_databases() {
     cp "$SQLITE_DB"  "${BACKUP_DIR}/cidx_server.db.bak"
     cp "$GROUPS_DB"  "${BACKUP_DIR}/groups.db.bak"
     cp "$CONFIG_JSON" "${BACKUP_DIR}/config.json.bak"
-    [[ -d "$ALIASES_DIR" ]] && cp -r "$ALIASES_DIR" "${BACKUP_DIR}/aliases"
+    if [[ -d "$ALIASES_DIR" ]]; then
+        cp -r "$ALIASES_DIR" "${BACKUP_DIR}/aliases"
+    fi
 
     log_info "Backups created in: $BACKUP_DIR"
 }
@@ -350,43 +370,83 @@ update_config_for_cluster() {
     log_step "Updating config.json for cluster mode"
 
     if $DRY_RUN; then
-        log_dry "Would set storage_mode=postgres and postgres_dsn in $CONFIG_JSON"
+        log_dry "Would set storage_mode=postgres, postgres_dsn, and clone_backend=${CLONE_BACKEND} in $CONFIG_JSON"
         return
     fi
 
-    PYTHONPATH="$PYTHONPATH" "$PYTHON_BIN" - <<PYEOF
+    # ONTAP_MOUNT holds the NFS/shared-storage mount path regardless of backend type.
+    # Pass all values via environment variables to avoid shell-interpolation injection.
+    CIDX_CONFIG_FILE="$CONFIG_JSON" \
+    CIDX_POSTGRES_URL="$POSTGRES_URL" \
+    CIDX_CLONE_BACKEND="$CLONE_BACKEND" \
+    CIDX_DAEMON_URL="$DAEMON_URL" \
+    CIDX_DAEMON_API_KEY="$DAEMON_API_KEY" \
+    CIDX_MOUNT_POINT="$ONTAP_MOUNT" \
+    PYTHONPATH="$PYTHONPATH" "$PYTHON_BIN" - <<'PYEOF'
 import json, os, tempfile
 
-config_file = '${CONFIG_JSON}'
-postgres_url = '${POSTGRES_URL}'
-config_dir = os.path.dirname(config_file)
+config_file    = os.environ['CIDX_CONFIG_FILE']
+postgres_url   = os.environ['CIDX_POSTGRES_URL']
+clone_backend  = os.environ['CIDX_CLONE_BACKEND']
+daemon_url     = os.environ['CIDX_DAEMON_URL']
+daemon_api_key = os.environ['CIDX_DAEMON_API_KEY']
+mount_point    = os.environ['CIDX_MOUNT_POINT']
+config_dir     = os.path.dirname(config_file)
 
 with open(config_file, 'r') as f:
     config = json.load(f)
 
-if config.get('storage_mode') == 'postgres' and config.get('postgres_dsn') == postgres_url:
-    print('config.json already in postgres mode — no changes needed.')
-else:
-    config['storage_mode'] = 'postgres'
-    config['postgres_dsn'] = postgres_url
+# Compute desired state — each backend is mutually exclusive; prune opposing sections.
+desired = dict(config)
+desired['storage_mode'] = 'postgres'
+desired['postgres_dsn']  = postgres_url
+desired['clone_backend'] = clone_backend
 
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=config_dir, prefix='.config_migrate_', suffix='.tmp'
-    )
+if clone_backend == 'cow-daemon':
+    desired.pop('ontap', None)           # remove ONTAP section if present
+    desired['cow_daemon'] = {
+        'daemon_url':  daemon_url,
+        'api_key':     daemon_api_key,
+        'mount_point': mount_point,
+    }
+elif clone_backend == 'local':
+    desired.pop('ontap', None)
+    desired.pop('cow_daemon', None)
+else:
+    # 'ontap' or unrecognised: keep existing ontap section, remove cow_daemon
+    desired.pop('cow_daemon', None)
+
+# Idempotency: skip write if nothing changed
+if config == desired:
+    print('config.json already up to date — no changes needed.')
+else:
+    tmp_fd = None
+    tmp_path = None
     try:
-        with os.fdopen(tmp_fd, 'w') as f:
-            json.dump(config, f, indent=2)
-            f.write('\n')
-            f.flush()
-            os.fsync(f.fileno())
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=config_dir, prefix='.config_migrate_', suffix='.tmp'
+        )
+        with os.fdopen(tmp_fd, 'w') as fh:
+            tmp_fd = None  # fdopen takes ownership; prevent double-close
+            json.dump(desired, fh, indent=2)
+            fh.write('\n')
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp_path, config_file)
+        tmp_path = None  # replaced successfully
     except Exception as e:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_fd is not None:
+            try:
+                os.close(tmp_fd)
+            except OSError:
+                pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         raise RuntimeError(f'Failed to update config: {e}') from e
-    print('config.json updated: storage_mode=postgres')
+    print(f'config.json updated: storage_mode=postgres, clone_backend={clone_backend}')
 PYEOF
 
     log_info "Config update complete."

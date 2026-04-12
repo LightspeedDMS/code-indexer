@@ -832,6 +832,7 @@ class ApiMetricsBackend(Protocol):
         metric_type: str,
         timestamp: Optional[str] = None,
         node_id: Optional[str] = None,
+        username: str = "_anonymous",
     ) -> None:
         """Insert a single metric record.
 
@@ -840,6 +841,35 @@ class ApiMetricsBackend(Protocol):
                          'regex', 'other_api').
             timestamp: ISO 8601 timestamp string. Uses current UTC time when None.
             node_id: Optional cluster node identifier (NULL in standalone).
+            username: Username for bucket attribution. Defaults to '_anonymous'.
+        """
+        ...
+
+    def upsert_bucket(
+        self,
+        username: str,
+        granularity: str,
+        bucket_start: str,
+        metric_type: str,
+    ) -> None:
+        """Upsert a single bucket row, incrementing count by 1.
+
+        Args:
+            username: Username for attribution (e.g. 'alice', '_anonymous').
+            granularity: One of 'min1', 'min5', 'hour1', 'day1'.
+            bucket_start: ISO 8601 timestamp of the bucket start boundary.
+            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+        """
+        ...
+
+    def cleanup_expired_buckets(self) -> None:
+        """Delete expired bucket rows per granularity retention policy.
+
+        Retention:
+            min1  — 15 minutes
+            min5  — 1 hour
+            hour1 — 24 hours
+            day1  — 15 days
         """
         ...
 
@@ -858,6 +888,51 @@ class ApiMetricsBackend(Protocol):
         Returns:
             Dict with keys: semantic_searches, other_index_searches,
             regex_searches, other_api_calls — each mapped to an integer count.
+        """
+        ...
+
+    def get_metrics_bucketed(
+        self,
+        period_seconds: int,
+        username: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Return metric totals from api_metrics_buckets for the given period.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+            username: When provided, filter to this user's rows only.
+                      When None, aggregate across all users.
+
+        Returns:
+            Dict with keys: semantic, other_index, regex, other_api.
+        """
+        ...
+
+    def get_metrics_by_user(
+        self,
+        period_seconds: int,
+    ) -> Dict[str, Dict[str, int]]:
+        """Return per-user metric totals from api_metrics_buckets for the given period.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+
+        Returns:
+            Dict mapping username to {metric_type: count}.
+        """
+        ...
+
+    def get_metrics_timeseries(
+        self,
+        period_seconds: int,
+    ) -> List[Tuple[str, str, int]]:
+        """Return timeseries data from api_metrics_buckets for the given period.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+
+        Returns:
+            List of (bucket_start, metric_type, count) ordered by bucket_start ASC.
         """
         ...
 

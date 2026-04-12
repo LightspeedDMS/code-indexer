@@ -35,6 +35,27 @@
     {% include "partials/dashboard_stats.html" %}
 </section>
 
+<!-- Story #674: Per-User API Usage Breakdown Card -->
+<section id="api-per-user-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-api-per-user?api_filter=86400"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <div class="loading-indicator">
+        <p>Loading per-user API usage...</p>
+    </div>
+</section>
+
+<!-- Story #675: API Usage Trends Chart Card -->
+<section id="api-chart-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-api-chart?api_filter=86400"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <div class="loading-indicator">
+        <p>Loading API usage chart...</p>
+    </div>
+</section>
+
+<script src="/admin/static/js/chart.min.js?v={{ static_version }}"></script>
 <script>
 let autoRefreshInterval = null;
 let _refreshInProgress = false;
@@ -169,22 +190,28 @@ function refreshAll() {
     const timeFilter = document.getElementById('time-filter')?.value || '24h';
     const apiFilter = document.getElementById('api-filter')?.value || '900';
 
-    // Fire all 4 requests in parallel using fetch(); use Promise.allSettled so
+    // Fire all requests in parallel using fetch(); use Promise.allSettled so
     // one failure does not block the others from updating the DOM.
     // Story #69: Granular refresh targets - dropdowns stay untouched
     // Story #201: Recent Activity hardcoded to 24h (no dropdown)
+    // Story #674: Per-user breakdown refreshes with current api_filter value
+    // Story #675: Chart card refreshes with current api_filter value
     Promise.allSettled([
         fetch('/admin/partials/dashboard-health', _fetchOpts),
         fetch(`/admin/partials/dashboard-job-counts?time_filter=${timeFilter}`, _fetchOpts),
         fetch('/admin/partials/dashboard-recent-jobs?recent_filter=24h', _fetchOpts),
-        fetch(`/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, _fetchOpts)
+        fetch(`/admin/partials/dashboard-api-metrics?api_filter=${apiFilter}`, _fetchOpts),
+        fetch(`/admin/partials/dashboard-api-per-user?api_filter=${apiFilter}`, _fetchOpts),
+        fetch(`/admin/partials/dashboard-api-chart?api_filter=${apiFilter}`, _fetchOpts)
     ]).then(function(results) {
         var updates = [];
         var targets = [
             '#health-section',
             '#job-counts-data',
             '#recent-jobs-tbody',
-            '#api-metrics-data'
+            '#api-metrics-data',
+            '#api-per-user-section',
+            '#api-chart-section'
         ];
         results.forEach(function(result, i) {
             if (result.status === 'fulfilled') {

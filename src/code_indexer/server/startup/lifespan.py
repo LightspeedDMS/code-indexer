@@ -436,6 +436,40 @@ def make_lifespan(
                     global_lifecycle_manager.refresh_scheduler
                 )
 
+            # Story #510 AC8: Build VersionedSnapshotManager with configured CloneBackend
+            # and store it in app.state for use by snapshot-aware lifecycle services.
+            try:
+                from code_indexer.server.startup.clone_backend_wiring import (
+                    build_snapshot_manager,
+                )
+
+                versioned_base = str(golden_repos_dir)
+                snapshot_manager = build_snapshot_manager(
+                    server_config, versioned_base=versioned_base
+                )
+                app.state.snapshot_manager = snapshot_manager
+                logger.info(
+                    "Story #510: VersionedSnapshotManager initialized "
+                    "(clone_backend=%r, versioned_base=%s)",
+                    server_config.clone_backend,
+                    versioned_base,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as snap_exc:
+                # Non-fatal: log and continue. Snapshot operations will fail at
+                # runtime if clone_backend is misconfigured, but startup proceeds.
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-510",
+                        f"Failed to initialize VersionedSnapshotManager "
+                        f"(clone_backend={getattr(server_config, 'clone_backend', 'unknown')}): "
+                        f"{snap_exc}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                app.state.snapshot_manager = None
+
             logger.info(
                 "Global repos background services started successfully",
                 extra={"correlation_id": get_correlation_id()},

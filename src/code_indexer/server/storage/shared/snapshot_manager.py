@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from .ontap_flexclone_client import OntapFlexCloneClient
+    from .clone_backend import CloneBackend  # pragma: no cover
+    from .ontap_flexclone_client import OntapFlexCloneClient  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +38,15 @@ _DEFAULT_COW_TIMEOUT = 600
 
 
 class VersionedSnapshotManager:
-    """Manages versioned snapshots using FlexClone or filesystem CoW.
+    """Manages versioned snapshots using FlexClone, filesystem CoW, or a CloneBackend.
 
     Parameters
     ----------
     flexclone_client:
-        Optional :class:`OntapFlexCloneClient` instance.  When supplied,
-        snapshot creation and deletion use ONTAP FlexClone volumes.  When
-        ``None``, falls back to ``cp --reflink=auto`` (standalone mode).
+        Optional :class:`OntapFlexCloneClient` instance.  When supplied (and
+        ``clone_backend`` is ``None``), snapshot creation and deletion use
+        ONTAP FlexClone volumes.  When ``None``, falls back to
+        ``cp --reflink=auto`` (standalone mode).
     mount_point:
         Filesystem path where ONTAP FlexClone volumes are mounted, e.g.
         ``"/mnt/fsx"``.  Only used in FlexClone mode.
@@ -56,6 +58,12 @@ class VersionedSnapshotManager:
     cow_timeout:
         Maximum seconds allowed for the ``cp --reflink=auto`` command before a
         :exc:`subprocess.TimeoutExpired` is raised.  Defaults to 600 (10 min).
+    clone_backend:
+        Optional :class:`CloneBackend` instance (Story #510 AC7).  When
+        supplied, ``create_snapshot`` and ``delete_snapshot`` delegate entirely
+        to this backend, bypassing both ``flexclone_client`` and the local CoW
+        path.  When ``None``, the existing FlexClone / CoW selection logic is
+        used unchanged.
     """
 
     def __init__(
@@ -64,11 +72,13 @@ class VersionedSnapshotManager:
         mount_point: str = "/mnt/fsx",
         versioned_base: str = "",
         cow_timeout: int = _DEFAULT_COW_TIMEOUT,
+        clone_backend: Optional["CloneBackend"] = None,
     ) -> None:
         self._flexclone = flexclone_client
         self._mount_point = mount_point.rstrip("/")
         self._versioned_base = versioned_base
         self._cow_timeout = cow_timeout
+        self._clone_backend = clone_backend
 
     # ------------------------------------------------------------------
     # Mode helpers
@@ -111,6 +121,11 @@ class VersionedSnapshotManager:
         """
         timestamp = int(time.time())
 
+        if self._clone_backend is not None:
+            return self._clone_backend.create_clone(
+                source_path, alias, f"v_{timestamp}"
+            )
+
         if self._flexclone is not None:
             return self._create_flexclone_snapshot(alias, timestamp)
         return self._create_cow_snapshot(alias, source_path, timestamp)
@@ -140,6 +155,9 @@ class VersionedSnapshotManager:
         RuntimeError
             If deletion fails unexpectedly.
         """
+        if self._clone_backend is not None:
+            return self._clone_backend.delete_clone(version_path)
+
         if self._flexclone is not None:
             return self._delete_flexclone_snapshot(version_path)
         return self._delete_cow_snapshot(version_path)

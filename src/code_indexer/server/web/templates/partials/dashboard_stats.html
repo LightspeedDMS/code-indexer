@@ -99,10 +99,11 @@
     <div>
         <label for="api-filter" style="margin-right: 0.5rem;">Time Window:</label>
         <select id="api-filter" onchange="updateApiActivity()" style="padding: 0.25rem 0.5rem;">
-            <option value="60" {{ 'selected' if api_filter == 60 else '' }}>Last 1 Minute</option>
-            <option value="900" {{ 'selected' if api_filter == 900 or api_filter is none else '' }}>Last 15 Minutes</option>
+            <option value="900" {{ 'selected' if api_filter == 900 else '' }}>Last 15 Minutes</option>
             <option value="3600" {{ 'selected' if api_filter == 3600 else '' }}>Last 1 Hour</option>
-            <option value="86400" {{ 'selected' if api_filter == 86400 else '' }}>Last 24 Hours</option>
+            <option value="86400" {{ 'selected' if api_filter == 86400 or api_filter is none else '' }}>Last 24 Hours</option>
+            <option value="604800" {{ 'selected' if api_filter == 604800 else '' }}>Last 7 Days</option>
+            <option value="1296000" {{ 'selected' if api_filter == 1296000 else '' }}>Last 15 Days</option>
         </select>
     </div>
 </div>

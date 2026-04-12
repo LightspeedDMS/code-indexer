@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 from urllib.parse import quote
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from fastapi import APIRouter, Request, Response, Form, HTTPException, status
+from fastapi import APIRouter, Query, Request, Response, Form, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -123,6 +123,8 @@ login_router = APIRouter()
 # CSRF cookie name and settings
 CSRF_COOKIE_NAME = "_csrf"
 CSRF_MAX_AGE_SECONDS = 600  # 10 minutes
+# Story #674: Default time window (seconds) for per-user API breakdown card
+_DEFAULT_PER_USER_API_FILTER_SECONDS = 86_400  # 24 hours
 
 
 def _get_csrf_serializer() -> URLSafeTimedSerializer:
@@ -670,6 +672,100 @@ def dashboard_langfuse_partial(request: Request):
         {
             "request": request,
             "langfuse": langfuse_data,
+        },
+    )
+
+
+@web_router.get("/partials/dashboard-api-per-user", response_class=HTMLResponse)
+def dashboard_api_per_user_partial(
+    request: Request,
+    api_filter: int = Query(
+        _DEFAULT_PER_USER_API_FILTER_SECONDS,
+        ge=60,
+        le=31_536_000,
+        description="Time window in seconds for per-user API usage breakdown.",
+    ),
+):
+    """
+    Story #674: Per-user API usage breakdown card partial endpoint.
+
+    Returns HTML fragment containing a table of API usage counts per user,
+    sorted by total descending, for the selected time window.
+
+    Args:
+        request: HTTP request
+        api_filter: Time window in seconds (60s min, 1 year max; default 24h).
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    api_metrics_backend = (
+        backend_registry.api_metrics if backend_registry is not None else None
+    )
+
+    dashboard_service = _get_dashboard_service()
+    per_user_data = dashboard_service.get_per_user_stats(
+        period_seconds=api_filter,
+        api_metrics_backend=api_metrics_backend,
+    )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_api_per_user.html",
+        {
+            "request": request,
+            "per_user_data": per_user_data,
+            "api_filter": api_filter,
+        },
+    )
+
+
+@web_router.get("/partials/dashboard-api-chart", response_class=HTMLResponse)
+def dashboard_api_chart_partial(
+    request: Request,
+    api_filter: int = Query(
+        _DEFAULT_PER_USER_API_FILTER_SECONDS,
+        ge=60,
+        le=31_536_000,
+        description="Time window in seconds for API usage chart.",
+    ),
+):
+    """
+    Story #675: API Usage Trends stacked bar chart partial endpoint.
+
+    Returns HTML fragment containing a canvas element and inline Chart.js
+    initialization script that renders a stacked bar chart of API usage over time.
+
+    Args:
+        request: HTTP request
+        api_filter: Time window in seconds (60s min, 1 year max; default 24h).
+
+    Returns HTML fragment for htmx partial updates.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    backend_registry = getattr(request.app.state, "backend_registry", None)
+    api_metrics_backend = (
+        backend_registry.api_metrics if backend_registry is not None else None
+    )
+
+    dashboard_service = _get_dashboard_service()
+    chart_data = dashboard_service.get_chart_data(
+        period_seconds=api_filter,
+        api_metrics_backend=api_metrics_backend,
+    )
+
+    return templates.TemplateResponse(
+        "partials/dashboard_api_chart.html",
+        {
+            "request": request,
+            "chart_data": chart_data,
+            "api_filter": api_filter,
         },
     )
 

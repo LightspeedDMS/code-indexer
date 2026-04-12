@@ -319,3 +319,152 @@ def test_get_snapshot_path_cow_mode_no_double_slash() -> None:
 
     assert "//" not in path
     assert path == "/golden-repos/.versioned/repo-b/v_1234567890"
+
+
+# ---------------------------------------------------------------------------
+# clone_backend integration (Story #510 AC7)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_clone_backend() -> MagicMock:
+    """Return a MagicMock that satisfies the CloneBackend protocol."""
+    backend = MagicMock()
+    backend.create_clone.return_value = "/mnt/cow/myrepo/v_1700000000"
+    backend.delete_clone.return_value = True
+    return backend
+
+
+def test_create_snapshot_delegates_to_clone_backend_when_provided() -> None:
+    """create_snapshot calls clone_backend.create_clone when clone_backend is set."""
+    backend = _make_mock_clone_backend()
+    manager = VersionedSnapshotManager(clone_backend=backend)
+
+    with patch("code_indexer.server.storage.shared.snapshot_manager.time") as mock_time:
+        mock_time.time.return_value = 1700000000
+        result = manager.create_snapshot("myrepo", source_path="/golden-repos/myrepo")
+
+    backend.create_clone.assert_called_once_with(
+        "/golden-repos/myrepo", "myrepo", "v_1700000000"
+    )
+    assert result == "/mnt/cow/myrepo/v_1700000000"
+
+
+def test_create_snapshot_clone_backend_does_not_call_flexclone() -> None:
+    """When clone_backend is set, flexclone_client is never called."""
+    flexclone = _make_flexclone_client()
+    backend = _make_mock_clone_backend()
+    manager = VersionedSnapshotManager(
+        flexclone_client=flexclone, clone_backend=backend
+    )
+
+    with patch("code_indexer.server.storage.shared.snapshot_manager.time") as mock_time:
+        mock_time.time.return_value = 1700000000
+        manager.create_snapshot("myrepo", source_path="/src")
+
+    flexclone.create_clone.assert_not_called()
+    backend.create_clone.assert_called_once()
+
+
+def test_create_snapshot_clone_backend_does_not_call_subprocess() -> None:
+    """When clone_backend is set, subprocess.run is never called."""
+    backend = _make_mock_clone_backend()
+    manager = VersionedSnapshotManager(
+        clone_backend=backend, versioned_base="/tmp/test"
+    )
+
+    with (
+        patch("code_indexer.server.storage.shared.snapshot_manager.time") as mock_time,
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_time.time.return_value = 1700000000
+        manager.create_snapshot("myrepo", source_path="/src")
+
+    mock_run.assert_not_called()
+
+
+def test_delete_snapshot_delegates_to_clone_backend_when_provided() -> None:
+    """delete_snapshot calls clone_backend.delete_clone when clone_backend is set."""
+    backend = _make_mock_clone_backend()
+    manager = VersionedSnapshotManager(clone_backend=backend)
+
+    result = manager.delete_snapshot("myrepo", "/mnt/cow/myrepo/v_1700000000")
+
+    backend.delete_clone.assert_called_once_with("/mnt/cow/myrepo/v_1700000000")
+    assert result is True
+
+
+def test_delete_snapshot_clone_backend_does_not_call_flexclone() -> None:
+    """When clone_backend is set, flexclone_client.delete_clone is never called."""
+    flexclone = _make_flexclone_client()
+    backend = _make_mock_clone_backend()
+    manager = VersionedSnapshotManager(
+        flexclone_client=flexclone, clone_backend=backend
+    )
+
+    manager.delete_snapshot("myrepo", "/mnt/cow/myrepo/v_1700000000")
+
+    flexclone.delete_clone.assert_not_called()
+    backend.delete_clone.assert_called_once()
+
+
+def test_none_clone_backend_preserves_flexclone_create_behavior() -> None:
+    """When clone_backend is None, flexclone_client is used (existing behavior)."""
+    flexclone = _make_flexclone_client()
+    manager = VersionedSnapshotManager(
+        flexclone_client=flexclone,
+        clone_backend=None,
+        mount_point="/mnt/fsx",
+    )
+
+    with patch("code_indexer.server.storage.shared.snapshot_manager.time") as mock_time:
+        mock_time.time.return_value = 1700000000
+        result = manager.create_snapshot("myrepo", source_path="/src")
+
+    flexclone.create_clone.assert_called_once()
+    assert result == "/mnt/fsx/cidx_clone_myrepo_1700000000"
+
+
+def test_none_clone_backend_preserves_cow_create_behavior(tmp_path: "Path") -> None:
+    """When clone_backend is None, CoW subprocess path is used (existing behavior)."""
+    manager = VersionedSnapshotManager(
+        flexclone_client=None,
+        clone_backend=None,
+        versioned_base=str(tmp_path),
+    )
+
+    with (
+        patch("code_indexer.server.storage.shared.snapshot_manager.time") as mock_time,
+        patch("subprocess.run") as mock_run,
+    ):
+        mock_time.time.return_value = 1700000000
+        manager.create_snapshot("myrepo", source_path="/src")
+
+    mock_run.assert_called_once()
+
+
+def test_none_clone_backend_preserves_flexclone_delete_behavior() -> None:
+    """When clone_backend is None, flexclone_client.delete_clone is used (existing behavior)."""
+    flexclone = _make_flexclone_client()
+    manager = VersionedSnapshotManager(
+        flexclone_client=flexclone,
+        clone_backend=None,
+    )
+
+    result = manager.delete_snapshot("myrepo", "/mnt/fsx/cidx_clone_myrepo_1700000000")
+
+    flexclone.delete_clone.assert_called_once_with("cidx_clone_myrepo_1700000000")
+    assert result is True
+
+
+def test_none_clone_backend_preserves_cow_delete_behavior(tmp_path: "Path") -> None:
+    """When clone_backend is None, CoW directory removal is used (existing behavior)."""
+    snapshot_dir = tmp_path / ".versioned" / "myrepo" / "v_1700000000"
+    snapshot_dir.mkdir(parents=True)
+    (snapshot_dir / "file.txt").write_text("content")
+
+    manager = VersionedSnapshotManager(flexclone_client=None, clone_backend=None)
+
+    result = manager.delete_snapshot("myrepo", str(snapshot_dir))
+
+    assert result is True
+    assert not snapshot_dir.exists()

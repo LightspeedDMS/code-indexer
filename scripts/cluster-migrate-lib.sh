@@ -42,21 +42,71 @@ _prereq_error() {
 }
 
 validate_required_args() {
-    [[ -z "$POSTGRES_URL" ]]  && _prereq_error "--postgres-url is required"
-    [[ -z "$ONTAP_MOUNT" ]]   && _prereq_error "--ontap-mount is required"
+    if [[ -z "$POSTGRES_URL" ]]; then
+        _prereq_error "--postgres-url is required"
+    fi
+    # --ontap-mount / --nfs-mount required for ontap backend in non-dry-run only;
+    # dry-run mode skips live NFS validation so tests pass without a real mount.
+    if [[ "${CLONE_BACKEND:-ontap}" == "ontap" ]] && ! $DRY_RUN; then
+        if [[ -z "$ONTAP_MOUNT" ]]; then
+            _prereq_error "--ontap-mount (or --nfs-mount) is required for --clone-backend ontap"
+        fi
+    fi
+}
+
+validate_cow_daemon_args() {
+    if [[ "${CLONE_BACKEND:-ontap}" != "cow-daemon" ]]; then return; fi
+    if [[ -z "$DAEMON_URL" ]]; then
+        _prereq_error "--daemon-url is required when --clone-backend cow-daemon"
+    fi
+    if [[ -z "$DAEMON_API_KEY" ]]; then
+        _prereq_error "--daemon-api-key is required when --clone-backend cow-daemon"
+    fi
+}
+
+# Default connect-timeout in seconds for CoW daemon health check.
+# Override by setting COW_DAEMON_CONNECT_TIMEOUT in the environment before running.
+COW_DAEMON_CONNECT_TIMEOUT="${COW_DAEMON_CONNECT_TIMEOUT:-10}"
+
+validate_daemon_health() {
+    if [[ "${CLONE_BACKEND:-ontap}" != "cow-daemon" ]]; then return; fi
+    if $DRY_RUN; then
+        log_dry "Would check CoW daemon health at $DAEMON_URL"
+        return
+    fi
+    log_info "Checking CoW daemon health at $DAEMON_URL ..."
+    if ! curl -sf --connect-timeout "$COW_DAEMON_CONNECT_TIMEOUT" \
+            "${DAEMON_URL}/api/v1/health" >/dev/null 2>&1; then
+        _prereq_error "CoW daemon not reachable at $DAEMON_URL. Ensure the daemon is running."
+    else
+        log_info "CoW daemon health check: OK"
+    fi
 }
 
 validate_local_paths() {
-    [[ ! -d "$CIDX_DATA_DIR" ]]        && _prereq_error "CIDX data directory does not exist: $CIDX_DATA_DIR"
-    [[ ! -f "$SQLITE_DB" ]]            && _prereq_error "SQLite database not found: $SQLITE_DB"
-    [[ ! -f "$GROUPS_DB" ]]            && _prereq_error "Groups database not found: $GROUPS_DB"
-    [[ ! -f "$CONFIG_JSON" ]]          && _prereq_error "Server config not found: $CONFIG_JSON"
+    if [[ ! -d "$CIDX_DATA_DIR" ]]; then
+        _prereq_error "CIDX data directory does not exist: $CIDX_DATA_DIR"
+    fi
+    if [[ ! -f "$SQLITE_DB" ]]; then
+        _prereq_error "SQLite database not found: $SQLITE_DB"
+    fi
+    if [[ ! -f "$GROUPS_DB" ]]; then
+        _prereq_error "Groups database not found: $GROUPS_DB"
+    fi
+    if [[ ! -f "$CONFIG_JSON" ]]; then
+        _prereq_error "Server config not found: $CONFIG_JSON"
+    fi
     if [[ ! -d "${PROJECT_ROOT}/src" ]]; then
         _prereq_error "CIDX source directory not found: ${PROJECT_ROOT}/src (use --src-dir)"
     fi
 }
 
 validate_nfs_mount() {
+    # In dry-run mode, skip live NFS validation — print intent only.
+    if $DRY_RUN; then
+        log_dry "Would validate NFS mount at $ONTAP_MOUNT"
+        return
+    fi
     if [[ ! -d "$ONTAP_MOUNT" ]]; then
         _prereq_error "NFS mount point does not exist or is not mounted: $ONTAP_MOUNT"
         return
@@ -106,10 +156,18 @@ validate_prerequisites() {
 
     _PREREQ_ERRORS=0
     validate_required_args
+    validate_cow_daemon_args
     validate_local_paths
-    validate_nfs_mount
+
+    # NFS mount validation is only needed for backends that use shared storage.
+    # "local" backend stores snapshots on the local filesystem — no NFS required.
+    if [[ "${CLONE_BACKEND:-ontap}" != "local" ]]; then
+        validate_nfs_mount
+    fi
+
     validate_python_bin
     validate_postgres_connection
+    validate_daemon_health
 
     if [[ $_PREREQ_ERRORS -gt 0 ]]; then
         log_error "Prerequisite validation failed with $_PREREQ_ERRORS error(s). Aborting."

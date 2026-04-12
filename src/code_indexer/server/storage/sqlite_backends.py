@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple
 
 from .database_manager import DatabaseConnectionManager
@@ -3274,6 +3275,17 @@ class LogsSqliteBackend:
         pass
 
 
+# Period-to-tier mapping for bucketed query methods (Story #673).
+# Maps period_seconds → granularity tier stored in api_metrics_buckets.
+PERIOD_TO_TIER: Dict[int, str] = {
+    900: "min1",  # 15 minutes  → 1-minute buckets
+    3600: "min5",  # 1 hour      → 5-minute buckets
+    86400: "hour1",  # 24 hours    → 1-hour buckets
+    604800: "day1",  # 7 days      → 1-day buckets
+    1296000: "day1",  # 15 days     → 1-day buckets
+}
+
+
 class ApiMetricsSqliteBackend:
     """
     SQLite backend for API metrics storage (Story #502).
@@ -3340,6 +3352,111 @@ class ApiMetricsSqliteBackend:
             )
 
         self._conn_manager.execute_atomic(operation)
+        self._ensure_buckets_schema()
+
+    # Valid values for bucket fields — used in upsert_bucket validation
+    _VALID_GRANULARITIES = frozenset({"min1", "min5", "hour1", "day1"})
+    _VALID_METRIC_TYPES = frozenset({"semantic", "other_index", "regex", "other_api"})
+
+    # Retention window per granularity tier (Story #672) — immutable
+    _RETENTION_WINDOWS = MappingProxyType(
+        {
+            "min1": timedelta(minutes=15),
+            "min5": timedelta(hours=1),
+            "hour1": timedelta(hours=24),
+            "day1": timedelta(days=15),
+        }
+    )
+
+    def _ensure_buckets_schema(self) -> None:
+        """Create the api_metrics_buckets table if it does not already exist."""
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS api_metrics_buckets (
+                    username      TEXT NOT NULL,
+                    granularity   TEXT NOT NULL,
+                    bucket_start  TEXT NOT NULL,
+                    metric_type   TEXT NOT NULL,
+                    count         INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (username, granularity, bucket_start, metric_type)
+                )
+                """
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def upsert_bucket(
+        self,
+        username: str,
+        granularity: str,
+        bucket_start: str,
+        metric_type: str,
+    ) -> None:
+        """Upsert a bucket row — increment count by 1, creating the row if needed.
+
+        Args:
+            username: Non-empty username for attribution.
+            granularity: One of 'min1', 'min5', 'hour1', 'day1'.
+            bucket_start: ISO 8601 timestamp of the bucket boundary.
+            metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+
+        Raises:
+            ValueError: If any argument fails validation.
+        """
+        if not isinstance(username, str) or not username.strip():
+            raise ValueError(f"username must be a non-empty string, got {username!r}")
+        if granularity not in self._VALID_GRANULARITIES:
+            raise ValueError(
+                f"Invalid granularity {granularity!r}. "
+                f"Must be one of: {sorted(self._VALID_GRANULARITIES)}"
+            )
+        if metric_type not in self._VALID_METRIC_TYPES:
+            raise ValueError(
+                f"Invalid metric_type {metric_type!r}. "
+                f"Must be one of: {sorted(self._VALID_METRIC_TYPES)}"
+            )
+        try:
+            datetime.fromisoformat(bucket_start)
+        except (ValueError, TypeError):
+            raise ValueError(
+                f"bucket_start must be a valid ISO 8601 datetime string, got {bucket_start!r}"
+            )
+
+        def operation(conn: Any) -> None:
+            conn.execute(
+                """
+                INSERT INTO api_metrics_buckets (username, granularity, bucket_start, metric_type, count)
+                VALUES (?, ?, ?, ?, 1)
+                ON CONFLICT(username, granularity, bucket_start, metric_type)
+                DO UPDATE SET count = count + 1
+                """,
+                (username, granularity, bucket_start, metric_type),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def cleanup_expired_buckets(self) -> None:
+        """Delete expired bucket rows per granularity retention policy.
+
+        Retention windows are defined by _RETENTION_WINDOWS:
+            min1  — 15 minutes
+            min5  — 1 hour
+            hour1 — 24 hours
+            day1  — 15 days
+        """
+        now = datetime.now(timezone.utc)
+
+        def operation(conn: Any) -> None:
+            for granularity, window in self._RETENTION_WINDOWS.items():
+                cutoff = (now - window).isoformat()
+                conn.execute(
+                    "DELETE FROM api_metrics_buckets WHERE granularity = ? AND bucket_start < ?",
+                    (granularity, cutoff),
+                )
+
+        self._conn_manager.execute_atomic(operation)
 
     def insert_metric(
         self,
@@ -3354,8 +3471,6 @@ class ApiMetricsSqliteBackend:
             timestamp: ISO 8601 timestamp. Uses current UTC time when None.
             node_id: Optional cluster node identifier (NULL in standalone).
         """
-        from datetime import datetime, timezone
-
         now = (
             timestamp
             if timestamp is not None
@@ -3386,8 +3501,6 @@ class ApiMetricsSqliteBackend:
             Dict with keys: semantic_searches, other_index_searches,
             regex_searches, other_api_calls.
         """
-        from datetime import datetime, timezone, timedelta
-
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
         ).isoformat()
@@ -3422,6 +3535,192 @@ class ApiMetricsSqliteBackend:
             "other_api_calls": counts.get("other_api", 0),
         }
 
+    # Seconds in 24 hours — identifies the period that uses 2-hour grouping
+    _PERIOD_24H_SECONDS: int = 86400
+
+    # Hours per timeseries group for the 24h period (12 buckets total)
+    _TIMESERIES_GROUP_HOURS: int = 2
+
+    def _resolve_tier_and_cutoff(self, period_seconds: int) -> Tuple[str, str]:
+        """Resolve granularity tier and ISO cutoff for a given period.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+
+        Returns:
+            (tier, cutoff_iso) where tier is the granularity string and
+            cutoff_iso is the ISO 8601 lower bound for bucket_start queries.
+
+        Raises:
+            ValueError: If period_seconds is not in PERIOD_TO_TIER.
+        """
+        if period_seconds not in PERIOD_TO_TIER:
+            raise ValueError(
+                f"period_seconds {period_seconds!r} not in PERIOD_TO_TIER. "
+                f"Valid values: {sorted(PERIOD_TO_TIER)}"
+            )
+        tier = PERIOD_TO_TIER[period_seconds]
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=period_seconds)
+        ).isoformat()
+        return tier, cutoff
+
+    def get_metrics_bucketed(
+        self,
+        period_seconds: int,
+        username: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Return metric totals from api_metrics_buckets for the given period.
+
+        Maps period_seconds to a granularity tier via PERIOD_TO_TIER, then
+        sums counts from all bucket rows within the rolling window.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+            username: When provided, filter to this user's rows only.
+                      When None, aggregate across all users.
+
+        Returns:
+            Dict with keys: semantic, other_index, regex, other_api — each
+            mapped to the integer sum of counts in the period.
+
+        Raises:
+            ValueError: If period_seconds is not in PERIOD_TO_TIER.
+        """
+        tier, cutoff = self._resolve_tier_and_cutoff(period_seconds)
+
+        conn = self._conn_manager.get_connection()
+        if username is not None:
+            rows = conn.execute(
+                """
+                SELECT metric_type, SUM(count) AS total
+                FROM api_metrics_buckets
+                WHERE granularity = ? AND bucket_start >= ? AND username = ?
+                GROUP BY metric_type
+                """,
+                (tier, cutoff, username),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT metric_type, SUM(count) AS total
+                FROM api_metrics_buckets
+                WHERE granularity = ? AND bucket_start >= ?
+                GROUP BY metric_type
+                """,
+                (tier, cutoff),
+            ).fetchall()
+
+        counts = {row[0]: int(row[1]) for row in rows}
+        return {
+            "semantic": counts.get("semantic", 0),
+            "other_index": counts.get("other_index", 0),
+            "regex": counts.get("regex", 0),
+            "other_api": counts.get("other_api", 0),
+        }
+
+    def get_metrics_by_user(
+        self,
+        period_seconds: int,
+    ) -> Dict[str, Dict[str, int]]:
+        """Return per-user metric totals from api_metrics_buckets for the given period.
+
+        Maps period_seconds to a granularity tier via PERIOD_TO_TIER, then
+        groups by username and metric_type within the rolling window.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+
+        Returns:
+            Dict mapping username to {metric_type: count}.
+            Example: {"alice": {"semantic": 5, "regex": 2}, "bob": {"semantic": 3}}
+
+        Raises:
+            ValueError: If period_seconds is not in PERIOD_TO_TIER.
+        """
+        tier, cutoff = self._resolve_tier_and_cutoff(period_seconds)
+
+        conn = self._conn_manager.get_connection()
+        rows = conn.execute(
+            """
+            SELECT username, metric_type, SUM(count) AS total
+            FROM api_metrics_buckets
+            WHERE granularity = ? AND bucket_start >= ?
+            GROUP BY username, metric_type
+            ORDER BY username ASC, metric_type ASC
+            """,
+            (tier, cutoff),
+        ).fetchall()
+
+        result: Dict[str, Dict[str, int]] = {}
+        for row_username, metric_type, total in rows:
+            if row_username not in result:
+                result[row_username] = {}
+            result[row_username][metric_type] = int(total)
+        return result
+
+    def get_metrics_timeseries(
+        self,
+        period_seconds: int,
+    ) -> List[Tuple[str, str, int]]:
+        """Return timeseries data from api_metrics_buckets for the given period.
+
+        Maps period_seconds to a granularity tier via PERIOD_TO_TIER.
+        For the 24h period (hour1 tier), buckets are grouped into 2-hour windows
+        producing at most 12 data points. All other periods use raw bucket granularity.
+
+        Args:
+            period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
+
+        Returns:
+            List of (bucket_start, metric_type, count) tuples ordered by
+            bucket_start ASC. bucket_start is an ISO 8601 string.
+
+        Raises:
+            ValueError: If period_seconds is not in PERIOD_TO_TIER.
+        """
+        tier, cutoff = self._resolve_tier_and_cutoff(period_seconds)
+
+        conn = self._conn_manager.get_connection()
+
+        if period_seconds == self._PERIOD_24H_SECONDS:
+            # Group hour1 buckets into _TIMESERIES_GROUP_HOURS-hour windows → max 12 buckets.
+            # CAST integer division ensures correct floor: e.g. hour 3 → (3/2)*2 = 2.
+            rows = conn.execute(
+                """
+                SELECT
+                    strftime('%Y-%m-%dT', bucket_start) ||
+                    printf('%02d',
+                        CAST(CAST(strftime('%H', bucket_start) AS INTEGER) / ? AS INTEGER) * ?
+                    ) || ':00:00' AS grouped_bucket,
+                    metric_type,
+                    SUM(count) AS total
+                FROM api_metrics_buckets
+                WHERE granularity = ? AND bucket_start >= ?
+                GROUP BY grouped_bucket, metric_type
+                ORDER BY grouped_bucket ASC, metric_type ASC
+                """,
+                (
+                    self._TIMESERIES_GROUP_HOURS,
+                    self._TIMESERIES_GROUP_HOURS,
+                    tier,
+                    cutoff,
+                ),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT bucket_start, metric_type, SUM(count) AS total
+                FROM api_metrics_buckets
+                WHERE granularity = ? AND bucket_start >= ?
+                GROUP BY bucket_start, metric_type
+                ORDER BY bucket_start ASC, metric_type ASC
+                """,
+                (tier, cutoff),
+            ).fetchall()
+
+        return [(row[0], row[1], int(row[2])) for row in rows]
+
     def cleanup_old(self, max_age_seconds: int = 86400) -> int:
         """Delete metric records older than max_age_seconds.
 
@@ -3432,8 +3731,6 @@ class ApiMetricsSqliteBackend:
         Returns:
             Number of rows deleted.
         """
-        from datetime import datetime, timezone, timedelta
-
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
         ).isoformat()

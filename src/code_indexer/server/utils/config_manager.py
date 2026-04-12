@@ -831,6 +831,21 @@ class OntapConfig:
     nfs_export: str = "/"
 
 
+_COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS = 2
+_COW_DAEMON_DEFAULT_TIMEOUT_SECONDS = 600
+
+
+@dataclass
+class CowDaemonConfig:
+    """CoW Storage Daemon configuration (Story #510)."""
+
+    daemon_url: str = ""
+    api_key: str = ""
+    mount_point: str = ""
+    poll_interval_seconds: int = _COW_DAEMON_DEFAULT_POLL_INTERVAL_SECONDS
+    timeout_seconds: int = _COW_DAEMON_DEFAULT_TIMEOUT_SECONDS
+
+
 @dataclass
 class ClusterConfig:
     """Cluster node configuration (Epic #408)."""
@@ -970,6 +985,8 @@ class ServerConfig:
     postgres_dsn: Optional[str] = None  # PostgreSQL connection string for cluster mode
     ontap: Optional[OntapConfig] = None  # ONTAP FlexClone settings for cluster mode
     cluster: Optional[ClusterConfig] = None  # Cluster node identity
+    clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
+    cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1541,6 +1558,10 @@ class ServerConfigManager:
         # Epic #408: Convert cluster dict to ClusterConfig
         if "cluster" in config_dict and isinstance(config_dict["cluster"], dict):
             config_dict["cluster"] = ClusterConfig(**config_dict["cluster"])
+
+        # Story #510: Convert cow_daemon dict to CowDaemonConfig
+        if "cow_daemon" in config_dict and isinstance(config_dict["cow_daemon"], dict):
+            config_dict["cow_daemon"] = CowDaemonConfig(**config_dict["cow_daemon"])
 
         # Story #565: Convert password_expiry_config dict to PasswordExpiryConfig
         if "password_expiry_config" in config_dict and isinstance(

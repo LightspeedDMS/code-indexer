@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+from .api_metrics_service import api_metrics_service
 from .health_service import health_service
 from ..models.api_models import (
     HealthCheckResponse,
@@ -23,6 +24,42 @@ from ..models.api_models import (
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# Period thresholds for label formatting (in seconds)
+_PERIOD_1H = 3600
+_PERIOD_24H = 86400
+_PERIOD_7D = 604800
+
+
+def _format_time_label(bucket_start: str, period_seconds: int) -> str:
+    """Format a bucket_start ISO string into a human-readable x-axis label.
+
+    Args:
+        bucket_start: ISO 8601 datetime string (e.g. '2024-01-15T10:05:00').
+        period_seconds: The overall query period (e.g. 3600, 86400, 604800).
+
+    Returns:
+        Formatted label string keyed to the five supported granulations:
+            period < 24h  (<86400):  'HH:MM'   (e.g. '10:05') - minute precision
+            period == 24h (==86400): 'HH:00'   (e.g. '10:00') - 2-hour bucket display
+            period >= 7d  (>=604800): 'Mmm DD' (e.g. 'Jan 15') - month abbreviation + day
+            other periods:           'HH:MM'   fallback
+    """
+    try:
+        dt = datetime.fromisoformat(bucket_start)
+    except ValueError:
+        logger.warning("Invalid bucket_start format, using raw value: %s", bucket_start)
+        return bucket_start
+
+    if period_seconds >= _PERIOD_7D:
+        # Multi-day periods (7d, 15d): abbreviated month name + zero-padded day
+        return dt.strftime("%b %d")
+    elif period_seconds == _PERIOD_24H:
+        # 24-hour period uses 2-hour buckets: show HH:00 (suppress minutes)
+        return dt.strftime("%H:00")
+    else:
+        # Sub-day periods (15min, 1h) and unlisted periods: show HH:MM
+        return dt.strftime("%H:%M")
 
 
 @dataclass
@@ -141,7 +178,7 @@ class DashboardService:
         time_filter: str = "24h",
         recent_filter: str = "30d",
         user_role: str = "user",
-        api_window: int = 60,
+        api_window: int = 86400,
         api_metrics_backend=None,
     ) -> Dict[str, Any]:
         """
@@ -152,8 +189,9 @@ class DashboardService:
             time_filter: Time filter for job stats ("24h", "7d", "30d")
             recent_filter: Time filter for recent activity ("24h", "7d", "30d")
             user_role: User role ('admin' or 'user') - AC6 fix to prevent count flash
-            api_window: Time window in seconds for API metrics (default 60).
-                Common values: 60 (1 min), 900 (15 min), 3600 (1 hour), 86400 (24 hours)
+            api_window: Time window in seconds for API metrics (default 86400 = 24h).
+                Common values: 900 (15 min), 3600 (1 hour), 86400 (24 hours),
+                604800 (7 days), 1296000 (15 days)
             api_metrics_backend: Optional ApiMetricsBackend instance (Story #503).
                 When provided, used instead of the singleton api_metrics_service.
                 In cluster mode this is the PostgreSQL backend which aggregates
@@ -162,16 +200,17 @@ class DashboardService:
         Returns:
             Dictionary containing job counts, repo counts, recent jobs, and API metrics
         """
-        # Story #503 AC1: Use api_metrics_backend when available for cluster-wide aggregation.
-        # Falls back to the singleton api_metrics_service for backwards compatibility.
+        # Story #503 AC1 / Story #673: Use api_metrics_backend when available for
+        # cluster-wide aggregation. Use get_metrics_bucketed (Story #673) which reads
+        # from the pre-aggregated api_metrics_buckets table for efficient period queries.
         if api_metrics_backend is not None:
-            api_metrics = api_metrics_backend.get_metrics(window_seconds=api_window)
+            api_metrics = api_metrics_backend.get_metrics_bucketed(
+                period_seconds=api_window
+            )
         else:
-            # Story #4 AC2/AC3: Get API metrics for dashboard display
-            # Rolling window implementation - no reset needed, timestamps age out naturally
-            from .api_metrics_service import api_metrics_service
-
-            api_metrics = api_metrics_service.get_metrics(window_seconds=api_window)
+            api_metrics = api_metrics_service.get_metrics_bucketed(
+                period_seconds=api_window
+            )
 
         return {
             "job_counts": self._get_job_counts(username, time_filter),
@@ -179,6 +218,116 @@ class DashboardService:
             "recent_jobs": self._get_recent_jobs(username, recent_filter),
             "api_metrics": api_metrics,
         }
+
+    def get_chart_data(
+        self,
+        period_seconds: int,
+        api_metrics_backend=None,
+    ) -> Dict[str, Any]:
+        """Return Chart.js-ready stacked bar chart data for the given period.
+
+        Calls get_metrics_timeseries to obtain (bucket_start, metric_type, count)
+        tuples and reshapes them into 4 labelled datasets suitable for a Chart.js
+        stacked bar chart.  Missing metric types within a bucket are zero-filled so
+        every dataset always has the same length as the labels list.
+
+        Args:
+            period_seconds: Duration in seconds. Passed directly to
+                get_metrics_timeseries.
+            api_metrics_backend: Optional backend instance. When provided, used
+                instead of the singleton api_metrics_service (cluster mode).
+
+        Returns:
+            dict with keys:
+                labels   - list of human-readable time strings (x-axis)
+                datasets - list of 4 dicts, each with label, data, backgroundColor
+        """
+        if api_metrics_backend is not None:
+            timeseries = api_metrics_backend.get_metrics_timeseries(period_seconds)
+        else:
+            timeseries = api_metrics_service.get_metrics_timeseries(period_seconds)
+
+        # Build sorted unique label set (chronological order)
+        labels_set = sorted(set(t[0] for t in timeseries))
+        label_index = {label: i for i, label in enumerate(labels_set)}
+        num_labels = len(labels_set)
+
+        metric_types = ["semantic", "other_index", "regex", "other_api"]
+        datasets_data: Dict[str, List[int]] = {
+            mt: [0] * num_labels for mt in metric_types
+        }
+
+        for bucket_start, metric_type, count in timeseries:
+            if metric_type in datasets_data and bucket_start in label_index:
+                datasets_data[metric_type][label_index[bucket_start]] = count
+
+        formatted_labels = [
+            _format_time_label(label, period_seconds) for label in labels_set
+        ]
+
+        colors = {
+            "semantic": "#4e79a7",
+            "other_index": "#59a14f",
+            "regex": "#f28e2b",
+            "other_api": "#e15759",
+        }
+
+        return {
+            "labels": formatted_labels,
+            "datasets": [
+                {
+                    "label": mt.replace("_", " ").title(),
+                    "data": datasets_data[mt],
+                    "backgroundColor": colors[mt],
+                }
+                for mt in metric_types
+            ],
+        }
+
+    def get_per_user_stats(
+        self,
+        period_seconds: int,
+        api_metrics_backend=None,
+    ) -> List[Dict[str, Any]]:
+        """Get per-user API usage breakdown for the given period.
+
+        Transforms the raw per-user metric dict from api_metrics_service into a
+        sorted list of row dicts suitable for template rendering.
+
+        Args:
+            period_seconds: Duration in seconds for the metric window.
+            api_metrics_backend: Optional backend instance. When provided, used
+                instead of the singleton api_metrics_service (cluster mode).
+
+        Returns:
+            List of dicts sorted by total descending, each with keys:
+                username, semantic, other_index, regex, other_api, total.
+        """
+        if api_metrics_backend is not None:
+            raw = api_metrics_backend.get_metrics_by_user(period_seconds)
+        else:
+            raw = api_metrics_service.get_metrics_by_user(period_seconds)
+
+        rows = []
+        for username, counts in raw.items():
+            semantic = counts.get("semantic", 0)
+            other_index = counts.get("other_index", 0)
+            regex = counts.get("regex", 0)
+            other_api = counts.get("other_api", 0)
+            total = semantic + other_index + regex + other_api
+            rows.append(
+                {
+                    "username": username,
+                    "semantic": semantic,
+                    "other_index": other_index,
+                    "regex": regex,
+                    "other_api": other_api,
+                    "total": total,
+                }
+            )
+
+        rows.sort(key=lambda r: r["total"], reverse=True)
+        return rows
 
     def _get_health_data(self) -> HealthCheckResponse:
         """Get system health data."""
