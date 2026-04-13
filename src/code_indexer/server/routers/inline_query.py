@@ -223,7 +223,9 @@ def register_query_routes(
                     from ..services.api_metrics_service import api_metrics_service
 
                     # Track FTS search at service layer (Story #4 AC2)
-                    api_metrics_service.increment_other_index_search()
+                    api_metrics_service.increment_other_index_search(
+                        username=current_user.username
+                    )
 
                     try:
                         # repo_path is guaranteed to be set if fts_available is True
