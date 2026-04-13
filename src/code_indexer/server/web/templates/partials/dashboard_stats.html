@@ -153,7 +153,7 @@
 
 <!-- Story #674: Per-User API Usage Breakdown Card -->
 <section id="api-per-user-section" class="dashboard-section"
-    hx-get="/admin/partials/dashboard-api-per-user?api_filter=86400"
+    hx-get="/admin/partials/dashboard-api-per-user?api_filter={{ api_filter or 86400 }}"
     hx-trigger="load"
     hx-swap="innerHTML">
     <div class="loading-indicator">
@@ -163,7 +163,7 @@
 
 <!-- Story #675: API Usage Trends Chart Card -->
 <section id="api-chart-section" class="dashboard-section"
-    hx-get="/admin/partials/dashboard-api-chart?api_filter=86400"
+    hx-get="/admin/partials/dashboard-api-chart?api_filter={{ api_filter or 86400 }}"
     hx-trigger="load"
     hx-swap="innerHTML">
     <div class="loading-indicator">
