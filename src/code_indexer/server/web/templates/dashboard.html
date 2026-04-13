@@ -146,6 +146,13 @@ function applyResponse(response, targetSelector) {
             var el = document.querySelector(targetSelector);
             if (el) {
                 el.innerHTML = html;
+                // Re-execute inline scripts (innerHTML doesn't run them)
+                var scripts = el.querySelectorAll('script');
+                scripts.forEach(function(oldScript) {
+                    var newScript = document.createElement('script');
+                    newScript.textContent = oldScript.textContent;
+                    oldScript.parentNode.replaceChild(newScript, oldScript);
+                });
                 // After health section refresh, rebind carousel with persistent state
                 if (targetSelector === '#health-section') {
                     if (typeof window.nmRebindCarousel === 'function') {
