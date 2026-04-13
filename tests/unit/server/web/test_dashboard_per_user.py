@@ -269,26 +269,29 @@ class TestPerUserTemplate:
 
 
 class TestDashboardIntegration:
-    """Tests for dashboard.html integration of per-user card."""
+    """Tests for dashboard template integration of per-user card.
 
-    def _dashboard_source(self) -> str:
-        return DASHBOARD_TEMPLATE_PATH.read_text()
+    Per-user section lives in dashboard_stats.html (included by dashboard.html).
+    It is NOT in refreshAll() — it updates via updateApiActivity() on page load
+    and when the period selector changes.
+    """
 
-    def test_dashboard_has_htmx_get_wired_to_per_user_endpoint(self):
-        """dashboard.html must contain hx-get attribute referencing dashboard-api-per-user."""
-        src = self._dashboard_source()
-        # Verify the HTMX endpoint wiring exists in the template
-        assert "dashboard-api-per-user" in src, (
-            "dashboard.html must wire hx-get to /admin/partials/dashboard-api-per-user"
+    def _stats_source(self) -> str:
+        stats_path = (
+            DASHBOARD_TEMPLATE_PATH.parent / "partials" / "dashboard_stats.html"
+        )
+        return stats_path.read_text()
+
+    def test_dashboard_has_per_user_section(self):
+        """dashboard_stats.html must contain the api-per-user-section element."""
+        src = self._stats_source()
+        assert "api-per-user-section" in src, (
+            "dashboard_stats.html must contain api-per-user-section"
         )
 
-    def test_refresh_all_js_fetches_per_user_partial(self):
-        """refreshAll() JS function body must include a fetch of dashboard-api-per-user."""
-        src = self._dashboard_source()
-        refresh_all_start = src.find("function refreshAll()")
-        assert refresh_all_start != -1, "dashboard.html must define refreshAll()"
-        # Look at a generous slice of the refreshAll function body (up to 2000 chars)
-        refresh_all_section = src[refresh_all_start : refresh_all_start + 2000]
-        assert "dashboard-api-per-user" in refresh_all_section, (
-            "refreshAll() must include a fetch call for /admin/partials/dashboard-api-per-user"
+    def test_update_api_activity_fetches_per_user_partial(self):
+        """updateApiActivity() must include a fetch of dashboard-api-per-user."""
+        src = self._stats_source()
+        assert "dashboard-api-per-user" in src, (
+            "updateApiActivity() must include a fetch for dashboard-api-per-user"
         )

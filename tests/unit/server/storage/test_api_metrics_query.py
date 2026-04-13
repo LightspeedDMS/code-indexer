@@ -84,7 +84,12 @@ class TestGetMetricsBucketed:
 
     def test_returns_zero_counts_when_empty(self, backend):
         result = backend.get_metrics_bucketed(period_seconds=900)
-        assert result == {"semantic": 0, "other_index": 0, "regex": 0, "other_api": 0}
+        assert result == {
+            "semantic_searches": 0,
+            "other_index_searches": 0,
+            "regex_searches": 0,
+            "other_api_calls": 0,
+        }
 
     def test_returns_correct_totals_for_15min(self, backend):
         now = datetime.now(timezone.utc)
@@ -95,10 +100,10 @@ class TestGetMetricsBucketed:
         backend.upsert_bucket("alice", "min1", bucket, "regex")
 
         result = backend.get_metrics_bucketed(period_seconds=900)
-        assert result["semantic"] == 2
-        assert result["regex"] == 1
-        assert result["other_index"] == 0
-        assert result["other_api"] == 0
+        assert result["semantic_searches"] == 2
+        assert result["regex_searches"] == 1
+        assert result["other_index_searches"] == 0
+        assert result["other_api_calls"] == 0
 
     def test_returns_correct_totals_for_1h(self, backend):
         now = datetime.now(timezone.utc)
@@ -109,8 +114,8 @@ class TestGetMetricsBucketed:
         backend.upsert_bucket("bob", "min5", bucket, "other_index")
 
         result = backend.get_metrics_bucketed(period_seconds=3600)
-        assert result["other_api"] == 2
-        assert result["other_index"] == 1
+        assert result["other_api_calls"] == 2
+        assert result["other_index_searches"] == 1
 
     def test_returns_correct_totals_for_24h(self, backend):
         now = datetime.now(timezone.utc)
@@ -120,8 +125,8 @@ class TestGetMetricsBucketed:
         backend.upsert_bucket("bob", "hour1", bucket, "regex")
 
         result = backend.get_metrics_bucketed(period_seconds=86400)
-        assert result["semantic"] == 1
-        assert result["regex"] == 1
+        assert result["semantic_searches"] == 1
+        assert result["regex_searches"] == 1
 
     def test_returns_correct_totals_for_7d(self, backend):
         now = datetime.now(timezone.utc)
@@ -131,7 +136,7 @@ class TestGetMetricsBucketed:
         backend.upsert_bucket("alice", "day1", bucket, "semantic")
 
         result = backend.get_metrics_bucketed(period_seconds=604800)
-        assert result["semantic"] == 2
+        assert result["semantic_searches"] == 2
 
     def test_returns_correct_totals_for_15d(self, backend):
         now = datetime.now(timezone.utc)
@@ -140,7 +145,7 @@ class TestGetMetricsBucketed:
         backend.upsert_bucket("alice", "day1", bucket, "other_api")
 
         result = backend.get_metrics_bucketed(period_seconds=1296000)
-        assert result["other_api"] == 1
+        assert result["other_api_calls"] == 1
 
     def test_excludes_rows_outside_period(self, backend):
         """Rows with bucket_start before cutoff must NOT be included."""
@@ -151,7 +156,7 @@ class TestGetMetricsBucketed:
 
         result = backend.get_metrics_bucketed(period_seconds=900)
         # 20 minutes ago is outside the 15-minute window — must be excluded
-        assert result["semantic"] == 0
+        assert result["semantic_searches"] == 0
 
     def test_excludes_wrong_granularity_rows(self, backend):
         """Rows in wrong granularity tier must NOT be counted."""
@@ -162,7 +167,7 @@ class TestGetMetricsBucketed:
 
         # 15min query should use min1 tier — hour1 rows must not be counted
         result = backend.get_metrics_bucketed(period_seconds=900)
-        assert result["semantic"] == 0
+        assert result["semantic_searches"] == 0
 
     def test_aggregates_multiple_users(self, backend):
         """Totals are sum across all users."""
@@ -174,7 +179,7 @@ class TestGetMetricsBucketed:
         backend.upsert_bucket("carol", "min1", bucket, "semantic")
 
         result = backend.get_metrics_bucketed(period_seconds=900)
-        assert result["semantic"] == 3
+        assert result["semantic_searches"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +199,7 @@ class TestGetMetricsBucketedByUsername:
         backend.upsert_bucket("bob", "min1", bucket, "semantic")
 
         result = backend.get_metrics_bucketed(period_seconds=900, username="alice")
-        assert result["semantic"] == 2
+        assert result["semantic_searches"] == 2
 
     def test_returns_zeros_for_nonexistent_user(self, backend):
         now = datetime.now(timezone.utc)
@@ -202,7 +207,7 @@ class TestGetMetricsBucketedByUsername:
         backend.upsert_bucket("alice", "min1", bucket, "semantic")
 
         result = backend.get_metrics_bucketed(period_seconds=900, username="nobody")
-        assert result["semantic"] == 0
+        assert result["semantic_searches"] == 0
 
     def test_no_username_aggregates_all(self, backend):
         now = datetime.now(timezone.utc)
@@ -212,7 +217,7 @@ class TestGetMetricsBucketedByUsername:
         backend.upsert_bucket("bob", "min1", bucket, "regex")
 
         result = backend.get_metrics_bucketed(period_seconds=900, username=None)
-        assert result["regex"] == 2
+        assert result["regex_searches"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +530,7 @@ class TestApiMetricsServiceDelegation:
         backend.upsert_bucket("alice", "min1", bucket, "semantic")
 
         result = service.get_metrics_bucketed(period_seconds=900)
-        assert result["semantic"] == 1
+        assert result["semantic_searches"] == 1
 
     def test_get_metrics_bucketed_returns_zeros_without_backend(self):
         from code_indexer.server.services.api_metrics_service import ApiMetricsService
@@ -533,7 +538,12 @@ class TestApiMetricsServiceDelegation:
         service = ApiMetricsService()
         # No backend set
         result = service.get_metrics_bucketed(period_seconds=900)
-        assert result == {"semantic": 0, "other_index": 0, "regex": 0, "other_api": 0}
+        assert result == {
+            "semantic_searches": 0,
+            "other_index_searches": 0,
+            "regex_searches": 0,
+            "other_api_calls": 0,
+        }
 
     def test_get_metrics_by_user_delegates_to_backend(self, backend):
         from code_indexer.server.services.api_metrics_service import ApiMetricsService
@@ -602,9 +612,9 @@ class TestDashboardServiceWiring:
             api_metrics_backend=backend,
         )
 
-        # api_metrics in result must use bucketed counts (semantic=2)
+        # api_metrics in result must use bucketed counts (semantic_searches=2)
         api_metrics = result["api_metrics"]
-        assert api_metrics["semantic"] == 2
+        assert api_metrics["semantic_searches"] == 2
 
     def test_get_stats_partial_default_api_window_is_24h(self):
         """Default api_window for get_stats_partial should be 86400 (24h)."""

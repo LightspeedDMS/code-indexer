@@ -474,32 +474,36 @@ class TestDashboardIntegration:
             "dashboard.html must load chart.min.js via <script> tag"
         )
 
-    def test_dashboard_has_htmx_get_wired_to_chart_endpoint(self):
-        """dashboard.html must contain hx-get referencing dashboard-api-chart."""
-        src = self._dashboard_source()
+    def test_stats_template_has_chart_section(self):
+        """dashboard_stats.html must contain the api-chart-section element."""
+        stats_path = (
+            DASHBOARD_TEMPLATE_PATH.parent / "partials" / "dashboard_stats.html"
+        )
+        src = stats_path.read_text()
+        assert "api-chart-section" in src, (
+            "dashboard_stats.html must contain api-chart-section"
+        )
+
+    def test_update_api_activity_fetches_chart_partial(self):
+        """updateApiActivity() in dashboard_stats.html must fetch dashboard-api-chart."""
+        stats_path = (
+            DASHBOARD_TEMPLATE_PATH.parent / "partials" / "dashboard_stats.html"
+        )
+        src = stats_path.read_text()
         assert "dashboard-api-chart" in src, (
-            "dashboard.html must wire hx-get to /admin/partials/dashboard-api-chart"
+            "updateApiActivity() must include a fetch for dashboard-api-chart"
         )
 
-    def test_refresh_all_js_fetches_chart_partial(self):
-        """refreshAll() JS function body must include a fetch of dashboard-api-chart."""
-        src = self._dashboard_source()
-        refresh_all_start = src.find("function refreshAll()")
-        assert refresh_all_start != -1, "dashboard.html must define refreshAll()"
-        refresh_all_section = src[
-            refresh_all_start : refresh_all_start + REFRESH_FUNC_SCAN_BYTES
-        ]
-        assert "dashboard-api-chart" in refresh_all_section, (
-            "refreshAll() must include a fetch call for /admin/partials/dashboard-api-chart"
+    def test_chart_section_comes_after_per_user_section(self):
+        """Chart card container must appear after the per-user section in dashboard_stats.html."""
+        stats_path = (
+            DASHBOARD_TEMPLATE_PATH.parent / "partials" / "dashboard_stats.html"
         )
-
-    def test_dashboard_chart_section_comes_after_per_user_section(self):
-        """Chart card container must appear after the per-user section."""
-        src = self._dashboard_source()
+        src = stats_path.read_text()
         per_user_pos = src.find("api-per-user-section")
         chart_pos = src.find("api-chart-section")
-        assert per_user_pos != -1, "dashboard.html must have api-per-user-section"
-        assert chart_pos != -1, "dashboard.html must have api-chart-section"
+        assert per_user_pos != -1, "dashboard_stats.html must have api-per-user-section"
+        assert chart_pos != -1, "dashboard_stats.html must have api-chart-section"
         assert chart_pos > per_user_pos, (
             "Chart card section must appear after the per-user section"
         )

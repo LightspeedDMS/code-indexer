@@ -427,14 +427,20 @@ class ApiMetricsService:
                       When None, aggregate across all users.
 
         Returns:
-            Dict with keys: semantic, other_index, regex, other_api.
+            Dict with keys: semantic_searches, other_index_searches,
+            regex_searches, other_api_calls.
         """
         if self._backend is not None:
             return cast(
                 Dict[str, int],
                 self._backend.get_metrics_bucketed(period_seconds, username),
             )
-        return {"semantic": 0, "other_index": 0, "regex": 0, "other_api": 0}
+        return {
+            "semantic_searches": 0,
+            "other_index_searches": 0,
+            "regex_searches": 0,
+            "other_api_calls": 0,
+        }
 
     def get_metrics_by_user(self, period_seconds: int) -> Dict[str, Dict[str, int]]:
         """Return per-user metric totals from api_metrics_buckets for the given period.
