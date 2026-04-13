@@ -177,7 +177,7 @@ def multi_repository_query(
     """
     try:
         # Bug #350: Track REST API call in metrics
-        api_metrics_service.increment_other_api_call()
+        api_metrics_service.increment_other_api_call(username=user.username)
 
         # Log request
         logger.info(
