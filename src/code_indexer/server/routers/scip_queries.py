@@ -70,6 +70,9 @@ class ScipReferencesResponse(BaseModel):
         ..., description="List of reference locations"
     )
     error: Optional[str] = Field(None, description="Error message if operation failed")
+    query_metadata: Optional[dict] = Field(
+        None, description="Reranking metadata when reranking was applied"
+    )
 
 
 def _get_scip_query_service(request: Request) -> SCIPQueryService:

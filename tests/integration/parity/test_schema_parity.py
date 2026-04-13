@@ -199,6 +199,8 @@ def test_git_log_parameter_parity(mcp_tool_registry):
             "branch",
             "aggregation_mode",
             "response_format",
+            "rerank_instruction",
+            "rerank_query",
         ],
     )
 
@@ -417,5 +419,12 @@ def test_scip_references_parameter_parity(mcp_tool_registry):
         "scip_references",
         mcp_schema,
         None,  # type: ignore[arg-type]
-        rest_params_explicit=["symbol", "limit", "exact", "project"],
+        rest_params_explicit=[
+            "symbol",
+            "limit",
+            "exact",
+            "project",
+            "rerank_instruction",
+            "rerank_query",
+        ],
     )
