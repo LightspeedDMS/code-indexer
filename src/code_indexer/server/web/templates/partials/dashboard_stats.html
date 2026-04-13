@@ -215,5 +215,9 @@ function updateApiActivity() {
     var apiFilter = document.getElementById('api-filter').value;
     fetch('/admin/partials/dashboard-api-metrics?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
         .then(function(r) { applyResponse(r, '#api-metrics-data'); });
+    fetch('/admin/partials/dashboard-api-per-user?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#api-per-user-section'); });
+    fetch('/admin/partials/dashboard-api-chart?api_filter=' + encodeURIComponent(apiFilter), _fetchOpts)
+        .then(function(r) { applyResponse(r, '#api-chart-section'); });
 }
 </script>

@@ -518,7 +518,7 @@ def dashboard_job_counts_partial(
         time_filter=time_filter,
         recent_filter="24h",  # Not used for job counts
         user_role=session.role,
-        api_window=60,  # Not used for job counts
+        api_window=_DEFAULT_PER_USER_API_FILTER_SECONDS,  # Not used for job counts
     )
 
     return templates.TemplateResponse(
@@ -558,7 +558,7 @@ def dashboard_recent_jobs_partial(
         time_filter="24h",  # Not used for recent jobs
         recent_filter=recent_filter,
         user_role=session.role,
-        api_window=60,  # Not used for recent jobs
+        api_window=_DEFAULT_PER_USER_API_FILTER_SECONDS,  # Not used for recent jobs
     )
 
     return templates.TemplateResponse(
