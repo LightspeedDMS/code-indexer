@@ -87,6 +87,8 @@ def test_daemon_loads_correct_collection_not_temporal(vector_store, temp_index_d
         },
     ]
 
+    # Build HNSW so search() returns results (post-Bug #668: search never rebuilds HNSW)
+    vector_store.begin_indexing(collection_name)
     for vec_data in test_vectors:
         vector_store.upsert_points(
             collection_name=collection_name,
@@ -98,6 +100,7 @@ def test_daemon_loads_correct_collection_not_temporal(vector_store, temp_index_d
                 }
             ],
         )
+    vector_store.end_indexing(collection_name)
 
     # Query with lazy_load=False (default for semantic queries)
     # This simulates what happens when user runs: cidx query "zoom"

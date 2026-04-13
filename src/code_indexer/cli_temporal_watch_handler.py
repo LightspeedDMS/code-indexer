@@ -18,6 +18,11 @@ from watchdog.events import FileSystemEventHandler
 
 logger = logging.getLogger(__name__)
 
+# Git exit code indicating the working directory is not inside a git repository.
+# "fatal: not a git repository" → returncode 128. This is an expected fallback case,
+# not an error, when CIDX runs in a non-git directory.
+_GIT_NOT_REPO_RC = 128
+
 
 class TemporalWatchHandler(FileSystemEventHandler):
     """Watch git refs file for commit detection without hooks.
@@ -89,8 +94,13 @@ class TemporalWatchHandler(FileSystemEventHandler):
             )
             return result.stdout.strip()
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to get current branch: {e}")
-            return "HEAD"  # Detached HEAD state
+            # returncode _GIT_NOT_REPO_RC (128): "fatal: not a git repository" —
+            # expected when running in a non-git directory; log at DEBUG only.
+            if e.returncode == _GIT_NOT_REPO_RC:
+                logger.debug(f"Not a git repository, no branch available: {e}")
+            else:
+                logger.warning(f"Unexpected git error getting current branch: {e}")
+            return "HEAD"  # Detached HEAD state or non-git directory
 
     def _get_last_commit_hash(self) -> str:
         """Get last commit hash from git.
@@ -108,7 +118,12 @@ class TemporalWatchHandler(FileSystemEventHandler):
             )
             return result.stdout.strip()
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to get commit hash: {e}")
+            # returncode _GIT_NOT_REPO_RC (128): "fatal: not a git repository" —
+            # expected when running in a non-git directory; log at DEBUG only.
+            if e.returncode == _GIT_NOT_REPO_RC:
+                logger.debug(f"Not a git repository, no commit hash available: {e}")
+            else:
+                logger.warning(f"Unexpected git error getting commit hash: {e}")
             return ""
 
     def on_any_event(self, event):

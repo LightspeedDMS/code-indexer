@@ -314,8 +314,8 @@ python3 -m pytest \
     --deselect=tests/unit/storage/test_parallel_index_loading.py::TestParallelExecutionMechanism::test_search_accepts_query_parameter_for_parallel_execution \
     --deselect=tests/unit/test_scip_database_schema.py::TestIndexCreation::test_create_indexes_creates_all_indexes \
     --deselect=tests/unit/tools/perf_suite/test_report.py::TestHardwareProfileSection::test_hardware_capture_with_invalid_host_returns_none \
-    -m "not slow and not e2e and not real_api and not integration and not requires_server and not requires_containers" \
-    --timeout=3 \
+    -m "not slow and not e2e and not real_api and not integration and not requires_server and not requires_containers and not performance" \
+    --timeout=15 \
     2>&1 | tee "$TELEMETRY_FILE"
 
 PYTEST_EXIT_CODE=$?

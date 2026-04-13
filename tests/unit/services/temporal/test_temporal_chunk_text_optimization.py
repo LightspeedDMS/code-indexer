@@ -36,8 +36,8 @@ class TestChunkTextOptimization:
         content_in_payload = False
 
         for i, line in enumerate(lines):
-            # Look for point = { structure (around line 969)
-            if "point = {" in line and i > 950 and i < 1000:
+            # Look for point = { structure (around line 1076)
+            if "point = {" in line and i > 1050 and i < 1110:
                 point_creation_found = True
                 # Check next 10 lines for structure
                 point_block = "\n".join(lines[i : i + 15])
@@ -46,7 +46,7 @@ class TestChunkTextOptimization:
                 if '"chunk_text":' in point_block or "'chunk_text':" in point_block:
                     chunk_text_at_root = True
 
-                # Wasteful pattern: content should NOT be in payload creation (around line 848)
+                # Wasteful pattern: content should NOT be in payload creation (around line 1046)
                 payload_block = "\n".join(lines[i - 30 : i])
                 if '"content":' in payload_block and "chunk.get" in payload_block:
                     content_in_payload = True

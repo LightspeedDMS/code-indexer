@@ -8,6 +8,7 @@ identification when git is not available.
 """
 
 import hashlib
+import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Dict, Any, Optional
 
 from ..config import Config
 from ..utils.git_runner import run_git_command, is_git_repository
+
+logger = logging.getLogger(__name__)
 
 
 class FileIdentifier:
@@ -38,6 +41,10 @@ class FileIdentifier:
         self.config = config
         self.git_available = self._detect_git()
         self._project_id: Optional[str] = None
+        # Issue #676: Memoized per-run invariants — branch and commit hash do not
+        # change during a single indexing run, so we fetch them once and cache.
+        self._cached_branch: Optional[str] = None
+        self._cached_commit_hash: Optional[str] = None
 
     def _detect_git(self) -> bool:
         """
@@ -198,65 +205,110 @@ class FileIdentifier:
 
         return metadata
 
+    def _get_cached_branch(self) -> Optional[str]:
+        """Return the current branch name, fetched exactly once per FileIdentifier instance.
+
+        Issue #676: the branch is invariant for the duration of an indexing run.
+        After the first call the result is memoized; subsequent calls return the
+        cached value without spawning a subprocess.
+
+        Returns:
+            Branch name string (e.g. "development"), a "detached-<sha>" synthetic
+            name when HEAD is detached, "unknown" when git commands fail, or None
+            when git is not available.
+        """
+        if self._cached_branch is None and self.git_available:
+            try:
+                result = run_git_command(
+                    ["git", "branch", "--show-current"],
+                    cwd=self.project_dir,
+                )
+                branch_name = result.stdout.strip()
+                if branch_name:
+                    self._cached_branch = branch_name
+                else:
+                    # Empty output means detached HEAD — derive synthetic name from short hash
+                    try:
+                        result = run_git_command(
+                            ["git", "rev-parse", "--short", "HEAD"],
+                            cwd=self.project_dir,
+                        )
+                        self._cached_branch = f"detached-{result.stdout.strip()}"
+                    except subprocess.CalledProcessError as exc:
+                        logger.debug(
+                            "Could not resolve detached HEAD short hash in %s: %s",
+                            self.project_dir,
+                            exc,
+                        )
+                        self._cached_branch = "unknown"
+            except subprocess.CalledProcessError as exc:
+                logger.debug(
+                    "git branch --show-current failed in %s: %s; falling back to 'unknown'",
+                    self.project_dir,
+                    exc,
+                )
+                self._cached_branch = "unknown"
+        return self._cached_branch
+
+    def _get_cached_commit_hash(self) -> Optional[str]:
+        """Return the current HEAD commit hash, fetched exactly once per FileIdentifier instance.
+
+        Issue #676: the commit hash is invariant for the duration of an indexing run.
+        After the first call the result is memoized (including failure: stored as
+        "unknown") so subsequent calls never spawn a subprocess.
+
+        Returns:
+            Full 40-character commit hash string, "unknown" when the git command
+            fails, or None when git is not available.
+        """
+        if self._cached_commit_hash is None and self.git_available:
+            try:
+                result = run_git_command(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=self.project_dir,
+                )
+                self._cached_commit_hash = result.stdout.strip()
+            except subprocess.CalledProcessError as exc:
+                # Memoize failure as "unknown" so subsequent calls skip the subprocess
+                logger.debug(
+                    "git rev-parse HEAD failed in %s: %s; memoizing as 'unknown'",
+                    self.project_dir,
+                    exc,
+                )
+                self._cached_commit_hash = "unknown"
+        return self._cached_commit_hash
+
     def _get_git_metadata(self, file_path: Path) -> Dict[str, Any]:
         """
         Get git-specific metadata for a file.
+
+        Only ``git hash-object`` is invoked per file — it is legitimately per-file
+        because it computes the blob hash for the file's current on-disk content.
+        ``branch`` and ``commit_hash`` are invariant within an indexing run and
+        are returned from the memoized helpers ``_get_cached_branch`` and
+        ``_get_cached_commit_hash`` with no additional subprocess cost.
 
         Args:
             file_path: Path to the file
 
         Returns:
-            Dictionary containing git metadata
+            Dictionary containing git metadata (git_hash, branch, commit_hash)
         """
         git_metadata: Dict[str, Optional[str]] = {
             "git_hash": None,
-            "branch": None,
-            "commit_hash": None,
+            "branch": self._get_cached_branch(),
+            "commit_hash": self._get_cached_commit_hash(),
         }
 
         try:
-            # Get git blob hash for the file
+            # git hash-object is legitimately per-file: computes blob hash for this file
             result = run_git_command(
                 ["git", "hash-object", str(file_path)],
                 cwd=self.project_dir,
             )
             git_metadata["git_hash"] = result.stdout.strip()
         except subprocess.CalledProcessError:
-            pass
-
-        try:
-            # Get current branch
-            result = run_git_command(
-                ["git", "branch", "--show-current"],
-                cwd=self.project_dir,
-            )
-            branch_name = result.stdout.strip()
-
-            # Check if empty (detached HEAD returns empty string, not error)
-            if branch_name:
-                git_metadata["branch"] = branch_name
-            else:
-                # Empty means detached HEAD - create synthetic name
-                raise subprocess.CalledProcessError(1, "git branch")  # Trigger fallback
-        except subprocess.CalledProcessError:
-            # Fallback to HEAD for detached HEAD state
-            try:
-                result = run_git_command(
-                    ["git", "rev-parse", "--short", "HEAD"],
-                    cwd=self.project_dir,
-                )
-                git_metadata["branch"] = f"detached-{result.stdout.strip()}"
-            except subprocess.CalledProcessError:
-                git_metadata["branch"] = "unknown"
-
-        try:
-            # Get current commit hash
-            result = run_git_command(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self.project_dir,
-            )
-            git_metadata["commit_hash"] = result.stdout.strip()
-        except subprocess.CalledProcessError:
+            # Blob hash unavailable (e.g. untracked file, git error) — leave as None
             pass
 
         return git_metadata

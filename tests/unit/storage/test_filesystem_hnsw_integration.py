@@ -5,11 +5,11 @@ with mutual exclusivity enforcement and CLI support.
 """
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import Mock
 
 import numpy as np
-import pytest
 
 from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
 
@@ -144,27 +144,43 @@ class TestHNSWSearchPath:
         # Verify search path indicates HNSW was used
         assert timing.get("search_path") == "hnsw_index"
         assert len(results) > 0
-        mock_embedding_provider.get_embedding.assert_called_once_with("test query")
+        mock_embedding_provider.get_embedding.assert_called_once_with(
+            "test query", embedding_purpose="query"
+        )
 
-    def test_search_raises_error_if_hnsw_index_missing(self, tmp_path: Path):
-        """Test that search raises error if HNSW index is missing."""
+    def test_search_raises_error_if_hnsw_index_missing(self, tmp_path: Path, caplog):
+        """Test that search returns empty results if HNSW index is missing.
+
+        Post-Bug #668: search() no longer raises RuntimeError when HNSW is missing.
+        Instead it returns [] and logs a WARNING. Rebuilding is the indexer's job.
+        """
         store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
         store.create_collection("test_collection", vector_size=64)
 
         # Don't upsert any vectors, so no HNSW index is built
 
-        # Perform search - should raise RuntimeError
+        # Perform search - post-#668 returns [] with warning, does NOT raise
         query_vector = np.random.randn(64).tolist()
         mock_embedding_provider = Mock()
         mock_embedding_provider.get_embedding.return_value = query_vector
 
-        with pytest.raises(RuntimeError, match="HNSW index not found"):
-            store.search(
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
                 query="test query",
                 embedding_provider=mock_embedding_provider,
                 collection_name="test_collection",
                 limit=5,
             )
+
+        # Should return empty results, not raise
+        assert results == [], (
+            "search() should return [] when HNSW index is missing, not raise"
+        )
+        # Should log exactly a WARNING about missing/stale HNSW
+        assert any(rec.levelno == logging.WARNING for rec in caplog.records), (
+            "search() should emit exactly a WARNING when HNSW index is missing"
+        )
 
     def test_hnsw_search_path_activation_with_timing_metrics(
         self, tmp_path: Path, caplog

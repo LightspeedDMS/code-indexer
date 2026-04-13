@@ -90,7 +90,11 @@ def test_exclude_unknown_language_has_no_effect(tmp_path, test_vectors):
         }
         for i in range(3)
     ]
+    store.begin_indexing(collection_name)
     store.upsert_points(collection_name, points)
+    store.end_indexing(
+        collection_name
+    )  # Build HNSW so search() returns results (post-Bug #668)
 
     # Exclude non-existent language
     filter_conditions = {
@@ -150,7 +154,11 @@ def test_exclude_language_with_multiple_extensions(tmp_path, test_vectors):
             "payload": {"path": "app.js", "language": "js", "type": "content"},
         },
     ]
+    store.begin_indexing(collection_name)
     store.upsert_points(collection_name, points)
+    store.end_indexing(
+        collection_name
+    )  # Build HNSW so search() returns results (post-Bug #668)
 
     # Exclude all Python extensions
     filter_conditions = {
@@ -236,7 +244,11 @@ def test_empty_exclusion_list_behaves_like_no_filter(tmp_path, test_vectors):
             "payload": {"path": "app.js", "language": "js"},
         },
     ]
+    store.begin_indexing(collection_name)
     store.upsert_points(collection_name, points)
+    store.end_indexing(
+        collection_name
+    )  # Build HNSW so search() returns results (post-Bug #668)
 
     # Search with empty must_not
     filter_conditions = {"must_not": []}  # type: ignore[var-annotated]

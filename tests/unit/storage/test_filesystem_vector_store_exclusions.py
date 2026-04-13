@@ -82,7 +82,11 @@ def populated_store_with_languages(tmp_path, test_vectors):
         }
     )
 
+    store.begin_indexing(collection_name)
     store.upsert_points(collection_name, points)
+    store.end_indexing(
+        collection_name
+    )  # Build HNSW so search() returns results (post-Bug #668)
     return store, collection_name
 
 

@@ -60,7 +60,9 @@ class TestParallelExecutionMechanism:
         )
 
         # Verify embedding provider was called
-        mock_embedding_provider.get_embedding.assert_called_once_with("test function")
+        mock_embedding_provider.get_embedding.assert_called_once_with(
+            "test function", embedding_purpose="query"
+        )
 
         # Verify we got results
         assert len(results) > 0
@@ -232,14 +234,16 @@ class TestErrorHandling:
                 limit=3,
             )
 
-    def test_index_loading_error_propagates_correctly(self, tmp_path: Path):
-        """Test that errors during index loading are properly propagated.
+    def test_index_loading_error_propagates_correctly(self, tmp_path: Path, caplog):
+        """Test that missing HNSW index causes search to return empty with warning.
 
-        FAILING TEST: Error handling not implemented yet.
+        Post-Bug #668: search() returns [] and logs a WARNING when HNSW is missing.
+        It no longer raises RuntimeError — returning empty is the correct behavior.
 
-        Acceptance Criteria 5: Error handling works correctly for both parallel paths
-        Acceptance Criteria 12: Consistent error propagation from both threads
+        Acceptance Criteria 5: Error handling works correctly
         """
+        import logging
+
         store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
         store.create_collection("test_collection", vector_size=64)
 
@@ -250,14 +254,22 @@ class TestErrorHandling:
             64
         ).tolist()
 
-        # Error should propagate even when embedding succeeds
-        with pytest.raises(RuntimeError, match="HNSW index not found"):
-            store.search(
+        # Clear pre-existing log records, then capture only this search's output
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
                 query="test query",
                 embedding_provider=mock_embedding_provider,
                 collection_name="test_collection",
                 limit=3,
             )
+
+        assert results == [], (
+            "search() should return [] when HNSW index is missing (post-#668)"
+        )
+        assert any(rec.levelno == logging.WARNING for rec in caplog.records), (
+            "search() should emit exactly a WARNING when HNSW index is missing"
+        )
 
 
 class TestPerformanceRequirements:
@@ -290,7 +302,7 @@ class TestPerformanceRequirements:
         # Mock embedding provider with realistic delay
         mock_embedding_provider = Mock()
 
-        def slow_embedding(query):
+        def slow_embedding(query, **kwargs):
             time.sleep(0.4)  # Simulate 400ms embedding generation
             return np.random.randn(128).tolist()
 
@@ -454,32 +466,43 @@ class TestResourceManagement:
             mock_executor.__enter__.assert_called_once()
             mock_executor.__exit__.assert_called_once()
 
-    def test_thread_pool_cleanup_on_error(self, tmp_path: Path):
-        """Test that ThreadPoolExecutor is properly cleaned up even when errors occur.
+    def test_thread_pool_cleanup_on_error(self, tmp_path: Path, caplog):
+        """Test that search handles missing HNSW gracefully without resource leaks.
 
-        FAILING TEST: Resource cleanup on error path not implemented yet.
+        Post-Bug #668: search() returns [] + WARNING when HNSW is missing.
+        The ThreadPoolExecutor context manager ensures cleanup on all exit paths,
+        including the warning/empty-return path when HNSW is absent.
 
         Acceptance Criteria 13: Clean resource cleanup on all exit paths
         """
+        import logging
+
         store = FilesystemVectorStore(tmp_path, project_root=tmp_path)
         store.create_collection("test_collection", vector_size=64)
 
-        # Don't upsert data - will cause error
+        # Don't upsert data - HNSW index won't exist
 
         mock_embedding_provider = Mock()
         mock_embedding_provider.get_embedding.return_value = np.random.randn(
             64
         ).tolist()
 
-        # Don't use patch - just verify the error propagates correctly
-        # The context manager ensures cleanup happens automatically
-        with pytest.raises(RuntimeError, match="HNSW index not found"):
-            store.search(
+        # Clear pre-existing log records, then capture only this search's output
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
                 query="test query",
                 embedding_provider=mock_embedding_provider,
                 collection_name="test_collection",
                 limit=3,
             )
+
+        assert results == [], (
+            "search() should return [] when HNSW index is missing (post-#668)"
+        )
+        assert any(rec.levelno == logging.WARNING for rec in caplog.records), (
+            "search() should emit exactly a WARNING when HNSW index is missing"
+        )
 
     def test_no_thread_leaks_after_many_queries(self, tmp_path: Path):
         """Test that repeated queries don't leak threads.

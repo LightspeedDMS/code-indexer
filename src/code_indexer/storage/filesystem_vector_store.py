@@ -21,6 +21,28 @@ from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
 
+# Minimum and default timeout (seconds) for git subprocess calls.
+# GIT_TIMEOUT_SECONDS env var overrides the default; values below the minimum are clamped.
+_DEFAULT_GIT_TIMEOUT_SECONDS = 5
+MIN_GIT_TIMEOUT_SECONDS = 1
+
+
+def _parse_git_timeout() -> int:
+    """Parse GIT_TIMEOUT_SECONDS env var with safe fallback.
+
+    Defaults to 5 when the env var is unset or contains a non-integer value.
+    Clamps to a minimum of MIN_GIT_TIMEOUT_SECONDS (1) when the parsed value is below it.
+    """
+    try:
+        value = int(os.getenv("GIT_TIMEOUT_SECONDS", str(_DEFAULT_GIT_TIMEOUT_SECONDS)))
+        return max(value, MIN_GIT_TIMEOUT_SECONDS)
+    except ValueError:
+        return _DEFAULT_GIT_TIMEOUT_SECONDS
+
+
+# Timeout for git subprocess calls. Configurable via GIT_TIMEOUT_SECONDS env var.
+GIT_TIMEOUT_SECONDS = _parse_git_timeout()
+
 
 class PathIndex:
     """Reverse index mapping file_path -> Set[point_id].
@@ -103,6 +125,30 @@ class PathIndex:
             _id_index entry.
         """
         return any(point_id in pids for pids in self._path_index.values())
+
+    def merge_from(self, other: "PathIndex") -> None:
+        """Merge all entries from *other* into this PathIndex.
+
+        Uses add_point for each entry so the operation is idempotent: re-adding
+        a (file_path, point_id) pair that already exists is a safe no-op (set
+        semantics).
+
+        Args:
+            other: PathIndex whose entries will be added to self.
+
+        Thread safety:
+            Callers MUST hold the enclosing _path_index_lock before calling
+            this method. PathIndex has no internal lock.
+
+        Usage:
+            Used by scroll_points lazy rebuild: after walking the collection
+            on disk, merge the rebuilt index INTO the live index (rather than
+            replacing it) so concurrent upserts that ran during the walk are
+            not lost.
+        """
+        for file_path, point_ids in other._path_index.items():
+            for point_id in point_ids:
+                self.add_point(file_path, point_id)
 
     def save(self, path: Path) -> None:
         """Save path index to disk using msgpack.
@@ -225,6 +271,13 @@ class FilesystemVectorStore:
         # Story #540: Path-to-point_ids reverse index for duplicate prevention
         # Structure: {collection_name: PathIndex}
         self._path_indexes: Dict[str, PathIndex] = {}
+        # LOCK ORDER INVARIANT (B1): _id_index_lock and _path_index_lock must
+        # NEVER be held simultaneously by delete_points.  delete_points collects
+        # path-index work under _id_index_lock and applies it sequentially after
+        # release.  upsert_points holds _path_index_lock for orphan cleanup and
+        # may nest _id_index_lock inside — that direction is safe because the
+        # outer _path_index_lock is not also held by any concurrent delete.
+        # Violation of this invariant causes ABBA deadlock.
         self._path_index_lock = threading.Lock()
 
         # Story #669: Temporal metadata store for v2 format (lazy-initialized)
@@ -240,6 +293,12 @@ class FilesystemVectorStore:
         # end_indexing() checks this flag and skips its own full rebuild to avoid
         # overwriting the filtered rebuild with all-inclusive (ghost-producing) rebuild.
         self._branch_isolation_did_filtered_rebuild: bool = False
+
+        # Story #677: Memoize git repo root — invariant for the lifetime of this instance.
+        # _repo_root_cached is the "already ran" sentinel (None is a valid cached value).
+        self._cached_repo_root: Optional[Path] = None
+        self._repo_root_cached: bool = False
+        self._repo_root_lock: threading.Lock = threading.Lock()
 
     def _get_collection_path(
         self, collection_name: str, subdirectory: Optional[str] = None
@@ -1029,9 +1088,14 @@ class FilesystemVectorStore:
 
                 self._id_index[collection_name][point_id] = vector_file
 
-                # Update file path cache
+                # Update file path cache.
+                # Use setdefault because delete_points may have evicted the cache
+                # entry between the initialization at begin_indexing() and this
+                # point, causing a KeyError under concurrent upsert+delete.
                 if file_path:
-                    self._file_path_cache[collection_name].add(file_path)
+                    self._file_path_cache.setdefault(collection_name, set()).add(
+                        file_path
+                    )
 
                 # HNSW-001 & HNSW-002: Track changes for incremental updates
                 if collection_name in self._indexing_session_changes:
@@ -1119,6 +1183,10 @@ class FilesystemVectorStore:
             HNSW-001 & HNSW-002: Tracks deletions for incremental HNSW updates.
         """
         deleted = 0
+        # Collect (file_path, point_id) pairs for path-index removal.
+        # Applied AFTER releasing _id_index_lock to avoid nesting
+        # _path_index_lock inside _id_index_lock (ABBA deadlock risk — B1).
+        path_index_removals = []
 
         with self._id_index_lock:
             if collection_name not in self._id_index:
@@ -1137,9 +1205,13 @@ class FilesystemVectorStore:
                             with open(vector_file) as f:
                                 vector_data = json.load(f)
                                 file_path = vector_data.get("payload", {}).get("path")
-                        except (json.JSONDecodeError, KeyError, OSError):
-                            # If we can't read the file, continue with deletion
-                            pass
+                        except (json.JSONDecodeError, KeyError, OSError) as exc:
+                            self.logger.debug(
+                                "Could not read vector file during delete "
+                                "(path-index entry may not be cleaned up): %s — %s",
+                                vector_file,
+                                exc,
+                            )
 
                         # Delete file
                         vector_file.unlink()
@@ -1154,17 +1226,23 @@ class FilesystemVectorStore:
                             point_id
                         )
 
-                    # Story #540: Remove from path index
+                    # Queue path-index removal — applied outside this lock block
+                    # to avoid nesting _path_index_lock inside _id_index_lock.
                     if file_path:
-                        with self._path_index_lock:
-                            if collection_name in self._path_indexes:
-                                self._path_indexes[collection_name].remove_point(
-                                    file_path, point_id
-                                )
+                        path_index_removals.append((file_path, point_id))
 
             # Clear file path cache since file structure changed
             if deleted > 0 and collection_name in self._file_path_cache:
                 del self._file_path_cache[collection_name]
+
+        # Apply path-index removals AFTER releasing _id_index_lock.
+        # This eliminates the nested lock acquisition that caused the ABBA deadlock.
+        if path_index_removals:
+            with self._path_index_lock:
+                if collection_name in self._path_indexes:
+                    path_idx = self._path_indexes[collection_name]
+                    for file_path, point_id in path_index_removals:
+                        path_idx.remove_point(file_path, point_id)
 
         return {"status": "ok", "deleted": deleted}
 
@@ -1227,26 +1305,34 @@ class FilesystemVectorStore:
         return data
 
     def _get_repo_root(self) -> Optional[Path]:
-        """Get git repository root directory.
+        """Get git repository root directory (memoized).
+
+        The git repo root is invariant for the lifetime of this instance.
+        Both positive (Path) and negative (None) results are cached after the
+        first call so the subprocess runs at most once per instance.
 
         Returns:
             Path to git repo root, or None if not a git repo
         """
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=self.project_root,  # Use project_root instead of base_path
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            if result.returncode == 0:
-                return Path(result.stdout.strip())
-            return None
-
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            return None
+        with self._repo_root_lock:
+            if self._repo_root_cached:
+                return self._cached_repo_root
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    cwd=self.project_root,  # Use project_root instead of base_path
+                    capture_output=True,
+                    text=True,
+                    timeout=GIT_TIMEOUT_SECONDS,
+                )
+                if result.returncode == 0:
+                    self._cached_repo_root = Path(result.stdout.strip())
+                else:
+                    self._cached_repo_root = None
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                self._cached_repo_root = None
+            self._repo_root_cached = True
+            return self._cached_repo_root
 
     def _file_has_uncommitted_changes(self, file_path: str, repo_root: Path) -> bool:
         """Check if a specific file has uncommitted changes.
@@ -1449,6 +1535,19 @@ class FilesystemVectorStore:
         path_index_file = collection_path / "path_index.bin"
 
         path_index.save(path_index_file)
+
+        # Co-persist id_index when it is already in memory so that a cold-start
+        # scroll_points fast path does not fall back to rglob in _load_id_index.
+        # Shallow copy is taken under lock to avoid concurrent mutation during I/O.
+        with self._id_index_lock:
+            raw = self._id_index.get(collection_name)
+            id_index_copy: Optional[Dict[str, Path]] = (
+                dict(raw) if raw is not None else None
+            )
+        if id_index_copy is not None:
+            from .id_index_manager import IDIndexManager
+
+            IDIndexManager().save_index(collection_path, id_index_copy)
 
     # Story #726: _ensure_gitignore() method removed.
     # CIDX must NEVER modify files outside .code-indexer/ directory.
@@ -1943,6 +2042,110 @@ class FilesystemVectorStore:
 
             return evaluate_flat_filter
 
+    def _extract_path_filter(
+        self, filter_conditions: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
+        """Extract the target file path from a must-clause path equality filter.
+
+        Scans filter_conditions["must"] for a clause of the form:
+            {"key": "path", "match": {"value": <file_path>}}
+
+        Args:
+            filter_conditions: Filter conditions dict (may be None)
+
+        Returns:
+            The file path string if a path equality clause is found AND the
+            filter has no keys other than "must", else None.
+
+        Note:
+            The fast path is only safe when filter_conditions has EXACTLY the
+            key {"must"}.  If "should" or "must_not" (or any other key) is
+            present those clauses would be silently discarded by the fast path,
+            producing incorrect results.  Return None in that case to fall
+            through to the rglob path which evaluates the full filter.
+        """
+        if not filter_conditions:
+            return None
+        # M1 fix: fast path only when the ONLY top-level key is "must".
+        if set(filter_conditions.keys()) != {"must"}:
+            return None
+        must_clauses = filter_conditions.get("must")
+        if not isinstance(must_clauses, list):
+            return None
+        for clause in must_clauses:
+            if (
+                isinstance(clause, dict)
+                and clause.get("key") == "path"
+                and isinstance(clause.get("match"), dict)
+                and "value" in clause["match"]
+            ):
+                return str(clause["match"]["value"])
+        return None
+
+    def _build_non_path_filter(
+        self, filter_conditions: Optional[Dict[str, Any]]
+    ) -> Optional[Any]:
+        """Build a payload filter function for all non-path must clauses.
+
+        When a path fast path is taken, the path clause itself is satisfied by
+        the PathIndex lookup.  Any remaining must clauses (e.g. type==content)
+        are compiled into a filter function here so they can be applied to
+        each loaded point.
+
+        Args:
+            filter_conditions: Original filter_conditions dict
+
+        Returns:
+            Callable(payload) -> bool, or None if no remaining clauses
+        """
+        if not filter_conditions:
+            return None
+        must_clauses = filter_conditions.get("must")
+        if not isinstance(must_clauses, list):
+            return None
+        remaining = [c for c in must_clauses if c.get("key") != "path"]
+        if not remaining:
+            return None
+        # Re-package as a must filter and compile via existing _parse_filter
+        return self._parse_filter({"must": remaining})
+
+    def _rebuild_path_index_from_disk(self, collection_name: str) -> PathIndex:
+        """Walk the collection directory and rebuild a PathIndex from on-disk JSON files.
+
+        Called lazily when scroll_points detects that no path_index.bin exists for
+        a collection that already has vector files (i.e. a legacy or incomplete index).
+        After rebuilding, persists path_index.bin so subsequent calls use the fast path.
+
+        Args:
+            collection_name: Name of the collection to rebuild for
+
+        Returns:
+            Freshly built PathIndex populated from all existing vector JSON files
+        """
+        subdirectory = self._active_subdirectories.get(collection_name)
+        collection_path = self._get_collection_path(collection_name, subdirectory)
+        path_index = PathIndex()
+        for vector_file in collection_path.rglob("*.json"):
+            if "collection_meta" in vector_file.name:
+                continue
+            try:
+                with open(str(vector_file), "r") as fh:
+                    data: Dict[str, Any] = json.load(fh)
+                point_id = data.get("id", "")
+                file_path = data.get("payload", {}).get("path", "")
+                if point_id and file_path:
+                    path_index.add_point(file_path, point_id)
+            except (json.JSONDecodeError, KeyError, OSError) as exc:
+                self.logger.warning(
+                    "Skipping malformed vector file during path index rebuild: %s. Error: %s",
+                    vector_file,
+                    exc,
+                )
+                continue
+        # Persist so next call hits the fast path
+        self._save_path_index(collection_name, path_index)
+        return path_index
+
     def scroll_points(
         self,
         collection_name: str,
@@ -1959,16 +2162,86 @@ class FilesystemVectorStore:
             limit: Maximum number of points to return
             with_payload: Include payload in results
             with_vectors: Include vectors in results
-            offset: Pagination offset (file path from previous page)
+            offset: Pagination offset (file path from previous page, used by
+                    the rglob fallback path only; the path-index fast path
+                    always returns all matching points without pagination since
+                    per-file point counts are small, typically 1-10)
             filter_conditions: Optional filter conditions
 
         Returns:
             Tuple of (points_list, next_offset)
-        """
-        collection_path = self.base_path / collection_name
 
+        Performance note:
+            When filter_conditions contains a path equality clause
+            ({"key": "path", "match": {"value": X}}), the method uses the
+            persistent PathIndex to resolve matching point IDs in O(1) instead
+            of walking the entire collection tree via rglob.  Other filter
+            shapes fall through to the original rglob path (safety valve).
+        """
         if not self.collection_exists(collection_name):
             return [], None
+
+        # --- Fast path: path equality filter via PathIndex ---
+        target_path = self._extract_path_filter(filter_conditions)
+        if target_path is not None:
+            # Ensure path index is loaded (or lazily rebuilt if absent)
+            with self._path_index_lock:
+                if collection_name not in self._path_indexes:
+                    loaded = PathIndex.load(
+                        self._get_collection_path(
+                            collection_name,
+                            self._active_subdirectories.get(collection_name),
+                        )
+                        / "path_index.bin"
+                    )
+                    self._path_indexes[collection_name] = loaded
+                path_index = self._path_indexes[collection_name]
+                # Detect legacy collection: PathIndex empty but collection may have files
+                needs_rebuild = not path_index._path_index
+
+            # Release lock before any I/O; rebuild walks disk only on first call
+            if needs_rebuild:
+                rebuilt = self._rebuild_path_index_from_disk(collection_name)
+                # M2 fix: merge rebuilt entries INTO the live index instead of
+                # replacing it.  Any upsert_points calls that ran concurrently
+                # during the rglob walk added to the live PathIndex; a swap
+                # would discard those additions.  merge_from uses add_point
+                # (set semantics) so re-adding existing entries is a no-op.
+                with self._path_index_lock:
+                    live_index = self._path_indexes[collection_name]
+                    live_index.merge_from(rebuilt)
+                    path_index = live_index
+
+            # Get point IDs for the requested path (copy under lock for safety)
+            with self._path_index_lock:
+                target_ids = path_index.get_point_ids(target_path)
+
+            # Build filter for any non-path must clauses (e.g. type==content)
+            extra_filter = self._build_non_path_filter(filter_conditions)
+
+            # Load each matching point, applying any extra filter
+            result_points: List[Dict[str, Any]] = []
+            for pid in sorted(target_ids):  # sorted for deterministic order
+                point_data = self.get_point(pid, collection_name)
+                if point_data is None:
+                    continue
+                if extra_filter is not None:
+                    payload = point_data.get("payload", {})
+                    if not extra_filter(payload):
+                        continue
+                point: Dict[str, Any] = {"id": point_data["id"]}
+                if with_payload:
+                    point["payload"] = point_data.get("payload", {})
+                if with_vectors:
+                    point["vector"] = point_data.get("vector", [])
+                result_points.append(point)
+
+            # Respect limit; next_offset is always None because all matching
+            # points for a single file fit within a single page in practice
+            return result_points[:limit], None
+
+        # --- Safety valve: fall through to original rglob path ---
+        collection_path = self.base_path / collection_name
 
         # Get all vector files sorted by path
         all_files = sorted(
@@ -2007,7 +2280,7 @@ class FilesystemVectorStore:
                 with open(str(vector_file), "r") as file_handle:
                     data: Dict[str, Any] = json.load(file_handle)
 
-                point: Dict[str, Any] = {"id": data["id"]}
+                point = {"id": data["id"]}
 
                 if with_payload:
                     # Payload should always exist in new format
@@ -2745,7 +3018,13 @@ class FilesystemVectorStore:
 
             return True
 
-        except Exception:
+        except Exception as e:
+            self.logger.error(
+                "delete_by_filter failed for collection '%s' with filter %r",
+                collection_name,
+                filter_conditions,
+                exc_info=e,
+            )
             return False
 
     def get_collection_info(self, collection_name: str) -> Dict[str, Any]:

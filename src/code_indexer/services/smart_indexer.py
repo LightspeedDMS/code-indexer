@@ -478,20 +478,11 @@ class SmartIndexer(HighThroughputProcessor):
                 not force_full
                 and self.progressive_metadata.can_resume_interrupted_operation()
             ):
-                if progress_callback:
-                    # Get preview stats for initial feedback
-                    metadata_stats = self.progressive_metadata.get_stats()
-                    completed = metadata_stats.get("files_processed", 0)
-                    total = metadata_stats.get("total_files_to_index", 0)
-                    remaining = metadata_stats.get("remaining_files", 0)
-                    chunks_so_far = metadata_stats.get("chunks_indexed", 0)
-
-                    progress_callback(
-                        0,
-                        0,
-                        Path(""),
-                        info=f"🔄 Resuming interrupted operation: {completed}/{total} files completed ({chunks_so_far} chunks), {remaining} files remaining",
-                    )
+                # NOTE: The "Resuming interrupted operation" progress message is
+                # emitted by _do_resume_interrupted() itself (see line ~1780) using
+                # the post-filesystem-check count, which is the accurate number.
+                # We intentionally do NOT emit it here to avoid the duplicate that
+                # previously appeared in `cidx index` output on resume runs.
                 return self._do_resume_interrupted(
                     batch_size,
                     progress_callback,

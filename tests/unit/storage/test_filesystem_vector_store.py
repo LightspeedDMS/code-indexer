@@ -1297,79 +1297,93 @@ class TestFilesystemClientCompatibility:
         assert result is True
 
 
+_STALENESS_VECTOR_DIM = 1536
+
+
+def _make_staleness_points(id_prefix: str, path_prefix: str, count: int) -> list:
+    """Generate test points with random vectors for staleness tests."""
+    return [
+        {
+            "id": f"{id_prefix}_{i}",
+            "vector": np.random.randn(_STALENESS_VECTOR_DIM).tolist(),
+            "payload": {"path": f"{path_prefix}_{i}.py"},
+        }
+        for i in range(count)
+    ]
+
+
 class TestHNSWStalenessCoordination:
     """Test HNSW staleness coordination between watch mode and query."""
 
-    def test_search_rebuilds_stale_hnsw_index(self, tmp_path):
-        """GIVEN stale HNSW index (marked by watch mode)
+    def test_search_with_stale_hnsw_returns_empty_and_warns(self, tmp_path, caplog):
+        """GIVEN stale HNSW index where the bin file still exists (watch mode)
         WHEN search() is called
-        THEN HNSW index is automatically rebuilt before searching
+        THEN logs a WARNING and queries the existing file — returns results
 
-        AC: search() detects staleness and triggers rebuild
+        Post-Bug #668 behavior:
+        - stale AND bin missing → return [] (must rebuild first)
+        - stale AND bin exists → log WARNING, use existing file, return results
+        Search NEVER rebuilds the HNSW — rebuilding is exclusively the indexer's job.
         """
+        import logging
         from code_indexer.storage.filesystem_vector_store import FilesystemVectorStore
         from code_indexer.storage.hnsw_index_manager import HNSWIndexManager
 
         store = FilesystemVectorStore(base_path=tmp_path)
-        store.create_collection("test_coll", vector_size=1536)
-
-        # Initial indexing with normal HNSW build
-        points = [
-            {
-                "id": f"vec_{i}",
-                "vector": np.random.randn(1536).tolist(),
-                "payload": {"path": f"file_{i}.py"},
-            }
-            for i in range(10)
-        ]
-        store.begin_indexing("test_coll")
-        store.upsert_points("test_coll", points)
-        store.end_indexing("test_coll", skip_hnsw_rebuild=False)
-
-        # Verify HNSW is fresh
+        store.create_collection("test_coll", vector_size=_STALENESS_VECTOR_DIM)
         collection_path = tmp_path / "test_coll"
-        hnsw_manager = HNSWIndexManager(vector_dim=1536, space="cosine")
+        hnsw_manager = HNSWIndexManager(
+            vector_dim=_STALENESS_VECTOR_DIM, space="cosine"
+        )
+
+        # Build a fresh HNSW via normal indexing (creates hnsw_index.bin)
+        store.begin_indexing("test_coll")
+        store.upsert_points("test_coll", _make_staleness_points("vec", "file", 10))
+        store.end_indexing("test_coll", skip_hnsw_rebuild=False)
         assert not hnsw_manager.is_stale(collection_path), (
             "HNSW should be fresh after build"
         )
+        assert (collection_path / "hnsw_index.bin").exists(), "HNSW bin file must exist"
 
-        # Simulate watch mode: add more vectors and skip rebuild
-        new_points = [
-            {
-                "id": f"vec_new_{i}",
-                "vector": np.random.randn(1536).tolist(),
-                "payload": {"path": f"new_file_{i}.py"},
-            }
-            for i in range(5)
-        ]
+        # Simulate watch mode: add vectors, skip rebuild → marks stale, bin still exists
         store.begin_indexing("test_coll")
-        store.upsert_points("test_coll", new_points)
-        store.end_indexing("test_coll", skip_hnsw_rebuild=True)  # Watch mode
-
-        # Verify HNSW is now stale
+        store.upsert_points(
+            "test_coll", _make_staleness_points("vec_new", "new_file", 5)
+        )
+        store.end_indexing("test_coll", skip_hnsw_rebuild=True)
         assert hnsw_manager.is_stale(collection_path), (
             "HNSW should be stale after watch mode"
         )
-
-        # Perform search - should auto-rebuild
-        mock_embedding_provider = Mock()
-        mock_embedding_provider.get_embedding.return_value = np.random.randn(
-            1536
-        ).tolist()
-
-        results = store.search(
-            query="test query",
-            embedding_provider=mock_embedding_provider,
-            collection_name="test_coll",
-            limit=5,
+        assert (collection_path / "hnsw_index.bin").exists(), (
+            "HNSW bin file should still exist"
         )
 
-        # Verify search succeeded
-        assert len(results) > 0, "Search should return results"
+        # search(): stale but bin exists → WARNING + returns results from existing file
+        mock_provider = Mock()
+        mock_provider.get_embedding.return_value = np.random.randn(
+            _STALENESS_VECTOR_DIM
+        ).tolist()
 
-        # Verify HNSW is now fresh (rebuilt during search)
-        assert not hnsw_manager.is_stale(collection_path), (
-            "HNSW should be fresh after search rebuild"
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
+                query="test query",
+                embedding_provider=mock_provider,
+                collection_name="test_coll",
+                limit=5,
+            )
+
+        # Returns results from existing (stale) file — NOT empty
+        assert len(results) > 0, (
+            "search() should return results using the existing stale HNSW file (post-#668)"
+        )
+        # WARNING must be logged about staleness
+        assert any(rec.levelno == logging.WARNING for rec in caplog.records), (
+            "search() should emit a WARNING when HNSW is stale"
+        )
+        # HNSW remains stale — search must NOT rebuild it
+        assert hnsw_manager.is_stale(collection_path), (
+            "HNSW should remain stale — search() must not rebuild it"
         )
 
     def test_search_uses_fresh_hnsw_without_rebuild(self, tmp_path):
