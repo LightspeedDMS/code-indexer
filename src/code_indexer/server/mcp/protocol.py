@@ -499,7 +499,7 @@ async def handle_tools_call(
     # Track all MCP tool calls except self-tracking tools.
     # This line is only reached on success - exceptions propagate before this point.
     if tool_name not in _SELF_TRACKING_TOOLS:
-        api_metrics_service.increment_other_api_call()
+        api_metrics_service.increment_other_api_call(username=user.username)
 
     return cast(Dict[str, Any], result)
 
