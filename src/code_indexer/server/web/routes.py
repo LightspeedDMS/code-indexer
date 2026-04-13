@@ -617,24 +617,10 @@ def dashboard_api_metrics_partial(
         api_metrics_backend=api_metrics_backend,
     )
 
-    # Story #503 AC2: Per-node breakdown — only in cluster mode.
-    per_node_metrics = []
-    if is_cluster_mode:
-        try:
-            _nm_backend = getattr(request.app.state, "node_metrics_backend", None)
-            if _nm_backend is not None and api_metrics_backend is not None:
-                node_rows = _nm_backend.get_latest_per_node()
-                for row in node_rows:
-                    node_id = row.get("node_id")
-                    if node_id:
-                        node_counts = api_metrics_backend.get_metrics_bucketed(
-                            period_seconds=api_filter
-                        )
-                        per_node_metrics.append(
-                            {"node_id": node_id, "metrics": node_counts}
-                        )
-        except Exception as _exc:
-            logger.debug("Could not read per-node api_metrics: %s", _exc)
+    # Story #503 AC2: Per-node breakdown — disabled for now.
+    # The api_metrics_buckets table aggregates across all nodes (no node_id column).
+    # Per-node breakdown requires adding node_id to the buckets schema (future story).
+    per_node_metrics: list[dict] = []
 
     return templates.TemplateResponse(
         "partials/dashboard_api_metrics.html",
