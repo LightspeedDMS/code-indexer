@@ -151,6 +151,26 @@
     </article>
 </div>
 
+<!-- Story #674: Per-User API Usage Breakdown Card -->
+<section id="api-per-user-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-api-per-user?api_filter=86400"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <div class="loading-indicator">
+        <p>Loading per-user API usage...</p>
+    </div>
+</section>
+
+<!-- Story #675: API Usage Trends Chart Card -->
+<section id="api-chart-section" class="dashboard-section"
+    hx-get="/admin/partials/dashboard-api-chart?api_filter=86400"
+    hx-trigger="load"
+    hx-swap="innerHTML">
+    <div class="loading-indicator">
+        <p>Loading API usage chart...</p>
+    </div>
+</section>
+
 <!-- Langfuse Sync Section (Story #168) -->
 <!-- M6/M8: Uses 30s HTMX-only refresh (not in refreshAll() JavaScript function)
      because Langfuse data changes slowly (sync runs every 5min by default).
