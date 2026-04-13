@@ -240,12 +240,12 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     # Track API metrics for multi-repo searches
     # (Single-repo searches are tracked in semantic_query_manager._perform_search)
     if search_type == "semantic":
-        api_metrics_service.increment_semantic_search()
+        api_metrics_service.increment_semantic_search(username=user.username)
     elif search_type == "regex":
-        api_metrics_service.increment_regex_search()
+        api_metrics_service.increment_regex_search(username=user.username)
     else:
         # FTS, temporal, hybrid all go to other_index_searches bucket
-        api_metrics_service.increment_other_index_search()
+        api_metrics_service.increment_other_index_search(username=user.username)
 
     # Story #300 (Finding 1): Over-fetch to compensate for post-search access filtering.
     # Non-admin users may have results removed after HNSW search; fetching more upfront
