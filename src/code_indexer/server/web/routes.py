@@ -627,8 +627,8 @@ def dashboard_api_metrics_partial(
                 for row in node_rows:
                     node_id = row.get("node_id")
                     if node_id:
-                        node_counts = api_metrics_backend.get_metrics(
-                            window_seconds=api_filter, node_id=node_id
+                        node_counts = api_metrics_backend.get_metrics_bucketed(
+                            period_seconds=api_filter
                         )
                         per_node_metrics.append(
                             {"node_id": node_id, "metrics": node_counts}
