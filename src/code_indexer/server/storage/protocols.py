@@ -851,6 +851,7 @@ class ApiMetricsBackend(Protocol):
         granularity: str,
         bucket_start: str,
         metric_type: str,
+        node_id: str = "",
     ) -> None:
         """Upsert a single bucket row, incrementing count by 1.
 
@@ -859,6 +860,8 @@ class ApiMetricsBackend(Protocol):
             granularity: One of 'min1', 'min5', 'hour1', 'day1'.
             bucket_start: ISO 8601 timestamp of the bucket start boundary.
             metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+                     Non-empty values must not be whitespace-only.
         """
         ...
 
@@ -895,6 +898,7 @@ class ApiMetricsBackend(Protocol):
         self,
         period_seconds: int,
         username: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """Return metric totals from api_metrics_buckets for the given period.
 
@@ -902,6 +906,8 @@ class ApiMetricsBackend(Protocol):
             period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
             username: When provided, filter to this user's rows only.
                       When None, aggregate across all users.
+            node_id: When provided, filter to this cluster node's rows only.
+                     When None, aggregate across all nodes.
 
         Returns:
             Dict with keys: semantic, other_index, regex, other_api.

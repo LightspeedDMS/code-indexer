@@ -3369,7 +3369,13 @@ class ApiMetricsSqliteBackend:
     )
 
     def _ensure_buckets_schema(self) -> None:
-        """Create the api_metrics_buckets table if it does not already exist."""
+        """Create the api_metrics_buckets table if it does not already exist.
+
+        Includes node_id in the PRIMARY KEY so each cluster node maintains
+        independent bucket rows. Migrates existing tables (without node_id)
+        by renaming, recreating with the new schema, copying data, then
+        dropping the old table.
+        """
 
         def operation(conn: Any) -> None:
             conn.execute(
@@ -3379,11 +3385,42 @@ class ApiMetricsSqliteBackend:
                     granularity   TEXT NOT NULL,
                     bucket_start  TEXT NOT NULL,
                     metric_type   TEXT NOT NULL,
+                    node_id       TEXT NOT NULL DEFAULT '',
                     count         INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (username, granularity, bucket_start, metric_type)
+                    PRIMARY KEY (username, granularity, bucket_start, metric_type, node_id)
                 )
                 """
             )
+            # Migration: if table exists but node_id column is missing,
+            # recreate with node_id in the PK (ALTER TABLE cannot change PK in SQLite)
+            cursor = conn.execute("PRAGMA table_info(api_metrics_buckets)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "node_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE api_metrics_buckets RENAME TO _api_metrics_buckets_old"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE api_metrics_buckets (
+                        username      TEXT NOT NULL,
+                        granularity   TEXT NOT NULL,
+                        bucket_start  TEXT NOT NULL,
+                        metric_type   TEXT NOT NULL,
+                        node_id       TEXT NOT NULL DEFAULT '',
+                        count         INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY (username, granularity, bucket_start, metric_type, node_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO api_metrics_buckets
+                        (username, granularity, bucket_start, metric_type, node_id, count)
+                    SELECT username, granularity, bucket_start, metric_type, '', count
+                    FROM _api_metrics_buckets_old
+                    """
+                )
+                conn.execute("DROP TABLE _api_metrics_buckets_old")
 
         self._conn_manager.execute_atomic(operation)
 
@@ -3393,6 +3430,7 @@ class ApiMetricsSqliteBackend:
         granularity: str,
         bucket_start: str,
         metric_type: str,
+        node_id: str = "",
     ) -> None:
         """Upsert a bucket row — increment count by 1, creating the row if needed.
 
@@ -3401,6 +3439,8 @@ class ApiMetricsSqliteBackend:
             granularity: One of 'min1', 'min5', 'hour1', 'day1'.
             bucket_start: ISO 8601 timestamp of the bucket boundary.
             metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+                     Non-empty values must not be whitespace-only.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -3423,16 +3463,21 @@ class ApiMetricsSqliteBackend:
             raise ValueError(
                 f"bucket_start must be a valid ISO 8601 datetime string, got {bucket_start!r}"
             )
+        if not isinstance(node_id, str):
+            raise ValueError(f"node_id must be a string, got {node_id!r}")
+        if node_id != "" and not node_id.strip():
+            raise ValueError(f"node_id must not be whitespace-only, got {node_id!r}")
 
         def operation(conn: Any) -> None:
             conn.execute(
                 """
-                INSERT INTO api_metrics_buckets (username, granularity, bucket_start, metric_type, count)
-                VALUES (?, ?, ?, ?, 1)
-                ON CONFLICT(username, granularity, bucket_start, metric_type)
+                INSERT INTO api_metrics_buckets
+                    (username, granularity, bucket_start, metric_type, node_id, count)
+                VALUES (?, ?, ?, ?, ?, 1)
+                ON CONFLICT(username, granularity, bucket_start, metric_type, node_id)
                 DO UPDATE SET count = count + 1
                 """,
-                (username, granularity, bucket_start, metric_type),
+                (username, granularity, bucket_start, metric_type, node_id),
             )
 
         self._conn_manager.execute_atomic(operation)
@@ -3569,6 +3614,7 @@ class ApiMetricsSqliteBackend:
         self,
         period_seconds: int,
         username: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """Return metric totals from api_metrics_buckets for the given period.
 
@@ -3579,10 +3625,13 @@ class ApiMetricsSqliteBackend:
             period_seconds: Duration in seconds. Must be a key in PERIOD_TO_TIER.
             username: When provided, filter to this user's rows only.
                       When None, aggregate across all users.
+            node_id: When provided, filter to this cluster node's rows only.
+                     When None, aggregate across all nodes.
 
         Returns:
-            Dict with keys: semantic, other_index, regex, other_api — each
-            mapped to the integer sum of counts in the period.
+            Dict with keys: semantic_searches, other_index_searches,
+            regex_searches, other_api_calls — each mapped to the integer sum
+            of counts in the period.
 
         Raises:
             ValueError: If period_seconds is not in PERIOD_TO_TIER.
@@ -3590,26 +3639,25 @@ class ApiMetricsSqliteBackend:
         tier, cutoff = self._resolve_tier_and_cutoff(period_seconds)
 
         conn = self._conn_manager.get_connection()
+        # Build query dynamically based on optional filters
+        where_parts = ["granularity = ?", "bucket_start >= ?"]
+        params: list = [tier, cutoff]
         if username is not None:
-            rows = conn.execute(
-                """
-                SELECT metric_type, SUM(count) AS total
-                FROM api_metrics_buckets
-                WHERE granularity = ? AND bucket_start >= ? AND username = ?
-                GROUP BY metric_type
-                """,
-                (tier, cutoff, username),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT metric_type, SUM(count) AS total
-                FROM api_metrics_buckets
-                WHERE granularity = ? AND bucket_start >= ?
-                GROUP BY metric_type
-                """,
-                (tier, cutoff),
-            ).fetchall()
+            where_parts.append("username = ?")
+            params.append(username)
+        if node_id is not None:
+            where_parts.append("node_id = ?")
+            params.append(node_id)
+        where_clause = " AND ".join(where_parts)
+        rows = conn.execute(
+            f"""
+            SELECT metric_type, SUM(count) AS total
+            FROM api_metrics_buckets
+            WHERE {where_clause}
+            GROUP BY metric_type
+            """,
+            params,
+        ).fetchall()
 
         counts = {row[0]: int(row[1]) for row in rows}
         return {

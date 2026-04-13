@@ -108,7 +108,12 @@ class ApiMetricsPostgresBackend:
         self._ensure_buckets_schema()
 
     def _ensure_buckets_schema(self) -> None:
-        """Create the api_metrics_buckets table if it does not already exist."""
+        """Create the api_metrics_buckets table if it does not already exist.
+
+        Includes node_id in the PRIMARY KEY so each cluster node maintains
+        independent bucket rows. Migrates existing tables (without node_id)
+        by adding the column and recreating the primary key constraint.
+        """
         try:
             with self._pool.connection() as conn:
                 conn.execute(
@@ -118,9 +123,29 @@ class ApiMetricsPostgresBackend:
                         granularity   TEXT NOT NULL,
                         bucket_start  TEXT NOT NULL,
                         metric_type   TEXT NOT NULL,
+                        node_id       TEXT NOT NULL DEFAULT '',
                         count         INTEGER NOT NULL DEFAULT 0,
-                        PRIMARY KEY (username, granularity, bucket_start, metric_type)
+                        PRIMARY KEY (username, granularity, bucket_start, metric_type, node_id)
                     )
+                    """
+                )
+                # Migration: add node_id column if missing and recreate PK
+                conn.execute(
+                    """
+                    ALTER TABLE api_metrics_buckets
+                    ADD COLUMN IF NOT EXISTS node_id TEXT NOT NULL DEFAULT ''
+                    """
+                )
+                conn.execute(
+                    """
+                    ALTER TABLE api_metrics_buckets
+                    DROP CONSTRAINT IF EXISTS api_metrics_buckets_pkey
+                    """
+                )
+                conn.execute(
+                    """
+                    ALTER TABLE api_metrics_buckets
+                    ADD PRIMARY KEY (username, granularity, bucket_start, metric_type, node_id)
                     """
                 )
                 conn.commit()
@@ -200,6 +225,7 @@ class ApiMetricsPostgresBackend:
         granularity: str,
         bucket_start: str,
         metric_type: str,
+        node_id: str = "",
     ) -> None:
         """Upsert a bucket row — increment count by 1, creating the row if needed.
 
@@ -208,6 +234,8 @@ class ApiMetricsPostgresBackend:
             granularity: One of 'min1', 'min5', 'hour1', 'day1'.
             bucket_start: ISO 8601 timestamp of the bucket boundary.
             metric_type: Category ('semantic', 'other_index', 'regex', 'other_api').
+            node_id: Cluster node identifier. Empty string for standalone nodes.
+                     Non-empty values must not be whitespace-only.
 
         Raises:
             ValueError: If any argument fails validation.
@@ -230,17 +258,22 @@ class ApiMetricsPostgresBackend:
             raise ValueError(
                 f"bucket_start must be a valid ISO 8601 datetime string, got {bucket_start!r}"
             )
+        if not isinstance(node_id, str):
+            raise ValueError(f"node_id must be a string, got {node_id!r}")
+        if node_id != "" and not node_id.strip():
+            raise ValueError(f"node_id must not be whitespace-only, got {node_id!r}")
 
         try:
             with self._pool.connection() as conn:
                 conn.execute(
                     """
-                    INSERT INTO api_metrics_buckets (username, granularity, bucket_start, metric_type, count)
-                    VALUES (%s, %s, %s, %s, 1)
-                    ON CONFLICT (username, granularity, bucket_start, metric_type)
+                    INSERT INTO api_metrics_buckets
+                        (username, granularity, bucket_start, metric_type, node_id, count)
+                    VALUES (%s, %s, %s, %s, %s, 1)
+                    ON CONFLICT (username, granularity, bucket_start, metric_type, node_id)
                     DO UPDATE SET count = api_metrics_buckets.count + 1
                     """,
-                    (username, granularity, bucket_start, metric_type),
+                    (username, granularity, bucket_start, metric_type, node_id),
                 )
                 conn.commit()
         except Exception as exc:
@@ -328,6 +361,7 @@ class ApiMetricsPostgresBackend:
         self,
         period_seconds: int,
         username: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """Return metric totals from api_metrics_buckets for the given period.
 
@@ -337,33 +371,34 @@ class ApiMetricsPostgresBackend:
         Args:
             period_seconds: Must be a key in _PERIOD_TO_TIER.
             username: When provided, filter to this user. When None, aggregate all.
+            node_id: When provided, filter to this cluster node. When None, aggregate all.
 
         Returns:
-            Dict with keys: semantic, other_index, regex, other_api.
+            Dict with keys: semantic_searches, other_index_searches,
+            regex_searches, other_api_calls.
         """
         tier, cutoff = _resolve_tier_and_cutoff(period_seconds)
         try:
             with self._pool.connection() as conn:
+                # Build query dynamically based on optional filters
+                where_parts = ["granularity = %s", "bucket_start >= %s"]
+                params: list = [tier, cutoff]
                 if username is not None:
-                    rows = conn.execute(
-                        """
-                        SELECT metric_type, SUM(count) AS total
-                        FROM api_metrics_buckets
-                        WHERE granularity = %s AND bucket_start >= %s AND username = %s
-                        GROUP BY metric_type
-                        """,
-                        (tier, cutoff, username),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT metric_type, SUM(count) AS total
-                        FROM api_metrics_buckets
-                        WHERE granularity = %s AND bucket_start >= %s
-                        GROUP BY metric_type
-                        """,
-                        (tier, cutoff),
-                    ).fetchall()
+                    where_parts.append("username = %s")
+                    params.append(username)
+                if node_id is not None:
+                    where_parts.append("node_id = %s")
+                    params.append(node_id)
+                where_clause = " AND ".join(where_parts)
+                rows = conn.execute(
+                    f"""
+                    SELECT metric_type, SUM(count) AS total
+                    FROM api_metrics_buckets
+                    WHERE {where_clause}
+                    GROUP BY metric_type
+                    """,
+                    params,
+                ).fetchall()
         except Exception as exc:
             logger.warning(
                 "ApiMetricsPostgresBackend: get_metrics_bucketed failed: %s", exc

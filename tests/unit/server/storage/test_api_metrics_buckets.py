@@ -543,3 +543,95 @@ class TestApiMetricsBucketsCleanup:
             ).fetchone()[0]
 
         assert count == 1, "Only current row must remain after cleanup"
+
+
+class TestApiMetricsBucketsNodeId:
+    """Test node_id column support in api_metrics_buckets table."""
+
+    def test_node_id_column_exists_after_migration(self, backend_and_db):
+        """api_metrics_buckets must have a node_id column after schema init."""
+        _backend, db_file = backend_and_db
+
+        with sqlite3.connect(db_file) as conn:
+            cursor = conn.execute("PRAGMA table_info(api_metrics_buckets)")
+            columns = {row[1] for row in cursor.fetchall()}
+
+        assert "node_id" in columns, "node_id column must exist in api_metrics_buckets"
+
+    def test_upsert_bucket_with_node_id(self, backend_and_db):
+        """upsert_bucket with node_id must store the node_id in the row."""
+        backend, db_file = backend_and_db
+
+        backend.upsert_bucket(
+            "alice", "min1", "2026-04-11T10:00:00", "semantic", node_id="node-1"
+        )
+
+        with sqlite3.connect(db_file) as conn:
+            row = conn.execute(
+                "SELECT node_id FROM api_metrics_buckets "
+                "WHERE username=? AND granularity=? AND bucket_start=? AND metric_type=?",
+                ("alice", "min1", "2026-04-11T10:00:00", "semantic"),
+            ).fetchone()
+
+        assert row is not None
+        assert row[0] == "node-1", f"node_id must be 'node-1', got {row[0]!r}"
+
+    def test_upsert_bucket_same_bucket_different_nodes_separate_rows(
+        self, backend_and_db
+    ):
+        """Two nodes upserting into the same bucket must produce 2 separate rows."""
+        backend, db_file = backend_and_db
+
+        backend.upsert_bucket(
+            "alice", "min1", "2026-04-11T10:00:00", "semantic", node_id="node-1"
+        )
+        backend.upsert_bucket(
+            "alice", "min1", "2026-04-11T10:00:00", "semantic", node_id="node-2"
+        )
+
+        with sqlite3.connect(db_file) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM api_metrics_buckets "
+                "WHERE username=? AND granularity=? AND bucket_start=? AND metric_type=?",
+                ("alice", "min1", "2026-04-11T10:00:00", "semantic"),
+            ).fetchone()[0]
+
+        assert count == 2, (
+            f"node-1 and node-2 must each have their own row, got {count} rows"
+        )
+
+    def test_get_metrics_bucketed_filters_by_node_id(self, backend_and_db):
+        """get_metrics_bucketed with node_id must return only that node's counts."""
+        backend, db_file = backend_and_db
+
+        now = datetime.now(timezone.utc)
+        bucket = now.replace(second=0, microsecond=0).isoformat()
+
+        # node-1: 3 semantic calls, node-2: 5 semantic calls
+        for _ in range(3):
+            backend.upsert_bucket("alice", "min1", bucket, "semantic", node_id="node-1")
+        for _ in range(5):
+            backend.upsert_bucket("alice", "min1", bucket, "semantic", node_id="node-2")
+
+        result = backend.get_metrics_bucketed(period_seconds=900, node_id="node-1")
+        assert result["semantic_searches"] == 3, (
+            f"node-1 must report 3 semantic searches, got {result['semantic_searches']}"
+        )
+
+    def test_get_metrics_bucketed_without_node_id_aggregates_all(self, backend_and_db):
+        """get_metrics_bucketed without node_id must aggregate across all nodes."""
+        backend, db_file = backend_and_db
+
+        now = datetime.now(timezone.utc)
+        bucket = now.replace(second=0, microsecond=0).isoformat()
+
+        # node-1: 3 semantic, node-2: 5 semantic → total 8
+        for _ in range(3):
+            backend.upsert_bucket("alice", "min1", bucket, "semantic", node_id="node-1")
+        for _ in range(5):
+            backend.upsert_bucket("alice", "min1", bucket, "semantic", node_id="node-2")
+
+        result = backend.get_metrics_bucketed(period_seconds=900, node_id=None)
+        assert result["semantic_searches"] == 8, (
+            f"Without node_id filter, must aggregate all nodes → 8, got {result['semantic_searches']}"
+        )

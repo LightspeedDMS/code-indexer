@@ -211,6 +211,40 @@ class TestUsernameDefaultAnonymous:
         ), "increment_other_api_call() must default to username='_anonymous'"
 
 
+class TestWriterLoopNodeId:
+    """Test that _writer_loop forwards node_id to every upsert_bucket call."""
+
+    def test_writer_loop_passes_node_id_to_upsert(self, tmp_path):
+        """When _node_id is set, each upsert_bucket call must receive that node_id."""
+        from unittest.mock import MagicMock
+        from code_indexer.server.services.api_metrics_service import ApiMetricsService
+
+        db_file = str(tmp_path / "test_metrics.db")
+
+        # Build a mock backend that records every upsert_bucket invocation
+        mock_backend = MagicMock()
+        mock_backend.upsert_bucket = MagicMock()
+
+        service = ApiMetricsService()
+        service.initialize(
+            db_file, storage_backend=mock_backend, node_id="test-node-42"
+        )
+
+        service.increment_semantic_search(username="alice")
+
+        # Wait for the background writer to drain the queue
+        assert _poll_until(lambda: mock_backend.upsert_bucket.called), (
+            "upsert_bucket must be called within timeout"
+        )
+
+        # Every upsert_bucket call for this metric must carry node_id="test-node-42"
+        for actual_call in mock_backend.upsert_bucket.call_args_list:
+            _, kwargs = actual_call
+            assert kwargs.get("node_id") == "test-node-42", (
+                f"Expected node_id='test-node-42' but got {kwargs!r}"
+            )
+
+
 class TestGetMetricsBackwardCompat:
     """Test that get_metrics() still works after the background writer is added."""
 

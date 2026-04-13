@@ -191,16 +191,32 @@ class ApiMetricsService:
             if self._backend is not None:
                 try:
                     self._backend.upsert_bucket(
-                        username, "min1", _truncate_min1(timestamp), metric_type
+                        username,
+                        "min1",
+                        _truncate_min1(timestamp),
+                        metric_type,
+                        node_id=self._node_id,
                     )
                     self._backend.upsert_bucket(
-                        username, "min5", _truncate_min5(timestamp), metric_type
+                        username,
+                        "min5",
+                        _truncate_min5(timestamp),
+                        metric_type,
+                        node_id=self._node_id,
                     )
                     self._backend.upsert_bucket(
-                        username, "hour1", _truncate_hour1(timestamp), metric_type
+                        username,
+                        "hour1",
+                        _truncate_hour1(timestamp),
+                        metric_type,
+                        node_id=self._node_id,
                     )
                     self._backend.upsert_bucket(
-                        username, "day1", _truncate_day1(timestamp), metric_type
+                        username,
+                        "day1",
+                        _truncate_day1(timestamp),
+                        metric_type,
+                        node_id=self._node_id,
                     )
                 except Exception as e:
                     logger.warning(
@@ -413,6 +429,7 @@ class ApiMetricsService:
         self,
         period_seconds: int,
         username: Optional[str] = None,
+        node_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """Return metric totals from api_metrics_buckets for the given period.
 
@@ -425,6 +442,8 @@ class ApiMetricsService:
             period_seconds: Duration in seconds. Must be in PERIOD_TO_TIER.
             username: When provided, filter to this user's rows only.
                       When None, aggregate across all users.
+            node_id: When provided, filter to this cluster node's rows only.
+                     When None, aggregate across all nodes.
 
         Returns:
             Dict with keys: semantic_searches, other_index_searches,
@@ -433,7 +452,9 @@ class ApiMetricsService:
         if self._backend is not None:
             return cast(
                 Dict[str, int],
-                self._backend.get_metrics_bucketed(period_seconds, username),
+                self._backend.get_metrics_bucketed(
+                    period_seconds, username, node_id=node_id
+                ),
             )
         return {
             "semantic_searches": 0,
