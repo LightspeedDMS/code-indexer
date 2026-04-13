@@ -235,6 +235,6 @@ function updateApiActivity() {
         .then(function(r) { applyResponse(r, '#api-chart-section'); });
 }
 
-// Initial load: fetch per-user and chart cards with current period selector value
-updateApiActivity();
+// Initial load: deferred so applyResponse/_fetchOpts from dashboard.html are available
+window.addEventListener('DOMContentLoaded', function() { updateApiActivity(); });
 </script>
