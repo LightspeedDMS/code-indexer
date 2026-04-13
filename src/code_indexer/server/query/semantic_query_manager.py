@@ -788,10 +788,10 @@ class SemanticQueryManager:
         from code_indexer.server.services.api_metrics_service import api_metrics_service
 
         if search_mode == "semantic":
-            api_metrics_service.increment_semantic_search()
+            api_metrics_service.increment_semantic_search(username=username)
         else:
             # FTS, hybrid, or temporal searches
-            api_metrics_service.increment_other_index_search()
+            api_metrics_service.increment_other_index_search(username=username)
 
         all_results: List[QueryResult] = []
         repo_errors: List[str] = []
