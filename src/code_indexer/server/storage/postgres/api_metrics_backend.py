@@ -372,10 +372,10 @@ class ApiMetricsPostgresBackend:
 
         counts = {row[0]: int(row[1]) for row in rows}
         return {
-            "semantic": counts.get("semantic", 0),
-            "other_index": counts.get("other_index", 0),
-            "regex": counts.get("regex", 0),
-            "other_api": counts.get("other_api", 0),
+            "semantic_searches": counts.get("semantic", 0),
+            "other_index_searches": counts.get("other_index", 0),
+            "regex_searches": counts.get("regex", 0),
+            "other_api_calls": counts.get("other_api", 0),
         }
 
     def get_metrics_by_user(
