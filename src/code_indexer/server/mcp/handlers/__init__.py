@@ -64,6 +64,20 @@ class _ForwardingModule(_types.ModuleType):
             legacy = _sys.modules.get("code_indexer.server.mcp.handlers._legacy")
             if legacy is not None and name in legacy.__dict__:
                 legacy.__dict__[name] = value
+            # Propagate into extracted domain submodules so that callers in
+            # those modules also see the patched binding.  When a handler moves
+            # from _legacy.py to, say, scip.py, it imports helpers directly
+            # from _utils (e.g. `from ._utils import _get_scip_query_service`).
+            # Tests that patch "handlers._get_scip_query_service" must therefore
+            # also update the binding in each domain module where it is used.
+            for _submod_name in (
+                "code_indexer.server.mcp.handlers.scip",
+                "code_indexer.server.mcp.handlers.guides",
+                "code_indexer.server.mcp.handlers.ssh_keys",
+            ):
+                _submod = _sys.modules.get(_submod_name)
+                if _submod is not None and name in _submod.__dict__:
+                    _submod.__dict__[name] = value
             # app_module lives in _utils and is accessed as _utils.app_module
             # in _legacy.py (not as a bare name).  Forward writes here so that
             # tests which set handlers.app_module = mock also affect _utils.
@@ -88,6 +102,22 @@ from code_indexer.server.mcp.handlers.guides import (  # noqa: F401, E402
     _get_wiki_cache_for_handler,
     _wiki_analytics_filter_by_search,
     _wiki_analytics_build_articles,
+)
+
+from code_indexer.server.mcp.handlers.scip import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 scip step)
+    scip_definition,
+    scip_references,
+    scip_dependencies,
+    scip_dependents,
+    scip_impact,
+    scip_callchain,
+    scip_context,
+    get_scip_audit_log,
+    handle_scip_pr_history,
+    handle_scip_cleanup_history,
+    handle_scip_cleanup_workspaces,
+    handle_scip_cleanup_status,
 )
 
 from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402

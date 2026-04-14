@@ -16,6 +16,8 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import asyncio
 import json
 import logging
+import sys
+import types
 from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 from pathlib import Path
 
@@ -41,7 +43,7 @@ from code_indexer.server.mcp import reranking as _mcp_reranking
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
 from ._utils import (
-    _get_scip_audit_repository,
+    _get_scip_audit_repository,  # noqa: F401 — re-exported via handlers namespace
     _get_hnsw_health_service,
     _parse_json_string_array,
     _coerce_int,
@@ -55,18 +57,18 @@ from ._utils import (
     _get_query_tracker,
     _get_app_refresh_scheduler,
     _get_access_filtering_service,
-    _get_scip_query_service,
+    _get_scip_query_service,  # noqa: F401 — re-exported via handlers namespace
     _apply_payload_truncation,
     _apply_fts_payload_truncation,
     _apply_regex_payload_truncation,
     _apply_temporal_payload_truncation,
-    _apply_scip_payload_truncation,
+    _apply_scip_payload_truncation,  # noqa: F401 — re-exported via handlers namespace
     _error_with_suggestions,
     _get_available_repos,
     _format_omni_response,
     _is_temporal_query,
     _get_temporal_status,
-    _validate_symbol_format,
+    _validate_symbol_format,  # noqa: F401 — re-exported via handlers namespace
     _expand_wildcard_patterns,
 )
 
@@ -5142,524 +5144,33 @@ from .ssh_keys import (  # noqa: F401, E402
 )
 from .ssh_keys import _register as _ssh_keys_register  # noqa: E402
 from .guides import _register as _guides_register  # noqa: E402
+from .scip import _register as _scip_register  # noqa: E402
 
 _ssh_keys_register(HANDLER_REGISTRY)
 _guides_register(HANDLER_REGISTRY)
-
-
-# SCIP Call Graph Query Handlers
-# Story #40: All SCIP handlers now delegate to SCIPQueryService via _get_scip_query_service()
-# The legacy _get_golden_repos_scip_dir() and _find_scip_files() functions have been removed.
-
-
-def scip_definition(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Find definition locations for a symbol across all indexed projects.
-
-    Args:
-        params: Dictionary containing:
-            - symbol: Symbol name to search for
-            - exact: Optional boolean for exact match
-            - project: Optional project filter
-            - repository_alias: Optional repository name to filter SCIP indexes
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with definition results
-    """
-    try:
-        symbol = params.get("symbol")
-        exact = params.get("exact", False)
-        project = params.get("project")
-        repository_alias = params.get("repository_alias")
-
-        if not symbol:
-            return _mcp_response(
-                {"success": False, "error": "symbol parameter is required"}
-            )
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        results_dicts = service.find_definition(
-            symbol=symbol,
-            exact=exact,
-            repository_alias=repository_alias,
-            username=user.username,
-        )
-
-        # Apply project filter if specified (backward compatibility)
-        if project:
-            results_dicts = [
-                r for r in results_dicts if project in r.get("project", "")
-            ]
-
-        # Story #685: Apply SCIP payload truncation to context fields
-        # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "symbol": symbol,
-                "total_results": len(results_dicts),
-                "results": results_dicts,
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_definition: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
-
-
-def scip_references(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Find all references to a symbol across all indexed projects.
-
-    Args:
-        params: Dictionary containing:
-            - symbol: Symbol name to search for
-            - limit: Optional maximum number of results (default 100)
-            - exact: Optional boolean for exact match
-            - project: Optional project filter
-            - repository_alias: Optional repository name to filter SCIP indexes
-            - rerank_query: Optional query for cross-encoder reranking (Story #659)
-            - rerank_instruction: Optional instruction prefix for reranker (Story #659)
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with reference results
-    """
-    try:
-        symbol = params.get("symbol")
-        requested_limit = _coerce_int(params.get("limit"), 100)
-        exact = params.get("exact", False)
-        project = params.get("project")
-        repository_alias = params.get("repository_alias")
-        # Story #659: Optional reranking parameters
-        rerank_query = params.get("rerank_query") or None
-        rerank_instruction = params.get("rerank_instruction")
-
-        if not symbol:
-            return _mcp_response(
-                {"success": False, "error": "symbol parameter is required"}
-            )
-
-        # Story #659: Overfetch when reranking is requested so the reranker
-        # has a larger candidate pool; truncate back to requested_limit after reranking.
-        fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        results_dicts = service.find_references(
-            symbol=symbol,
-            limit=fetch_limit,
-            exact=exact,
-            repository_alias=repository_alias,
-            username=user.username,
-        )
-
-        # Apply project filter if specified (backward compatibility)
-        if project:
-            results_dicts = [
-                r for r in results_dicts if project in r.get("project", "")
-            ]
-
-        # Story #685: Apply SCIP payload truncation to context fields
-        # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
-
-        # Story #659: Apply cross-encoder reranking after retrieval, before return.
-        # Guard: skip entirely when no rerank_query to avoid overhead.
-        if rerank_query:
-            results_dicts, _rerank_meta = _mcp_reranking._apply_reranking_sync(
-                results=results_dicts,
-                rerank_query=rerank_query,
-                rerank_instruction=rerank_instruction,
-                content_extractor=lambda r: r.get("context") or "",
-                requested_limit=requested_limit,
-                config_service=get_config_service(),
-            )
-        else:
-            _rerank_meta = {
-                "reranker_used": False,
-                "reranker_provider": None,
-                "rerank_time_ms": 0,
-            }
-
-        return _mcp_response(
-            {
-                "success": True,
-                "symbol": symbol,
-                "total_results": len(results_dicts),
-                "results": results_dicts,
-                "query_metadata": {
-                    "reranker_used": _rerank_meta["reranker_used"],
-                    "reranker_provider": _rerank_meta["reranker_provider"],
-                    "rerank_time_ms": _rerank_meta["rerank_time_ms"],
-                },
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_references: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
-
-
-def scip_dependencies(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get dependencies for a symbol across all indexed projects.
-
-    Args:
-        params: Dictionary containing:
-            - symbol: Symbol name to search for
-            - depth: Optional depth limit (default 1)
-            - exact: Optional boolean for exact match
-            - project: Optional project filter
-            - repository_alias: Optional repository name to filter SCIP indexes
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with dependency results
-    """
-    try:
-        symbol = params.get("symbol")
-        depth = _coerce_int(params.get("depth"), 1)
-        exact = params.get("exact", False)
-        project = params.get("project")
-        repository_alias = params.get("repository_alias")
-
-        if not symbol:
-            return _mcp_response(
-                {"success": False, "error": "symbol parameter is required"}
-            )
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        results_dicts = service.get_dependencies(
-            symbol=symbol,
-            depth=depth,
-            exact=exact,
-            repository_alias=repository_alias,
-            username=user.username,
-        )
-
-        # Apply project filter if specified (backward compatibility)
-        if project:
-            results_dicts = [
-                r for r in results_dicts if project in r.get("project", "")
-            ]
-
-        # Story #685: Apply SCIP payload truncation to context fields
-        # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "symbol": symbol,
-                "total_results": len(results_dicts),
-                "results": results_dicts,
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_dependencies: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
-
-
-def scip_dependents(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get dependents (symbols that depend on target symbol) across all indexed projects.
-
-    Args:
-        params: Dictionary containing:
-            - symbol: Symbol name to search for
-            - depth: Optional depth limit (default 1)
-            - exact: Optional boolean for exact match
-            - project: Optional project filter
-            - repository_alias: Optional repository name to filter SCIP indexes
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with dependent results
-    """
-    try:
-        symbol = params.get("symbol")
-        depth = _coerce_int(params.get("depth"), 1)
-        exact = params.get("exact", False)
-        project = params.get("project")
-        repository_alias = params.get("repository_alias")
-
-        if not symbol:
-            return _mcp_response(
-                {"success": False, "error": "symbol parameter is required"}
-            )
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        results_dicts = service.get_dependents(
-            symbol=symbol,
-            depth=depth,
-            exact=exact,
-            repository_alias=repository_alias,
-            username=user.username,
-        )
-
-        # Apply project filter if specified (backward compatibility)
-        if project:
-            results_dicts = [
-                r for r in results_dicts if project in r.get("project", "")
-            ]
-
-        # Story #685: Apply SCIP payload truncation to context fields
-        # Story #50: Truncation functions are now sync
-        results_dicts = _apply_scip_payload_truncation(results_dicts)
-
-        return _mcp_response(
-            {
-                "success": True,
-                "symbol": symbol,
-                "total_results": len(results_dicts),
-                "results": results_dicts,
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_dependents: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e), "results": []})
-
-
-def scip_impact(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Analyze impact of changes to a symbol.
-
-    Args:
-        params: Dictionary containing:
-            - symbol: Symbol name to analyze
-            - depth: Optional traversal depth (default 3, max 10)
-            - repository_alias: Optional repository name to filter SCIP indexes
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with impact analysis results
-    """
-    try:
-        symbol = params.get("symbol")
-        depth = _coerce_int(params.get("depth"), 3)
-        repository_alias = params.get("repository_alias")
-
-        if not symbol:
-            return _mcp_response(
-                {"success": False, "error": "symbol parameter is required"}
-            )
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        result = service.analyze_impact(
-            symbol=symbol,
-            depth=depth,
-            repository_alias=repository_alias,
-            username=user.username,
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                **result,
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_impact: {e}", extra={"correlation_id": get_correlation_id()}
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": str(e),
-                "affected_symbols": [],
-                "affected_files": [],
-            }
-        )
-
-
-def scip_callchain(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Find call chains between two symbols.
-
-    Args:
-        params: Dictionary containing:
-            - from_symbol: Starting symbol
-            - to_symbol: Target symbol
-            - max_depth: Optional maximum chain length (default 10, max 10)
-            - repository_alias: Optional repository name to filter SCIP indexes
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with call chain results
-    """
-    try:
-        from_symbol = params.get("from_symbol")
-        to_symbol = params.get("to_symbol")
-        max_depth = params.get("max_depth", 10)
-        repository_alias = params.get("repository_alias")
-
-        # Validate symbol formats
-        from_symbol_error = _validate_symbol_format(from_symbol, "from_symbol")
-        if from_symbol_error:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": f"Invalid parameters: {from_symbol_error}",
-                    "from_symbol": from_symbol,
-                    "to_symbol": to_symbol,
-                    "chains": [],
-                }
-            )
-
-        to_symbol_error = _validate_symbol_format(to_symbol, "to_symbol")
-        if to_symbol_error:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": f"Invalid parameters: {to_symbol_error}",
-                    "from_symbol": from_symbol,
-                    "to_symbol": to_symbol,
-                    "chains": [],
-                }
-            )
-
-        # Validate and clamp max_depth to safe range [1, 10]
-        if max_depth < 1:
-            max_depth = 1
-        elif max_depth > 10:
-            max_depth = 10
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        all_chains = service.trace_callchain(
-            from_symbol=from_symbol,
-            to_symbol=to_symbol,
-            max_depth=max_depth,
-            limit=100,
-            repository_alias=repository_alias,
-            username=user.username,
-        )
-
-        # Deduplicate chains by path
-        unique_chains_map = {}
-        for chain in all_chains:
-            path_key = tuple(chain.get("path", []))
-            if path_key not in unique_chains_map:
-                unique_chains_map[path_key] = chain
-
-        unique_chains = list(unique_chains_map.values())
-
-        # Check if any chain reached max depth
-        max_depth_reached = any(
-            chain.get("length", 0) >= max_depth for chain in unique_chains
-        )
-
-        # Sort by length (shortest first)
-        unique_chains.sort(key=lambda c: c.get("length", 0))
-
-        # Limit to maximum return size (100 chains)
-        MAX_CALL_CHAINS_RETURNED = 100
-        truncated = len(unique_chains) > MAX_CALL_CHAINS_RETURNED
-        returned_chains = unique_chains[:MAX_CALL_CHAINS_RETURNED]
-
-        # Generate diagnostic message if no chains found
-        diagnostic = None
-        if len(unique_chains) == 0:
-            diagnostic = f"No call chains found from '{from_symbol}' to '{to_symbol}'. "
-            diagnostic += "Verify symbol names exist in the codebase. Try using simple class or method names."
-
-        return _mcp_response(
-            {
-                "success": True,
-                "from_symbol": from_symbol,
-                "to_symbol": to_symbol,
-                "total_chains_found": len(unique_chains),
-                "truncated": truncated,
-                "max_depth_reached": max_depth_reached,
-                # Note: scip_files_searched not available via service API
-                "scip_files_searched": 0,
-                "repository_filter": repository_alias if repository_alias else "all",
-                "chains": returned_chains,
-                "diagnostic": diagnostic,
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_callchain: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e), "chains": []})
-
-
-def scip_context(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get smart context for a symbol.
-
-    Args:
-        params: Dictionary containing:
-            - symbol: Symbol name to analyze
-            - limit: Optional maximum files to return (default 20, max 100)
-            - min_score: Optional minimum relevance score (default 0.0, range 0.0-1.0)
-            - repository_alias: Optional repository name to filter SCIP indexes
-        user: Authenticated user (for permission checking)
-
-    Returns:
-        MCP-compliant response with smart context results
-    """
-    from code_indexer.scip.database.queries import QueryTimeoutError
-
-    try:
-        symbol = params.get("symbol")
-        limit = _coerce_int(params.get("limit"), 20)
-        min_score = _coerce_float(params.get("min_score"), 0.0)
-        repository_alias = params.get("repository_alias")
-
-        if not symbol:
-            return _mcp_response(
-                {"success": False, "error": "symbol parameter is required"}
-            )
-
-        # Delegate to SCIPQueryService (Story #40)
-        service = _get_scip_query_service()
-        result = service.get_context(
-            symbol=symbol,
-            limit=limit,
-            min_score=min_score,
-            repository_alias=repository_alias,
-            username=user.username,
-            timeout_seconds=30,
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                **result,
-            }
-        )
-    except QueryTimeoutError as e:
-        logger.warning(
-            f"scip_context timeout for symbol: {params.get('symbol')}: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response(
-            {
-                "success": False,
-                "error": f"Query timeout exceeded: {e}",
-                "files": [],
-            }
-        )
-    except Exception as e:
-        logger.exception(
-            f"Error in scip_context: {e}",
-            extra={"correlation_id": get_correlation_id()},
-        )
-        return _mcp_response({"success": False, "error": str(e), "files": []})
+_scip_register(HANDLER_REGISTRY)
+
+# SCIP handlers extracted to scip.py (Story #496).
+# Re-exported here so that tests importing directly from _legacy continue to work.
+from .scip import (  # noqa: F401, E402
+    scip_definition,
+    scip_references,
+    scip_dependencies,
+    scip_dependents,
+    scip_impact,
+    scip_callchain,
+    scip_context,
+    get_scip_audit_log,
+    handle_scip_pr_history,
+    handle_scip_cleanup_history,
+    handle_scip_cleanup_workspaces,
+    handle_scip_cleanup_status,
+    _filter_audit_entries as _filter_audit_entries,
+    _parse_log_details as _parse_log_details,
+    _get_pr_logs_from_service as _get_pr_logs_from_service,
+    _get_cleanup_logs_from_service as _get_cleanup_logs_from_service,
+    _execute_workspace_cleanup,
+)
 
 
 def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -9255,108 +8766,6 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 HANDLER_REGISTRY["admin_logs_query"] = handle_admin_logs_query
 HANDLER_REGISTRY["admin_logs_export"] = admin_logs_export
-
-
-def get_scip_audit_log(params: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """
-    Get SCIP dependency installation audit log with filtering.
-
-    Admin-only endpoint for querying SCIP dependency installation history.
-    Supports filtering by job_id, repo_alias, project_language, and project_build_system.
-
-    Args:
-        params: Query parameters (job_id, repo_alias, project_language,
-                project_build_system, limit, offset)
-        user: Authenticated user (must be admin)
-
-    Returns:
-        MCP response with audit records, total count, and applied filters
-    """
-    try:
-        # Check admin permission
-        if user.role != UserRole.ADMIN:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Permission denied. Admin access required for audit logs.",
-                }
-            )
-
-        # Extract filter parameters
-        job_id = params.get("job_id")
-        repo_alias = params.get("repo_alias")
-        project_language = params.get("project_language")
-        project_build_system = params.get("project_build_system")
-
-        # Extract and validate pagination parameters
-        limit = params.get("limit", 100)
-        offset = params.get("offset", 0)
-
-        # Convert and validate pagination params
-        try:
-            limit = int(limit)
-            offset = int(offset)
-            # Ensure positive and bounded limit (1-1000)
-            limit = max(1, min(limit, 1000))
-            # Ensure non-negative offset
-            offset = max(0, offset)
-        except (ValueError, TypeError):
-            # Use defaults if conversion fails
-            limit = 100
-            offset = 0
-
-        # Query audit repository
-        records, total = _get_scip_audit_repository().query_audit_records(
-            job_id=job_id,
-            repo_alias=repo_alias,
-            project_language=project_language,
-            project_build_system=project_build_system,
-            limit=limit,
-            offset=offset,
-        )
-
-        # Build filters dict (echo applied filters in response)
-        filters = {}
-        if job_id:
-            filters["job_id"] = job_id
-        if repo_alias:
-            filters["repo_alias"] = repo_alias
-        if project_language:
-            filters["project_language"] = project_language
-        if project_build_system:
-            filters["project_build_system"] = project_build_system
-
-        return _mcp_response(
-            {
-                "success": True,
-                "records": records,
-                "total": total,
-                "filters": filters,
-            }
-        )
-
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "MCP-GENERAL-080",
-                f"Error retrieving SCIP audit log: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-HANDLER_REGISTRY["get_scip_audit_log"] = get_scip_audit_log
-
-
-# Register SCIP handlers
-HANDLER_REGISTRY["scip_definition"] = scip_definition
-HANDLER_REGISTRY["scip_references"] = scip_references
-HANDLER_REGISTRY["scip_dependencies"] = scip_dependencies
-HANDLER_REGISTRY["scip_dependents"] = scip_dependents
-HANDLER_REGISTRY["scip_impact"] = scip_impact
-HANDLER_REGISTRY["scip_callchain"] = scip_callchain
-HANDLER_REGISTRY["scip_context"] = scip_context
 
 
 # Story #633: GitHub Actions Monitoring Handlers
@@ -14181,70 +13590,8 @@ DEFAULT_AUDIT_LOG_LIMIT = 100
 JOB_ID_LENGTH = 8
 
 
-def _filter_audit_entries(
-    entries: List[Dict[str, Any]],
-    filter_user: Optional[str],
-    action: Optional[str],
-    from_date: Optional[str],
-    to_date: Optional[str],
-    limit: int,
-) -> List[Dict[str, Any]]:
-    """Filter audit log entries by user, action, and date range."""
-    filtered = entries
-    if filter_user:
-        filtered = [
-            e for e in filtered if e.get("user", "").lower() == filter_user.lower()
-        ]
-    if action:
-        filtered = [
-            e for e in filtered if action.lower() in e.get("action", "").lower()
-        ]
-    if from_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") >= from_date]
-    if to_date:
-        filtered = [e for e in filtered if e.get("timestamp", "") <= to_date]
-    return filtered[:limit]
-
-
-def _parse_log_details(row: dict) -> dict:
-    """Parse the details JSON field of an audit_logs row into a flat dict.
-
-    When AuditLogService rows are used instead of flat-file parsed dicts the
-    payload lives inside the ``details`` JSON column.  This helper merges the
-    top-level row fields with the decoded details so callers get the same shape
-    that the old PasswordChangeAuditLogger flat-file parsing produced.
-    """
-    flat = dict(row)
-    details_str = row.get("details") or "{}"
-    try:
-        inner = json.loads(details_str)
-    except (ValueError, TypeError) as e:
-        logger.warning("Failed to parse audit log details JSON: %s", e)
-        inner = {}
-    flat.update(inner)
-    return flat
-
-
-def _get_pr_logs_from_service(limit: int, repo_alias: Optional[str] = None) -> list:
-    """Fetch PR logs from AuditLogService."""
-
-    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
-    audit_service = getattr(svc, "audit_service", None) if svc else None
-    if audit_service is None:
-        raise RuntimeError("AuditLogService not available on app.state")
-    rows = audit_service.get_pr_logs(repo_alias=repo_alias, limit=limit)
-    return [_parse_log_details(r) for r in rows]
-
-
-def _get_cleanup_logs_from_service(limit: int, repo_path: Optional[str] = None) -> list:
-    """Fetch cleanup logs from AuditLogService."""
-
-    svc = getattr(getattr(_utils.app_module, "app", None), "state", None)
-    audit_service = getattr(svc, "audit_service", None) if svc else None
-    if audit_service is None:
-        raise RuntimeError("AuditLogService not available on app.state")
-    rows = audit_service.get_cleanup_logs(repo_path=repo_path, limit=limit)
-    return [_parse_log_details(r) for r in rows]
+# _filter_audit_entries, _parse_log_details, _get_pr_logs_from_service,
+# _get_cleanup_logs_from_service are imported from .scip at the top of this file.
 
 
 def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -14448,241 +13795,10 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
         return _mcp_response({"success": False, "error": str(e)})
 
 
-def handle_scip_pr_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP self-healing PR creation history (admin only)."""
-    try:
-        if user.role != UserRole.ADMIN:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Permission denied. Admin role required to view SCIP PR history.",
-                }
-            )
-
-        limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
-        pr_logs = _get_pr_logs_from_service(limit=limit)
-
-        history = [
-            {
-                "pr_number": (
-                    log.get("pr_url", "").split("/")[-1] if log.get("pr_url") else None
-                ),
-                "repo": log.get("repo_alias", ""),
-                "indexed_at": log.get("timestamp", ""),
-                "status": (
-                    "success"
-                    if (log.get("event_type") or log.get("action_type"))
-                    == "pr_creation_success"
-                    else "failed"
-                ),
-                "pr_url": log.get("pr_url"),
-                "branch_name": log.get("branch_name"),
-                "job_id": log.get("job_id"),
-            }
-            for log in pr_logs
-        ]
-
-        return _mcp_response(
-            {"success": True, "history": history, "total": len(history)}
-        )
-    except RuntimeError as e:
-        logger.critical("AuditLogService configuration error: %s", e)
-        return _mcp_response(
-            {"success": False, "error": f"Server configuration error: {e}"}
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-010",
-                f"Error in handle_scip_pr_history: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-def handle_scip_cleanup_history(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP workspace cleanup history (admin only)."""
-    try:
-        if user.role != UserRole.ADMIN:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Permission denied. Admin role required to view SCIP cleanup history.",
-                }
-            )
-
-        limit = _coerce_int(args.get("limit"), DEFAULT_AUDIT_LOG_LIMIT)
-        cleanup_logs = _get_cleanup_logs_from_service(limit=limit)
-
-        history = [
-            {
-                "cleanup_id": log.get("timestamp", "")
-                .replace(":", "-")
-                .replace(".", "-"),
-                "started_at": log.get("timestamp", ""),
-                "completed_at": log.get("timestamp", ""),
-                "workspaces_cleaned": len(log.get("files_cleared", [])),
-                "repo_path": log.get("repo_path") or log.get("target_id"),
-            }
-            for log in cleanup_logs
-        ]
-
-        return _mcp_response(
-            {"success": True, "history": history, "total": len(history)}
-        )
-    except RuntimeError as e:
-        logger.critical("AuditLogService configuration error: %s", e)
-        return _mcp_response(
-            {"success": False, "error": f"Server configuration error: {e}"}
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-011",
-                f"Error in handle_scip_cleanup_history: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
 HANDLER_REGISTRY["get_maintenance_status"] = handle_get_maintenance_status
-HANDLER_REGISTRY["scip_pr_history"] = handle_scip_pr_history
-HANDLER_REGISTRY["scip_cleanup_history"] = handle_scip_cleanup_history
-
-
-# Cleanup job state tracking for scip_cleanup_workspaces/scip_cleanup_status
-_cleanup_job_state: Dict[str, Any] = {
-    "running": False,
-    "job_id": None,
-    "progress": None,
-    "last_result": None,
-}
-
-
-def _execute_workspace_cleanup() -> Dict[str, Any]:
-    """Execute workspace cleanup and return result dict."""
-    workspace_cleanup_service = getattr(
-        _utils.app_module.app.state, "workspace_cleanup_service", None
-    )
-    if workspace_cleanup_service:
-        result = workspace_cleanup_service.cleanup_workspaces()
-        return {
-            "workspaces_scanned": result.workspaces_scanned,
-            "workspaces_deleted": result.workspaces_deleted,
-            "workspaces_preserved": result.workspaces_preserved,
-            "space_reclaimed_bytes": result.space_reclaimed_bytes,
-            "duration_seconds": result.duration_seconds,
-            "errors": result.errors,
-        }
-    return {"message": "Workspace cleanup service not available"}
-
-
-def handle_scip_cleanup_workspaces(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Trigger SCIP workspace cleanup job (admin only)."""
-    global _cleanup_job_state
-    try:
-        if user.role != UserRole.ADMIN:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Permission denied. Admin role required to trigger SCIP cleanup.",
-                }
-            )
-
-        if _cleanup_job_state["running"]:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Cleanup job already running",
-                    "job_id": _cleanup_job_state["job_id"],
-                }
-            )
-
-        import uuid
-
-        job_id = str(uuid.uuid4())[:JOB_ID_LENGTH]
-
-        _cleanup_job_state.update(
-            {"running": True, "job_id": job_id, "progress": "started"}
-        )
-        try:
-            _cleanup_job_state["last_result"] = _execute_workspace_cleanup()
-            _cleanup_job_state["progress"] = "completed"
-        except Exception as cleanup_error:
-            logger.error(
-                format_error_log(
-                    "REPO-GENERAL-012",
-                    f"Workspace cleanup failed: {cleanup_error}",
-                    extra={"correlation_id": get_correlation_id()},
-                )
-            )
-            _cleanup_job_state["progress"] = f"failed: {str(cleanup_error)}"
-        finally:
-            _cleanup_job_state["running"] = False
-
-        return _mcp_response(
-            {
-                "success": True,
-                "job_id": job_id,
-                "status": _cleanup_job_state["progress"],
-            }
-        )
-    except Exception as e:
-        _cleanup_job_state["running"] = False
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-013",
-                f"Error in handle_scip_cleanup_workspaces: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})
-
-
-def handle_scip_cleanup_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
-    """Get SCIP workspace cleanup job status (admin only)."""
-    try:
-        if user.role != UserRole.ADMIN:
-            return _mcp_response(
-                {
-                    "success": False,
-                    "error": "Permission denied. Admin role required to view cleanup status.",
-                }
-            )
-
-        workspace_cleanup_service = getattr(
-            _utils.app_module.app.state, "workspace_cleanup_service", None
-        )
-        service_status = (
-            workspace_cleanup_service.get_cleanup_status()
-            if workspace_cleanup_service
-            else {}
-        )
-
-        return _mcp_response(
-            {
-                "success": True,
-                "running": _cleanup_job_state["running"],
-                "job_id": _cleanup_job_state["job_id"],
-                "progress": _cleanup_job_state["progress"],
-                "last_cleanup_time": service_status.get("last_cleanup_time"),
-                "workspace_count": service_status.get("workspace_count", 0),
-                "oldest_workspace_age": service_status.get("oldest_workspace_age"),
-                "total_size_mb": service_status.get("total_size_mb", 0.0),
-                "last_result": _cleanup_job_state.get("last_result"),
-            }
-        )
-    except Exception as e:
-        logger.error(
-            format_error_log(
-                "REPO-GENERAL-014",
-                f"Error in handle_scip_cleanup_status: {e}",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _mcp_response({"success": False, "error": str(e)})
+# handle_scip_pr_history, handle_scip_cleanup_history, handle_scip_cleanup_workspaces,
+# handle_scip_cleanup_status, _cleanup_job_state, _execute_workspace_cleanup
+# extracted to scip.py (Story #496)
 
 
 def handle_trigger_dependency_analysis(
@@ -14802,8 +13918,6 @@ def handle_trigger_dependency_analysis(
         return _mcp_response({"success": False, "error": str(e), "job_id": None})
 
 
-HANDLER_REGISTRY["scip_cleanup_workspaces"] = handle_scip_cleanup_workspaces
-HANDLER_REGISTRY["scip_cleanup_status"] = handle_scip_cleanup_status
 HANDLER_REGISTRY["list_repo_categories"] = list_repo_categories
 HANDLER_REGISTRY["trigger_dependency_analysis"] = handle_trigger_dependency_analysis
 
@@ -15754,3 +14868,37 @@ def get_provider_health(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
 
 HANDLER_REGISTRY["get_provider_health"] = get_provider_health
+
+
+# ---------------------------------------------------------------------------
+# Module-level forwarding for mock-patch compatibility
+# ---------------------------------------------------------------------------
+# When domain handlers are extracted from this module into separate files
+# (e.g. scip.py, guides.py), those modules import utilities like
+# `_get_scip_query_service` directly from `_utils`.  Tests that patch
+# `code_indexer.server.mcp.handlers._legacy._get_scip_query_service` would
+# normally only update the binding in THIS module's global dict, leaving the
+# domain module's binding untouched.
+#
+# The _ForwardingModule below intercepts every `setattr` on _legacy and
+# mirrors the write into each extracted domain module (when the name exists
+# there), preserving all existing test patches without requiring test changes.
+
+
+class _LegacyForwardingModule(types.ModuleType):
+    """Forward attribute writes on _legacy to extracted domain submodules."""
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        if not name.startswith("__"):
+            for _submod_name in (
+                "code_indexer.server.mcp.handlers.scip",
+                "code_indexer.server.mcp.handlers.guides",
+                "code_indexer.server.mcp.handlers.ssh_keys",
+            ):
+                _submod = sys.modules.get(_submod_name)
+                if _submod is not None and name in _submod.__dict__:
+                    _submod.__dict__[name] = value
+
+
+sys.modules[__name__].__class__ = _LegacyForwardingModule
