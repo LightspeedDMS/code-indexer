@@ -75,6 +75,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
                 "code_indexer.server.mcp.handlers.delegation",
+                "code_indexer.server.mcp.handlers.pull_requests",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -213,4 +214,16 @@ from code_indexer.server.mcp.handlers.delegation import (  # noqa: F401, E402
     _validate_competitive_params,
     _validate_function_parameters,
     _validate_open_delegation_params,
+)
+
+from code_indexer.server.mcp.handlers.pull_requests import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 pull_requests step)
+    create_pull_request,
+    list_pull_requests,
+    get_pull_request,
+    list_pull_request_comments,
+    comment_on_pull_request,
+    update_pull_request,
+    merge_pull_request,
+    close_pull_request,
 )
