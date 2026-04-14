@@ -76,6 +76,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.ssh_keys",
                 "code_indexer.server.mcp.handlers.delegation",
                 "code_indexer.server.mcp.handlers.pull_requests",
+                "code_indexer.server.mcp.handlers.git_read",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -226,4 +227,27 @@ from code_indexer.server.mcp.handlers.pull_requests import (  # noqa: F401, E402
     update_pull_request,
     merge_pull_request,
     close_pull_request,
+)
+
+from code_indexer.server.mcp.handlers.git_read import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 git_read step)
+    handle_git_file_history,
+    handle_git_log,
+    handle_git_show_commit,
+    handle_git_file_at_revision,
+    handle_git_diff,
+    handle_git_blame,
+    handle_git_search_commits,
+    handle_git_search_diffs,
+    git_status,
+    git_fetch,
+    git_branch_list,
+    git_conflict_status,
+    git_diff,
+    git_log,
+    # Private helpers used by tests and omni handlers
+    _serialize_file_history_commits,
+    _compute_file_history_fetch_limit,
+    _omni_git_log,
+    _omni_git_search_commits,
 )
