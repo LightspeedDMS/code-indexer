@@ -131,6 +131,10 @@ window.nmPinSlide = function(idx) {
 };
 // ---- End persistent carousel state ----
 
+// Cache of last fetched HTML per target — used to skip redundant DOM updates
+// that cause chart flicker when data hasn't changed.
+var _lastContent = {};
+
 // Shared response handler - used by refreshAll() and dropdown handlers in dashboard_stats.html
 function applyResponse(response, targetSelector) {
     if (response.status === 401) {
@@ -145,6 +149,13 @@ function applyResponse(response, targetSelector) {
         return response.text().then(function(html) {
             var el = document.querySelector(targetSelector);
             if (el) {
+                // Skip DOM update if fetched content is identical to last
+                // poll — prevents chart flicker and unnecessary script
+                // re-execution when underlying data hasn't changed.
+                if (_lastContent[targetSelector] === html) {
+                    return;
+                }
+                _lastContent[targetSelector] = html;
                 el.innerHTML = html;
                 // Re-execute inline scripts (innerHTML doesn't run them)
                 var scripts = el.querySelectorAll('script');
