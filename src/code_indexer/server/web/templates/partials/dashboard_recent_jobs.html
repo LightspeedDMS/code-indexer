@@ -1,16 +1,8 @@
 <!-- Story #69: Granular partial for recent jobs table body ONLY -->
 <!-- Bug #679 Part 2: provider_results column, COMPLETED_PARTIAL badge, colspan update -->
 {% set has_providers = has_provider_results or (recent_jobs and recent_jobs | selectattr('result') | selectattr('result.provider_results', 'defined') | list | length > 0) %}
-<thead>
-    <tr>
-        <th>Repository</th>
-        <th>Type</th>
-        <th>Completed</th>
-        <th>Status</th>
-        {% if has_providers %}<th>Providers</th>{% endif %}
-    </tr>
-</thead>
-<tbody>
+<!-- No <thead> here — the parent table in dashboard_stats.html owns the header row.
+     This partial is swapped into #recent-jobs-tbody which is a <tbody> element. -->
 {% if recent_jobs and recent_jobs|length > 0 %}
     {% for job in recent_jobs %}
     {% set provider_results = job.result.provider_results if job.result and job.result.provider_results is defined and job.result.provider_results else none %}
@@ -46,4 +38,3 @@
         <td colspan="{{ 5 if has_providers else 4 }}" style="text-align: center;">No recent activity to display.</td>
     </tr>
 {% endif %}
-</tbody>
