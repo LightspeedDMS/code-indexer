@@ -19,3 +19,4 @@
 - [reference_reranker_api_signatures.md](reference_reranker_api_signatures.md) - Verified Voyage rerank-2.5 and Cohere rerank API params — no native instruction field in either; Voyage prepends instruction to query, Cohere concatenates
 - [project_reranker_injection_point.md](project_reranker_injection_point.md) - Reranker fires AFTER dual-provider RRF coalescing, BEFORE truncation/caching — mandatory pipeline order for Story #653
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access — CIDX client NOT yet built (needs CowStorageDaemonClient story)
+- [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it

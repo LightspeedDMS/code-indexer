@@ -179,10 +179,13 @@ class LangfuseTraceSyncService:
         except Exception as e:
             logger.debug("Failed to read state files for cluster metrics: %s", e)
 
-        # Override with in-memory metrics for local node (fresher data)
+        # Override with in-memory metrics for local node (fresher data).
+        # Sanitize key so it matches the key extracted from state filenames
+        # (state files use _sanitize_folder_name, so "Claude Code" → "Claude_Code").
         with self._lock:
             for project, m in self._metrics.items():
-                result[project] = {
+                safe_key = self._sanitize_folder_name(project)
+                result[safe_key] = {
                     "traces_checked": m.traces_checked,
                     "traces_written_new": m.traces_written_new,
                     "traces_written_updated": m.traces_written_updated,
