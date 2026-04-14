@@ -139,11 +139,9 @@ class RegexSearchService:
             ValueError: If path doesn't exist or PCRE2 unavailable
             TimeoutError: If search exceeds timeout_seconds
         """
-        # Story #4 AC2: Track regex search at service layer
-        # This ensures both MCP and REST API calls are counted
-        from code_indexer.server.services.api_metrics_service import api_metrics_service
-
-        api_metrics_service.increment_regex_search()
+        # Story #4 AC2: Regex metrics tracked at MCP handler layer with
+        # correct username attribution (_legacy.py:245). Removed duplicate
+        # increment_regex_search() call here that caused _anonymous attribution.
 
         if pcre2 and not self._detect_pcre2_support():
             raise ValueError(
