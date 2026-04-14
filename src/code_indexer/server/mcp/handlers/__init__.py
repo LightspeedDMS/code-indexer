@@ -77,6 +77,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.delegation",
                 "code_indexer.server.mcp.handlers.pull_requests",
                 "code_indexer.server.mcp.handlers.git_read",
+                "code_indexer.server.mcp.handlers.git_write",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -158,7 +159,6 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _append_provider_to_config,
     _derive_forge_host,
     _get_group_manager,
-    _get_pat_credential_for_remote,
     _get_personal_credential_for_host,
     _omni_regex_search,
     _omni_search_code,
@@ -250,4 +250,29 @@ from code_indexer.server.mcp.handlers.git_read import (  # noqa: F401, E402
     _compute_file_history_fetch_limit,
     _omni_git_log,
     _omni_git_search_commits,
+)
+
+from code_indexer.server.mcp.handlers.git_write import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 git_write step)
+    git_stage,
+    git_unstage,
+    git_commit,
+    git_push,
+    git_pull,
+    git_reset,
+    git_clean,
+    git_merge,
+    git_mark_resolved,
+    git_merge_abort,
+    git_checkout_file,
+    git_branch_create,
+    git_branch_switch,
+    git_branch_delete,
+    git_stash,
+    git_amend,
+    configure_git_credential,
+    list_git_credentials,
+    delete_git_credential,
+    # Private helper used by other domain modules
+    _get_pat_credential_for_remote,
 )

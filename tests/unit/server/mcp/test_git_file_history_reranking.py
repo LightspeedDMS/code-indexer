@@ -120,7 +120,7 @@ def git_svc_mock():
             return_value=("/fake/repo", None),
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy.GitOperationsService"
+            "code_indexer.server.mcp.handlers.git_read.GitOperationsService"
         ) as mock_cls,
     ):
         mock_svc = MagicMock()
@@ -139,7 +139,7 @@ def git_svc_with_rerank_mock():
             return_value=("/fake/repo", None),
         ),
         patch(
-            "code_indexer.server.mcp.handlers._legacy.GitOperationsService"
+            "code_indexer.server.mcp.handlers.git_read.GitOperationsService"
         ) as mock_cls,
         patch(
             "code_indexer.server.mcp.handlers._legacy.get_config_service",
@@ -208,7 +208,7 @@ class TestGitFileHistoryNoRerankOverhead:
 
     def test_no_rerank_query_skips_reranking(self, git_svc_mock):
         """When rerank_query=None, _apply_reranking_sync must not be invoked."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync"
@@ -224,7 +224,7 @@ class TestGitFileHistoryNoRerankOverhead:
 
     def test_empty_rerank_query_skips_reranking(self, git_svc_mock):
         """When rerank_query='', _apply_reranking_sync must not be invoked."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync"
@@ -241,7 +241,7 @@ class TestGitFileHistoryNoRerankOverhead:
 
     def test_no_rerank_query_returns_identical_results(self):
         """Without rerank_query, results match current behavior (original order)."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         commits = [
             _make_file_commit(subject="first commit"),
@@ -255,7 +255,7 @@ class TestGitFileHistoryNoRerankOverhead:
                 return_value=("/fake/repo", None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy.GitOperationsService"
+                "code_indexer.server.mcp.handlers.git_read.GitOperationsService"
             ) as mock_git_svc_cls,
         ):
             mock_git_svc = MagicMock()
@@ -285,7 +285,7 @@ class TestGitFileHistoryRerankingWiring:
 
     def test_rerank_called_with_commit_extractor(self, git_svc_with_rerank_mock):
         """When rerank_query is set, _apply_reranking_sync is invoked with subject-only extractor."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         commit = _make_file_commit(subject="fix: auth session expired")
         git_svc_with_rerank_mock.get_file_history.return_value = (
@@ -329,7 +329,7 @@ class TestGitFileHistoryRerankingWiring:
 
     def test_rerank_requested_limit_matches_user_limit(self, git_svc_with_rerank_mock):
         """requested_limit passed to _apply_reranking_sync matches user-specified limit."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         commit = _make_file_commit()
         git_svc_with_rerank_mock.get_file_history.return_value = (
@@ -364,7 +364,7 @@ class TestGitFileHistoryOverfetch:
         self, git_svc_with_rerank_mock
     ):
         """get_file_history receives limit=min(requested*5, 200) when rerank_query set."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync",
@@ -385,7 +385,7 @@ class TestGitFileHistoryOverfetch:
 
     def test_overfetch_capped_at_200(self, git_svc_with_rerank_mock):
         """Overfetch limit is capped at 200 even for large requested limits."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         with patch(
             "code_indexer.server.mcp.reranking._apply_reranking_sync",
@@ -406,7 +406,7 @@ class TestGitFileHistoryOverfetch:
 
     def test_no_overfetch_without_rerank_query(self, git_svc_mock):
         """Without rerank_query, get_file_history receives the plain requested limit."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         args = {
             "repository_alias": "test-repo",
@@ -431,7 +431,7 @@ class TestGitFileHistoryQueryMetadata:
 
     def _run_with_rerank_meta(self, rerank_meta: dict) -> dict:
         """Run handle_git_file_history with patched reranking; return parsed payload."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         commit = _make_file_commit()
         fake_result = _make_file_history_result(commits=[commit])
@@ -442,7 +442,7 @@ class TestGitFileHistoryQueryMetadata:
                 return_value=("/fake/repo", None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy.GitOperationsService"
+                "code_indexer.server.mcp.handlers.git_read.GitOperationsService"
             ) as mock_git_svc_cls,
             patch(
                 "code_indexer.server.mcp.handlers._legacy.get_config_service",
@@ -518,7 +518,7 @@ class TestGitFileHistoryQueryMetadata:
 
     def test_no_rerank_query_includes_query_metadata_with_used_false(self):
         """Without rerank_query, response still includes query_metadata with reranker_used=False."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         commit = _make_file_commit()
         fake_result = _make_file_history_result(commits=[commit])
@@ -529,7 +529,7 @@ class TestGitFileHistoryQueryMetadata:
                 return_value=("/fake/repo", None),
             ),
             patch(
-                "code_indexer.server.mcp.handlers._legacy.GitOperationsService"
+                "code_indexer.server.mcp.handlers.git_read.GitOperationsService"
             ) as mock_git_svc_cls,
         ):
             mock_git_svc = MagicMock()
@@ -559,7 +559,7 @@ class TestGitFileHistoryProviderFallback:
 
     def test_cohere_fallback_reflected_in_metadata(self, git_svc_with_rerank_mock):
         """When Voyage fails and Cohere is used, metadata shows cohere as provider."""
-        from code_indexer.server.mcp.handlers._legacy import handle_git_file_history
+        from code_indexer.server.mcp.handlers.git_read import handle_git_file_history
 
         commit = _make_file_commit()
         git_svc_with_rerank_mock.get_file_history.return_value = (
