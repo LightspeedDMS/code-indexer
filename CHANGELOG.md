@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.14.11
+
+### Fixes
+
+- fix: Bug #678 -- Add passive sin-bin (circuit breaker) with exponential backoff to ProviderHealthMonitor. Quarantines failing providers for configurable cooldown (30s to 300s cap). Gates all online-query dispatch paths behind sin-bin check. Externalizes all hardcoded numeric tunables (timeouts, thresholds, retry counts) to config. Adds config seeding helper that overlays server provider config onto CLI subprocess config.json before each cidx index launch. Implements cross-process health telemetry bridge (provider_health.jsonl write/drain). Updates reranker client timeouts from 5s to 15s with sin-bin check. Adds RerankerSinbinnedException for graceful degradation. 141 new tests.
+
+- fix: Bug #679 -- Add per-provider exception isolation in CLI temporal indexing loop so one provider failure does not abort others. Introduces COMPLETED_PARTIAL job status for partial-success runs. Writes per-provider provider_results.json with mtime lifecycle guard (prevents reading stale data from prior runs). Exit code semantics: 0=all success, 1=all fail, 2=partial. Adds GET /admin/provider-health endpoint with sin-bin state. Surfaces reranker status in MCP query response metadata. Updates dashboard with provider dots and COMPLETED_PARTIAL badge. 93 new tests.
+
+- fix: Dashboard per-user and chart API metrics now auto-refresh every 2 seconds alongside totals. Previously they only updated on page load or dropdown change, causing stale numbers.
+
 ## v9.14.9
 
 ### Improvements
