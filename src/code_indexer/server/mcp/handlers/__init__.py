@@ -76,6 +76,20 @@ class _ForwardingModule(_types.ModuleType):
 _sys.modules[__name__].__class__ = _ForwardingModule
 
 
+from code_indexer.server.mcp.handlers.guides import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 step 3)
+    quick_reference,
+    first_time_user_guide,
+    get_tool_categories,
+    handle_start_trace,
+    handle_end_trace,
+    handle_wiki_article_analytics,
+    # Private helpers used by tests and external consumers
+    _get_wiki_cache_for_handler,
+    _wiki_analytics_filter_by_search,
+    _wiki_analytics_build_articles,
+)
+
 from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     # Package-level attributes expected by protocol.py and tests
     HANDLER_REGISTRY,
@@ -120,9 +134,6 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _get_user_groups,
     _load_packages_context,
     _lookup_golden_repo_for_cs,
-    _get_wiki_cache_for_handler,
-    _wiki_analytics_build_articles,
-    _wiki_analytics_filter_by_search,
     _omni_regex_search,
     _omni_search_code,
     _provider_index_job,
