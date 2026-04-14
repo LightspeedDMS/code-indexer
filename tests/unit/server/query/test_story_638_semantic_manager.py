@@ -264,6 +264,8 @@ class TestScoreGateIntegration:
                 "code_indexer.server.query.semantic_query_manager.ProviderHealthMonitor"
             ) as mock_phm:
                 mock_phm.get_instance.return_value.get_health.return_value = {}
+                # Bug #678: is_sinbinned must return False so providers are dispatched
+                mock_phm.get_instance.return_value.is_sinbinned.return_value = False
                 results = manager._search_single_repository(
                     repo_path=repo_path,
                     repository_alias="repo",

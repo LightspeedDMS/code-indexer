@@ -180,10 +180,10 @@ class TestVoyageRerankerClientInstantiation:
         assert VoyageRerankerClient() is not None
 
     def test_voyage_reranker_client_default_timeout(self):
-        """Default timeout is 5.0 seconds."""
+        """Default timeout is 15.0 seconds."""
         from code_indexer.server.clients.reranker_clients import VoyageRerankerClient
 
-        assert VoyageRerankerClient().timeout == 5.0
+        assert VoyageRerankerClient().timeout == 15.0
 
     def test_voyage_reranker_client_default_max_chars(self):
         """Default max_chars is 4000."""
@@ -726,10 +726,10 @@ class TestCohereRerankerClientInstantiation:
         assert CohereRerankerClient() is not None
 
     def test_cohere_reranker_client_default_timeout(self):
-        """Default timeout is 5.0 seconds."""
+        """Default timeout is 15.0 seconds."""
         from code_indexer.server.clients.reranker_clients import CohereRerankerClient
 
-        assert CohereRerankerClient().timeout == 5.0
+        assert CohereRerankerClient().timeout == 15.0
 
     def test_cohere_reranker_client_default_max_chars(self):
         """Default max_chars is 4000."""

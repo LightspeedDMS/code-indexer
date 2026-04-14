@@ -44,6 +44,12 @@ class SemanticQueryError(Exception):
     pass
 
 
+class QueryBudgetExceeded(Exception):
+    """Raised when the query latency budget is exhausted (Bug #678)."""
+
+    pass
+
+
 @dataclass
 class QueryResult:
     """Individual query result with standardized format.
@@ -1225,6 +1231,37 @@ class SemanticQueryManager:
                     ),
                 ),
             ]
+            # Bug #678: Read parallel timeout from orchestration config.
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+
+                _orch_cfg = get_config_service().get_config().query_orchestration
+                _cfg_timeout = (
+                    _orch_cfg.parallel_query_orchestrator_timeout_seconds
+                    if _orch_cfg is not None
+                    else None
+                )
+                if isinstance(_cfg_timeout, (int, float)) and _cfg_timeout > 0:
+                    _parallel_timeout = _cfg_timeout
+                else:
+                    logger.warning(
+                        "Invalid parallel timeout from config (%r); using default %ds",
+                        _cfg_timeout,
+                        PARALLEL_TIMEOUT_SECONDS,
+                        extra=get_log_extra("QUERY-STRATEGY-007"),
+                    )
+                    _parallel_timeout = PARALLEL_TIMEOUT_SECONDS
+            except Exception as _cfg_exc:
+                logger.warning(
+                    "Failed to read parallel timeout from config; using default %ds: %s",
+                    PARALLEL_TIMEOUT_SECONDS,
+                    _cfg_exc,
+                    extra=get_log_extra("QUERY-STRATEGY-006"),
+                )
+                _parallel_timeout = PARALLEL_TIMEOUT_SECONDS
+
             provider_tasks: Dict[str, Any] = {}
             _degraded_in_query: List[str] = []
             for _pname, _kwargs in _all_providers:
@@ -1238,6 +1275,15 @@ class SemanticQueryManager:
                     )
                     _degraded_in_query.append(_pname)
                     continue
+                # Bug #678: skip sin-binned providers
+                if _health_monitor.is_sinbinned(_pname):
+                    logger.info(
+                        "Skipping provider '%s' (sinbinned) in parallel dispatch",
+                        _pname,
+                        extra=get_log_extra("QUERY-STRATEGY-005"),
+                    )
+                    _degraded_in_query.append(_pname)
+                    continue
                 _captured_kwargs = _kwargs
                 provider_tasks[_pname] = (
                     lambda _kw=_captured_kwargs: self._search_with_provider(**_kw)
@@ -1245,15 +1291,25 @@ class SemanticQueryManager:
 
             primary_results: List[QueryResult] = []
             secondary_results: List[QueryResult] = []
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {
-                    executor.submit(fn): name for name, fn in provider_tasks.items()
-                }
+            # Bug #678: track per-future start times for failure latency recording
+            _future_start: Dict[Any, float] = {}
+            # Use explicit lifecycle (not `with`) so we can call shutdown(wait=False)
+            # on timeout — the `with` form always calls shutdown(wait=True) which
+            # blocks until all threads finish, defeating the timeout.
+            executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=2)
+            try:
+                futures = {}
+                for name, fn in provider_tasks.items():
+                    _t0 = time.monotonic()
+                    fut = executor.submit(fn)
+                    futures[fut] = name
+                    _future_start[fut] = _t0
                 try:
-                    for future in as_completed(
-                        futures, timeout=PARALLEL_TIMEOUT_SECONDS
-                    ):
+                    for future in as_completed(futures, timeout=_parallel_timeout):
                         provider_name = futures[future]
+                        _latency_ms = (
+                            time.monotonic() - _future_start[future]
+                        ) * 1000.0
                         try:
                             batch = future.result()
                             if provider_name == "voyage-ai":
@@ -1267,14 +1323,42 @@ class SemanticQueryManager:
                                 _e,
                                 extra=get_log_extra("QUERY-STRATEGY-002"),
                             )
+                            # Bug #678: record failure so health monitor can sinbin the provider
+                            _health_monitor.record_call(
+                                provider_name,
+                                latency_ms=_latency_ms,
+                                success=False,
+                            )
                 except concurrent.futures.TimeoutError:
+                    # Bug #678: capture unfinished futures BEFORE cancel() so the
+                    # done() check below correctly identifies them — cancel() marks
+                    # futures as cancelled which makes done() return True afterward.
+                    _unfinished = [fut for fut in futures if not fut.done()]
                     for future in futures:
                         future.cancel()
                     logger.warning(
                         "Parallel query timed out after %ds; some providers did not respond",
-                        PARALLEL_TIMEOUT_SECONDS,
+                        _parallel_timeout,
                         extra=get_log_extra("QUERY-STRATEGY-004"),
                     )
+                    # Bug #678: record timeout as failure for all unfinished providers
+                    for future in _unfinished:
+                        provider_name = futures[future]
+                        _latency_ms = (
+                            time.monotonic() - _future_start[future]
+                        ) * 1000.0
+                        _health_monitor.record_call(
+                            provider_name,
+                            latency_ms=_latency_ms,
+                            success=False,
+                        )
+                    # Non-blocking shutdown: let timed-out threads finish as daemons
+                    # rather than blocking here until the slow thread completes.
+                    executor.shutdown(wait=False)
+                    executor = None  # type: ignore[assignment]
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True)
 
             # Story #638: Symmetric score-gated filtering — cull weak provider
             # results before fusion to prevent low-quality candidates from diluting

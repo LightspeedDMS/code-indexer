@@ -55,6 +55,12 @@ class TestProviderIndexJobNoConfigMutation:
                 "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
                 return_value=(10, 5),
             ),
+            # Bug #678: seed_provider_config writes to config.json by design; mock it
+            # so this test can continue asserting the original no-mutation invariant.
+            patch("code_indexer.server.services.config_seeding.seed_provider_config"),
+            patch(
+                "code_indexer.services.provider_health_bridge.drain_and_feed_monitor"
+            ),
         ):
             mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()
 
@@ -84,6 +90,12 @@ class TestProviderIndexJobNoConfigMutation:
             patch(
                 "code_indexer.services.progress_subprocess_runner.gather_repo_metrics",
                 return_value=(0, 0),
+            ),
+            # Bug #678: seed_provider_config writes to config.json by design; mock it
+            # so this test can continue asserting the original no-mutation invariant.
+            patch("code_indexer.server.services.config_seeding.seed_provider_config"),
+            patch(
+                "code_indexer.services.provider_health_bridge.drain_and_feed_monitor"
             ),
         ):
             mock_cfg_svc.return_value.get_config.return_value = _mock_server_config()

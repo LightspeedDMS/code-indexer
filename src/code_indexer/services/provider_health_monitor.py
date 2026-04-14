@@ -8,8 +8,11 @@ import logging
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from code_indexer.server.utils.config_manager import ProviderSinBinConfig
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,7 @@ class ProviderHealthStatus:
     """Computed health status for a provider."""
 
     provider: str
-    status: str  # "healthy", "degraded", "down"
+    status: str  # "healthy", "degraded", "down", "sinbinned"
     health_score: float  # 0.0 to 1.0
     p50_latency_ms: float
     p95_latency_ms: float
@@ -40,6 +43,7 @@ class ProviderHealthStatus:
     successful_requests: int
     failed_requests: int
     window_minutes: int
+    sinbinned: bool = field(default=False)  # Bug #678: circuit-breaker state
 
 
 # Default thresholds
@@ -49,6 +53,9 @@ DEFAULT_AVAILABILITY_THRESHOLD = 0.95  # 95%
 DEFAULT_ROLLING_WINDOW_MINUTES = 60
 DEFAULT_DOWN_ERROR_RATE = 0.5  # 50% error rate = down
 DEFAULT_DOWN_CONSECUTIVE_FAILURES = 5
+
+# Bug #678: Sentinel value for "no sin-bin active" monotonic timestamp
+_SINBIN_NOT_ACTIVE: float = 0.0
 
 
 class ProviderHealthMonitor:
@@ -78,6 +85,14 @@ class ProviderHealthMonitor:
         self._last_known_status: Dict[str, str] = {}
         # Story #619 HIGH-2: registered probe functions per provider
         self._probe_functions: Dict[str, object] = {}
+        # Bug #678: sin-bin (circuit-breaker) state
+        self._sinbin_until: Dict[str, float] = {}  # provider -> monotonic expiry
+        self._sinbin_rounds: Dict[
+            str, int
+        ] = {}  # provider -> consecutive sin-bin count
+        self._sinbin_failure_deque: Dict[
+            str, deque
+        ] = {}  # provider -> recent failure timestamps
 
     @classmethod
     def get_instance(cls, **kwargs: object) -> "ProviderHealthMonitor":
@@ -107,6 +122,84 @@ class ProviderHealthMonitor:
         """
         self._probe_functions[provider_name] = probe_fn
 
+    # ------------------------------------------------------------------
+    # Bug #678: Sin-bin (circuit-breaker) methods
+    # ------------------------------------------------------------------
+
+    def is_sinbinned(self, provider: str) -> bool:
+        """Return True if provider is currently in sin-bin (cooldown active)."""
+        with self._data_lock:
+            return time.monotonic() < self._sinbin_until.get(
+                provider, _SINBIN_NOT_ACTIVE
+            )
+
+    def sinbin(self, provider: str) -> None:
+        """Place provider in sin-bin with exponential backoff cooldown."""
+        cfg = self._get_sinbin_config(provider)
+        with self._data_lock:
+            rounds = self._sinbin_rounds.get(provider, 0)
+            cooldown = min(
+                cfg.initial_cooldown_seconds * (cfg.backoff_multiplier**rounds),
+                cfg.max_cooldown_seconds,
+            )
+            self._sinbin_until[provider] = time.monotonic() + cooldown
+            self._sinbin_rounds[provider] = rounds + 1
+        logger.warning(
+            "Provider '%s' sin-binned for %.1fs (round %d)",
+            provider,
+            cooldown,
+            rounds + 1,
+        )
+
+    def clear_sinbin(self, provider: str) -> None:
+        """Remove provider from sin-bin immediately and reset backoff rounds."""
+        with self._data_lock:
+            self._sinbin_until.pop(provider, None)
+            self._sinbin_rounds[provider] = 0
+
+    def get_sinbin_ttl_seconds(self, provider: str) -> Optional[float]:
+        """Return remaining sin-bin cooldown in seconds, or None if not sinbinned."""
+        with self._data_lock:
+            expiry = self._sinbin_until.get(provider)
+            if expiry is None:
+                return None
+            ttl = expiry - time.monotonic()
+            return max(0.0, ttl) if ttl > 0 else None
+
+    def get_sinbin_rounds(self, provider: str) -> int:
+        """Return the number of consecutive sin-bin rounds for a provider."""
+        with self._data_lock:
+            return self._sinbin_rounds.get(provider, 0)
+
+    def _get_sinbin_config(self, provider: str) -> "ProviderSinBinConfig":
+        """Read sin-bin config from server runtime config, falling back to defaults."""
+        from code_indexer.server.utils.config_manager import ProviderSinBinConfig
+
+        try:
+            from code_indexer.server.services.config_service import get_config_service
+
+            server_cfg = get_config_service().get_config()
+            if provider in ("voyage-ai", "voyage-reranker"):
+                cfg = getattr(server_cfg, "voyage_ai_sinbin", None)
+            elif provider in ("cohere", "cohere-reranker"):
+                cfg = getattr(server_cfg, "cohere_sinbin", None)
+            else:
+                cfg = None
+            if isinstance(cfg, ProviderSinBinConfig):
+                return cfg
+        except Exception as exc:
+            logger.debug(
+                "Sin-bin config read failed for provider '%s'; using defaults: %s",
+                provider,
+                exc,
+            )
+        return ProviderSinBinConfig()
+
+    def reconfigure(self, provider: str) -> None:
+        """Re-read thresholds from config for provider without losing accumulated metrics."""
+        # Config is read on-demand in _get_sinbin_config; no state to update here.
+        logger.debug("reconfigure called for provider '%s'", provider)
+
     # Recovery probe constants (Story #619 Gap 4)
     PROBE_INTERVAL_SEC: int = 30
     PROBE_JOIN_TIMEOUT_SEC: int = 5
@@ -121,6 +214,10 @@ class ProviderHealthMonitor:
             provider=provider,
         )
 
+        # Read sinbin config outside the lock to avoid holding it during I/O
+        cfg = self._get_sinbin_config(provider)
+        should_sinbin = False
+
         with self._data_lock:
             if provider not in self._metrics:
                 self._metrics[provider] = deque()
@@ -129,10 +226,27 @@ class ProviderHealthMonitor:
             # Track consecutive failures
             if success:
                 self._consecutive_failures[provider] = 0
+                # Bug #678: on success after sinbin, reset rounds and clear entry
+                if self._sinbin_rounds.get(provider, 0) > 0:
+                    self._sinbin_rounds[provider] = 0
+                    self._sinbin_until.pop(provider, None)
             else:
                 self._consecutive_failures[provider] = (
                     self._consecutive_failures.get(provider, 0) + 1
                 )
+                # Bug #678: track failure in windowed deque
+                if provider not in self._sinbin_failure_deque:
+                    self._sinbin_failure_deque[provider] = deque()
+                now_mono = time.monotonic()
+                self._sinbin_failure_deque[provider].append(now_mono)
+                # Prune entries outside window
+                window_start = now_mono - cfg.failure_window_seconds
+                fdeque = self._sinbin_failure_deque[provider]
+                while fdeque and fdeque[0] < window_start:
+                    fdeque.popleft()
+                # Auto-sinbin when threshold reached
+                if len(fdeque) >= cfg.failure_threshold:
+                    should_sinbin = True
 
             # Prune old entries
             self._prune_old_metrics(provider)
@@ -141,6 +255,9 @@ class ProviderHealthMonitor:
             old_status = self._last_known_status.get(provider, "healthy")
             new_status = self._compute_status(provider).status
             self._last_known_status[provider] = new_status
+
+        if should_sinbin:
+            self.sinbin(provider)
 
         if old_status != "down" and new_status == "down":
             self._start_recovery_probe(provider)
@@ -311,6 +428,9 @@ class ProviderHealthMonitor:
                 availability,
             )
 
+        # Bug #678: check sin-bin state without re-acquiring _data_lock (already held)
+        is_sb = time.monotonic() < self._sinbin_until.get(provider, _SINBIN_NOT_ACTIVE)
+
         return ProviderHealthStatus(
             provider=provider,
             status=status,
@@ -324,6 +444,7 @@ class ProviderHealthMonitor:
             successful_requests=successful,
             failed_requests=failed,
             window_minutes=self._rolling_window_minutes,
+            sinbinned=is_sb,
         )
 
     def _empty_status(self, provider: str) -> ProviderHealthStatus:

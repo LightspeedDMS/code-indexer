@@ -33,6 +33,9 @@ class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    COMPLETED_PARTIAL = (
+        "completed_partial"  # Bug #679: some providers succeeded, some failed
+    )
     FAILED = "failed"
     CANCELLED = "cancelled"
     RESOLVING_PREREQUISITES = "resolving_prerequisites"  # AC2: SCIP self-healing state
@@ -749,6 +752,9 @@ class BackgroundJobManager:
                     # Bug #646: result["success"] is False (exact identity) → FAILED
                     if isinstance(result, dict) and result.get("success") is False:
                         job.status = JobStatus.FAILED
+                    # Bug #679: result["partial"] is True (exact identity) → COMPLETED_PARTIAL
+                    elif isinstance(result, dict) and result.get("partial") is True:
+                        job.status = JobStatus.COMPLETED_PARTIAL
                     else:
                         job.status = JobStatus.COMPLETED
                     job.completed_at = datetime.now(timezone.utc)
@@ -763,7 +769,8 @@ class BackgroundJobManager:
             # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
             if self._job_tracker is not None:
                 try:
-                    if job.status == JobStatus.COMPLETED:
+                    if job.status in (JobStatus.COMPLETED, JobStatus.COMPLETED_PARTIAL):
+                        # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
                         self._job_tracker.complete_job(
                             job_id,
                             result=job.result if isinstance(job.result, dict) else None,
@@ -788,8 +795,10 @@ class BackgroundJobManager:
 
             # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
             # Only when SQLite backend is available (data is preserved in DB)
+            # Bug #679: COMPLETED_PARTIAL is also a terminal status — must be evicted
             if self._sqlite_backend and job.status in (
                 JobStatus.COMPLETED,
+                JobStatus.COMPLETED_PARTIAL,
                 JobStatus.CANCELLED,
                 JobStatus.FAILED,
             ):
@@ -933,7 +942,12 @@ class BackgroundJobManager:
             for job_id, job in self.jobs.items():
                 if (
                     job.status
-                    in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]
+                    in [
+                        JobStatus.COMPLETED,
+                        JobStatus.COMPLETED_PARTIAL,
+                        JobStatus.FAILED,
+                        JobStatus.CANCELLED,
+                    ]
                     and job.completed_at
                     and job.completed_at < cutoff_time
                 ):

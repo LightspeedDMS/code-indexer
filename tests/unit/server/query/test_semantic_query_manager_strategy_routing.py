@@ -1099,6 +1099,8 @@ class TestHealthGatedParallelDispatch:
 
         mock_monitor = MagicMock()
         mock_monitor.get_health.side_effect = fake_get_health
+        # Bug #678: is_sinbinned must return False so providers are not skipped
+        mock_monitor.is_sinbinned.return_value = False
 
         with (
             patch.object(manager, "_search_with_provider", side_effect=fake_search),
@@ -1189,6 +1191,8 @@ class TestHealthGatedParallelDispatch:
 
         mock_monitor = MagicMock()
         mock_monitor.get_health.side_effect = fake_get_health
+        # Bug #678: is_sinbinned must return False so providers are not skipped
+        mock_monitor.is_sinbinned.return_value = False
 
         with (
             patch.object(manager, "_search_with_provider", side_effect=fake_search),
@@ -1394,6 +1398,7 @@ class TestDegradedProviders:
 
         mock_monitor = MagicMock()
         mock_monitor.get_health.side_effect = fake_get_health
+        mock_monitor.is_sinbinned.return_value = False  # Bug #678: not sin-binned
 
         with (
             patch.object(manager, "_search_with_provider", side_effect=fake_search),

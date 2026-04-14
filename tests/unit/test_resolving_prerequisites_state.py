@@ -202,6 +202,7 @@ class TestResolvingPrerequisitesState:
             "PENDING",
             "RUNNING",
             "COMPLETED",
+            "COMPLETED_PARTIAL",  # Bug #679
             "FAILED",
             "CANCELLED",
             "RESOLVING_PREREQUISITES",

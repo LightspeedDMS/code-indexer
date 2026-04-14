@@ -33,6 +33,14 @@ _DEFAULT_MODEL = "rerank-2.5"
 _PROVIDER_NAME = "voyage-reranker"
 
 
+class RerankerSinbinnedException(Exception):
+    """Raised when a reranker provider is sin-binned (Bug #678)."""
+
+    def __init__(self, provider: str):
+        self.provider = provider
+        super().__init__(f"Reranker provider '{provider}' is sin-binned")
+
+
 @dataclass
 class RerankResult:
     """Single reranked result with its original document index and relevance score."""
@@ -86,13 +94,13 @@ class VoyageRerankerClient(RerankerClient):
 
     def __init__(
         self,
-        timeout: float = 5.0,
+        timeout: float = 15.0,
         max_chars: int = 4000,
         base_url: Optional[str] = None,
     ) -> None:
         """
         Args:
-            timeout: HTTP request timeout in seconds. Must be positive (default 5.0).
+            timeout: HTTP request timeout in seconds. Must be positive (default 15.0).
             max_chars: Maximum characters per document before client-side truncation.
                        Must be positive (default 4000).
             base_url: Override the Voyage AI rerank endpoint. Defaults to
@@ -166,6 +174,21 @@ class VoyageRerankerClient(RerankerClient):
             raise ValueError("documents must be a non-empty list")
         if top_k is not None and top_k <= 0:
             raise ValueError(f"top_k must be a positive integer, got {top_k}")
+
+        # Bug #678: Skip if provider is sin-binned
+        try:
+            from code_indexer.services.provider_health_monitor import (
+                ProviderHealthMonitor,
+            )
+
+            if ProviderHealthMonitor.get_instance().is_sinbinned(_PROVIDER_NAME):
+                raise RerankerSinbinnedException(_PROVIDER_NAME)
+        except RerankerSinbinnedException:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "ProviderHealthMonitor unavailable; proceeding normally: %s", exc
+            )
 
         effective_query = self._build_query(query, instruction)
         truncated_docs = self._truncate_documents(documents)
@@ -322,13 +345,13 @@ class CohereRerankerClient(RerankerClient):
 
     def __init__(
         self,
-        timeout: float = 5.0,
+        timeout: float = 15.0,
         max_chars: int = 4000,
         base_url: Optional[str] = None,
     ) -> None:
         """
         Args:
-            timeout: HTTP request timeout in seconds. Must be positive (default 5.0).
+            timeout: HTTP request timeout in seconds. Must be positive (default 15.0).
             max_chars: Maximum characters per document before client-side truncation.
                        Must be positive (default 4000).
             base_url: Override the Cohere rerank endpoint. Defaults to
@@ -407,6 +430,21 @@ class CohereRerankerClient(RerankerClient):
             raise ValueError("documents must be a non-empty list")
         if top_k is not None and top_k <= 0:
             raise ValueError(f"top_k must be a positive integer, got {top_k}")
+
+        # Bug #678: Skip if provider is sin-binned
+        try:
+            from code_indexer.services.provider_health_monitor import (
+                ProviderHealthMonitor,
+            )
+
+            if ProviderHealthMonitor.get_instance().is_sinbinned(_COHERE_PROVIDER_NAME):
+                raise RerankerSinbinnedException(_COHERE_PROVIDER_NAME)
+        except RerankerSinbinnedException:
+            raise
+        except Exception as exc:
+            logger.debug(
+                "ProviderHealthMonitor unavailable; proceeding normally: %s", exc
+            )
 
         self._validate_document_count(documents)
 

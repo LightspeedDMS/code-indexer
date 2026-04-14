@@ -91,6 +91,12 @@ class TestProviderIndexJobNoConfigMutation:
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
             ),
+            # Bug #678: seed_provider_config writes to config.json by design; mock it
+            # so this test continues asserting the original no-mutation invariant.
+            patch("code_indexer.server.services.config_seeding.seed_provider_config"),
+            patch(
+                "code_indexer.services.provider_health_bridge.drain_and_feed_monitor"
+            ),
         ):
             result = _provider_index_job(str(repo_path), "cohere")
 
@@ -117,6 +123,12 @@ class TestProviderIndexJobNoConfigMutation:
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
+            ),
+            # Bug #678: seed_provider_config writes to config.json by design; mock it
+            # so this test continues asserting the original no-mutation invariant.
+            patch("code_indexer.server.services.config_seeding.seed_provider_config"),
+            patch(
+                "code_indexer.services.provider_health_bridge.drain_and_feed_monitor"
             ),
         ):
             result = _provider_index_job(str(repo_path), "cohere")
@@ -145,6 +157,12 @@ class TestProviderIndexJobNoConfigMutation:
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
+            ),
+            # Bug #678: seed_provider_config writes to config.json by design; mock it
+            # so this test continues asserting the original no-mutation invariant.
+            patch("code_indexer.server.services.config_seeding.seed_provider_config"),
+            patch(
+                "code_indexer.services.provider_health_bridge.drain_and_feed_monitor"
             ),
         ):
             result = _provider_index_job(str(repo_path), "cohere")
@@ -180,6 +198,12 @@ class TestProviderIndexJobNoConfigMutation:
             patch(
                 "code_indexer.server.mcp.handlers.get_config_service",
                 return_value=_make_config_service(),
+            ),
+            # Bug #678: seed_provider_config writes to config.json by design; mock it
+            # so this test continues asserting the original no-mutation invariant.
+            patch("code_indexer.server.services.config_seeding.seed_provider_config"),
+            patch(
+                "code_indexer.services.provider_health_bridge.drain_and_feed_monitor"
             ),
         ):
             _provider_index_job(str(repo_path), "cohere")

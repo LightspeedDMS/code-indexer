@@ -45,6 +45,10 @@
                 <span class="status-indicator status-cancelled" title="Cancelled by user">
                     Cancelled
                 </span>
+                {% elif job.status == 'completed_partial' %}
+                <span class="status-indicator status-completed_partial" title="Completed with partial provider failures">
+                    Partial
+                </span>
                 {% else %}
                 <span class="status-indicator status-unknown">
                     {{ job.status }}
@@ -152,6 +156,39 @@
                         </div>
                         {% endif %}
                     </div>
+                    {% if job.result and job.result.provider_results is defined and job.result.provider_results %}
+                    <table class="provider-breakdown">
+                        <thead>
+                            <tr>
+                                <th>Provider</th>
+                                <th>Status</th>
+                                <th>Files Indexed</th>
+                                <th>Chunks Indexed</th>
+                                <th>Latency (ms)</th>
+                                <th>Error</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for provider_name, pr in job.result.provider_results.items() %}
+                        <tr>
+                            <td>{{ provider_name }}</td>
+                            <td><span class="provider-dot provider-dot-{{ pr.status }}">{{ pr.status }}</span></td>
+                            <td>{{ pr.files_indexed if pr.files_indexed is not none else '—' }}</td>
+                            <td>{{ pr.chunks_indexed if pr.chunks_indexed is not none else '—' }}</td>
+                            <td>{{ pr.latency_ms if pr.latency_ms is not none else '—' }}</td>
+                            <td>
+                                {% if pr.error %}
+                                {% set err_display = pr.error[:200] %}
+                                <span title="{{ pr.error }}">{{ err_display }}{% if pr.error | length > 200 %}...{% endif %}</span>
+                                {% else %}
+                                —
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                    {% endif %}
                 </article>
             </td>
         </tr>

@@ -899,6 +899,36 @@ class RerankConfig:
 
 
 @dataclass
+class ProviderSinBinConfig:
+    """Sin-bin (circuit-breaker) configuration per embedding provider (Bug #678).
+
+    Controls exponential backoff when a provider exceeds failure thresholds.
+    Server runtime config only — NOT seeded to CLI subprocess config.json.
+    """
+
+    failure_threshold: int = 5
+    failure_window_seconds: int = 60
+    initial_cooldown_seconds: int = 30
+    max_cooldown_seconds: int = 300
+    backoff_multiplier: float = 2.0
+
+
+@dataclass
+class QueryOrchestrationConfig:
+    """Parallel query orchestration tunables (Bug #678).
+
+    Controls latency budget enforcement and retry limits when all providers
+    are sin-binned. Server runtime config only.
+    """
+
+    parallel_query_orchestrator_timeout_seconds: int = 20
+    max_query_latency_budget_seconds: int = 60
+    all_providers_sinbinned_retry_limit: int = 2
+    provider_health_probe_interval_seconds: int = 30
+    provider_health_probe_join_timeout_seconds: int = 5
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -979,6 +1009,13 @@ class ServerConfig:
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
     rerank_config: Optional[RerankConfig] = None
+
+    # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
+    voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
+    cohere_sinbin: Optional[ProviderSinBinConfig] = None
+
+    # Bug #678 - Query orchestration tunables (server runtime only)
+    query_orchestration: Optional[QueryOrchestrationConfig] = None
 
     # Epic #408 - Cluster mode configuration
     storage_mode: str = "sqlite"  # "sqlite" (standalone) or "postgres" (cluster)
@@ -1068,6 +1105,13 @@ class ServerConfig:
         # Story #565 - Initialize password expiry config
         if self.password_expiry_config is None:
             self.password_expiry_config = PasswordExpiryConfig()
+        # Bug #678 - Initialize sin-bin and orchestration configs
+        if self.voyage_ai_sinbin is None:
+            self.voyage_ai_sinbin = ProviderSinBinConfig()
+        if self.cohere_sinbin is None:
+            self.cohere_sinbin = ProviderSinBinConfig()
+        if self.query_orchestration is None:
+            self.query_orchestration = QueryOrchestrationConfig()
 
 
 class ServerConfigManager:
@@ -1542,6 +1586,23 @@ class ServerConfigManager:
             config_dict["rerank_config"], dict
         ):
             config_dict["rerank_config"] = RerankConfig(**config_dict["rerank_config"])
+
+        # Bug #678: Convert sinbin dicts to ProviderSinBinConfig
+        for _sinbin_key in ("voyage_ai_sinbin", "cohere_sinbin"):
+            if _sinbin_key in config_dict and isinstance(
+                config_dict[_sinbin_key], dict
+            ):
+                config_dict[_sinbin_key] = ProviderSinBinConfig(
+                    **config_dict[_sinbin_key]
+                )
+
+        # Bug #678: Convert query_orchestration dict to QueryOrchestrationConfig
+        if "query_orchestration" in config_dict and isinstance(
+            config_dict["query_orchestration"], dict
+        ):
+            config_dict["query_orchestration"] = QueryOrchestrationConfig(
+                **config_dict["query_orchestration"]
+            )
 
         # Story #400: Convert data_retention_config dict to DataRetentionConfig
         if "data_retention_config" in config_dict and isinstance(

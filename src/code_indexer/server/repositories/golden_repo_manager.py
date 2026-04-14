@@ -1402,9 +1402,41 @@ class GoldenRepoManager:
                 # Story #620: Write embedding_providers list so cidx index loops all providers.
                 self._write_embedding_providers_to_config(clone_path)
 
+            # Bug #678: Wrapper that seeds config before and drains health events after
+            # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
+            # at DEBUG and never interrupt indexing.
+            def _run_popen_with_telemetry(
+                command: List[str], phase_name: str, error_label: str
+            ) -> None:
+                try:
+                    from code_indexer.server.services.config_seeding import (
+                        seed_provider_config,
+                    )
+
+                    seed_provider_config(clone_path)
+                except Exception as _seed_exc:  # noqa: BLE001
+                    logging.debug(
+                        "Bug #678: seed_provider_config failed (non-fatal): %s",
+                        _seed_exc,
+                    )
+                try:
+                    _run_popen(command, phase_name=phase_name, error_label=error_label)
+                finally:
+                    try:
+                        from code_indexer.services.provider_health_bridge import (
+                            drain_and_feed_monitor,
+                        )
+
+                        drain_and_feed_monitor(clone_path)
+                    except Exception as _drain_exc:  # noqa: BLE001
+                        logging.debug(
+                            "Bug #678: drain_and_feed_monitor failed (non-fatal): %s",
+                            _drain_exc,
+                        )
+
             # Step 2: cidx index --fts --progress-json (semantic + FTS, Popen for real progress)
             logging.info(f"Executing cidx index --fts for {clone_path}")
-            _run_popen(
+            _run_popen_with_telemetry(
                 ["cidx", "index", "--fts", "--progress-json"],
                 phase_name="semantic",
                 error_label="semantic+FTS indexing",
@@ -1414,7 +1446,7 @@ class GoldenRepoManager:
             # Step 3: cidx index --index-commits --progress-json (temporal, if enabled)
             if temporal_command is not None:
                 logging.info(f"Executing cidx index --index-commits for {clone_path}")
-                _run_popen(
+                _run_popen_with_telemetry(
                     temporal_command,
                     phase_name="temporal",
                     error_label="temporal indexing",

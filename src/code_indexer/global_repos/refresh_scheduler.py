@@ -1440,11 +1440,42 @@ class RefreshScheduler:
                     f"{phase_name} indexing on source failed for {alias_name}: {error_msg}"
                 )
 
+        # Bug #678: Wrapper that seeds config before and drains health events after
+        # each cidx index subprocess. Fire-and-forget: telemetry failures are logged
+        # at DEBUG and never interrupt indexing.
+        def _run_popen_c_with_telemetry(
+            command: list, phase_name: str, error_label: str
+        ) -> None:
+            try:
+                from code_indexer.server.services.config_seeding import (
+                    seed_provider_config,
+                )
+
+                seed_provider_config(str(source_path))
+            except Exception as _seed_exc:  # noqa: BLE001
+                logger.debug(
+                    "Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc
+                )
+            try:
+                _run_popen_c(command, phase_name=phase_name, error_label=error_label)
+            finally:
+                try:
+                    from code_indexer.services.provider_health_bridge import (
+                        drain_and_feed_monitor,
+                    )
+
+                    drain_and_feed_monitor(str(source_path))
+                except Exception as _drain_exc:  # noqa: BLE001
+                    logger.debug(
+                        "Bug #678: drain_and_feed_monitor failed (non-fatal): %s",
+                        _drain_exc,
+                    )
+
         # Execute Step 1: cidx index --fts (semantic + FTS, Popen for real progress)
         logger.info(
             f"Running cidx index on source for {alias_name}: {' '.join(index_command)}"
         )
-        _run_popen_c(
+        _run_popen_c_with_telemetry(
             index_command,
             phase_name="semantic",
             error_label=f"indexing on source for {alias_name}",
@@ -1456,7 +1487,7 @@ class RefreshScheduler:
             logger.info(
                 f"Running cidx index (temporal) on source for {alias_name}: {' '.join(temporal_command)}"
             )
-            _run_popen_c(
+            _run_popen_c_with_telemetry(
                 temporal_command,
                 phase_name="temporal",
                 error_label=f"temporal indexing on source for {alias_name}",

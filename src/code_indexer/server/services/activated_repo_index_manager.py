@@ -478,6 +478,59 @@ class ActivatedRepoIndexManager:
         else:
             return {"success": False, "error": f"Unknown index type: {index_type}"}
 
+    def _seed_telemetry(self, repo_path: str) -> None:
+        """Bug #678: Seed provider config into the repo .code-indexer dir before indexing.
+
+        Fire-and-forget: failures are logged at DEBUG and never interrupt indexing.
+        """
+        try:
+            from code_indexer.server.services.config_seeding import seed_provider_config
+
+            seed_provider_config(repo_path)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug(
+                "Bug #678: seed_provider_config failed (non-fatal): %s", exc
+            )
+
+    def _drain_telemetry(self, repo_path: str) -> None:
+        """Bug #678: Drain health events written by the cidx index subprocess.
+
+        Fire-and-forget: failures are logged at DEBUG and never interrupt indexing.
+        """
+        try:
+            from code_indexer.services.provider_health_bridge import (
+                drain_and_feed_monitor,
+            )
+
+            drain_and_feed_monitor(repo_path)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug(
+                "Bug #678: drain_and_feed_monitor failed (non-fatal): %s", exc
+            )
+
+    def _run_subprocess_with_telemetry(
+        self,
+        args: List[str],
+        repo_path: str,
+        timeout: int,
+    ) -> "subprocess.CompletedProcess[str]":
+        """Run a cidx subprocess with provider-config seeding and health-event draining.
+
+        Bug #678: Seeds config before the subprocess starts and drains health events
+        in a finally block so telemetry is collected even when the command fails.
+        """
+        self._seed_telemetry(repo_path)
+        try:
+            return subprocess.run(
+                args,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        finally:
+            self._drain_telemetry(repo_path)
+
     def _execute_semantic_indexing(self, repo_path: str, clear: bool) -> Dict[str, Any]:
         """Execute semantic indexing using SmartIndexer."""
         try:
@@ -492,13 +545,10 @@ class ActivatedRepoIndexManager:
                 )
                 shutil.rmtree(index_dir)
 
-            # Run cidx index command
-            result = subprocess.run(
+            result = self._run_subprocess_with_telemetry(
                 ["cidx", "index"],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=self.INDEXING_TIMEOUT_SECONDS,
+                repo_path,
+                self.INDEXING_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -521,12 +571,10 @@ class ActivatedRepoIndexManager:
             if clear:
                 args.append("--clear")
 
-            result = subprocess.run(
+            result = self._run_subprocess_with_telemetry(
                 args,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=self.INDEXING_TIMEOUT_SECONDS,
+                repo_path,
+                self.INDEXING_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:
@@ -549,12 +597,10 @@ class ActivatedRepoIndexManager:
             if clear:
                 args.append("--clear")
 
-            result = subprocess.run(
+            result = self._run_subprocess_with_telemetry(
                 args,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=self.INDEXING_TIMEOUT_SECONDS,
+                repo_path,
+                self.INDEXING_TIMEOUT_SECONDS,
             )
 
             if result.returncode != 0:

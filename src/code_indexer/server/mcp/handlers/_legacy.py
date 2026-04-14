@@ -16039,6 +16039,14 @@ def _provider_index_job(
     all_stdout: list = []
     all_stderr: list = []
 
+    # Bug #678: Seed provider config before subprocess
+    try:
+        from code_indexer.server.services.config_seeding import seed_provider_config
+
+        seed_provider_config(actual_path)
+    except Exception as _seed_exc:  # noqa: BLE001
+        logger.debug("Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc)
+
     try:
         run_with_popen_progress(
             command=cmd,
@@ -16083,6 +16091,18 @@ def _provider_index_job(
             "stdout": "".join(all_stdout)[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:],
             "stderr": str(exc),
         }
+    finally:
+        # Bug #678: Drain health events after subprocess
+        try:
+            from code_indexer.services.provider_health_bridge import (
+                drain_and_feed_monitor,
+            )
+
+            drain_and_feed_monitor(actual_path)
+        except Exception as _drain_exc:  # noqa: BLE001
+            logger.debug(
+                "Bug #678: drain_and_feed_monitor failed (non-fatal): %s", _drain_exc
+            )
 
 
 def _set_enable_temporal_flag(repo_alias: str) -> None:
@@ -16195,6 +16215,15 @@ def _provider_temporal_index_job(
 
     all_stdout: list = []
     all_stderr: list = []
+
+    # Bug #678: Seed provider config before subprocess
+    try:
+        from code_indexer.server.services.config_seeding import seed_provider_config
+
+        seed_provider_config(actual_path)
+    except Exception as _seed_exc:  # noqa: BLE001
+        logger.debug("Bug #678: seed_provider_config failed (non-fatal): %s", _seed_exc)
+
     try:
         run_with_popen_progress(
             command=cmd,
@@ -16251,6 +16280,18 @@ def _provider_temporal_index_job(
             "stdout": "".join(all_stdout)[-_PROVIDER_JOB_OUTPUT_TAIL_CHARS:],
             "stderr": str(exc),
         }
+    finally:
+        # Bug #678: Drain health events after subprocess
+        try:
+            from code_indexer.services.provider_health_bridge import (
+                drain_and_feed_monitor,
+            )
+
+            drain_and_feed_monitor(actual_path)
+        except Exception as _drain_exc:  # noqa: BLE001
+            logger.debug(
+                "Bug #678: drain_and_feed_monitor failed (non-fatal): %s", _drain_exc
+            )
 
 
 def bulk_add_provider_index(params: Dict[str, Any], user: User) -> Dict[str, Any]:

@@ -1,6 +1,19 @@
 <!-- Story #69: Granular partial for recent jobs table body ONLY -->
+<!-- Bug #679 Part 2: provider_results column, COMPLETED_PARTIAL badge, colspan update -->
+{% set has_providers = has_provider_results or (recent_jobs and recent_jobs | selectattr('result') | selectattr('result.provider_results', 'defined') | list | length > 0) %}
+<thead>
+    <tr>
+        <th>Repository</th>
+        <th>Type</th>
+        <th>Completed</th>
+        <th>Status</th>
+        {% if has_providers %}<th>Providers</th>{% endif %}
+    </tr>
+</thead>
+<tbody>
 {% if recent_jobs and recent_jobs|length > 0 %}
     {% for job in recent_jobs %}
+    {% set provider_results = job.result.provider_results if job.result and job.result.provider_results is defined and job.result.provider_results else none %}
     <tr>
         <td>
             <a href="/admin/jobs?job_id={{ job.job_id }}">{{ job.repo_name }}</a>
@@ -8,12 +21,29 @@
         <td>{{ job.job_type }}</td>
         <td>{{ job.completion_time[:19] if job.completion_time else 'N/A' }}</td>
         <td>
+            {% if job.status == 'completed_partial' %}
+            <span class="job-status status-completed_partial">Partial</span>
+            {% else %}
             <span class="job-status status-{{ job.status }}">{{ job.status | capitalize }}</span>
+            {% endif %}
         </td>
+        {% if has_providers %}
+        <td>
+            {% if provider_results %}
+            {% for provider_name, pr in provider_results.items() %}
+            <span class="provider-dot provider-dot-{{ pr.status }}"
+                  title="{{ provider_name }}: {{ pr.status }} ({{ pr.files_indexed }} files)">&#9679;</span>
+            {% endfor %}
+            {% else %}
+            &mdash;
+            {% endif %}
+        </td>
+        {% endif %}
     </tr>
     {% endfor %}
 {% else %}
     <tr>
-        <td colspan="4" style="text-align: center;">No recent activity to display.</td>
+        <td colspan="{{ 5 if has_providers else 4 }}" style="text-align: center;">No recent activity to display.</td>
     </tr>
 {% endif %}
+</tbody>

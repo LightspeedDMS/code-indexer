@@ -86,6 +86,39 @@ VOYAGE_MULTIMODAL_MODEL = "voyage-multimodal-3"
 COHERE_MULTIMODAL_MODEL = "embed-v4.0-multimodal"
 
 
+class HealthMonitorConfig(BaseModel):
+    """Per-provider health monitor thresholds (Bug #678).
+
+    Shared structure used in both VoyageAIConfig and CohereConfig.
+    Replaces module-level constants in provider_health_monitor.py.
+    """
+
+    rolling_window_minutes: int = Field(
+        default=60,
+        description="Rolling window for health metrics in minutes",
+    )
+    down_consecutive_failures: int = Field(
+        default=5,
+        description="Consecutive failures before marking provider as down",
+    )
+    down_error_rate: float = Field(
+        default=0.5,
+        description="Error rate threshold above which provider is marked down",
+    )
+    degraded_error_rate: float = Field(
+        default=0.1,
+        description="Error rate threshold above which provider is marked degraded",
+    )
+    latency_p95_threshold_ms: float = Field(
+        default=5000.0,
+        description="P95 latency threshold in ms above which provider is degraded",
+    )
+    availability_threshold: float = Field(
+        default=0.95,
+        description="Availability below this threshold marks provider degraded",
+    )
+
+
 class VoyageAIConfig(BaseModel):
     """Configuration for VoyageAI embedding service.
 
@@ -129,6 +162,22 @@ class VoyageAIConfig(BaseModel):
         default=True, description="Use exponential backoff for retries"
     )
 
+    # Bug #678: Reranker timeouts (separate from embedding timeouts)
+    reranker_timeout: float = Field(
+        default=15.0,
+        description="Reranker HTTP request timeout in seconds (31x measured p95)",
+    )
+    reranker_connect_timeout: float = Field(
+        default=5.0,
+        description="Reranker connect timeout in seconds",
+    )
+
+    # Bug #678: Per-provider health monitor configuration
+    health_monitor: HealthMonitorConfig = Field(
+        default_factory=HealthMonitorConfig,
+        description="Health monitor thresholds for this provider",
+    )
+
 
 # Backward compatibility alias (VoyageConfig was renamed to VoyageAIConfig in v8.0)
 VoyageConfig = VoyageAIConfig
@@ -160,6 +209,22 @@ class CohereConfig(BaseModel):
     )
     exponential_backoff: bool = Field(
         default=True, description="Use exponential backoff for retries"
+    )
+
+    # Bug #678: Reranker timeouts (separate from embedding timeouts)
+    reranker_timeout: float = Field(
+        default=15.0,
+        description="Reranker HTTP request timeout in seconds",
+    )
+    reranker_connect_timeout: float = Field(
+        default=5.0,
+        description="Reranker connect timeout in seconds",
+    )
+
+    # Bug #678: Per-provider health monitor configuration
+    health_monitor: HealthMonitorConfig = Field(
+        default_factory=HealthMonitorConfig,
+        description="Health monitor thresholds for this provider",
     )
 
 
