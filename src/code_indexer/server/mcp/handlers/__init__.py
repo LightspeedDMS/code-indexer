@@ -74,6 +74,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.scip",
                 "code_indexer.server.mcp.handlers.guides",
                 "code_indexer.server.mcp.handlers.ssh_keys",
+                "code_indexer.server.mcp.handlers.delegation",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -154,16 +155,9 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     # Domain helpers in _legacy.py (not yet extracted to domain modules)
     _append_provider_to_config,
     _derive_forge_host,
-    _get_cidx_callback_base_url,
-    _get_delegation_config,
-    _get_delegation_function_repo_path,
     _get_group_manager,
     _get_pat_credential_for_remote,
     _get_personal_credential_for_host,
-    _get_repo_ready_timeout,
-    _get_user_groups,
-    _load_packages_context,
-    _lookup_golden_repo_for_cs,
     _omni_regex_search,
     _omni_search_code,
     _provider_index_job,
@@ -175,12 +169,7 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _resolve_git_repo_path,
     _resolve_golden_repo_base_clone,
     _resolve_golden_repo_path,
-    _resolve_guardrails,
     _resolve_repo_path,
-    _validate_collaborative_params,
-    _validate_competitive_params,
-    _validate_function_parameters,
-    _validate_open_delegation_params,
     _write_mode_acquire_lock,
     _write_mode_create_marker,
     _write_mode_run_refresh,
@@ -200,4 +189,28 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     handle_gitlab_ci_get_job_logs,
     handle_gitlab_ci_retry_pipeline,
     handle_gitlab_ci_cancel_pipeline,
+)
+
+from code_indexer.server.mcp.handlers.delegation import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 delegation step)
+    handle_list_delegation_functions,
+    handle_execute_delegation_function,
+    handle_poll_delegation_job,
+    handle_execute_open_delegation,
+    handle_cs_register_repository,
+    handle_cs_list_repositories,
+    handle_cs_check_health,
+    # Private helpers used by tests and external consumers
+    _get_cidx_callback_base_url,
+    _get_delegation_config,
+    _get_delegation_function_repo_path,
+    _get_repo_ready_timeout,
+    _get_user_groups,
+    _load_packages_context,
+    _lookup_golden_repo_for_cs,
+    _resolve_guardrails,
+    _validate_collaborative_params,
+    _validate_competitive_params,
+    _validate_function_parameters,
+    _validate_open_delegation_params,
 )
