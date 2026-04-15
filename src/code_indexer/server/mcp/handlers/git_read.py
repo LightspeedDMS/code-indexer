@@ -1291,6 +1291,22 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             return _mcp_response({"success": False, "error": error_msg})
         assert repo_path is not None  # narrowed by error_msg check above
 
+        # Bug #696: from_revision is required by the schema
+        from_revision = args.get("from_revision")
+        if not from_revision:
+            return _mcp_response(
+                {"success": False, "error": "Missing required parameter: from_revision"}
+            )
+
+        # Bug #696: Read all schema-advertised parameters and forward to service
+        to_revision = args.get("to_revision")
+        path = args.get("path")
+        context_lines_raw = args.get("context_lines")
+        context_lines = (
+            _coerce_int(context_lines_raw, 3) if context_lines_raw is not None else None
+        )
+        stat_only = args.get("stat_only")
+
         # Story #686: Extract pagination parameters
         file_paths = args.get("file_paths")
         offset = _coerce_int(args.get("offset"), 0)
@@ -1301,7 +1317,15 @@ def git_diff(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         )  # None means use default (500)
 
         result = git_operations_service.git_diff(
-            Path(repo_path), file_paths=file_paths, offset=offset, limit=limit
+            Path(repo_path),
+            file_paths=file_paths,
+            context_lines=context_lines,
+            from_revision=from_revision,
+            to_revision=to_revision,
+            path=path,
+            stat_only=stat_only,
+            offset=offset,
+            limit=limit,
         )
         result["success"] = True
         return _mcp_response(result)
@@ -1356,9 +1380,26 @@ def git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         rerank_query = args.get("rerank_query") or None
         fetch_limit = _compute_file_history_fetch_limit(requested_limit, rerank_query)
         offset = _coerce_int(args.get("offset"), 0)
-        since_date = args.get("since_date")
+
+        # Bug #697 Defect 2: schema param is "since", service param is "since_date"
+        # — kept distinct to avoid touching service callers.
+        since_date = args.get("since")
+
+        # Bug #697 Defect 1: read and forward all schema-advertised filter params
+        until = args.get("until")
+        author = args.get("author")
+        branch = args.get("branch")
+        path = args.get("path")
+
         result = git_operations_service.git_log(
-            Path(repo_path), limit=fetch_limit, offset=offset, since_date=since_date
+            Path(repo_path),
+            limit=fetch_limit,
+            offset=offset,
+            since_date=since_date,
+            until=until,
+            author=author,
+            branch=branch,
+            path=path,
         )
 
         # Story #660: Apply reranking after retrieval, before response.

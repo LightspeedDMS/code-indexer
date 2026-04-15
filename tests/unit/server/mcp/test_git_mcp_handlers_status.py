@@ -142,7 +142,8 @@ class TestGitDiffHandler:
             "files_changed": 1,
         }
 
-        params = {"repository_alias": "test-repo"}
+        # Bug #696: from_revision is now required by the schema
+        params = {"repository_alias": "test-repo", "from_revision": "HEAD"}
 
         mcp_response = handlers.git_diff(params, mock_user)
         data = _extract_response_data(mcp_response)
@@ -162,15 +163,28 @@ class TestGitDiffHandler:
             "files_changed": 1,
         }
 
-        params = {"repository_alias": "test-repo", "file_paths": ["specific.py"]}
+        # Bug #696: from_revision is now required by the schema
+        params = {
+            "repository_alias": "test-repo",
+            "from_revision": "HEAD",
+            "file_paths": ["specific.py"],
+        }
 
         mcp_response = handlers.git_diff(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
-        # Story #686: git_diff now includes offset and limit parameters
+        # Bug #696: handler now forwards from_revision, to_revision, path, context_lines, stat_only
         mock_git_service.git_diff.assert_called_once_with(
-            Path("/tmp/test-repo"), file_paths=["specific.py"], offset=0, limit=None
+            Path("/tmp/test-repo"),
+            file_paths=["specific.py"],
+            context_lines=None,
+            from_revision="HEAD",
+            to_revision=None,
+            path=None,
+            stat_only=None,
+            offset=0,
+            limit=None,
         )
 
     def test_git_diff_missing_repository(self, mock_user):
@@ -218,24 +232,32 @@ class TestGitLogHandler:
     def test_git_log_with_since_date(
         self, mock_user, mock_git_service, mock_repo_manager
     ):
-        """Test git log with since_date filter."""
+        """Test git log with since filter (Bug #697: schema key is 'since', not 'since_date')."""
         from code_indexer.server.mcp import handlers
 
         mock_git_service.git_log.return_value = {"commits": []}
 
+        # Bug #697: schema param is "since" (not "since_date")
         params = {
             "repository_alias": "test-repo",
             "limit": 10,
-            "since_date": "2025-01-10",
+            "since": "2025-01-10",
         }
 
         mcp_response = handlers.git_log(params, mock_user)
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
-        # Story #686: git_log now includes offset parameter
+        # Bug #697: handler reads "since" from args and passes as since_date= to service
         mock_git_service.git_log.assert_called_once_with(
-            Path("/tmp/test-repo"), limit=10, offset=0, since_date="2025-01-10"
+            Path("/tmp/test-repo"),
+            limit=10,
+            offset=0,
+            since_date="2025-01-10",
+            until=None,
+            author=None,
+            branch=None,
+            path=None,
         )
 
     def test_git_log_default_limit(
@@ -252,9 +274,16 @@ class TestGitLogHandler:
         data = _extract_response_data(mcp_response)
 
         assert data["success"] is True
-        # Story #686: Default limit is now 50 (not 10), and offset parameter added
+        # Bug #697: handler now forwards until, author, branch, path in addition to since_date
         mock_git_service.git_log.assert_called_once_with(
-            Path("/tmp/test-repo"), limit=50, offset=0, since_date=None
+            Path("/tmp/test-repo"),
+            limit=50,
+            offset=0,
+            since_date=None,
+            until=None,
+            author=None,
+            branch=None,
+            path=None,
         )
 
     def test_git_log_missing_repository(self, mock_user):

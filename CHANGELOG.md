@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.15.2
+
+### Fixes
+
+- fix: Bug #696 -- `git_diff` MCP handler silently discarded every revision-related parameter advertised in its tool schema. `from_revision`, `to_revision`, `path`, `context_lines`, and `stat_only` were accepted by the handler but never forwarded to `git_operations_service.git_diff()`, so every invocation degenerated into a working-tree diff against a clean golden repo and returned empty. Handler now reads all five parameters from `args` and forwards them to the service. `from_revision` is validated as required per the schema. Invalid revisions now produce `success:false` errors via the existing `GitCommandError` branch. 7 new unit tests with real git repos (no MagicMock).
+
+- fix: Bug #697 -- `git_log` MCP handler silently discarded every filter parameter (`path`, `author`, `until`, `branch`) AND suffered from a key-name mismatch where it read `args.get("since_date")` but the schema parameter is named `since`. Every filter was dead across the MCP surface. Handler now reads the correct schema key `since` and forwards it as `since_date=` to the service (kept service parameter name stable to avoid touching other callers). All five missing filter parameters now read from `args` and forwarded. 7 new unit tests including an explicit regression guard (`test_git_log_reads_since_not_since_date`) that locks in the key-name fix.
+
+- fix: Bug #698 -- `git_show_commit` stats always reported `insertions: 0, deletions: 0` for every file because combining `--numstat` and `--name-status` in a single `git show` command causes git to silently suppress numstat output (only name-status is emitted). `_get_commit_stats()` now runs the two git commands separately and merges results by path, matching the two-command pattern already used by `get_diff()`. Also fixed a latent rename-path resolution bug: numstat emits paths like `"old => new"` and `"dir/{old => new}/file.py"` which didn't match the name-status keys. Added `_resolve_numstat_rename_path()` helper that handles both simple and brace forms. 8 new unit tests covering add/modify/delete/rename/binary/multi-file/empty-commit cases.
+
 ## v9.15.1
 
 ### Fixes
