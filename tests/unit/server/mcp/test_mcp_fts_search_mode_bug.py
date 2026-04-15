@@ -135,18 +135,19 @@ class TestMCPFTSSearchModeBugFix:
         behavior is verified by reading the source code.
         """
         import inspect
-        from code_indexer.server.mcp import handlers
 
-        # Get the source code of search_code function
-        source = inspect.getsource(handlers.search_code)
+        # Get the source code of the search kwargs builder (Story #496: extracted from search_code)
+        from code_indexer.server.mcp.handlers.search import _build_search_kwargs
+
+        source = inspect.getsource(_build_search_kwargs)
 
         # Verify that search_mode is passed to _perform_search in the global repo code path
         # The code should have: search_mode=params.get("search_mode", "semantic")
         assert "search_mode=params.get" in source, (
-            "search_code handler must pass search_mode parameter to _perform_search"
+            "search pipeline must pass search_mode parameter to _perform_search"
         )
         assert 'search_mode=params.get("search_mode"' in source, (
-            "search_mode must be extracted from params in the global repo path"
+            "search_mode must be extracted from params in the search kwargs builder"
         )
 
 

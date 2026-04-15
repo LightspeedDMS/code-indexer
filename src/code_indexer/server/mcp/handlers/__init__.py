@@ -81,6 +81,8 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.admin",
                 "code_indexer.server.mcp.handlers.cicd",
                 "code_indexer.server.mcp.handlers.files",
+                "code_indexer.server.mcp.handlers.repos",
+                "code_indexer.server.mcp.handlers.search",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -158,22 +160,24 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _mcp_response,
     _parse_json_string_array,
     _validate_symbol_format,
-    # Domain helpers in _legacy.py (not yet extracted to domain modules)
-    _append_provider_to_config,
-    _omni_regex_search,
-    _omni_search_code,
-    _provider_index_job,
-    _provider_temporal_index_job,
-    _remove_provider_from_config,
+    # Domain helpers still in _legacy.py (not yet extracted)
     _resolve_git_repo_path,
-    _resolve_golden_repo_base_clone,
-    _resolve_golden_repo_path,
     _resolve_repo_path,
     _write_mode_acquire_lock,
     _write_mode_create_marker,
     _write_mode_run_refresh,
     _write_mode_strip_global,
     _is_write_mode_active,
+)
+
+from code_indexer.server.mcp.handlers.repos import (  # noqa: F401, E402
+    # Private helpers extracted from _legacy (Story #496 repos step)
+    _append_provider_to_config,
+    _provider_index_job,
+    _provider_temporal_index_job,
+    _remove_provider_from_config,
+    _resolve_golden_repo_base_clone,
+    _resolve_golden_repo_path,
     _post_provider_index_snapshot,
 )
 
@@ -328,6 +332,16 @@ from code_indexer.server.mcp.handlers.files import (  # noqa: F401, E402
     handle_directory_tree,
     # Private helpers used by other domain modules (git_write, pull_requests)
     _is_writable_repo,
+)
+
+from code_indexer.server.mcp.handlers.search import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 search step)
+    search_code,
+    handle_regex_search,
+    handle_get_cached_content,
+    # Private helpers used by tests and external consumers
+    _omni_search_code,
+    _omni_regex_search,
 )
 
 from code_indexer.server.auth import dependencies  # noqa: F401, E402

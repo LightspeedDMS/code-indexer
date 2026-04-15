@@ -812,7 +812,6 @@ class TestAC6CidxMetaFiltering:
 
     def test_cidx_meta_search_results_filtered(self):
         """search_code querying cidx-meta must call filter_cidx_meta_results."""
-        from code_indexer.server.mcp import handlers
         import inspect
 
         # Verify that filter_cidx_meta_results exists on AccessFilteringService
@@ -822,10 +821,13 @@ class TestAC6CidxMetaFiltering:
 
         assert hasattr(AccessFilteringService, "filter_cidx_meta_results")
 
-        # Verify via source inspection that search_code calls filter_cidx_meta_results
-        source = inspect.getsource(handlers.search_code)
+        # Verify via source inspection that the search pipeline calls filter_cidx_meta_results
+        # After Story #496 extraction, this logic lives in _apply_rerank_and_filter
+        from code_indexer.server.mcp.handlers.search import _apply_rerank_and_filter
+
+        source = inspect.getsource(_apply_rerank_and_filter)
         assert "filter_cidx_meta_results" in source, (
-            "search_code must call filter_cidx_meta_results for cidx-meta queries"
+            "search pipeline must call filter_cidx_meta_results for cidx-meta queries"
         )
 
 
