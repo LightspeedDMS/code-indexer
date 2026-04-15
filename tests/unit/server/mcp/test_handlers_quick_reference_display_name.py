@@ -48,7 +48,7 @@ class TestQuickReferenceDisplayName:
         # Patch at _legacy module scope — quick_reference resolves get_config_service
         # via _legacy module namespace after Phase 2 refactor.
         with patch(
-            "code_indexer.server.mcp.handlers._legacy.get_config_service"
+            "code_indexer.server.mcp.handlers.guides.get_config_service"
         ) as mock_get_service:
             mock_service = MagicMock()
             mock_service.get_config.return_value = mock_config
@@ -69,7 +69,7 @@ class TestQuickReferenceDisplayName:
         # Patch at _legacy module scope — quick_reference resolves get_config_service
         # via _legacy module namespace after Phase 2 refactor.
         with patch(
-            "code_indexer.server.mcp.handlers._legacy.get_config_service"
+            "code_indexer.server.mcp.handlers.guides.get_config_service"
         ) as mock_get_service:
             mock_service = MagicMock()
             mock_service.get_config.return_value = mock_config
@@ -91,7 +91,7 @@ class TestQuickReferenceDisplayName:
         # Patch at _legacy module scope — quick_reference resolves get_config_service
         # via _legacy module namespace after Phase 2 refactor.
         with patch(
-            "code_indexer.server.mcp.handlers._legacy.get_config_service"
+            "code_indexer.server.mcp.handlers.guides.get_config_service"
         ) as mock_get_service:
             mock_service = MagicMock()
             mock_service.get_config.return_value = mock_config

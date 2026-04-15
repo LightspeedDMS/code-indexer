@@ -185,10 +185,10 @@ class TestOmniSearchHandlerFilterWiring:
     """
 
     def _get_omni_search_source(self):
-        """Get source code of _omni_search_code."""
-        from code_indexer.server.mcp.handlers import _omni_search_code
+        """Get source code of _build_multi_search_request (builds MultiSearchRequest)."""
+        from code_indexer.server.mcp.handlers.search import _build_multi_search_request
 
-        return inspect.getsource(_omni_search_code)
+        return inspect.getsource(_build_multi_search_request)
 
     def test_omni_search_passes_exclude_language(self):
         """_omni_search_code should pass exclude_language to MultiSearchRequest."""
