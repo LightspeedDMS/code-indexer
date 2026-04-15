@@ -80,6 +80,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.git_write",
                 "code_indexer.server.mcp.handlers.admin",
                 "code_indexer.server.mcp.handlers.cicd",
+                "code_indexer.server.mcp.handlers.files",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -313,6 +314,23 @@ from code_indexer.server.services.git_operations_service import (  # noqa: F401,
 from code_indexer.global_repos.git_operations import (  # noqa: F401, E402
     GitOperationsService,
 )
+
+from code_indexer.server.mcp.handlers.files import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 files step)
+    list_files,
+    get_file_content,
+    browse_directory,
+    handle_create_file,
+    handle_edit_file,
+    handle_delete_file,
+    handle_enter_write_mode,
+    handle_exit_write_mode,
+    handle_directory_tree,
+    # Private helpers used by other domain modules (git_write, pull_requests)
+    _is_writable_repo,
+)
+
+from code_indexer.server.auth import dependencies  # noqa: F401, E402
 
 from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
     # CI/CD credential helpers extracted from _legacy (Story #496 cicd step)
