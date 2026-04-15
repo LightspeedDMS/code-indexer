@@ -31,6 +31,7 @@ from code_indexer.server.services.config_service import get_config_service  # no
 from code_indexer.global_repos.alias_manager import AliasManager
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
+from . import _utils  # noqa: F401 — tests patch _legacy._utils
 from ._utils import (
     _get_scip_audit_repository,  # noqa: F401 — re-exported via handlers namespace
     _get_golden_repos_dir,
