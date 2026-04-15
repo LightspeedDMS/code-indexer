@@ -616,6 +616,7 @@ class _LegacyForwardingModule(types.ModuleType):
                 "code_indexer.server.mcp.handlers.git_read",
                 "code_indexer.server.mcp.handlers.git_write",
                 "code_indexer.server.mcp.handlers.admin",
+                "code_indexer.server.mcp.handlers.cicd",
                 "code_indexer.server.mcp.handlers.files",
                 "code_indexer.server.mcp.handlers.repos",
                 "code_indexer.server.mcp.handlers.search",
@@ -623,6 +624,12 @@ class _LegacyForwardingModule(types.ModuleType):
                 _submod = sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
                     _submod.__dict__[name] = value
+            # app_module lives in _utils — forward writes so that
+            # patches on _legacy.app_module also affect _utils.app_module
+            if name == "app_module":
+                _utils_mod = sys.modules.get("code_indexer.server.mcp.handlers._utils")
+                if _utils_mod is not None:
+                    _utils_mod.__dict__["app_module"] = value
 
 
 sys.modules[__name__].__class__ = _LegacyForwardingModule
