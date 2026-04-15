@@ -79,6 +79,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.git_read",
                 "code_indexer.server.mcp.handlers.git_write",
                 "code_indexer.server.mcp.handlers.admin",
+                "code_indexer.server.mcp.handlers.cicd",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -158,16 +159,11 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _validate_symbol_format,
     # Domain helpers in _legacy.py (not yet extracted to domain modules)
     _append_provider_to_config,
-    _derive_forge_host,
-    _get_personal_credential_for_host,
     _omni_regex_search,
     _omni_search_code,
     _provider_index_job,
     _provider_temporal_index_job,
     _remove_provider_from_config,
-    _resolve_cicd_project_access,
-    _resolve_cicd_read_token,
-    _resolve_cicd_write_token,
     _resolve_git_repo_path,
     _resolve_golden_repo_base_clone,
     _resolve_golden_repo_path,
@@ -178,19 +174,6 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     _write_mode_strip_global,
     _is_write_mode_active,
     _post_provider_index_snapshot,
-    # CI/CD handlers (Story #745)
-    handle_gh_actions_list_runs,
-    handle_gh_actions_get_run,
-    handle_gh_actions_search_logs,
-    handle_gh_actions_get_job_logs,
-    handle_gh_actions_retry_run,
-    handle_gh_actions_cancel_run,
-    handle_gitlab_ci_list_pipelines,
-    handle_gitlab_ci_get_pipeline,
-    handle_gitlab_ci_search_logs,
-    handle_gitlab_ci_get_job_logs,
-    handle_gitlab_ci_retry_pipeline,
-    handle_gitlab_ci_cancel_pipeline,
 )
 
 from code_indexer.server.mcp.handlers.delegation import (  # noqa: F401, E402
@@ -329,4 +312,27 @@ from code_indexer.server.services.git_operations_service import (  # noqa: F401,
 )
 from code_indexer.global_repos.git_operations import (  # noqa: F401, E402
     GitOperationsService,
+)
+
+from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
+    # CI/CD credential helpers extracted from _legacy (Story #496 cicd step)
+    _derive_forge_host,
+    _get_personal_credential_for_host,
+    _resolve_cicd_project_access,
+    _resolve_cicd_read_token,
+    _resolve_cicd_write_token,
+    # Old-style GitHub Actions handlers (preserved for REST routes)
+    handle_gh_actions_list_runs,
+    handle_gh_actions_get_run,
+    handle_gh_actions_search_logs,
+    handle_gh_actions_get_job_logs,
+    handle_gh_actions_retry_run,
+    handle_gh_actions_cancel_run,
+    # GitLab CI handlers
+    handle_gitlab_ci_list_pipelines,
+    handle_gitlab_ci_get_pipeline,
+    handle_gitlab_ci_search_logs,
+    handle_gitlab_ci_get_job_logs,
+    handle_gitlab_ci_retry_pipeline,
+    handle_gitlab_ci_cancel_pipeline,
 )
