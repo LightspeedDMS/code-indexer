@@ -130,19 +130,21 @@ class TestRepositoryDiscoveryResult:
 
         result = RepositoryDiscoveryResult(
             repositories=[repo],
-            total_count=100,
-            page=1,
             page_size=50,
-            total_pages=2,
             platform="gitlab",
+            has_next_page=True,
+            next_cursor="cursor-abc123",
+            partial_due_to_cap=False,
+            source_total=100,
         )
 
         assert len(result.repositories) == 1
-        assert result.total_count == 100
-        assert result.page == 1
         assert result.page_size == 50
-        assert result.total_pages == 2
         assert result.platform == "gitlab"
+        assert result.has_next_page is True
+        assert result.next_cursor == "cursor-abc123"
+        assert result.partial_due_to_cap is False
+        assert result.source_total == 100
 
     def test_empty_repositories_list_is_valid(self):
         """Test that an empty repositories list is valid."""
@@ -150,15 +152,15 @@ class TestRepositoryDiscoveryResult:
 
         result = RepositoryDiscoveryResult(
             repositories=[],
-            total_count=0,
-            page=1,
             page_size=50,
-            total_pages=0,
             platform="gitlab",
+            has_next_page=False,
+            partial_due_to_cap=False,
         )
 
         assert len(result.repositories) == 0
-        assert result.total_count == 0
+        assert result.has_next_page is False
+        assert result.next_cursor is None
 
     def test_page_must_be_positive(self):
         """Test that page must be a positive integer."""
@@ -208,20 +210,24 @@ class TestRepositoryDiscoveryResult:
 
         assert "total_count" in str(exc_info.value)
 
-    def test_total_pages_calculated_correctly(self):
-        """Test that total_pages is validated against total_count and page_size."""
+    def test_cursor_pagination_fields_are_valid(self):
+        """Test that cursor-based pagination fields are accepted and correct."""
         from code_indexer.server.models.auto_discovery import RepositoryDiscoveryResult
 
-        # 100 total with page_size 50 = 2 pages
+        # Cursor-based: has_next_page=True means more pages exist
         result = RepositoryDiscoveryResult(
             repositories=[],
-            total_count=100,
-            page=1,
             page_size=50,
-            total_pages=2,
             platform="gitlab",
+            has_next_page=True,
+            next_cursor="opaque-cursor-token",
+            partial_due_to_cap=False,
+            source_total=100,
         )
-        assert result.total_pages == 2
+        assert result.has_next_page is True
+        assert result.next_cursor == "opaque-cursor-token"
+        assert result.partial_due_to_cap is False
+        assert result.source_total == 100
 
 
 class TestDiscoveryProviderError:
