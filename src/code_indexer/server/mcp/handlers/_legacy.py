@@ -27,6 +27,7 @@ from code_indexer.global_repos.git_operations import GitOperationsService  # noq
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )
+from code_indexer.server.services.config_service import get_config_service  # noqa: F401
 from code_indexer.global_repos.alias_manager import AliasManager
 
 # Shared utilities extracted to _utils.py (Story #496 refactoring)
@@ -38,6 +39,11 @@ from ._utils import (
     _get_scip_query_service,  # noqa: F401 — re-exported via handlers namespace
     _apply_scip_payload_truncation,  # noqa: F401 — re-exported via handlers namespace
     _validate_symbol_format,  # noqa: F401 — re-exported via handlers namespace
+    # Re-imported for test patch compatibility (tests patch _legacy.X)
+    _expand_wildcard_patterns,  # noqa: F401
+    _get_query_tracker,  # noqa: F401
+    _get_wiki_enabled_repos,  # noqa: F401
+    _list_global_repos,  # noqa: F401
 )
 
 logger = logging.getLogger(__name__)

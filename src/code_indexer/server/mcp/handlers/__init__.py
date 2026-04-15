@@ -29,6 +29,34 @@ from code_indexer.server.mcp.handlers._utils import (  # noqa: F401
     _truncate_field,
     _truncate_regex_field,
     WILDCARD_CHARS,
+    # Utility functions extracted from _legacy (now live in _utils)
+    _apply_fts_payload_truncation,
+    _apply_payload_truncation,
+    _apply_regex_payload_truncation,
+    _apply_scip_payload_truncation,
+    _apply_temporal_payload_truncation,
+    _coerce_float,
+    _coerce_int,
+    _enrich_with_wiki_url,
+    _error_with_suggestions,
+    _expand_wildcard_patterns,
+    _format_omni_response,
+    _get_access_filtering_service,
+    _get_app_refresh_scheduler,
+    _get_available_repos,
+    _get_global_repo,
+    _get_golden_repos_dir,
+    _get_hnsw_health_service,
+    _get_query_tracker,
+    _get_scip_audit_repository,
+    _get_scip_query_service,
+    _get_temporal_status,
+    _get_wiki_enabled_repos,
+    _is_temporal_query,
+    _list_global_repos,
+    _mcp_response,
+    _parse_json_string_array,
+    _validate_symbol_format,
 )
 
 import sys as _sys
@@ -132,37 +160,13 @@ from code_indexer.server.mcp.handlers.scip import (  # noqa: F401, E402
 from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     # Package-level attributes expected by protocol.py and tests
     HANDLER_REGISTRY,
-    # Utilities (originally in _legacy, now imported there from _utils)
-    _apply_fts_payload_truncation,
-    _apply_payload_truncation,
-    _apply_regex_payload_truncation,
-    _apply_scip_payload_truncation,
-    _apply_temporal_payload_truncation,
-    _coerce_float,
-    _coerce_int,
-    _enrich_with_wiki_url,
-    _error_with_suggestions,
-    _expand_wildcard_patterns,
-    _format_omni_response,
-    _get_access_filtering_service,
-    _get_app_refresh_scheduler,
-    _get_available_repos,
-    _get_global_repo,
-    _get_golden_repos_dir,
-    _get_hnsw_health_service,
-    _get_query_tracker,
-    _get_scip_audit_repository,
-    _get_scip_query_service,
-    _get_temporal_status,
-    _get_wiki_enabled_repos,
-    _is_temporal_query,
-    _list_global_repos,
-    _mcp_response,
-    _parse_json_string_array,
-    _validate_symbol_format,
     # Domain helpers still in _legacy.py (not yet extracted)
     _resolve_git_repo_path,
     _resolve_repo_path,
+)
+
+# Write-mode helpers live in files.py (extracted from _legacy during Story #496)
+from code_indexer.server.mcp.handlers.files import (  # noqa: F401, E402
     _write_mode_acquire_lock,
     _write_mode_create_marker,
     _write_mode_run_refresh,
@@ -368,3 +372,8 @@ from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
     handle_gitlab_ci_retry_pipeline,
     handle_gitlab_ci_cancel_pipeline,
 )
+
+# Re-export infrastructure symbols patched by tests via handlers.X
+from code_indexer.server.middleware.correlation import get_correlation_id  # noqa: F401, E402
+from code_indexer.server.logging_utils import format_error_log  # noqa: F401, E402
+from code_indexer.global_repos.global_registry import GlobalRegistry  # noqa: F401, E402
