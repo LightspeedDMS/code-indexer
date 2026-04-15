@@ -919,7 +919,15 @@ class GitOperationsService:
             has_more = (offset + lines_returned) < total_lines
             next_offset = (offset + lines_returned) if has_more else None
 
+            # Count changed files. Unified-diff format has "diff --git" markers;
+            # --stat output (stat_only=True) has no such markers but emits a
+            # summary line like "N files changed, ...". Fall back to parsing
+            # that summary when the marker count is zero and output is non-empty.
             files_changed = full_diff_text.count("diff --git")
+            if files_changed == 0 and full_diff_text:
+                stat_summary = re.search(r"(\d+) files? changed", full_diff_text)
+                if stat_summary:
+                    files_changed = int(stat_summary.group(1))
 
             return {
                 "diff_text": diff_text,

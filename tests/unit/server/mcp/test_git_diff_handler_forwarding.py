@@ -189,6 +189,48 @@ class TestGitDiffHandlerForwarding:
             f"Expected stat output, got: {diff_text!r}"
         )
 
+    def test_git_diff_stat_only_reports_nonzero_files_changed_count(
+        self, tmp_path: Path
+    ):
+        """Regression for files_changed counter: when stat_only=True, the
+        response metadata files_changed must reflect the actual file count
+        reported by git --stat, not zero.
+
+        Background: git_operations_service.git_diff previously computed
+        files_changed by counting 'diff --git' markers in the diff output.
+        That pattern only appears in unified-diff format, so --stat output
+        (which has no 'diff --git' markers) always reported files_changed=0
+        even though the stat summary line clearly shows 'N files changed'.
+        """
+        from code_indexer.server.mcp.handlers.git_read import git_diff
+
+        repo, shas = _make_real_repo(tmp_path)
+        # shas[0]..shas[2] spans 2 modifications to 2 different files
+        # (file_a.txt at commit 1 and file_b.txt at commit 2).
+        user = _make_user()
+
+        with _patch_resolve(repo):
+            result = _extract(
+                git_diff(
+                    {
+                        "repository_alias": "test-repo",
+                        "from_revision": shas[0],
+                        "to_revision": shas[2],
+                        "stat_only": True,
+                    },
+                    user,
+                )
+            )
+
+        assert result["success"] is True, result.get("error")
+        # The diff spans file_a.txt and file_b.txt (2 files changed).
+        # Before fix: files_changed=0 (counter looks for 'diff --git' markers
+        # which don't appear in --stat output). After fix: files_changed=2.
+        assert result["files_changed"] == 2, (
+            f"Expected files_changed=2 for stat_only diff, got "
+            f"{result['files_changed']}. diff_text={result['diff_text']!r}"
+        )
+
     def test_git_diff_forwards_path_filter(self, tmp_path: Path):
         """Handler must forward path filter; only the filtered file should appear in diff."""
         from code_indexer.server.mcp.handlers.git_read import git_diff

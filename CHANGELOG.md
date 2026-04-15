@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.15.3
+
+### Fixes
+
+- fix: `git_diff` response metadata `files_changed` counter was always 0 when `stat_only=true`. Root cause: `git_operations_service.git_diff()` computed `files_changed` by counting `"diff --git"` markers in the raw output, but git's `--stat` format emits no such markers -- only a summary line like "N files changed, K insertions(+), L deletions(-)". Fix: when the marker count is zero and output is non-empty, fall back to parsing the stat summary line via regex `r"(\d+) files? changed"`. Unified-diff path is unchanged; only stat/stat_only paths get the new fallback. The actual diff_text content was always correct -- only the counter metadata was wrong, so MCP clients that read `diff_text` saw the right data but clients that read `files_changed` saw 0. 1 new regression test.
+
 ## v9.15.2
 
 ### Fixes
