@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from code_indexer.server.services.dep_map_file_utils import (
     load_domains_json as _load_domains_json_util,
+    parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
 )
 from code_indexer.server.services.dep_map_health_detector import (
     REPAIRABLE_ANOMALY_TYPES,
@@ -140,6 +141,10 @@ class DepMapRepairExecutor:
         # Phase 3: Reconcile _domains.json (FREE)
         self._report_progress(70, "Phase 3: Reconciling domains.json")
         self._run_phase3(output_dir, health_report, fixed, errors)
+
+        # Phase 3.5: Backfill JSON metadata from .md files (FREE -- Bug #687 Fix 4)
+        self._report_progress(75, "Phase 3.5: Backfilling JSON metadata from markdown")
+        self._run_phase35(output_dir, fixed, errors)
 
         # Phase 4: Regenerate _index.md (FREE -- programmatic)
         self._report_progress(80, "Phase 4: Regenerating index")
@@ -363,6 +368,94 @@ class DepMapRepairExecutor:
             self._log("Regenerated _index.md")
         except Exception as e:
             errors.append(f"Failed to regenerate _index.md: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase 3.5: Backfill JSON description from .md files (Bug #687 Fix 4/5)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_phase35(
+        self,
+        output_dir: Path,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """
+        Phase 3.5: For each domain in _domains.json with an empty description,
+        extract description from the corresponding .md file and update _domains.json.
+
+        Only description is backfilled — evidence cannot be parsed from .md files
+        and requires Claude CLI re-analysis (Phase 1) to populate.
+
+        Idempotent: domains that already have a non-empty description are unchanged.
+        """
+        domain_list = self._load_domains_json(output_dir)
+        updated_count = 0
+
+        for domain in domain_list:
+            name = domain.get("name", "")
+            if not name or "/" in name or "\\" in name or ".." in name:
+                continue
+            desc = domain.get("description", "") or ""
+            if desc.strip():
+                continue  # already has description — leave it untouched
+            md_file = output_dir / f"{name}.md"
+            if not md_file.exists():
+                continue
+            extracted = self._extract_description_from_md(md_file)
+            if extracted:
+                domain["description"] = extracted
+                updated_count += 1
+
+        if updated_count > 0:
+            domains_file = output_dir / "_domains.json"
+            try:
+                domains_file.write_text(
+                    json.dumps(domain_list, indent=2), encoding="utf-8"
+                )
+                fixed.append(f"backfilled description for {updated_count} domain(s)")
+                self._log(
+                    f"Phase 3.5: backfilled description for {updated_count} domain(s)"
+                )
+            except OSError as e:
+                errors.append(f"Phase 3.5: failed to write _domains.json: {e}")
+                self._log(f"Phase 3.5 write error: {e}")
+
+    def _extract_description_from_md(self, md_file: Path) -> str:
+        """
+        Extract a description string from a domain .md file.
+
+        Strategy (in order):
+        1. YAML frontmatter 'description' field (present after Fix 1)
+        2. First non-empty, non-heading content line after '## Overview' section
+
+        Returns empty string if nothing useful is found.
+        """
+        try:
+            content = md_file.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("Phase 3.5: could not read %s: %s", md_file, e)
+            return ""
+
+        # Strategy 1: frontmatter description field
+        frontmatter = _parse_yaml_frontmatter_util(content)
+        if frontmatter:
+            desc = (frontmatter.get("description") or "").strip()
+            if desc:
+                return desc
+
+        # Strategy 2: first content line of ## Overview section
+        in_overview = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped == "## Overview":
+                in_overview = True
+                continue
+            if in_overview:
+                if stripped.startswith("##"):
+                    break  # entered next section — nothing found
+                if stripped and not stripped.startswith("#"):
+                    return stripped
+        return ""
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers

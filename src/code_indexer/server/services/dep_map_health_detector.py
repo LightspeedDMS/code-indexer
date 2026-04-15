@@ -222,6 +222,9 @@ class DepMapHealthDetector:
                 self._check_stale_participating_repos(domain_list, known_repos)
             )
 
+        # Check 8: Domains with empty JSON description/evidence but valid .md files
+        anomalies.extend(self._check_empty_json_metadata(output_dir, domain_list))
+
         # Determine overall status
         status = self._compute_status(anomalies)
 
@@ -482,6 +485,56 @@ class DepMapHealthDetector:
                 )
             ]
         return []
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Check 8: Empty JSON metadata when .md has valid content (Bug #687)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_empty_json_metadata(
+        self,
+        output_dir: Path,
+        domain_list: List[Dict[str, Any]],
+    ) -> List[Anomaly]:
+        """
+        Check 8: Flag domains where _domains.json has empty description/evidence
+        but the corresponding .md file exists with a valid ## Overview section.
+
+        This detects the silent drift described in Bug #687 where Pass 2 writes
+        good .md content but never back-fills _domains.json metadata.
+
+        Not in REPAIRABLE_ANOMALY_TYPES -- repaired by Phase 3.5 backfill,
+        not by Phase 1 Claude CLI re-analysis.
+        """
+        anomalies = []
+        for domain in domain_list:
+            name = domain.get("name", "")
+            if not name:
+                continue
+            # Guard against path traversal: domain names must be simple identifiers
+            if "/" in name or "\\" in name or ".." in name:
+                logger.warning("Skipping domain with unsafe name in Check 8: %r", name)
+                continue
+            desc = domain.get("description", "") or ""
+            evidence = domain.get("evidence", "") or ""
+            if desc.strip() or evidence.strip():
+                continue  # metadata present — not a drift case
+            md_file = output_dir / f"{name}.md"
+            if not md_file.exists():
+                continue  # missing file is caught by Check 1
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.warning("Check 8: could not read domain file %s: %s", md_file, e)
+                continue
+            if "## Overview" in content:
+                anomalies.append(
+                    Anomaly(
+                        type="empty_json_metadata",
+                        domain=name,
+                        detail="description and evidence empty in JSON but .md has ## Overview",
+                    )
+                )
+        return anomalies
 
     # ─────────────────────────────────────────────────────────────────────────
     # Status computation

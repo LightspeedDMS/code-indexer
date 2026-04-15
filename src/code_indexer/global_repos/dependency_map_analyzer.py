@@ -1133,20 +1133,52 @@ Rules:
                 )
                 return
 
-        # Build YAML frontmatter
-        now = datetime.now(timezone.utc).isoformat()
-        frontmatter = "---\n"
-        frontmatter += f"domain: {domain_name}\n"
-        frontmatter += f"last_analyzed: {now}\n"
-        frontmatter += "participating_repos:\n"
-        for repo in participating_repos:
-            frontmatter += f"  - {repo}\n"
-        frontmatter += "---\n\n"
+        # Build YAML frontmatter (description included so Phase 3.5 can backfill JSON)
+        description = domain.get("description", "")
+        frontmatter = self._build_domain_frontmatter(
+            domain_name=domain_name,
+            description=description,
+            participating_repos=participating_repos,
+        )
 
         # Write domain file
         domain_file = staging_dir / f"{domain_name}.md"
         domain_file.write_text(frontmatter + result)
         logger.info(f"Pass 2 complete for domain '{domain_name}': wrote {domain_file}")
+
+    def _build_domain_frontmatter(
+        self,
+        domain_name: str,
+        description: str,
+        participating_repos: List[str],
+    ) -> str:
+        """
+        Build the YAML frontmatter block for a domain .md file (Fix 1, Bug #687).
+
+        Includes the 'description' field so Phase 3.5 can backfill _domains.json
+        by reading it from frontmatter rather than relying on JSON staying in sync.
+
+        The description value is YAML-escaped via yaml.dump to handle colons,
+        quotes, newlines, and other special characters safely.
+
+        Returns frontmatter string ending with '---\\n\\n' (ready to prepend to body).
+        """
+        import yaml  # lazy import — yaml not needed at module level
+
+        now = datetime.now(timezone.utc).isoformat()
+        # yaml.dump produces a safe scalar (quoted if necessary); strip trailing newline
+        desc_yaml = yaml.dump({"description": description}, default_flow_style=False)
+        # desc_yaml is "description: <value>\n"; extract just the value part
+        desc_line = desc_yaml.rstrip("\n")
+        fm = "---\n"
+        fm += f"domain: {domain_name}\n"
+        fm += f"{desc_line}\n"
+        fm += f"last_analyzed: {now}\n"
+        fm += "participating_repos:\n"
+        for repo in participating_repos:
+            fm += f"  - {repo}\n"
+        fm += "---\n\n"
+        return fm
 
     def run_pass_3_index(
         self,

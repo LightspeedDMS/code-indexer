@@ -1786,56 +1786,84 @@ class DependencyMapService:
                 )
                 return affected, True
 
-        # Build alias-to-domain index for fast lookup
+        # Apply assignments and write updated _domains.json (Fix 2, Bug #687)
+        affected = self._apply_domain_assignments(
+            assignments=assignments,
+            domain_list=domain_list,
+            dependency_map_dir=dependency_map_dir,
+        )
+        logger.info(
+            f"Updated _domains.json with {len(new_repos)} new repo(s): "
+            f"affected domains: {affected}"
+        )
+        return affected, True
+
+    def _make_new_domain_entry(
+        self, domain_name: str, repo_alias: str
+    ) -> Dict[str, Any]:
+        """
+        Build a minimal domain dict for a brand-new domain (Fix 2, Bug #687).
+
+        Sets needs_reanalysis=True so Check 8 flags it for Phase 3.5 backfill
+        rather than leaving description="" silently in _domains.json.
+        """
+        return {
+            "name": domain_name,
+            "description": "",
+            "participating_repos": [repo_alias],
+            "evidence": "",
+            "needs_reanalysis": True,
+        }
+
+    def _apply_domain_assignments(
+        self,
+        assignments: List[Dict[str, Any]],
+        domain_list: List[Dict[str, Any]],
+        dependency_map_dir: Path,
+    ) -> Set[str]:
+        """
+        Apply Claude's assignment list to domain_list and persist _domains.json.
+
+        Adds repos to existing domains or creates new domain entries flagged with
+        needs_reanalysis=True (Fix 2, Bug #687). Writes updated _domains.json to disk.
+
+        Returns the set of domain names that were affected.
+        """
+        affected: Set[str] = set()
         domain_by_name = {d["name"]: d for d in domain_list}
 
-        # Apply assignments from Claude's response
         for assignment in assignments:
             repo_alias = assignment.get("repo")
             assigned_domains = assignment.get("domains", [])
-
             if not repo_alias or not assigned_domains:
                 continue
-
             for domain_name in assigned_domains:
                 if domain_name in domain_by_name:
-                    domain = domain_by_name[domain_name]
-                    repos = domain.setdefault("participating_repos", [])
+                    repos = domain_by_name[domain_name].setdefault(
+                        "participating_repos", []
+                    )
                     if repo_alias not in repos:
                         repos.append(repo_alias)
-                    affected.add(domain_name)
                     logger.info(
-                        f"Assigned new repo '{repo_alias}' to existing domain '{domain_name}'"
+                        f"Assigned repo '{repo_alias}' to domain '{domain_name}'"
                     )
                 else:
-                    # Create new domain with this repo as first participant
-                    new_domain = {
-                        "name": domain_name,
-                        "description": "",
-                        "participating_repos": [repo_alias],
-                        "evidence": "",
-                    }
-                    domain_list.append(new_domain)
-                    domain_by_name[domain_name] = new_domain
-                    affected.add(domain_name)
+                    new_entry = self._make_new_domain_entry(domain_name, repo_alias)
+                    domain_list.append(new_entry)
+                    domain_by_name[domain_name] = new_entry
                     logger.info(
                         f"Created new domain '{domain_name}' for repo '{repo_alias}'"
                     )
+                affected.add(domain_name)
 
-        # WRITE updated _domains.json to live path (dependency_map_dir)
-        # Ensure directory exists: live path may not exist for versioned cidx-meta repos
-        write_domains_file = dependency_map_dir / "_domains.json"
+        write_file = Path(dependency_map_dir) / "_domains.json"
         try:
-            dependency_map_dir.mkdir(parents=True, exist_ok=True)
-            write_domains_file.write_text(json.dumps(domain_list, indent=2))
-            logger.info(
-                f"Updated _domains.json with {len(new_repos)} new repo(s): "
-                f"affected domains: {affected}"
-            )
-            return affected, True
-        except Exception as e:
-            logger.warning(f"Failed to write updated _domains.json: {e}")
-            return affected, False
+            Path(dependency_map_dir).mkdir(parents=True, exist_ok=True)
+            write_file.write_text(json.dumps(domain_list, indent=2))
+        except OSError as e:
+            logger.warning(f"Failed to write _domains.json: {e}")
+
+        return affected
 
     def _remove_stale_repos_from_domains_json(
         self,
