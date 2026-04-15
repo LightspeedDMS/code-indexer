@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.15.0
+
+### Refactoring
+
+- refactor: Story #496 -- Modularize MCP handlers.py into domain-specific handler modules. Split the monolithic handlers.py (17,180 lines, 255 functions) into 13 domain modules under a handlers/ package: search.py, repos.py, files.py, admin.py, guides.py, scip.py, delegation.py, pull_requests.py, git_read.py, git_write.py, cicd.py, ssh_keys.py. Backward-compatible re-export layer in __init__.py with ForwardingModule for mock-patch transparency. _legacy.py retained for shared path resolution helpers. 5 new forwarding module tests added. Zero behavioral changes -- pure structural decomposition.
+
 ## v9.14.11
 
 ### Fixes
