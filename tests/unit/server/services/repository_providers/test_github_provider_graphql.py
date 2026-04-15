@@ -85,7 +85,9 @@ class TestGitHubGraphQLNonSearchDiscovery:
         with patch.object(
             provider, "_make_graphql_request", return_value=graphql_response
         ) as mock_graphql:
-            result = provider.discover_repositories(page=1, page_size=50, search=None)
+            result = provider.discover_repositories(
+                cursor=None, page_size=50, search=None
+            )
 
             # Verify GraphQL was called
             assert mock_graphql.called
@@ -253,23 +255,23 @@ class TestGitHubGraphQLSearchModeEnrichment:
         return mock_response
 
     @pytest.mark.asyncio
-    async def test_search_mode_uses_rest_then_enriches_with_graphql(self):
-        """Test that search mode uses REST API then enriches with GraphQL."""
+    async def test_search_mode_uses_rest_search_endpoint(self):
+        """Test that search mode uses REST search/repositories endpoint."""
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
         from code_indexer.server.services.ci_token_manager import TokenData
 
+        FAKE_TOKEN = "test-token-not-real"
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
-            platform="github", token="ghp_test123", base_url=None
+            platform="github", token=FAKE_TOKEN, base_url=None
         )
         golden_repo_manager = MagicMock()
         golden_repo_manager.list_golden_repos.return_value = []
 
         provider = GitHubProvider(token_manager, golden_repo_manager)
 
-        # Mock REST search response
         rest_repos = [
             {
                 "full_name": "owner/search-result",
@@ -282,47 +284,20 @@ class TestGitHubGraphQLSearchModeEnrichment:
             }
         ]
 
-        # Mock GraphQL enrichment response
-        graphql_enrichment = [
-            {
-                "defaultBranchRef": {
-                    "target": {
-                        "history": {
-                            "nodes": [
-                                {
-                                    "oid": "fedcba987654321",
-                                    "author": {"name": "Search Author"},
-                                    "committedDate": "2024-01-20T12:00:00Z",
-                                }
-                            ]
-                        }
-                    }
-                }
-            }
-        ]
-
         rest_response = self._create_rest_search_response(rest_repos)
-        graphql_response = self._create_graphql_enrichment_response(graphql_enrichment)
 
-        with (
-            patch.object(
-                provider, "_make_api_request", return_value=rest_response
-            ) as mock_rest,
-            patch.object(
-                provider, "_make_graphql_request", return_value=graphql_response
-            ) as mock_graphql,
-        ):
-            result = provider.discover_repositories(page=1, page_size=50, search="test")
+        with patch.object(
+            provider, "_make_api_request_checked", return_value=rest_response
+        ) as mock_rest:
+            result = provider.discover_repositories(
+                cursor=None, page_size=50, search="test"
+            )
 
-            # Verify both REST and GraphQL were called
             assert mock_rest.called
-            assert mock_graphql.called
-
-            # Verify result has commit info
+            call_args = mock_rest.call_args
+            assert "search/repositories" in str(call_args)
             assert len(result.repositories) == 1
-            repo = result.repositories[0]
-            assert repo.last_commit_hash == "fedcba9"
-            assert repo.last_commit_author == "Search Author"
+            assert result.repositories[0].name == "owner/search-result"
 
     @pytest.mark.asyncio
     async def test_enrich_with_commits_builds_batch_graphql_query(self):
@@ -438,22 +413,23 @@ class TestGitHubGraphQLGracefulDegradation:
 
     @pytest.mark.asyncio
     async def test_graphql_error_returns_repos_without_commit_info(self):
-        """Test that GraphQL errors log warning and fall back to REST API."""
+        """Test that GraphQL errors fall back to REST API."""
+        import httpx
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
         from code_indexer.server.services.ci_token_manager import TokenData
 
+        FAKE_TOKEN = "test-token-not-real"
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
-            platform="github", token="ghp_test123", base_url=None
+            platform="github", token=FAKE_TOKEN, base_url=None
         )
         golden_repo_manager = MagicMock()
         golden_repo_manager.list_golden_repos.return_value = []
 
         provider = GitHubProvider(token_manager, golden_repo_manager)
 
-        # Mock REST API fallback response
         rest_repos = [
             {
                 "full_name": "owner/fallback-repo",
@@ -466,31 +442,24 @@ class TestGitHubGraphQLGracefulDegradation:
             }
         ]
 
-        mock_rest_response = MagicMock()
+        mock_rest_response = MagicMock(spec=httpx.Response)
         mock_rest_response.status_code = 200
         mock_rest_response.headers = {}
         mock_rest_response.json.return_value = rest_repos
         mock_rest_response.raise_for_status = MagicMock()
 
-        # Simulate GraphQL request failure, REST API success
+        # GraphQL fails (httpx.post), REST succeeds (httpx.get)
         with (
-            patch.object(
-                provider,
-                "_make_graphql_request",
-                side_effect=Exception("GraphQL error"),
-            ),
-            patch.object(
-                provider, "_make_api_request", return_value=mock_rest_response
-            ),
+            patch("httpx.post", side_effect=httpx.ConnectError("graphql down")),
+            patch("httpx.get", return_value=mock_rest_response),
         ):
-            # Should not raise, should log warning and fall back to REST
-            result = provider.discover_repositories(page=1, page_size=50, search=None)
+            result = provider.discover_repositories(
+                cursor=None, page_size=50, search=None
+            )
 
-            # Result should be valid with repositories but without commit info
             assert result is not None
             assert len(result.repositories) == 1
             assert result.repositories[0].name == "owner/fallback-repo"
-            # Commit info should be None (REST API doesn't provide it)
             assert result.repositories[0].last_commit_hash is None
             assert result.repositories[0].last_commit_author is None
             assert result.repositories[0].last_commit_date is None
@@ -543,23 +512,25 @@ class TestGitHubGraphQLExistingFunctionality:
 
     @pytest.mark.asyncio
     async def test_pagination_still_works(self):
-        """Test that pagination is preserved in GraphQL mode."""
+        """Test that cursor-based pagination works in GraphQL mode."""
+        import httpx
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
         from code_indexer.server.services.ci_token_manager import TokenData
 
+        FAKE_TOKEN = "test-token-not-real"
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
-            platform="github", token="ghp_test123", base_url=None
+            platform="github", token=FAKE_TOKEN, base_url=None
         )
         golden_repo_manager = MagicMock()
         golden_repo_manager.list_golden_repos.return_value = []
 
         provider = GitHubProvider(token_manager, golden_repo_manager)
 
-        # Mock GraphQL response with pagination
-        mock_response = MagicMock()
+        # GraphQL response: empty nodes but hasNextPage=True
+        mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -577,15 +548,12 @@ class TestGitHubGraphQLExistingFunctionality:
         }
         mock_response.raise_for_status = MagicMock()
 
-        with patch.object(
-            provider, "_make_graphql_request", return_value=mock_response
-        ):
-            result = provider.discover_repositories(page=2, page_size=50)
+        with patch("httpx.post", return_value=mock_response):
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
-            assert result.page == 2
             assert result.page_size == 50
-            # Total pages should be calculated from totalCount
-            assert result.total_pages == 3  # ceil(150/50)
+            assert result.has_next_page is True
+            assert result.next_cursor is not None
 
     @pytest.mark.asyncio
     async def test_indexed_repo_exclusion_still_works(self):
@@ -673,7 +641,7 @@ class TestGitHubGraphQLExistingFunctionality:
         with patch.object(
             provider, "_make_graphql_request", return_value=mock_response
         ):
-            result = provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
             # Should only return new-repo
             assert len(result.repositories) == 1

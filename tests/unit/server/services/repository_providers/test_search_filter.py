@@ -9,6 +9,7 @@ With server-side filtering, the API returns pre-filtered results, so:
 """
 
 from typing import Optional
+import httpx
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -94,7 +95,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="auth"
+                cursor=None, page_size=50, search="auth"
             )
 
         assert len(result.repositories) == 1
@@ -115,7 +116,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="authentication"
+                cursor=None, page_size=50, search="authentication"
             )
 
         assert len(result.repositories) == 1
@@ -134,7 +135,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="myproject"
+                cursor=None, page_size=50, search="myproject"
             )
         assert len(result.repositories) == 1
 
@@ -142,7 +143,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="important"
+                cursor=None, page_size=50, search="important"
             )
         assert len(result.repositories) == 1
 
@@ -157,7 +158,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="nonexistent"
+                cursor=None, page_size=50, search="nonexistent"
             )
 
         assert len(result.repositories) == 0
@@ -175,7 +176,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search=""
+                cursor=None, page_size=50, search=""
             )
         assert len(result.repositories) == 2
 
@@ -183,7 +184,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search=None
+                cursor=None, page_size=50, search=None
             )
         assert len(result.repositories) == 2
 
@@ -203,7 +204,7 @@ class TestGitLabProviderSearchFilter:
                 gitlab_provider, "_make_api_request", return_value=mock_response
             ):
                 result = gitlab_provider.discover_repositories(
-                    page=1, page_size=50, search=search_term
+                    cursor=None, page_size=50, search=search_term
                 )
                 assert isinstance(result.repositories, list)
 
@@ -221,7 +222,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="team"
+                cursor=None, page_size=50, search="team"
             )
 
         # All API results returned (server-side filtering already done)
@@ -249,7 +250,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="auth"
+                cursor=None, page_size=50, search="auth"
             )
 
         assert len(result.repositories) == 1
@@ -282,7 +283,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="project"
+                cursor=None, page_size=50, search="project"
             )
 
         # All repos returned by API are included (no client-side filtering)
@@ -306,7 +307,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="project"
+                cursor=None, page_size=50, search="project"
             )
 
         assert len(result.repositories) == 1
@@ -337,7 +338,7 @@ class TestGitLabProviderSearchFilter:
             gitlab_provider, "_make_api_request", return_value=mock_response
         ):
             result = gitlab_provider.discover_repositories(
-                page=1, page_size=50, search="commit"
+                cursor=None, page_size=50, search="commit"
             )
 
         # All API results returned (server-side filtering by name/desc)
@@ -437,7 +438,7 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="auth"
+                cursor=None, page_size=50, search="auth"
             )
 
         assert len(result.repositories) == 1
@@ -458,7 +459,7 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="authentication"
+                cursor=None, page_size=50, search="authentication"
             )
 
         assert len(result.repositories) == 1
@@ -477,7 +478,7 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="awesome"
+                cursor=None, page_size=50, search="awesome"
             )
         assert len(result.repositories) == 1
 
@@ -492,36 +493,31 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="nonexistent"
+                cursor=None, page_size=50, search="nonexistent"
             )
 
         assert len(result.repositories) == 0
 
     @pytest.mark.asyncio
     async def test_search_empty_string_returns_all(self, github_provider):
-        """Test that empty search uses regular API and returns all repos."""
+        """Test that empty search uses regular REST API and returns all repos."""
         repos = [
             create_mock_github_repo("repo-a", "owner/repo-a"),
             create_mock_github_repo("repo-b", "owner/repo-b"),
         ]
-        # Empty search uses regular API (not search API)
+        # Empty/None search tries GraphQL first; ConnectError forces REST fallback.
+        # Mock the external HTTP layer only: httpx.post (GraphQL) and httpx.get (REST).
         mock_response = create_github_mock_response(repos, is_search=False)
 
-        with patch.object(
-            github_provider, "_make_api_request", return_value=mock_response
-        ):
-            result = github_provider.discover_repositories(
-                page=1, page_size=50, search=""
-            )
-        assert len(result.repositories) == 2
-
-        with patch.object(
-            github_provider, "_make_api_request", return_value=mock_response
-        ):
-            result = github_provider.discover_repositories(
-                page=1, page_size=50, search=None
-            )
-        assert len(result.repositories) == 2
+        for search_value in ["", None]:
+            with patch(
+                "httpx.post", side_effect=httpx.ConnectError("graphql unavailable")
+            ):
+                with patch("httpx.get", return_value=mock_response):
+                    result = github_provider.discover_repositories(
+                        cursor=None, page_size=50, search=search_value
+                    )
+            assert len(result.repositories) == 2
 
     @pytest.mark.asyncio
     async def test_search_special_characters_handled_safely(self, github_provider):
@@ -538,7 +534,7 @@ class TestGitHubProviderSearchFilter:
                 github_provider, "_make_api_request", return_value=mock_response
             ):
                 result = github_provider.discover_repositories(
-                    page=1, page_size=50, search=search_term
+                    cursor=None, page_size=50, search=search_term
                 )
                 assert isinstance(result.repositories, list)
 
@@ -569,7 +565,7 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="repo"
+                cursor=None, page_size=50, search="repo"
             )
 
         # All repos returned by API are included (no client-side filtering)
@@ -593,7 +589,7 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="repo"
+                cursor=None, page_size=50, search="repo"
             )
 
         assert len(result.repositories) == 1
@@ -624,7 +620,7 @@ class TestGitHubProviderSearchFilter:
             github_provider, "_make_api_request", return_value=mock_response
         ):
             result = github_provider.discover_repositories(
-                page=1, page_size=50, search="commit"
+                cursor=None, page_size=50, search="commit"
             )
 
         # All API results returned (server-side filtering by name/desc)

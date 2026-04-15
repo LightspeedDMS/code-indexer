@@ -53,18 +53,30 @@ class DiscoveredRepository(BaseModel):
 
 
 class RepositoryDiscoveryResult(BaseModel):
-    """Paginated response model for repository discovery endpoint."""
+    """Cursor-based response model for repository discovery endpoint."""
+
+    model_config = {"extra": "forbid"}
 
     repositories: List[DiscoveredRepository] = Field(
         ..., description="List of discovered repositories"
     )
-    total_count: int = Field(
-        ..., ge=0, description="Total number of repositories available"
-    )
-    page: int = Field(..., ge=1, description="Current page number (1-indexed)")
-    page_size: int = Field(..., ge=1, description="Number of items per page")
-    total_pages: int = Field(..., ge=0, description="Total number of pages")
+    page_size: int = Field(..., ge=1, description="Target number of items per page")
     platform: Literal["gitlab", "github"] = Field(..., description="Platform source")
+    has_next_page: bool = Field(
+        ..., description="Whether more repositories exist beyond this page"
+    )
+    next_cursor: Optional[str] = Field(
+        None,
+        description="Opaque cursor token for fetching the next page (None if exhausted)",
+    )
+    partial_due_to_cap: bool = Field(
+        ...,
+        description="True when safety cap was hit and page may be shorter than page_size",
+    )
+    source_total: Optional[int] = Field(
+        None,
+        description="Informational total from source API (pre-filter; may not equal len(repositories))",
+    )
 
 
 class DiscoveryProviderError(BaseModel):

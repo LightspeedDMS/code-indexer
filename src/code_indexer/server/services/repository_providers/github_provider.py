@@ -5,10 +5,13 @@ Implements repository discovery from GitHub API, supporting user repositories
 and organization repositories accessible via personal access token.
 """
 
+import base64
+import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, List, Optional, Set
+from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple, Union
 
 import httpx
 
@@ -26,11 +29,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CURSOR_VERSION = 1
+_CURSOR_PLATFORM = "github"
+_FILL_SAFETY_CAP = 5  # max source batches fetched per user page
+GITHUB_MAX_PAGE_SIZE = 100  # GitHub API hard limit for per_page
+
 
 class GitHubProviderError(Exception):
     """Exception raised for GitHub provider errors."""
 
     pass
+
+
+@dataclass
+class _CursorState:
+    """Decoded cursor state for GitHub pagination."""
+
+    source: Optional[Union[str, int]]  # GraphQL endCursor or REST page number
+    skip: int  # items to skip within the first fetched batch
+    mode: str = "graphql"  # active backend: "graphql", "rest", or "search"
 
 
 class GitHubProvider(RepositoryProviderBase):
@@ -543,294 +560,468 @@ class GitHubProvider(RepositoryProviderBase):
 
                 raise GitHubProviderError(f"GitHub API rate limit exceeded.{reset_msg}")
 
-    def discover_repositories(
-        self, page: int = 1, page_size: int = 50, search: Optional[str] = None
-    ) -> RepositoryDiscoveryResult:
+    def _make_api_request_checked(
+        self, endpoint: str, params: Optional[dict] = None
+    ) -> httpx.Response:
         """
-        Discover repositories from GitHub API.
-
-        Non-search mode uses GraphQL with commit info.
-        Search mode uses REST search then enriches with GraphQL.
-
-        Args:
-            page: Page number (1-indexed)
-            page_size: Number of repositories per page (max 100 for GitHub)
-            search: Optional search query
+        Make a REST API request and translate transport/HTTP errors to GitHubProviderError.
 
         Returns:
-            RepositoryDiscoveryResult with discovered repositories
+            Successful HTTP response
 
         Raises:
-            GitHubProviderError: If API call fails or token not configured
+            GitHubProviderError: On timeout, HTTP error, or network failure
+        """
+        try:
+            response = self._make_api_request(endpoint, params=params)
+            self._check_rate_limit(response)
+            response.raise_for_status()
+        except httpx.TimeoutException as e:
+            raise GitHubProviderError(f"GitHub API request timed out: {e}") from e
+        except httpx.HTTPStatusError as e:
+            if hasattr(e, "response") and e.response is not None:
+                self._check_rate_limit(e.response)
+            status = (
+                e.response.status_code
+                if hasattr(e, "response") and e.response
+                else "unknown"
+            )
+            raise GitHubProviderError(f"GitHub API error: {status}") from e
+        except httpx.RequestError as e:
+            raise GitHubProviderError(f"GitHub API request failed: {e}") from e
+        return response
+
+    _VALID_CURSOR_MODES = frozenset({"graphql", "rest", "search"})
+
+    def _encode_cursor(
+        self, source: Optional[Union[str, int]], skip: int, mode: str = "graphql"
+    ) -> str:
+        """
+        Encode a cursor payload as an opaque base64-JSON string.
+
+        Args:
+            source: GraphQL endCursor string or REST integer page number
+            skip: Non-negative items to skip within the first fetched batch
+            mode: Active backend: "graphql", "rest", or "search"
+        """
+        payload = {
+            "v": _CURSOR_VERSION,
+            "platform": _CURSOR_PLATFORM,
+            "source": source,
+            "skip": skip,
+            "mode": mode,
+        }
+        return base64.b64encode(json.dumps(payload).encode()).decode()
+
+    def _decode_cursor_payload(self, token: str) -> Optional[dict]:
+        """Decode base64 token to JSON dict; return None on failure."""
+        import binascii
+
+        try:
+            raw = base64.b64decode(token)
+        except (binascii.Error, ValueError) as exc:
+            logger.debug(
+                format_error_log(
+                    "GIT-CURSOR-001", f"GitHub cursor base64 failed: {exc}"
+                )
+            )
+            return None
+        try:
+            return json.loads(raw)  # type: ignore[no-any-return]  # json.loads returns Any
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.debug(
+                format_error_log("GIT-CURSOR-002", f"GitHub cursor JSON failed: {exc}")
+            )
+            return None
+
+    def _validate_cursor_metadata(self, payload: dict) -> bool:
+        """Validate version, platform and mode fields; log and return False on mismatch."""
+        if payload.get("v") != _CURSOR_VERSION:
+            logger.debug(
+                format_error_log(
+                    "GIT-CURSOR-003",
+                    f"GitHub cursor version mismatch (got {payload.get('v')!r})",
+                )
+            )
+            return False
+        if payload.get("platform") != _CURSOR_PLATFORM:
+            logger.debug(
+                format_error_log(
+                    "GIT-CURSOR-004",
+                    f"GitHub cursor platform mismatch (got {payload.get('platform')!r})",
+                )
+            )
+            return False
+        mode = payload.get("mode", "graphql")
+        if mode not in self._VALID_CURSOR_MODES:
+            logger.debug(
+                format_error_log(
+                    "GIT-CURSOR-007",
+                    f"GitHub cursor mode={mode!r} not recognized",
+                )
+            )
+            return False
+        return True
+
+    def _extract_cursor_fields(self, payload: dict) -> Optional[_CursorState]:
+        """Extract source, skip, mode from a validated payload dict."""
+        try:
+            source = payload["source"]
+            skip = int(payload["skip"])
+            mode = str(payload.get("mode", "graphql"))
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.debug(
+                format_error_log("GIT-CURSOR-005", f"GitHub cursor field error: {exc}")
+            )
+            return None
+        if skip < 0:
+            logger.debug(
+                format_error_log(
+                    "GIT-CURSOR-006", f"GitHub cursor skip={skip} is negative"
+                )
+            )
+            return None
+        return _CursorState(source=source, skip=skip, mode=mode)
+
+    def _decode_cursor(self, token: Optional[str]) -> Optional[_CursorState]:
+        """
+        Decode an opaque cursor string into a _CursorState.
+
+        Returns None for any invalid input, triggering a silent restart.
+        """
+        if token is None:
+            return None
+        payload = self._decode_cursor_payload(token)
+        if payload is None:
+            return None
+        if not self._validate_cursor_metadata(payload):
+            return None
+        return self._extract_cursor_fields(payload)
+
+    def _fetch_batch_graphql(
+        self, source: Optional[str], batch_size: int
+    ) -> Tuple[List[DiscoveredRepository], Optional[str], bool, Optional[int]]:
+        """
+        Fetch one batch via GraphQL.
+
+        Returns:
+            (parsed_repos_unfiltered, next_source, has_more, source_total)
+
+        Raises:
+            GitHubProviderError: On API errors
+        """
+        query = self._build_graphql_query(first=batch_size, after=source)
+        try:
+            response = self._make_graphql_request(query)
+        except httpx.TimeoutException as e:
+            raise GitHubProviderError(f"GitHub API request timed out: {e}") from e
+        self._check_rate_limit(response)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = (
+                e.response.status_code
+                if hasattr(e, "response") and e.response
+                else "unknown"
+            )
+            raise GitHubProviderError(f"GitHub API error: {status}") from e
+
+        data = response.json()
+        if "data" not in data or "viewer" not in data["data"]:
+            raise GitHubProviderError("Invalid GraphQL response structure")
+
+        repos_data = data["data"]["viewer"].get("repositories", {})
+        nodes = repos_data.get("nodes", [])
+        page_info = repos_data.get("pageInfo", {})
+        source_total: Optional[int] = repos_data.get("totalCount")
+        has_more = bool(page_info.get("hasNextPage"))
+        next_source: Optional[str] = page_info.get("endCursor")
+        parsed = [self._parse_graphql_response(n) for n in nodes]
+        return parsed, next_source, has_more, source_total
+
+    def _fetch_batch_rest(
+        self, source: Optional[int], batch_size: int
+    ) -> Tuple[List[DiscoveredRepository], Optional[int], bool, Optional[int]]:
+        """
+        Fetch one batch via REST user/repos endpoint (GraphQL fallback).
+
+        Returns:
+            (parsed_repos_unfiltered, next_source, has_more, source_total)
+
+        Raises:
+            GitHubProviderError: On API errors
+        """
+        page = source if isinstance(source, int) else 1
+        params = {
+            "page": page,
+            "per_page": batch_size,
+            "sort": "pushed",
+            "direction": "desc",
+            "affiliation": "owner,collaborator,organization_member",
+        }
+        response = self._make_api_request_checked("user/repos", params=params)
+        repos = response.json()
+        link_header = response.headers.get("Link", "")
+        last_page = self._parse_link_header_for_last_page(link_header)
+        has_more = page < last_page
+        next_source: Optional[int] = page + 1 if has_more else None
+        source_total: Optional[int] = last_page * batch_size if last_page > 1 else None
+        parsed = [self._parse_repository(r) for r in repos]
+        return parsed, next_source, has_more, source_total
+
+    def _fetch_batch_search(
+        self, source: Optional[int], batch_size: int, search: str
+    ) -> Tuple[List[DiscoveredRepository], Optional[int], bool, Optional[int]]:
+        """
+        Fetch one batch via REST search/repositories endpoint.
+
+        Returns:
+            (parsed_repos_unfiltered, next_source, has_more, source_total)
+
+        Raises:
+            GitHubProviderError: On API errors
+        """
+        page = source if isinstance(source, int) else 1
+        params = {
+            "q": f"{search} in:name,description fork:true",
+            "page": page,
+            "per_page": batch_size,
+            "sort": "updated",
+            "order": "desc",
+        }
+        response = self._make_api_request_checked("search/repositories", params=params)
+        data = response.json()
+        repos = data.get("items", [])
+        source_total: Optional[int] = data.get("total_count")
+        total_count = source_total or 0
+        total_pages = (
+            (total_count + batch_size - 1) // batch_size if total_count > 0 else 1
+        )
+        has_more = page < total_pages
+        next_source: Optional[int] = page + 1 if has_more else None
+        parsed = [self._parse_repository(r) for r in repos]
+        return parsed, next_source, has_more, source_total
+
+    def _collect_unindexed_from_batch(
+        self,
+        batch: List[DiscoveredRepository],
+        skip: int,
+        kept: List[DiscoveredRepository],
+        target: int,
+        indexed_urls: Set[str],
+    ) -> Tuple[List[DiscoveredRepository], Optional[int]]:
+        """
+        Walk batch from skip offset, collect unindexed repos until target reached.
+
+        Returns:
+            (updated_kept, stop_index_or_None)
+            stop_index is the batch index where target was hit (inclusive); None if not hit.
+        """
+        for i, repo in enumerate(batch):
+            if i < skip:
+                continue
+            if self._is_repo_indexed(
+                repo.clone_url_https, repo.clone_url_ssh, indexed_urls
+            ):
+                continue
+            kept.append(repo)
+            if len(kept) == target:
+                return kept, i
+        return kept, None
+
+    def _build_result(
+        self,
+        kept: List[DiscoveredRepository],
+        page_size: int,
+        has_next_page: bool,
+        next_cursor: Optional[str],
+        partial_due_to_cap: bool,
+        source_total: Optional[int],
+    ) -> RepositoryDiscoveryResult:
+        """Build a RepositoryDiscoveryResult for GitHub from collected data."""
+        return RepositoryDiscoveryResult(
+            repositories=kept,
+            page_size=page_size,
+            platform="github",
+            has_next_page=has_next_page,
+            next_cursor=next_cursor,
+            partial_due_to_cap=partial_due_to_cap,
+            source_total=source_total,
+        )
+
+    def _init_discovery_state(
+        self, cursor: Optional[str], search: Optional[str]
+    ) -> _CursorState:
+        """Return decoded cursor state or a fresh initial state."""
+        decoded = self._decode_cursor(cursor)
+        if decoded is not None:
+            return decoded
+        initial_mode = "search" if search else "graphql"
+        return _CursorState(source=None, skip=0, mode=initial_mode)
+
+    def _fetch_next_batch(
+        self,
+        state: _CursorState,
+        effective_page_size: int,
+        search: Optional[str],
+    ) -> Tuple[
+        List[DiscoveredRepository], Optional[Union[str, int]], bool, Optional[int], str
+    ]:
+        """
+        Dispatch one batch fetch; raises GitHubProviderError on failure.
+
+        Returns (batch, next_source, has_more, source_total, active_mode).
+        """
+        return self._dispatch_fetch_batch(state, effective_page_size, search)
+
+    def _run_fill_loop(
+        self,
+        state: _CursorState,
+        effective: int,
+        page_size: int,
+        search: Optional[str],
+        indexed_urls: Set[str],
+    ) -> RepositoryDiscoveryResult:
+        """
+        Run the filter-fill loop and return a RepositoryDiscoveryResult.
+
+        Fetches source batches until effective unindexed repos are collected
+        or SAFETY_CAP is reached.
+        """
+        kept: List[DiscoveredRepository] = []
+        source_total: Optional[int] = None
+        batches_fetched = 0
+        while len(kept) < effective and batches_fetched < _FILL_SAFETY_CAP:
+            batch, next_source, has_more, batch_total, active_mode = (
+                self._fetch_next_batch(state, effective, search)
+            )
+            batches_fetched += 1
+            if source_total is None and batch_total is not None:
+                source_total = batch_total
+            kept, stop_idx = self._collect_unindexed_from_batch(
+                batch, state.skip, kept, effective, indexed_urls
+            )
+            if stop_idx is not None:
+                return self._result_from_stop(
+                    kept,
+                    page_size,
+                    stop_idx,
+                    len(batch),
+                    has_more,
+                    next_source,
+                    state,
+                    active_mode,
+                    source_total,
+                )
+            state = _CursorState(source=next_source, skip=0, mode=active_mode)
+            if not has_more:
+                return self._build_result(
+                    kept, page_size, False, None, False, source_total
+                )
+        cap_cursor = self._encode_cursor(state.source, state.skip, state.mode)
+        return self._build_result(kept, page_size, True, cap_cursor, True, source_total)
+
+    def _result_from_stop(
+        self,
+        kept: List[DiscoveredRepository],
+        page_size: int,
+        stop_idx: int,
+        batch_len: int,
+        has_more: bool,
+        next_source: Optional[Union[str, int]],
+        state: _CursorState,
+        active_mode: str,
+        source_total: Optional[int],
+    ) -> RepositoryDiscoveryResult:
+        """Build result when page_size target was hit inside a batch."""
+        is_last_in_batch = stop_idx == batch_len - 1
+        if is_last_in_batch and not has_more:
+            return self._build_result(kept, page_size, False, None, False, source_total)
+        next_skip = 0 if is_last_in_batch else stop_idx + 1
+        next_src = next_source if is_last_in_batch else state.source
+        enc = self._encode_cursor(next_src, next_skip, active_mode)
+        return self._build_result(kept, page_size, True, enc, False, source_total)
+
+    def _dispatch_fetch_batch(
+        self,
+        state: _CursorState,
+        effective_page_size: int,
+        search: Optional[str],
+    ) -> Tuple[
+        List[DiscoveredRepository], Optional[Union[str, int]], bool, Optional[int], str
+    ]:
+        """
+        Dispatch to the correct batch fetcher based on cursor mode and search flag.
+
+        Returns:
+            (batch, next_source, has_more, source_total, active_mode)
+
+        Raises:
+            GitHubProviderError: On API errors
+        """
+        if search:
+            batch, next_source, has_more, source_total = self._fetch_batch_search(
+                source=state.source if isinstance(state.source, int) else None,
+                batch_size=effective_page_size,
+                search=search,
+            )
+            return batch, next_source, has_more, source_total, "search"
+
+        if state.mode == "rest":
+            batch, next_source, has_more, source_total = self._fetch_batch_rest(
+                source=state.source if isinstance(state.source, int) else None,
+                batch_size=effective_page_size,
+            )
+            return batch, next_source, has_more, source_total, "rest"
+
+        try:
+            batch, gql_next, has_more, source_total = self._fetch_batch_graphql(
+                source=state.source if isinstance(state.source, str) else None,
+                batch_size=effective_page_size,
+            )
+            return batch, gql_next, has_more, source_total, "graphql"
+        except httpx.RequestError:
+            logger.warning(
+                "GraphQL batch fetch failed (network error); falling back to REST user/repos. "
+                "GraphQL cursor invalidated — restarting from REST page 1."
+            )
+            batch, next_source, has_more, source_total = self._fetch_batch_rest(
+                source=1,
+                batch_size=effective_page_size,
+            )
+            return batch, next_source, has_more, source_total, "rest"
+
+    def discover_repositories(
+        self,
+        cursor: Optional[str] = None,
+        page_size: int = 50,
+        search: Optional[str] = None,
+    ) -> RepositoryDiscoveryResult:
+        """
+        Discover repositories from GitHub using cursor-based pagination.
+
+        Runs a filter-fill loop: fetches source batches until page_size unindexed
+        repositories are collected or the safety cap is reached.
+
+        Args:
+            cursor: Opaque token from a previous call (None for first page)
+            page_size: Target number of unindexed repos to return
+            search: Optional search query (routes to REST search endpoint)
+
+        Returns:
+            RepositoryDiscoveryResult with cursor fields
+
+        Raises:
+            GitHubProviderError: If not configured or API call fails
         """
         if not self.is_configured():
             raise GitHubProviderError(
                 "GitHub token not configured. "
                 "Please configure a GitHub token in the CI Tokens settings."
             )
-
-        # Get indexed repos for filtering
+        if page_size < 1:
+            raise GitHubProviderError("page_size must be at least 1")
         indexed_urls = self._get_indexed_canonical_urls()
-
-        # GitHub API limits per_page to 100
-        effective_page_size = min(page_size, 100)
-
-        # Non-search mode: Use GraphQL for repository listing with commit info
-        if not search:
-            return self._discover_via_graphql(page, effective_page_size, indexed_urls)
-
-        # Search mode: Use REST search API then enrich with GraphQL
-        return self._discover_via_rest_search(
-            page, effective_page_size, search, indexed_urls
-        )
-
-    def _discover_via_graphql(
-        self, page: int, page_size: int, indexed_urls: Set[str]
-    ) -> RepositoryDiscoveryResult:
-        """
-        Discover repositories via GraphQL with commit info and pagination.
-
-        Falls back to REST API if GraphQL fails (graceful degradation).
-
-        Args:
-            page: Page number (1-indexed)
-            page_size: Repositories per page
-            indexed_urls: Set of already-indexed repository URLs
-
-        Returns:
-            RepositoryDiscoveryResult
-
-        Raises:
-            GitHubProviderError: If both GraphQL and REST API fail
-        """
-        try:
-            # Paginate to the requested page
-            cursor = None
-            current_page = 1
-
-            while current_page <= page:
-                query = self._build_graphql_query(first=page_size, after=cursor)
-                response = self._make_graphql_request(query)
-
-                self._check_rate_limit(response)
-                response.raise_for_status()
-
-                data = response.json()
-
-                if "data" not in data or "viewer" not in data["data"]:
-                    raise GitHubProviderError("Invalid GraphQL response structure")
-
-                viewer_data = data["data"]["viewer"]
-                repos_data = viewer_data.get("repositories", {})
-
-                # If we've reached the target page, process results
-                if current_page == page:
-                    nodes = repos_data.get("nodes", [])
-                    total_count = repos_data.get("totalCount", 0)
-
-                    # Parse repositories from GraphQL nodes
-                    repositories: List[DiscoveredRepository] = []
-                    for node in nodes:
-                        # Extract URLs for exclusion check
-                        https_url = node.get("url", "")
-                        if https_url:
-                            https_url = f"{https_url}.git"
-                        ssh_url = node.get("sshUrl", "")
-
-                        if not self._is_repo_indexed(https_url, ssh_url, indexed_urls):
-                            repositories.append(self._parse_graphql_response(node))
-
-                    # Calculate pagination
-                    total_pages = (
-                        (total_count + page_size - 1) // page_size
-                        if total_count > 0
-                        else 1
-                    )
-
-                    return RepositoryDiscoveryResult(
-                        repositories=repositories,
-                        total_count=total_count,
-                        page=page,
-                        page_size=page_size,
-                        total_pages=total_pages,
-                        platform="github",
-                    )
-
-                # Move to next page
-                page_info = repos_data.get("pageInfo", {})
-                if not page_info.get("hasNextPage"):
-                    # Requested page doesn't exist, return empty result
-                    return RepositoryDiscoveryResult(
-                        repositories=[],
-                        total_count=repos_data.get("totalCount", 0),
-                        page=page,
-                        page_size=page_size,
-                        total_pages=(
-                            (repos_data.get("totalCount", 0) + page_size - 1)
-                            // page_size
-                            if repos_data.get("totalCount", 0) > 0
-                            else 1
-                        ),
-                        platform="github",
-                    )
-
-                cursor = page_info.get("endCursor")
-                current_page += 1
-
-            # Fallback: Should never reach here, but satisfy type checker
-            return RepositoryDiscoveryResult(
-                repositories=[],
-                total_count=0,
-                page=page,
-                page_size=page_size,
-                total_pages=1,
-                platform="github",
-            )
-
-        except Exception as e:
-            # Graceful degradation: Fall back to REST API without commit info
-            logger.warning(
-                format_error_log(
-                    "GIT-GENERAL-066",
-                    f"GraphQL discovery failed, falling back to REST API: {e}",
-                )
-            )
-            return self._discover_via_rest_fallback(page, page_size, indexed_urls)
-
-    def _discover_via_rest_fallback(
-        self, page: int, page_size: int, indexed_urls: Set[str]
-    ) -> RepositoryDiscoveryResult:
-        """
-        Fallback to REST API when GraphQL fails.
-
-        Returns repositories without commit info.
-
-        Args:
-            page: Page number (1-indexed)
-            page_size: Repositories per page
-            indexed_urls: Set of already-indexed repository URLs
-
-        Returns:
-            RepositoryDiscoveryResult
-
-        Raises:
-            GitHubProviderError: If REST API request fails
-        """
-        endpoint = "user/repos"
-        params = {
-            "page": page,
-            "per_page": page_size,
-            "sort": "pushed",
-            "direction": "desc",
-            "affiliation": "owner,collaborator,organization_member",
-        }
-
-        try:
-            response = self._make_api_request(endpoint, params=params)
-            self._check_rate_limit(response)
-            response.raise_for_status()
-        except httpx.TimeoutException as e:
-            raise GitHubProviderError(f"GitHub API request timed out: {e}") from e
-        except httpx.HTTPStatusError as e:
-            if hasattr(e, "response") and e.response is not None:
-                self._check_rate_limit(e.response)
-            raise GitHubProviderError(
-                f"GitHub API error: {e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}"
-            ) from e
-        except httpx.RequestError as e:
-            raise GitHubProviderError(f"GitHub API request failed: {e}") from e
-
-        repos = response.json()
-        link_header = response.headers.get("Link", "")
-        total_pages = self._parse_link_header_for_last_page(link_header)
-        total_count = len(repos)
-        if total_pages > 1:
-            total_count = total_pages * page_size
-
-        # Filter and parse repositories
-        repositories: List[DiscoveredRepository] = []
-        for repo in repos:
-            https_url = repo.get("clone_url", "")
-            ssh_url = repo.get("ssh_url", "")
-
-            if not self._is_repo_indexed(https_url, ssh_url, indexed_urls):
-                repositories.append(self._parse_repository(repo))
-
-        return RepositoryDiscoveryResult(
-            repositories=repositories,
-            total_count=total_count,
-            page=page,
-            page_size=page_size,
-            total_pages=total_pages,
-            platform="github",
-        )
-
-    def _discover_via_rest_search(
-        self, page: int, page_size: int, search: str, indexed_urls: Set[str]
-    ) -> RepositoryDiscoveryResult:
-        """
-        Discover repositories via REST search API, then enrich with GraphQL.
-
-        Args:
-            page: Page number (1-indexed)
-            page_size: Repositories per page
-            search: Search query
-            indexed_urls: Set of already-indexed repository URLs
-
-        Returns:
-            RepositoryDiscoveryResult
-
-        Raises:
-            GitHubProviderError: If REST search request fails
-        """
-        endpoint = "search/repositories"
-        params = {
-            "q": f"{search} in:name,description fork:true",
-            "page": page,
-            "per_page": page_size,
-            "sort": "updated",
-            "order": "desc",
-        }
-
-        try:
-            response = self._make_api_request(endpoint, params=params)
-            self._check_rate_limit(response)
-            response.raise_for_status()
-        except httpx.TimeoutException as e:
-            raise GitHubProviderError(f"GitHub API request timed out: {e}") from e
-        except httpx.HTTPStatusError as e:
-            if hasattr(e, "response") and e.response is not None:
-                self._check_rate_limit(e.response)
-            raise GitHubProviderError(
-                f"GitHub API error: {e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'}"
-            ) from e
-        except httpx.RequestError as e:
-            raise GitHubProviderError(f"GitHub API request failed: {e}") from e
-
-        response_data = response.json()
-        repos = response_data.get("items", [])
-        total_count = response_data.get("total_count", 0)
-        total_pages = (
-            (total_count + page_size - 1) // page_size if total_count > 0 else 1
-        )
-
-        # Filter out already-indexed repositories and parse
-        repositories: List[DiscoveredRepository] = []
-        for repo in repos:
-            https_url = repo.get("clone_url", "")
-            ssh_url = repo.get("ssh_url", "")
-
-            if not self._is_repo_indexed(https_url, ssh_url, indexed_urls):
-                repositories.append(self._parse_repository(repo))
-
-        # Enrich with commit info via GraphQL
-        repositories = self._enrich_with_commits_graphql(repositories)
-
-        return RepositoryDiscoveryResult(
-            repositories=repositories,
-            total_count=total_count,
-            page=page,
-            page_size=page_size,
-            total_pages=total_pages,
-            platform="github",
-        )
+        effective = min(page_size, GITHUB_MAX_PAGE_SIZE)
+        state = self._init_discovery_state(cursor, search)
+        return self._run_fill_loop(state, effective, page_size, search, indexed_urls)

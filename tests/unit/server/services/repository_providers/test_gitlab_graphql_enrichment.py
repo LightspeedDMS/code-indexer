@@ -319,12 +319,14 @@ class TestDiscoverRepositoriesIntegration:
             }
             return response
 
-        monkeypatch.setattr(gitlab_provider, "_make_api_request", mock_make_api_request)
+        monkeypatch.setattr(
+            gitlab_provider, "_make_api_request_checked", mock_make_api_request
+        )
         monkeypatch.setattr(
             gitlab_provider, "_make_graphql_request", mock_make_graphql_request
         )
 
-        result = gitlab_provider.discover_repositories(page=1, page_size=50)
+        result = gitlab_provider.discover_repositories(cursor=None, page_size=50)
 
         assert len(result.repositories) == 1
         repo = result.repositories[0]

@@ -34,19 +34,21 @@ class RepositoryProviderBase(ABC):
 
     @abstractmethod
     def discover_repositories(
-        self, page: int = 1, page_size: int = 50, search: Optional[str] = None
+        self,
+        cursor: Optional[str] = None,
+        page_size: int = 50,
+        search: Optional[str] = None,
     ) -> "RepositoryDiscoveryResult":
         """
-        Discover repositories from the platform.
+        Discover repositories from the platform using cursor-based pagination.
 
         Args:
-            page: Page number (1-indexed)
-            page_size: Number of repositories per page
-            search: Optional search string to filter repositories by name,
-                   description, commit hash, or committer (case-insensitive)
+            cursor: Opaque cursor token from a previous call (None for first page)
+            page_size: Target number of unindexed repositories to return
+            search: Optional search string to filter repositories by name/description
 
         Returns:
-            RepositoryDiscoveryResult with discovered repositories
+            RepositoryDiscoveryResult with cursor-based pagination fields
 
         Raises:
             DiscoveryProviderError: If API call fails

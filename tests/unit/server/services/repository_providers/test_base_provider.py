@@ -8,6 +8,40 @@ repository providers (GitLab, GitHub) must implement.
 
 import pytest
 from abc import ABC
+from typing import Optional
+
+
+def _make_concrete_provider():
+    """Return a minimal concrete RepositoryProviderBase instance for testing."""
+    from code_indexer.server.services.repository_providers.base import (
+        RepositoryProviderBase,
+    )
+    from code_indexer.server.models.auto_discovery import RepositoryDiscoveryResult
+
+    class ConcreteProvider(RepositoryProviderBase):
+        @property
+        def platform(self) -> str:
+            return "test"
+
+        def is_configured(self) -> bool:
+            return True
+
+        def discover_repositories(
+            self,
+            cursor: Optional[str] = None,
+            page_size: int = 50,
+            search: Optional[str] = None,
+        ) -> RepositoryDiscoveryResult:
+            return RepositoryDiscoveryResult(
+                repositories=[],
+                page_size=page_size,
+                platform="gitlab",
+                has_next_page=False,
+                next_cursor=None,
+                partial_due_to_cap=False,
+            )
+
+    return ConcreteProvider()
 
 
 class TestRepositoryProviderBase:
@@ -64,67 +98,18 @@ class TestRepositoryProviderBase:
 
     def test_concrete_implementation_can_be_created(self):
         """Test that a concrete implementation can be created."""
-        from code_indexer.server.services.repository_providers.base import (
-            RepositoryProviderBase,
-        )
-        from code_indexer.server.models.auto_discovery import (
-            RepositoryDiscoveryResult,
-        )
-
-        class ConcreteProvider(RepositoryProviderBase):
-            @property
-            def platform(self) -> str:
-                return "test"
-
-            def is_configured(self) -> bool:
-                return True
-
-            def discover_repositories(
-                self, page: int = 1, page_size: int = 50
-            ) -> RepositoryDiscoveryResult:
-                return RepositoryDiscoveryResult(
-                    repositories=[],
-                    total_count=0,
-                    page=page,
-                    page_size=page_size,
-                    total_pages=0,
-                    platform="gitlab",
-                )
-
-        provider = ConcreteProvider()
+        provider = _make_concrete_provider()
         assert provider.platform == "test"
 
     @pytest.mark.asyncio
     async def test_concrete_implementation_methods_can_be_called(self):
         """Test that concrete implementation methods can be called."""
-        from code_indexer.server.services.repository_providers.base import (
-            RepositoryProviderBase,
-        )
-        from code_indexer.server.models.auto_discovery import (
-            RepositoryDiscoveryResult,
-        )
+        from code_indexer.server.models.auto_discovery import RepositoryDiscoveryResult
 
-        class ConcreteProvider(RepositoryProviderBase):
-            @property
-            def platform(self) -> str:
-                return "test"
-
-            def is_configured(self) -> bool:
-                return True
-
-            def discover_repositories(
-                self, page: int = 1, page_size: int = 50
-            ) -> RepositoryDiscoveryResult:
-                return RepositoryDiscoveryResult(
-                    repositories=[],
-                    total_count=0,
-                    page=page,
-                    page_size=page_size,
-                    total_pages=0,
-                    platform="gitlab",
-                )
-
-        provider = ConcreteProvider()
+        provider = _make_concrete_provider()
         assert provider.is_configured() is True
-        result = provider.discover_repositories(page=1, page_size=50)
+        result = provider.discover_repositories(cursor=None, page_size=50)
         assert isinstance(result, RepositoryDiscoveryResult)
+        assert result.has_next_page is False
+        assert result.next_cursor is None
+        assert result.partial_due_to_cap is False

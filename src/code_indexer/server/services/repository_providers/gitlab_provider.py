@@ -5,9 +5,12 @@ Implements repository discovery from GitLab API, supporting both gitlab.com
 and self-hosted GitLab instances.
 """
 
+import base64
+import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Set
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union
 
 import httpx
 
@@ -24,6 +27,20 @@ if TYPE_CHECKING:
     from ...repositories.golden_repo_manager import GoldenRepoManager
 
 logger = logging.getLogger(__name__)
+
+_CURSOR_VERSION = 1
+_CURSOR_PLATFORM = "gitlab"
+_FILL_SAFETY_CAP = 5
+_VALID_CURSOR_MODES = frozenset({"rest"})
+
+
+@dataclass
+class _CursorState:
+    """Decoded cursor state for GitLab pagination."""
+
+    source: Optional[Union[str, int]]  # REST page number
+    skip: int  # items to skip within the first fetched batch
+    mode: str = "rest"  # GitLab only uses REST
 
 
 class GitLabProviderError(Exception):
@@ -413,45 +430,20 @@ class GitLabProvider(RepositoryProviderBase):
             is_private=project.get("visibility") == "private",
         )
 
-    def discover_repositories(
-        self, page: int = 1, page_size: int = 50, search: Optional[str] = None
-    ) -> RepositoryDiscoveryResult:
+    def _make_api_request_checked(
+        self, endpoint: str, params: Optional[dict] = None
+    ) -> httpx.Response:
         """
-        Discover repositories from GitLab API.
-
-        Args:
-            page: Page number (1-indexed)
-            page_size: Number of repositories per page
+        Make a REST API request and translate transport/HTTP errors to GitLabProviderError.
 
         Returns:
-            RepositoryDiscoveryResult with discovered repositories
+            Successful HTTP response
 
         Raises:
-            GitLabProviderError: If API call fails or token not configured
+            GitLabProviderError: On timeout, HTTP error, or network failure
         """
-        if not self.is_configured():
-            raise GitLabProviderError(
-                "GitLab token not configured. "
-                "Please configure a GitLab token in the CI Tokens settings."
-            )
-
-        # Get indexed repos for filtering
-        indexed_urls = self._get_indexed_canonical_urls()
-
-        # Build params for API request
-        params = {
-            "membership": "true",
-            "page": page,
-            "per_page": page_size,
-            "order_by": "last_activity_at",
-            "sort": "desc",
-        }
-        # Add search parameter for server-side filtering (Story #16)
-        if search:
-            params["search"] = search
-
         try:
-            response = self._make_api_request("projects", params=params)
+            response = self._make_api_request(endpoint, params=params)
             response.raise_for_status()
         except httpx.TimeoutException as e:
             raise GitLabProviderError(f"GitLab API request timed out: {e}") from e
@@ -461,32 +453,304 @@ class GitLabProvider(RepositoryProviderBase):
             ) from e
         except httpx.RequestError as e:
             raise GitLabProviderError(f"GitLab API request failed: {e}") from e
+        return response
 
-        # Parse response
+    def _encode_cursor(
+        self, source: Optional[Union[str, int]], skip: int, mode: str = "rest"
+    ) -> str:
+        """
+        Encode a cursor payload as an opaque base64-JSON string.
+
+        Args:
+            source: REST page number (integer) or None for first page
+            skip: Non-negative items to skip within the first fetched batch
+            mode: Must be a recognized cursor mode (always "rest" for GitLab)
+
+        Raises:
+            ValueError: If skip is negative or mode is not recognized
+        """
+        if skip < 0:
+            raise ValueError(f"skip must be non-negative, got {skip}")
+        if mode not in _VALID_CURSOR_MODES:
+            raise ValueError(f"mode {mode!r} is not a recognized cursor mode")
+        payload = {
+            "v": _CURSOR_VERSION,
+            "platform": _CURSOR_PLATFORM,
+            "source": source,
+            "skip": skip,
+            "mode": mode,
+        }
+        return base64.b64encode(json.dumps(payload).encode()).decode()
+
+    def _decode_cursor_payload(self, token: str) -> Optional[dict]:
+        """Decode base64 token to JSON dict; return None on any decode failure."""
+        import binascii
+
+        if not isinstance(token, str):
+            logger.debug(
+                format_error_log("GL-CURSOR-000", "GitLab cursor token is not a string")
+            )
+            return None
+        try:
+            raw = base64.b64decode(token)
+        except (binascii.Error, TypeError, ValueError) as exc:
+            logger.debug(
+                format_error_log("GL-CURSOR-001", f"GitLab cursor base64 failed: {exc}")
+            )
+            return None
+        try:
+            return json.loads(raw)  # type: ignore[no-any-return]  # json.loads returns Any
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.debug(
+                format_error_log("GL-CURSOR-002", f"GitLab cursor JSON failed: {exc}")
+            )
+            return None
+
+    def _validate_cursor_metadata(self, payload: dict) -> bool:
+        """Validate version, platform and mode fields; log and return False on mismatch."""
+        if payload.get("v") != _CURSOR_VERSION:
+            logger.debug(
+                format_error_log(
+                    "GL-CURSOR-003",
+                    f"GitLab cursor version mismatch (got {payload.get('v')!r})",
+                )
+            )
+            return False
+        if payload.get("platform") != _CURSOR_PLATFORM:
+            logger.debug(
+                format_error_log(
+                    "GL-CURSOR-004",
+                    f"GitLab cursor platform mismatch (got {payload.get('platform')!r})",
+                )
+            )
+            return False
+        mode = payload.get("mode", "rest")
+        if mode not in _VALID_CURSOR_MODES:
+            logger.debug(
+                format_error_log(
+                    "GL-CURSOR-007",
+                    f"GitLab cursor mode={mode!r} not recognized",
+                )
+            )
+            return False
+        return True
+
+    def _extract_cursor_fields(self, payload: dict) -> Optional[_CursorState]:
+        """Extract source, skip, mode from a validated payload dict."""
+        try:
+            source = payload["source"]
+            skip = int(payload["skip"])
+            mode = str(payload.get("mode", "rest"))
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.debug(
+                format_error_log("GL-CURSOR-005", f"GitLab cursor field error: {exc}")
+            )
+            return None
+        if skip < 0:
+            logger.debug(
+                format_error_log(
+                    "GL-CURSOR-006", f"GitLab cursor skip={skip} is negative"
+                )
+            )
+            return None
+        return _CursorState(source=source, skip=skip, mode=mode)
+
+    def _fetch_batch_rest(
+        self, source: Optional[int], batch_size: int, search: Optional[str]
+    ) -> Tuple[List[DiscoveredRepository], Optional[int], bool, Optional[int]]:
+        """
+        Fetch one page via GitLab REST /projects.
+
+        Returns:
+            (parsed_repos_unfiltered, next_source, has_more, source_total)
+
+        Raises:
+            GitLabProviderError: On API errors
+        """
+        page = source if isinstance(source, int) else 1
+        params: dict = {
+            "membership": "true",
+            "page": page,
+            "per_page": batch_size,
+            "order_by": "last_activity_at",
+            "sort": "desc",
+        }
+        if search:
+            params["search"] = search
+        response = self._make_api_request_checked("projects", params=params)
         projects = response.json()
-        total_count = int(response.headers.get("x-total", "0"))
-        total_pages = int(response.headers.get("x-total-pages", "0"))
+        source_total = int(response.headers.get("x-total", "0")) or None
+        total_pages = int(response.headers.get("x-total-pages", "1"))
+        has_more = page < total_pages
+        next_source: Optional[int] = page + 1 if has_more else None
+        parsed = [self._parse_project(p) for p in projects]
+        return parsed, next_source, has_more, source_total
 
-        # Filter out already-indexed repositories
-        repositories: List[DiscoveredRepository] = []
-        for project in projects:
-            https_url = project.get("http_url_to_repo", "")
-            ssh_url = project.get("ssh_url_to_repo", "")
+    def _collect_unindexed_from_batch(
+        self,
+        batch: List[DiscoveredRepository],
+        skip: int,
+        kept: List[DiscoveredRepository],
+        target: int,
+        indexed_urls: Set[str],
+    ) -> Tuple[List[DiscoveredRepository], Optional[int]]:
+        """
+        Walk batch from skip offset, collect unindexed repos until target reached.
 
-            if not self._is_repo_indexed(https_url, ssh_url, indexed_urls):
-                repositories.append(self._parse_project(project))
+        Returns:
+            (updated_kept, stop_index_or_None)
+        """
+        for i, repo in enumerate(batch):
+            if i < skip:
+                continue
+            if self._is_repo_indexed(
+                repo.clone_url_https, repo.clone_url_ssh, indexed_urls
+            ):
+                continue
+            kept.append(repo)
+            if len(kept) == target:
+                return kept, i
+        return kept, None
 
-        # Note: Client-side search filtering removed (Story #16)
-        # Server-side filtering via API `search` parameter is used instead
-
-        # Story #81: Enrich with commit info via GraphQL
-        repositories = self._enrich_repositories_with_commits(repositories)
-
+    def _build_result(
+        self,
+        kept: List[DiscoveredRepository],
+        page_size: int,
+        has_next_page: bool,
+        next_cursor: Optional[str],
+        partial_due_to_cap: bool,
+        source_total: Optional[int],
+    ) -> RepositoryDiscoveryResult:
+        """Build a RepositoryDiscoveryResult for GitLab from collected data."""
         return RepositoryDiscoveryResult(
-            repositories=repositories,
-            total_count=total_count,
-            page=page,
+            repositories=kept,
             page_size=page_size,
-            total_pages=total_pages,
             platform="gitlab",
+            has_next_page=has_next_page,
+            next_cursor=next_cursor,
+            partial_due_to_cap=partial_due_to_cap,
+            source_total=source_total,
         )
+
+    def _decode_cursor(self, token: Optional[str]) -> Optional[_CursorState]:
+        """
+        Decode an opaque cursor string into a _CursorState.
+
+        Returns None for any invalid input, triggering a silent restart.
+        """
+        if token is None:
+            return None
+        payload = self._decode_cursor_payload(token)
+        if payload is None:
+            return None
+        if not self._validate_cursor_metadata(payload):
+            return None
+        return self._extract_cursor_fields(payload)
+
+    def _init_discovery_state(self, cursor: Optional[str]) -> _CursorState:
+        """Return decoded cursor state or a fresh initial state (page 1)."""
+        decoded = self._decode_cursor(cursor)
+        if decoded is not None:
+            return decoded
+        return _CursorState(source=None, skip=0, mode="rest")
+
+    def _result_from_stop(
+        self,
+        kept: List[DiscoveredRepository],
+        page_size: int,
+        stop_idx: int,
+        batch_len: int,
+        has_more: bool,
+        next_source: Optional[Union[str, int]],
+        state: _CursorState,
+        source_total: Optional[int],
+    ) -> RepositoryDiscoveryResult:
+        """Build result when page_size target was hit inside a batch."""
+        is_last_in_batch = stop_idx == batch_len - 1
+        if is_last_in_batch and not has_more:
+            return self._build_result(kept, page_size, False, None, False, source_total)
+        next_skip = 0 if is_last_in_batch else stop_idx + 1
+        next_src = next_source if is_last_in_batch else state.source
+        enc = self._encode_cursor(next_src, next_skip, "rest")
+        return self._build_result(kept, page_size, True, enc, False, source_total)
+
+    def _run_fill_loop(
+        self,
+        state: _CursorState,
+        effective: int,
+        page_size: int,
+        search: Optional[str],
+        indexed_urls: Set[str],
+    ) -> RepositoryDiscoveryResult:
+        """Run the filter-fill loop and return a RepositoryDiscoveryResult."""
+        kept: List[DiscoveredRepository] = []
+        source_total: Optional[int] = None
+        batches_fetched = 0
+        while len(kept) < effective and batches_fetched < _FILL_SAFETY_CAP:
+            batch, next_source, has_more, batch_total = self._fetch_batch_rest(
+                source=state.source if isinstance(state.source, int) else None,
+                batch_size=effective,
+                search=search,
+            )
+            batches_fetched += 1
+            if source_total is None and batch_total is not None:
+                source_total = batch_total
+            kept, stop_idx = self._collect_unindexed_from_batch(
+                batch, state.skip, kept, effective, indexed_urls
+            )
+            if stop_idx is not None:
+                return self._result_from_stop(
+                    kept,
+                    page_size,
+                    stop_idx,
+                    len(batch),
+                    has_more,
+                    next_source,
+                    state,
+                    source_total,
+                )
+            state = _CursorState(source=next_source, skip=0, mode="rest")
+            if not has_more:
+                return self._build_result(
+                    kept, page_size, False, None, False, source_total
+                )
+        cap_cursor = self._encode_cursor(state.source, state.skip, "rest")
+        return self._build_result(kept, page_size, True, cap_cursor, True, source_total)
+
+    def discover_repositories(
+        self,
+        cursor: Optional[str] = None,
+        page_size: int = 50,
+        search: Optional[str] = None,
+    ) -> RepositoryDiscoveryResult:
+        """
+        Discover repositories from GitLab using cursor-based pagination.
+
+        Runs a filter-fill loop: fetches source pages until page_size unindexed
+        repositories are collected or the safety cap is reached.
+
+        Args:
+            cursor: Opaque token from a previous call (None for first page)
+            page_size: Target number of unindexed repos to return
+            search: Optional search query (server-side filtering via API)
+
+        Returns:
+            RepositoryDiscoveryResult with cursor fields
+
+        Raises:
+            GitLabProviderError: If not configured or API call fails
+        """
+        if not self.is_configured():
+            raise GitLabProviderError(
+                "GitLab token not configured. "
+                "Please configure a GitLab token in the CI Tokens settings."
+            )
+        if page_size < 1:
+            raise GitLabProviderError("page_size must be at least 1")
+        indexed_urls = self._get_indexed_canonical_urls()
+        state = self._init_discovery_state(cursor)
+        result = self._run_fill_loop(state, page_size, page_size, search, indexed_urls)
+        # Enrich with commit info via GraphQL (REST doesn't provide it)
+        if result.repositories:
+            self._enrich_repositories_with_commits(result.repositories)
+        return result

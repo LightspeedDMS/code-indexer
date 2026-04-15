@@ -6358,10 +6358,11 @@ def _get_github_provider():
 def _build_gitlab_repos_response(
     request: Request,
     repositories: Optional[list] = None,
-    total_count: int = 0,
-    page: int = 1,
     page_size: int = 50,
-    total_pages: int = 0,
+    next_cursor: Optional[str] = None,
+    has_next_page: bool = False,
+    partial_due_to_cap: bool = False,
+    source_total: Optional[int] = None,
     error_type: Optional[str] = None,
     error_message: Optional[str] = None,
     search_term: Optional[str] = None,
@@ -6376,10 +6377,11 @@ def _build_gitlab_repos_response(
             "request": request,
             "csrf_token": csrf_token,
             "repositories": repositories or [],
-            "total_count": total_count,
-            "page": page,
             "page_size": page_size,
-            "total_pages": total_pages,
+            "next_cursor": next_cursor,
+            "has_next_page": has_next_page,
+            "partial_due_to_cap": partial_due_to_cap,
+            "source_total": source_total,
             "error_type": error_type,
             "error_message": error_message,
             "search_term": search_term or "",
@@ -6394,10 +6396,11 @@ def _build_gitlab_repos_response(
 def _build_github_repos_response(
     request: Request,
     repositories: Optional[list] = None,
-    total_count: int = 0,
-    page: int = 1,
     page_size: int = 50,
-    total_pages: int = 0,
+    next_cursor: Optional[str] = None,
+    has_next_page: bool = False,
+    partial_due_to_cap: bool = False,
+    source_total: Optional[int] = None,
     error_type: Optional[str] = None,
     error_message: Optional[str] = None,
     search_term: Optional[str] = None,
@@ -6412,10 +6415,11 @@ def _build_github_repos_response(
             "request": request,
             "csrf_token": csrf_token,
             "repositories": repositories or [],
-            "total_count": total_count,
-            "page": page,
             "page_size": page_size,
-            "total_pages": total_pages,
+            "next_cursor": next_cursor,
+            "has_next_page": has_next_page,
+            "partial_due_to_cap": partial_due_to_cap,
+            "source_total": source_total,
             "error_type": error_type,
             "error_message": error_message,
             "search_term": search_term or "",
@@ -6450,7 +6454,10 @@ def auto_discovery_page(request: Request):
 
 @web_router.get("/partials/auto-discovery/gitlab", response_class=HTMLResponse)
 def gitlab_repos_partial(
-    request: Request, page: int = 1, page_size: int = 50, search: Optional[str] = None
+    request: Request,
+    cursor: Optional[str] = None,
+    page_size: int = Query(default=50, ge=1, le=100),
+    search: Optional[str] = None,
 ):
     """HTMX partial for GitLab repository discovery."""
     session = _require_admin_session(request)
@@ -6473,21 +6480,21 @@ def gitlab_repos_partial(
             )
 
         result = provider.discover_repositories(
-            page=page, page_size=page_size, search=search_term
+            cursor=cursor, page_size=page_size, search=search_term
         )
         return _build_gitlab_repos_response(
             request,
             result.repositories,
-            result.total_count,
-            result.page,
             result.page_size,
-            result.total_pages,
+            result.next_cursor,
+            result.has_next_page,
+            result.partial_due_to_cap,
+            result.source_total,
             search_term=search_term,
         )
     except GitLabProviderError as e:
         return _build_gitlab_repos_response(
             request,
-            page=page,
             page_size=page_size,
             error_type="api_error",
             error_message=str(e),
@@ -6503,7 +6510,6 @@ def gitlab_repos_partial(
         )
         return _build_gitlab_repos_response(
             request,
-            page=page,
             page_size=page_size,
             error_type="api_error",
             error_message=f"Unexpected error: {e}",
@@ -6513,7 +6519,10 @@ def gitlab_repos_partial(
 
 @web_router.get("/partials/auto-discovery/github", response_class=HTMLResponse)
 def github_repos_partial(
-    request: Request, page: int = 1, page_size: int = 50, search: Optional[str] = None
+    request: Request,
+    cursor: Optional[str] = None,
+    page_size: int = Query(default=50, ge=1, le=100),
+    search: Optional[str] = None,
 ):
     """HTMX partial for GitHub repository discovery."""
     session = _require_admin_session(request)
@@ -6536,15 +6545,16 @@ def github_repos_partial(
             )
 
         result = provider.discover_repositories(
-            page=page, page_size=page_size, search=search_term
+            cursor=cursor, page_size=page_size, search=search_term
         )
         return _build_github_repos_response(
             request,
             result.repositories,
-            result.total_count,
-            result.page,
             result.page_size,
-            result.total_pages,
+            result.next_cursor,
+            result.has_next_page,
+            result.partial_due_to_cap,
+            result.source_total,
             search_term=search_term,
         )
     except GitHubProviderError as e:
@@ -6555,7 +6565,6 @@ def github_repos_partial(
             error_type = "rate_limit"
         return _build_github_repos_response(
             request,
-            page=page,
             page_size=page_size,
             error_type=error_type,
             error_message=error_msg,
@@ -6571,7 +6580,6 @@ def github_repos_partial(
         )
         return _build_github_repos_response(
             request,
-            page=page,
             page_size=page_size,
             error_type="api_error",
             error_message=f"Unexpected error: {e}",

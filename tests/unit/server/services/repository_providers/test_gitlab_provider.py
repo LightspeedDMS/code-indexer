@@ -150,7 +150,7 @@ class TestGitLabProviderDiscovery:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         assert isinstance(result, RepositoryDiscoveryResult)
         assert result.platform == "gitlab"
@@ -199,7 +199,7 @@ class TestGitLabProviderDiscovery:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         assert len(result.repositories) == 1
         repo = result.repositories[0]
@@ -211,8 +211,10 @@ class TestGitLabProviderDiscovery:
         assert repo.is_private is True
 
     @pytest.mark.asyncio
-    async def test_discover_repositories_handles_pagination(self):
-        """Test that discover_repositories correctly handles pagination."""
+    async def test_discover_repositories_has_next_page_when_more_pages_exist(self):
+        """Test cursor result: has_next_page=True and next_cursor set when source has more pages."""
+        import httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.gitlab_provider import (
             GitLabProvider,
         )
@@ -220,31 +222,41 @@ class TestGitLabProviderDiscovery:
 
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
-            platform="gitlab",
-            token="glpat-test-token-123456789012",
-            base_url=None,
+            platform="gitlab", token="dummy", base_url=None
         )
         golden_repo_manager = MagicMock()
         golden_repo_manager.list_golden_repos.return_value = []
-
         provider = GitLabProvider(
-            token_manager=token_manager,
-            golden_repo_manager=golden_repo_manager,
+            token_manager=token_manager, golden_repo_manager=golden_repo_manager
         )
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {"x-total": "150", "x-total-pages": "3"}
-        mock_response.json.return_value = []
-        mock_response.raise_for_status = MagicMock()
+        # Two repos on page 1, three more pages exist -> cursor result should signal more
+        projects = [
+            {
+                "id": i,
+                "path_with_namespace": f"group/project{i}",
+                "description": None,
+                "http_url_to_repo": f"https://gitlab.com/group/project{i}.git",
+                "ssh_url_to_repo": f"git@gitlab.com:group/project{i}.git",
+                "default_branch": "main",
+                "last_activity_at": "2024-01-15T10:30:00Z",
+                "visibility": "private",
+            }
+            for i in range(2)
+        ]
+        mock_get = MagicMock(spec=httpx.Response)
+        mock_get.status_code = 200
+        mock_get.raise_for_status = MagicMock()
+        mock_get.json.return_value = projects
+        mock_get.headers = {"x-total": "6", "x-total-pages": "3", "x-next-page": "2"}
 
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=2, page_size=50)
+        with _patch("httpx.get", return_value=mock_get):
+            result = provider.discover_repositories(cursor=None, page_size=2)
 
-        assert result.total_count == 150
-        assert result.total_pages == 3
-        assert result.page == 2
-        assert result.page_size == 50
+        assert result.has_next_page is True
+        assert result.next_cursor is not None
+        assert result.page_size == 2
+        assert result.partial_due_to_cap is False
 
 
 class TestGitLabProviderExclusion:
@@ -308,7 +320,7 @@ class TestGitLabProviderExclusion:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         # Should only return the new project
         assert len(result.repositories) == 1
@@ -360,7 +372,7 @@ class TestGitLabProviderExclusion:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         # Should be filtered out
         assert len(result.repositories) == 0
@@ -404,7 +416,7 @@ class TestGitLabProviderSortingOrder:
             return mock_response
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(page=1, page_size=50)
+            provider.discover_repositories(cursor=None, page_size=50)
 
         # Verify sorting parameters are correct for last activity descending
         assert captured_params.get("order_by") == "last_activity_at", (
@@ -436,7 +448,7 @@ class TestGitLabProviderErrorHandling:
         )
 
         with pytest.raises(GitLabProviderError) as exc_info:
-            provider.discover_repositories(page=1, page_size=50)
+            provider.discover_repositories(cursor=None, page_size=50)
 
         assert "not configured" in str(exc_info.value).lower()
 
@@ -471,7 +483,7 @@ class TestGitLabProviderErrorHandling:
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
             with pytest.raises(GitLabProviderError) as exc_info:
-                provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(cursor=None, page_size=50)
 
         assert (
             "api" in str(exc_info.value).lower()
@@ -506,7 +518,7 @@ class TestGitLabProviderErrorHandling:
             side_effect=httpx.TimeoutException("Connection timed out"),
         ):
             with pytest.raises(GitLabProviderError) as exc_info:
-                provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(cursor=None, page_size=50)
 
         assert "timed out" in str(exc_info.value).lower()
 
@@ -549,7 +561,9 @@ class TestGitLabProviderServerSideSearch:
             return mock_response
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(page=1, page_size=50, search="myproject")
+            provider.discover_repositories(
+                cursor=None, page_size=50, search="myproject"
+            )
 
         # Verify search parameter is included in API request
         assert "search" in captured_params, "search parameter not passed to API request"
@@ -615,7 +629,7 @@ class TestGitLabProviderServerSideSearch:
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
             result = provider.discover_repositories(
-                page=1, page_size=50, search="myproject"
+                cursor=None, page_size=50, search="myproject"
             )
 
         # All repos from API should be returned (no client-side filtering)
@@ -663,7 +677,7 @@ class TestGitLabProviderServerSideSearch:
         with patch.object(
             provider, "_make_api_request", side_effect=capture_request_none
         ):
-            provider.discover_repositories(page=1, page_size=50, search=None)
+            provider.discover_repositories(cursor=None, page_size=50, search=None)
 
         assert "search" not in captured_params_none, (
             "search parameter should not be in API request when search=None"
@@ -684,7 +698,7 @@ class TestGitLabProviderServerSideSearch:
         with patch.object(
             provider, "_make_api_request", side_effect=capture_request_empty
         ):
-            provider.discover_repositories(page=1, page_size=50, search="")
+            provider.discover_repositories(cursor=None, page_size=50, search="")
 
         assert "search" not in captured_params_empty, (
             "search parameter should not be in API request when search=''"
@@ -746,7 +760,9 @@ class TestGitLabProviderServerSideSearch:
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50, search="data")
+            result = provider.discover_repositories(
+                cursor=None, page_size=50, search="data"
+            )
 
         # Only non-indexed repo should be returned
         assert len(result.repositories) == 1, (

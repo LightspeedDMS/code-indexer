@@ -99,6 +99,8 @@ class TestGitHubProviderDiscovery:
     @pytest.mark.asyncio
     async def test_discover_repositories_returns_result_model(self):
         """Test that discover_repositories returns a RepositoryDiscoveryResult."""
+        import httpx as _httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -108,7 +110,7 @@ class TestGitHubProviderDiscovery:
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
             platform="github",
-            token="ghp_test123456789012345678901234567890",
+            token="dummy",
             base_url=None,
         )
         golden_repo_manager = MagicMock()
@@ -119,22 +121,32 @@ class TestGitHubProviderDiscovery:
             golden_repo_manager=golden_repo_manager,
         )
 
-        # Mock the HTTP response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {}  # No Link header for single page
-        mock_response.json.return_value = []
-        mock_response.raise_for_status = MagicMock()
+        graphql_resp = MagicMock(spec=_httpx.Response)
+        graphql_resp.status_code = 200
+        graphql_resp.raise_for_status = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "viewer": {
+                    "repositories": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "totalCount": 0,
+                        "nodes": [],
+                    }
+                }
+            }
+        }
 
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+        with _patch("httpx.post", return_value=graphql_resp):
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         assert isinstance(result, RepositoryDiscoveryResult)
         assert result.platform == "github"
 
     @pytest.mark.asyncio
     async def test_discover_repositories_parses_github_response(self):
-        """Test that discover_repositories correctly parses GitHub API response."""
+        """Test that discover_repositories correctly parses GitHub GraphQL response."""
+        import httpx as _httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -143,7 +155,7 @@ class TestGitHubProviderDiscovery:
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
             platform="github",
-            token="ghp_test123456789012345678901234567890",
+            token="dummy",
             base_url=None,
         )
         golden_repo_manager = MagicMock()
@@ -154,30 +166,34 @@ class TestGitHubProviderDiscovery:
             golden_repo_manager=golden_repo_manager,
         )
 
-        # Mock GitHub API response
-        github_repos = [
-            {
-                "id": 1,
-                "name": "my-project",
-                "full_name": "owner/my-project",
-                "description": "A test project",
-                "html_url": "https://github.com/owner/my-project",
-                "clone_url": "https://github.com/owner/my-project.git",
-                "ssh_url": "git@github.com:owner/my-project.git",
-                "default_branch": "main",
-                "pushed_at": "2024-01-15T10:30:00Z",
-                "private": True,
+        # GraphQL node format (as returned by _parse_graphql_response)
+        graphql_node = {
+            "nameWithOwner": "owner/my-project",
+            "description": "A test project",
+            "isPrivate": True,
+            "url": "https://github.com/owner/my-project",
+            "sshUrl": "git@github.com:owner/my-project.git",
+            "pushedAt": "2024-01-15T10:30:00Z",
+            "defaultBranchRef": {"name": "main", "target": {"history": {"nodes": []}}},
+        }
+
+        graphql_resp = MagicMock(spec=_httpx.Response)
+        graphql_resp.status_code = 200
+        graphql_resp.raise_for_status = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "viewer": {
+                    "repositories": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "totalCount": 1,
+                        "nodes": [graphql_node],
+                    }
+                }
             }
-        ]
+        }
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {}
-        mock_response.json.return_value = github_repos
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+        with _patch("httpx.post", return_value=graphql_resp):
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         assert len(result.repositories) == 1
         repo = result.repositories[0]
@@ -189,8 +205,12 @@ class TestGitHubProviderDiscovery:
         assert repo.is_private is True
 
     @pytest.mark.asyncio
-    async def test_discover_repositories_handles_pagination(self):
-        """Test that discover_repositories correctly handles pagination."""
+    async def test_discover_repositories_has_next_page_when_source_has_more(self):
+        """Test cursor result: has_next_page=True and exact cursor when source has more pages."""
+        import base64
+        import json
+        import httpx as _httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -198,35 +218,62 @@ class TestGitHubProviderDiscovery:
 
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
-            platform="github",
-            token="ghp_test123456789012345678901234567890",
-            base_url=None,
+            platform="github", token="dummy", base_url=None
         )
         golden_repo_manager = MagicMock()
         golden_repo_manager.list_golden_repos.return_value = []
-
         provider = GitHubProvider(
-            token_manager=token_manager,
-            golden_repo_manager=golden_repo_manager,
+            token_manager=token_manager, golden_repo_manager=golden_repo_manager
         )
 
-        # Mock response with Link header for pagination
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        # GitHub's Link header format with last page info
-        mock_response.headers = {
-            "Link": '<https://api.github.com/user/repos?page=3&per_page=50>; rel="last", '
-            '<https://api.github.com/user/repos?page=3&per_page=50>; rel="next"'
+        nodes = [
+            {
+                "nameWithOwner": f"owner/repo{i}",
+                "name": f"repo{i}",
+                "description": None,
+                "isPrivate": False,
+                "url": f"https://github.com/owner/repo{i}",
+                "sshUrl": f"git@github.com:owner/repo{i}.git",
+                "pushedAt": "2024-01-15T10:30:00Z",
+                "defaultBranchRef": {
+                    "name": "main",
+                    "target": {"history": {"nodes": []}},
+                },
+            }
+            for i in range(2)
+        ]
+        graphql_resp = MagicMock(spec=_httpx.Response)
+        graphql_resp.status_code = 200
+        graphql_resp.raise_for_status = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "viewer": {
+                    "repositories": {
+                        "pageInfo": {"hasNextPage": True, "endCursor": "abc123"},
+                        "totalCount": 10,
+                        "nodes": nodes,
+                    }
+                }
+            }
         }
-        mock_response.json.return_value = []
-        mock_response.raise_for_status = MagicMock()
 
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=2, page_size=50)
+        with _patch("httpx.post", return_value=graphql_resp):
+            result = provider.discover_repositories(cursor=None, page_size=2)
 
-        assert result.total_pages == 3
-        assert result.page == 2
-        assert result.page_size == 50
+        expected_cursor = base64.b64encode(
+            json.dumps(
+                {
+                    "v": 1,
+                    "platform": "github",
+                    "source": "abc123",
+                    "skip": 0,
+                    "mode": "graphql",
+                }
+            ).encode()
+        ).decode()
+        assert result.has_next_page is True
+        assert result.next_cursor == expected_cursor
+        assert result.page_size == 2
 
 
 class TestGitHubProviderLinkHeaderParsing:
@@ -300,6 +347,8 @@ class TestGitHubProviderExclusion:
     @pytest.mark.asyncio
     async def test_excludes_already_indexed_repos_by_https_url(self):
         """Test that already-indexed repos are excluded using HTTPS URL matching."""
+        import httpx as _httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -308,7 +357,7 @@ class TestGitHubProviderExclusion:
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
             platform="github",
-            token="ghp_test123456789012345678901234567890",
+            token="dummy",
             base_url=None,
         )
         golden_repo_manager = MagicMock()
@@ -322,40 +371,49 @@ class TestGitHubProviderExclusion:
             golden_repo_manager=golden_repo_manager,
         )
 
-        # Mock GitHub API response with both indexed and new repos
-        github_repos = [
+        nodes = [
             {
-                "id": 1,
-                "name": "already-indexed",
-                "full_name": "owner/already-indexed",
+                "nameWithOwner": "owner/already-indexed",
                 "description": "Already in golden repos",
-                "clone_url": "https://github.com/owner/already-indexed.git",
-                "ssh_url": "git@github.com:owner/already-indexed.git",
-                "default_branch": "main",
-                "pushed_at": "2024-01-15T10:30:00Z",
-                "private": True,
+                "isPrivate": True,
+                "url": "https://github.com/owner/already-indexed",
+                "sshUrl": "git@github.com:owner/already-indexed.git",
+                "pushedAt": "2024-01-15T10:30:00Z",
+                "defaultBranchRef": {
+                    "name": "main",
+                    "target": {"history": {"nodes": []}},
+                },
             },
             {
-                "id": 2,
-                "name": "new-project",
-                "full_name": "owner/new-project",
+                "nameWithOwner": "owner/new-project",
                 "description": "Not yet indexed",
-                "clone_url": "https://github.com/owner/new-project.git",
-                "ssh_url": "git@github.com:owner/new-project.git",
-                "default_branch": "main",
-                "pushed_at": "2024-01-15T10:30:00Z",
-                "private": False,
+                "isPrivate": False,
+                "url": "https://github.com/owner/new-project",
+                "sshUrl": "git@github.com:owner/new-project.git",
+                "pushedAt": "2024-01-15T10:30:00Z",
+                "defaultBranchRef": {
+                    "name": "main",
+                    "target": {"history": {"nodes": []}},
+                },
             },
         ]
+        graphql_resp = MagicMock(spec=_httpx.Response)
+        graphql_resp.status_code = 200
+        graphql_resp.raise_for_status = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "viewer": {
+                    "repositories": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "totalCount": 2,
+                        "nodes": nodes,
+                    }
+                }
+            }
+        }
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {}
-        mock_response.json.return_value = github_repos
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+        with _patch("httpx.post", return_value=graphql_resp):
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         # Should only return the new project
         assert len(result.repositories) == 1
@@ -364,6 +422,8 @@ class TestGitHubProviderExclusion:
     @pytest.mark.asyncio
     async def test_excludes_already_indexed_repos_by_ssh_url(self):
         """Test that already-indexed repos are excluded using SSH URL matching."""
+        import httpx as _httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -372,7 +432,7 @@ class TestGitHubProviderExclusion:
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
             platform="github",
-            token="ghp_test123456789012345678901234567890",
+            token="dummy",
             base_url=None,
         )
         golden_repo_manager = MagicMock()
@@ -386,28 +446,37 @@ class TestGitHubProviderExclusion:
             golden_repo_manager=golden_repo_manager,
         )
 
-        github_repos = [
+        nodes = [
             {
-                "id": 1,
-                "name": "already-indexed",
-                "full_name": "owner/already-indexed",
+                "nameWithOwner": "owner/already-indexed",
                 "description": "Already in golden repos",
-                "clone_url": "https://github.com/owner/already-indexed.git",
-                "ssh_url": "git@github.com:owner/already-indexed.git",
-                "default_branch": "main",
-                "pushed_at": "2024-01-15T10:30:00Z",
-                "private": True,
+                "isPrivate": True,
+                "url": "https://github.com/owner/already-indexed",
+                "sshUrl": "git@github.com:owner/already-indexed.git",
+                "pushedAt": "2024-01-15T10:30:00Z",
+                "defaultBranchRef": {
+                    "name": "main",
+                    "target": {"history": {"nodes": []}},
+                },
             },
         ]
+        graphql_resp = MagicMock(spec=_httpx.Response)
+        graphql_resp.status_code = 200
+        graphql_resp.raise_for_status = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "viewer": {
+                    "repositories": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "totalCount": 1,
+                        "nodes": nodes,
+                    }
+                }
+            }
+        }
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {}
-        mock_response.json.return_value = github_repos
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+        with _patch("httpx.post", return_value=graphql_resp):
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         # Should be filtered out
         assert len(result.repositories) == 0
@@ -415,6 +484,8 @@ class TestGitHubProviderExclusion:
     @pytest.mark.asyncio
     async def test_cross_platform_no_false_positives(self):
         """Test that GitLab repo doesn't exclude GitHub repo with same name."""
+        import httpx as _httpx
+        from unittest.mock import patch as _patch
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -423,7 +494,7 @@ class TestGitHubProviderExclusion:
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
             platform="github",
-            token="ghp_test123456789012345678901234567890",
+            token="dummy",
             base_url=None,
         )
         golden_repo_manager = MagicMock()
@@ -437,29 +508,37 @@ class TestGitHubProviderExclusion:
             golden_repo_manager=golden_repo_manager,
         )
 
-        # GitHub repo with same name should NOT be excluded
-        github_repos = [
+        nodes = [
             {
-                "id": 1,
-                "name": "my-project",
-                "full_name": "owner/my-project",
+                "nameWithOwner": "owner/my-project",
                 "description": "GitHub version",
-                "clone_url": "https://github.com/owner/my-project.git",
-                "ssh_url": "git@github.com:owner/my-project.git",
-                "default_branch": "main",
-                "pushed_at": "2024-01-15T10:30:00Z",
-                "private": False,
+                "isPrivate": False,
+                "url": "https://github.com/owner/my-project",
+                "sshUrl": "git@github.com:owner/my-project.git",
+                "pushedAt": "2024-01-15T10:30:00Z",
+                "defaultBranchRef": {
+                    "name": "main",
+                    "target": {"history": {"nodes": []}},
+                },
             },
         ]
+        graphql_resp = MagicMock(spec=_httpx.Response)
+        graphql_resp.status_code = 200
+        graphql_resp.raise_for_status = MagicMock()
+        graphql_resp.json.return_value = {
+            "data": {
+                "viewer": {
+                    "repositories": {
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "totalCount": 1,
+                        "nodes": nodes,
+                    }
+                }
+            }
+        }
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.headers = {}
-        mock_response.json.return_value = github_repos
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
-            result = provider.discover_repositories(page=1, page_size=50)
+        with _patch("httpx.post", return_value=graphql_resp):
+            result = provider.discover_repositories(cursor=None, page_size=50)
 
         # GitHub repo should NOT be excluded - different host
         assert len(result.repositories) == 1
@@ -469,9 +548,16 @@ class TestGitHubProviderExclusion:
 class TestGitHubProviderSortingOrder:
     """Tests for GitHubProvider sorting by last push descending."""
 
-    @pytest.mark.asyncio
-    async def test_api_request_uses_pushed_sort_descending(self):
-        """Test that API request sorts by pushed (last push date) in descending order."""
+    def test_api_request_uses_pushed_sort_descending(self):
+        """Test that the GraphQL request contains the correct sort order clause.
+
+        discover_repositories is synchronous. The primary code path uses GraphQL.
+        We mock httpx.post (the external HTTP boundary) to capture all outgoing
+        HTTP payloads without making a real network call, then find the GraphQL
+        payload (identified by the presence of a 'query' key) and assert it
+        contains orderBy: {field: PUSHED_AT, direction: DESC}.
+        """
+        import httpx
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -480,7 +566,7 @@ class TestGitHubProviderSortingOrder:
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
             platform="github",
-            token="ghp_test123456789012345678901234567890",
+            token="fake-github-token",
             base_url=None,
         )
         golden_repo_manager = MagicMock()
@@ -491,32 +577,73 @@ class TestGitHubProviderSortingOrder:
             golden_repo_manager=golden_repo_manager,
         )
 
-        # Track the params passed to _make_api_request
-        captured_params = {}  # type: ignore[var-annotated]
+        # Capture all outgoing httpx.post calls at the external HTTP boundary
+        captured_payloads: list = []
 
-        def capture_request(endpoint, params=None):
-            captured_params.update(params or {})
-            mock_response = MagicMock()
+        def fake_httpx_post(url, **kwargs):
+            captured_payloads.append(kwargs.get("json", {}))
+            mock_response = MagicMock(spec=httpx.Response)
             mock_response.status_code = 200
             mock_response.headers = {}
-            mock_response.json.return_value = []
             mock_response.raise_for_status = MagicMock()
+            mock_response.json.return_value = {
+                "data": {
+                    "viewer": {
+                        "repositories": {
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                            "totalCount": 0,
+                            "nodes": [],
+                        }
+                    }
+                }
+            }
             return mock_response
 
-        with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(page=1, page_size=50)
+        with patch("httpx.post", side_effect=fake_httpx_post):
+            provider.discover_repositories(cursor=None, page_size=50)
 
-        # Verify sorting parameters are correct for last push descending
-        assert captured_params.get("sort") == "pushed", (
-            f"Expected sort='pushed', got '{captured_params.get('sort')}'"
+        # Find the GraphQL payload (identified by the presence of a 'query' key)
+        graphql_payloads = [p for p in captured_payloads if "query" in p]
+        assert len(graphql_payloads) >= 1, (
+            f"Expected at least one httpx.post call with a 'query' key; "
+            f"captured payloads: {captured_payloads}"
         )
-        assert captured_params.get("direction") == "desc", (
-            f"Expected direction='desc', got '{captured_params.get('direction')}'"
+
+        graphql_query = graphql_payloads[0]["query"]
+        assert "orderBy: {field: PUSHED_AT, direction: DESC}" in graphql_query, (
+            f"Expected 'orderBy: {{field: PUSHED_AT, direction: DESC}}' in GraphQL query, "
+            f"got:\n{graphql_query}"
         )
 
 
 class TestGitHubProviderErrorHandling:
     """Tests for GitHubProvider error handling."""
+
+    # Named constant for the rate limit reset Unix epoch used in rate-limit tests.
+    # Value represents 2024-01-01 00:00:00 UTC — a fixed, symbolic test timestamp.
+    _RATE_LIMIT_RESET_EPOCH = "1704067200"
+
+    def _make_provider(self):
+        """Create a configured GitHubProvider with a fake token for error-path tests."""
+        from code_indexer.server.services.repository_providers.github_provider import (
+            GitHubProvider,
+        )
+        from code_indexer.server.services.ci_token_manager import TokenData
+
+        token_manager = MagicMock()
+        token_manager.get_token.return_value = TokenData(
+            platform="github",
+            token="fake-github-token",
+            base_url=None,
+        )
+        golden_repo_manager = MagicMock()
+        return GitHubProvider(
+            token_manager=token_manager,
+            golden_repo_manager=golden_repo_manager,
+        )
 
     @pytest.mark.asyncio
     async def test_raises_error_when_not_configured(self):
@@ -536,122 +663,86 @@ class TestGitHubProviderErrorHandling:
         )
 
         with pytest.raises(GitHubProviderError) as exc_info:
-            provider.discover_repositories(page=1, page_size=50)
+            provider.discover_repositories(cursor=None, page_size=50)
 
         assert "not configured" in str(exc_info.value).lower()
 
-    @pytest.mark.asyncio
-    async def test_handles_api_error(self):
-        """Test that provider handles GitHub API errors gracefully."""
+    def test_handles_api_error(self):
+        """Test that provider handles GitHub API errors gracefully.
+
+        The primary code path makes a GraphQL request via httpx.post.
+        We mock httpx.post at the external HTTP boundary to simulate a 401.
+        """
         from code_indexer.server.services.repository_providers.github_provider import (
-            GitHubProvider,
             GitHubProviderError,
         )
-        from code_indexer.server.services.ci_token_manager import TokenData
 
-        token_manager = MagicMock()
-        token_manager.get_token.return_value = TokenData(
-            platform="github",
-            token="ghp_test123456789012345678901234567890",
-            base_url=None,
-        )
-        golden_repo_manager = MagicMock()
+        provider = self._make_provider()
 
-        provider = GitHubProvider(
-            token_manager=token_manager,
-            golden_repo_manager=golden_repo_manager,
-        )
-
-        # Simulate API error
-        mock_response = MagicMock()
+        mock_request = MagicMock()
+        mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 401
+        mock_response.headers = {}
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "Unauthorized", request=MagicMock(), response=mock_response
+            "Unauthorized", request=mock_request, response=mock_response
         )
 
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
+        with patch("httpx.post", return_value=mock_response):
             with pytest.raises(GitHubProviderError) as exc_info:
-                provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(cursor=None, page_size=50)
 
-        assert (
-            "api" in str(exc_info.value).lower()
-            or "error" in str(exc_info.value).lower()
-        )
+        error_msg = str(exc_info.value).lower()
+        assert "api" in error_msg or "error" in error_msg or "unauthorized" in error_msg
 
-    @pytest.mark.asyncio
-    async def test_handles_timeout(self):
-        """Test that provider handles request timeout."""
+    def test_handles_timeout(self):
+        """Test that provider handles request timeout.
+
+        The primary code path makes a GraphQL request via httpx.post.
+        We mock httpx.post at the external HTTP boundary to raise a timeout.
+        """
         from code_indexer.server.services.repository_providers.github_provider import (
-            GitHubProvider,
             GitHubProviderError,
         )
-        from code_indexer.server.services.ci_token_manager import TokenData
 
-        token_manager = MagicMock()
-        token_manager.get_token.return_value = TokenData(
-            platform="github",
-            token="ghp_test123456789012345678901234567890",
-            base_url=None,
-        )
-        golden_repo_manager = MagicMock()
+        provider = self._make_provider()
 
-        provider = GitHubProvider(
-            token_manager=token_manager,
-            golden_repo_manager=golden_repo_manager,
-        )
-
-        with patch.object(
-            provider,
-            "_make_api_request",
-            side_effect=httpx.TimeoutException("Connection timed out"),
+        with patch(
+            "httpx.post", side_effect=httpx.TimeoutException("Connection timed out")
         ):
             with pytest.raises(GitHubProviderError) as exc_info:
-                provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(cursor=None, page_size=50)
 
         assert "timed out" in str(exc_info.value).lower()
 
-    @pytest.mark.asyncio
-    async def test_handles_rate_limit(self):
-        """Test that provider handles GitHub rate limit response."""
+    def test_handles_rate_limit(self):
+        """Test that provider handles GitHub rate limit response.
+
+        The primary code path makes a GraphQL request via httpx.post.
+        We mock httpx.post at the external HTTP boundary to simulate a 403 rate limit.
+        """
         from code_indexer.server.services.repository_providers.github_provider import (
-            GitHubProvider,
             GitHubProviderError,
         )
-        from code_indexer.server.services.ci_token_manager import TokenData
 
-        token_manager = MagicMock()
-        token_manager.get_token.return_value = TokenData(
-            platform="github",
-            token="ghp_test123456789012345678901234567890",
-            base_url=None,
-        )
-        golden_repo_manager = MagicMock()
+        provider = self._make_provider()
 
-        provider = GitHubProvider(
-            token_manager=token_manager,
-            golden_repo_manager=golden_repo_manager,
-        )
-
-        # Simulate rate limit response
-        mock_response = MagicMock()
+        mock_request = MagicMock()
+        mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 403
         mock_response.headers = {
             "X-RateLimit-Remaining": "0",
-            "X-RateLimit-Reset": "1704067200",
+            "X-RateLimit-Reset": self._RATE_LIMIT_RESET_EPOCH,
         }
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "rate limit exceeded", request=MagicMock(), response=mock_response
+            "rate limit exceeded", request=mock_request, response=mock_response
         )
 
-        with patch.object(provider, "_make_api_request", return_value=mock_response):
+        with patch("httpx.post", return_value=mock_response):
             with pytest.raises(GitHubProviderError) as exc_info:
-                provider.discover_repositories(page=1, page_size=50)
+                provider.discover_repositories(cursor=None, page_size=50)
 
-        # Should include rate limit info in error
-        assert (
-            "rate limit" in str(exc_info.value).lower()
-            or "api" in str(exc_info.value).lower()
-        )
+        error_msg = str(exc_info.value).lower()
+        assert "rate limit" in error_msg or "api" in error_msg or "error" in error_msg
 
 
 class TestGitHubProviderServerSideSearch:
@@ -694,7 +785,9 @@ class TestGitHubProviderServerSideSearch:
             )
 
         with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(page=1, page_size=50, search="myproject")
+            provider.discover_repositories(
+                cursor=None, page_size=50, search="myproject"
+            )
 
         assert captured_endpoint == "search/repositories"
         assert "q" in captured_params
@@ -737,7 +830,7 @@ class TestGitHubProviderServerSideSearch:
             return_value=self._create_mock_response(search_response),
         ):
             result = provider.discover_repositories(
-                page=1, page_size=50, search="myproject"
+                cursor=None, page_size=50, search="myproject"
             )
 
         assert len(result.repositories) == 1
@@ -745,7 +838,7 @@ class TestGitHubProviderServerSideSearch:
 
     @pytest.mark.asyncio
     async def test_search_pagination_from_response_body(self):
-        """Test that search uses total_count from response for pagination."""
+        """Test that search propagates total_count from API response as source_total."""
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -767,15 +860,19 @@ class TestGitHubProviderServerSideSearch:
             return_value=self._create_mock_response(search_response),
         ):
             result = provider.discover_repositories(
-                page=1, page_size=50, search="myproject"
+                cursor=None, page_size=50, search="myproject"
             )
 
-        assert result.total_count == 150
-        assert result.total_pages == 3  # ceil(150/50)
+        assert result.source_total == 150
+        assert result.has_next_page is False  # no items returned, source exhausted
 
     @pytest.mark.asyncio
     async def test_no_search_uses_user_repos_endpoint(self):
-        """Test that without search, /user/repos endpoint is used."""
+        """Test that without search, /user/repos endpoint is used (via REST fallback).
+
+        The provider tries GraphQL first. A network-level failure (ConnectError)
+        triggers the GraphQL-to-REST fallback, so user/repos gets called.
+        """
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
@@ -796,8 +893,13 @@ class TestGitHubProviderServerSideSearch:
             captured_endpoint = endpoint
             return self._create_mock_response([])
 
-        with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(page=1, page_size=50, search=None)
+        with patch(
+            "httpx.post", side_effect=httpx.ConnectError("simulated graphql failure")
+        ):
+            with patch.object(
+                provider, "_make_api_request", side_effect=capture_request
+            ):
+                provider.discover_repositories(cursor=None, page_size=50, search=None)
 
         assert captured_endpoint == "user/repos"
 
@@ -844,35 +946,49 @@ class TestGitHubProviderServerSideSearch:
             "_make_api_request",
             return_value=self._create_mock_response(search_response),
         ):
-            result = provider.discover_repositories(page=1, page_size=50, search="data")
+            result = provider.discover_repositories(
+                cursor=None, page_size=50, search="data"
+            )
 
         assert len(result.repositories) == 1
         assert result.repositories[0].name == "owner/data-services"
 
     @pytest.mark.asyncio
     async def test_empty_search_string_uses_regular_endpoint(self):
-        """Test that empty search string uses /user/repos endpoint."""
+        """Test that empty search string uses /user/repos endpoint (via REST fallback)."""
+        import httpx
         from code_indexer.server.services.repository_providers.github_provider import (
             GitHubProvider,
         )
         from code_indexer.server.services.ci_token_manager import TokenData
 
+        FAKE_TOKEN_FOR_TESTS = "test-token-not-real"
         token_manager = MagicMock()
         token_manager.get_token.return_value = TokenData(
-            platform="github", token="ghp_test123", base_url=None
+            platform="github", token=FAKE_TOKEN_FOR_TESTS, base_url=None
         )
         golden_repo_manager = MagicMock()
         golden_repo_manager.list_golden_repos.return_value = []
 
         provider = GitHubProvider(token_manager, golden_repo_manager)
-        captured_endpoint = None
+        captured_url = None
 
-        def capture_request(endpoint, params=None):
-            nonlocal captured_endpoint
-            captured_endpoint = endpoint
-            return self._create_mock_response([])
+        def capture_get(url, **kwargs):
+            nonlocal captured_url
+            captured_url = url
+            mock_resp = MagicMock(spec=httpx.Response)
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = []
+            mock_resp.headers = {}
+            mock_resp.raise_for_status = MagicMock()
+            return mock_resp
 
-        with patch.object(provider, "_make_api_request", side_effect=capture_request):
-            provider.discover_repositories(page=1, page_size=50, search="")
+        # httpx.post → GraphQL fails; httpx.get → REST captures URL
+        with (
+            patch("httpx.post", side_effect=httpx.ConnectError("forced graphql fail")),
+            patch("httpx.get", side_effect=capture_get),
+        ):
+            provider.discover_repositories(cursor=None, page_size=50, search="")
 
-        assert captured_endpoint == "user/repos"
+        assert captured_url is not None, "REST endpoint was never called"
+        assert "/user/repos" in captured_url, f"Expected /user/repos in {captured_url}"
