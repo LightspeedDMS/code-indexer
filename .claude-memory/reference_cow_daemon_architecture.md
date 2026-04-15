@@ -2,8 +2,8 @@
 name: CoW Storage Daemon Architecture
 description: How CoW Storage Daemon integrates with CIDX — REST API for lifecycle, NFS for filesystem access
 type: reference
+originSessionId: 04fcbccb-cd14-4e4f-94da-218d94a53f94
 ---
-
 # CoW Storage Daemon — Architecture and Integration Model
 
 ## What It Is
@@ -39,8 +39,28 @@ Repo: `/home/jsbattig/Dev/cow-storage-daemon`
 - Install: `./scripts/install-cow-daemon.sh --storage-path /home/jsbattig/cow-storage`
 - Credentials stored in `.local-testing`
 
-## CIDX Integration Status
-As of 2026-04-11: CIDX does NOT yet have a CowStorageDaemonClient.
-`VersionedSnapshotManager` has ONTAP mode (via `OntapFlexCloneClient`) and direct `cp --reflink=auto` mode.
-A `CowStorageDaemonClient` needs to be built — mirrors `OntapFlexCloneClient` structure.
-Config: `CowDaemonConfig` dataclass needs adding to `config_manager.py` with `endpoint`, `api_key`, `namespace`, `mount_point`.
+## CIDX Integration Status — WIRED (Story #510, as of 2026-04-14)
+
+CIDX HAS a working CoW daemon client. Do NOT assume it still needs to be built.
+
+**Implementation**:
+- `CowDaemonBackend` class: `src/code_indexer/server/storage/shared/clone_backend.py:215` — full REST client (create_clone, delete_clone, list_clones, clone_exists, `_poll_job` with exponential backoff)
+- `CloneBackendFactory.create(clone_backend_type="cow-daemon", cow_daemon_config=...)` at `clone_backend.py:355`
+- Startup wiring: `src/code_indexer/server/startup/clone_backend_wiring.py:65` `build_snapshot_manager()` — selects backend from `config.clone_backend` ∈ {"local", "ontap", "cow-daemon"}
+- Fail-fast health check: `_check_daemon_health()` calls `GET /api/v1/health` at startup — RuntimeError if unreachable, NO fallback
+- Fail-fast NFS check: `_check_nfs_mount()` validates NFS mount via `NfsMountValidator`
+- Injected into `VersionedSnapshotManager(clone_backend=backend)` — used by all golden-repo lifecycle services
+- Config: `CowDaemonConfig` already exists in `config_manager.py` (`daemon_url`, `api_key`, `mount_point`, `poll_interval_seconds`, `timeout_seconds`)
+- Uses lazy-imported `requests` library inside `CowDaemonBackend._requests()` to keep startup fast
+
+**Hot-path endpoints actually called**:
+- `POST /api/v1/clones` — create
+- `GET /api/v1/jobs/{job_id}` — poll (exponential backoff, max 30s)
+- `DELETE /api/v1/clones/{namespace}/{name}` — delete (404 = success, idempotent)
+- `GET /api/v1/clones?namespace={ns}` — list
+- `GET /api/v1/clones/{namespace}/{name}` — exists (200/404)
+- `GET /api/v1/health` — startup only
+
+**Coexists with**: `LocalCloneBackend` (`cp --reflink=auto`) and `OntapCloneBackend` (wraps `OntapFlexCloneClient`). All three implement the `CloneBackend` Protocol.
+
+**Before citing this file**: verify `clone_backend.py:215` still shows `class CowDaemonBackend` — if it moved, update line refs.
