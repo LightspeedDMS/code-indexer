@@ -28,6 +28,11 @@ from code_indexer.server.auth import dependencies
 from . import _utils
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
+from code_indexer.server.services.git_operations_service import (  # noqa: F401
+    git_operations_service,
+    GitCommandError,
+)
+from code_indexer.global_repos.git_operations import GitOperationsService  # noqa: F401
 from code_indexer.server.repositories.activated_repo_manager import (
     ActivatedRepoManager,
 )

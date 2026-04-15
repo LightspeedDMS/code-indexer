@@ -276,3 +276,12 @@ from code_indexer.server.mcp.handlers.git_write import (  # noqa: F401, E402
     # Private helper used by other domain modules
     _get_pat_credential_for_remote,
 )
+
+# Re-export git service objects so test patches via handlers.X keep working
+from code_indexer.server.services.git_operations_service import (  # noqa: F401, E402
+    git_operations_service,
+    GitCommandError,
+)
+from code_indexer.global_repos.git_operations import (  # noqa: F401, E402
+    GitOperationsService,
+)
