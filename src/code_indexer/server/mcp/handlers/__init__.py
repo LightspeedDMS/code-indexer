@@ -78,6 +78,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.pull_requests",
                 "code_indexer.server.mcp.handlers.git_read",
                 "code_indexer.server.mcp.handlers.git_write",
+                "code_indexer.server.mcp.handlers.admin",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -158,7 +159,6 @@ from code_indexer.server.mcp.handlers._legacy import (  # noqa: F401, E402
     # Domain helpers in _legacy.py (not yet extracted to domain modules)
     _append_provider_to_config,
     _derive_forge_host,
-    _get_group_manager,
     _get_personal_credential_for_host,
     _omni_regex_search,
     _omni_search_code,
@@ -275,6 +275,51 @@ from code_indexer.server.mcp.handlers.git_write import (  # noqa: F401, E402
     delete_git_credential,
     # Private helper used by other domain modules
     _get_pat_credential_for_remote,
+)
+
+from code_indexer.server.mcp.handlers.admin import (  # noqa: F401, E402
+    # Public handlers extracted from _legacy (Story #496 admin step)
+    handle_authenticate,
+    list_users,
+    create_user,
+    handle_set_session_impersonation,
+    handle_list_groups,
+    handle_create_group,
+    handle_get_group,
+    handle_update_group,
+    handle_delete_group,
+    handle_add_member_to_group,
+    handle_remove_member_from_group,
+    handle_add_repos_to_group,
+    handle_remove_repo_from_group,
+    handle_bulk_remove_repos_from_group,
+    handle_list_api_keys,
+    handle_create_api_key,
+    handle_delete_api_key,
+    handle_list_mcp_credentials,
+    handle_create_mcp_credential,
+    handle_delete_mcp_credential,
+    handle_admin_list_user_mcp_credentials,
+    handle_admin_create_user_mcp_credential,
+    handle_admin_delete_user_mcp_credential,
+    handle_admin_list_all_mcp_credentials,
+    handle_admin_list_system_mcp_credentials,
+    handle_query_audit_logs,
+    handle_enter_maintenance_mode,
+    handle_exit_maintenance_mode,
+    handle_get_maintenance_status,
+    handle_admin_logs_query,
+    admin_logs_export,
+    get_job_statistics,
+    get_job_details,
+    handle_get_global_config,
+    handle_set_global_config,
+    trigger_reindex,
+    get_index_status,
+    handle_trigger_dependency_analysis,
+    # Private helpers used by tests and external consumers
+    _get_group_manager,
+    _validate_group_id,
 )
 
 # Re-export git service objects so test patches via handlers.X keep working
