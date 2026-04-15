@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.15.1
+
+### Fixes
+
+- fix: Bug #685 -- Auto-discovery pagination dead-end. Replace broken page-number pagination with opaque cursor model and filter-fill loop. Fixes sparse pages after filtering already-indexed repos and missing Next button when all repos on a page are indexed. Cursor-based navigation with JS Back button stack. Safety cap of 5 source batches per page. Invalid cursors silently restart from beginning. 45 new tests.
+
 ## v9.15.0
 
 ### Refactoring
