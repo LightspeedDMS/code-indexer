@@ -1,9 +1,10 @@
 """
-Web routes for Dependency Map page (Story #212, #342).
+Web routes for Dependency Map page (Story #212, #342, #684).
 
 Provides:
   GET  /admin/dependency-map                                -> Full page
   GET  /admin/partials/depmap-job-status                    -> HTMX partial (admin only)
+  POST /admin/partials/depmap-job-status/retry              -> Retry failed dashboard job (Story #684)
   GET  /admin/partials/depmap-activity-journal              -> HTMX journal partial (Story #329)
   POST /admin/dependency-map/trigger                        -> Trigger analysis (admin only, JSON)
   GET  /admin/dependency-map/health                         -> Health report JSON (Story #342)
@@ -84,6 +85,56 @@ def _get_dashboard_service():
         )
     except Exception as e:
         logger.warning("Failed to build DependencyMapDashboardService: %s", e)
+        return None
+
+
+def _get_dashboard_cache_backend():
+    """
+    Construct and return a DependencyMapDashboardCacheBackend backed by the server DB.
+
+    Follows the same config-resolution pattern as _get_dashboard_service.
+    Returns None if the server configuration is unavailable.
+    """
+    try:
+        from ..services.config_service import get_config_service
+        from ..storage.sqlite_backends import DependencyMapDashboardCacheBackend
+
+        config_service = get_config_service()
+        server_dir = config_service.config_manager.server_dir
+        db_path = str(server_dir / "data" / "cidx_server.db")
+        return DependencyMapDashboardCacheBackend(db_path)
+    except Exception as e:
+        logger.warning("_get_dashboard_cache_backend failed: %s", e)
+        return None
+
+
+def _get_job_tracker():
+    """
+    Return the global JobTracker instance from app module scope.
+
+    Returns None if unavailable (e.g. during testing without full startup).
+    """
+    try:
+        from ..app import job_tracker
+
+        return job_tracker
+    except Exception as e:
+        logger.debug("_get_job_tracker failed: %s", e)
+        return None
+
+
+def _get_background_job_manager():
+    """
+    Return the global BackgroundJobManager instance from app module scope.
+
+    Returns None if unavailable.
+    """
+    try:
+        from ..app import background_job_manager
+
+        return background_job_manager
+    except Exception as e:
+        logger.debug("_get_background_job_manager failed: %s", e)
         return None
 
 
@@ -195,6 +246,226 @@ def _get_progress_from_service(dep_map_service) -> tuple:
         logger.debug("Could not get progress from job tracker: %s", e)
 
     return 0, ""
+
+
+# Default dashboard cache TTL in seconds (10 minutes).
+# Used directly by _render_complete_response; override by passing ttl explicitly.
+_DASHBOARD_CACHE_TTL_DEFAULT = 600
+
+# Operation type registered with BackgroundJobManager for dashboard analysis jobs
+_DASHBOARD_OP_TYPE = "dep_map_dashboard"
+
+
+class _NullJobTracker:
+    """No-op tracker used as fallback when no real JobTracker is available."""
+
+    def update_status(self, job_id: str, **kwargs) -> None:
+        pass
+
+    def get_job(self, job_id: str):
+        return None
+
+
+def _submit_dashboard_job(
+    cache_backend, bg_job_manager, dashboard_service, job_tracker
+) -> Optional[str]:
+    """
+    Atomically claim the job slot and submit a background dashboard analysis job.
+
+    Uses cache_backend.claim_job_slot() as a compare-and-swap to coalesce
+    concurrent requests onto a single job rather than spawning duplicates.
+    Clears the claimed slot if submission fails (exception or falsy return value).
+
+    Args:
+        cache_backend: DependencyMapDashboardCacheBackend instance.
+        bg_job_manager: BackgroundJobManager instance.
+        dashboard_service: DependencyMapDashboardService instance.
+        job_tracker: JobTracker instance (may be None; _NullJobTracker used as fallback).
+
+    Returns:
+        The job_id string on success, the existing job_id if slot was already taken,
+        or None if a required dependency was unavailable or submission failed.
+    """
+    import uuid
+
+    if bg_job_manager is None or dashboard_service is None or cache_backend is None:
+        logger.warning(
+            "_submit_dashboard_job: required dependency unavailable "
+            "(bg_job_manager=%s, dashboard_service=%s, cache_backend=%s)",
+            bg_job_manager is not None,
+            dashboard_service is not None,
+            cache_backend is not None,
+        )
+        return None
+
+    new_job_id = str(uuid.uuid4())
+
+    # Atomic claim: returns None on success, existing job_id if slot already taken
+    existing = cache_backend.claim_job_slot(new_job_id)
+    if existing is not None:
+        logger.debug("_submit_dashboard_job: slot already taken by %s", existing)
+        return str(existing)
+
+    from ..services.dependency_map_dashboard_job_runner import (
+        DependencyMapDashboardJobRunner,
+    )
+
+    effective_tracker = job_tracker if job_tracker is not None else _NullJobTracker()
+    runner = DependencyMapDashboardJobRunner(
+        cache_backend=cache_backend,
+        dashboard_service=dashboard_service,
+        job_tracker=effective_tracker,
+    )
+
+    try:
+        submitted_id = bg_job_manager.submit_job(
+            _DASHBOARD_OP_TYPE,
+            runner.run,
+            new_job_id,
+            submitter_username="system",
+            is_admin=True,
+            repo_alias=None,
+        )
+    except Exception as exc:
+        logger.warning("_submit_dashboard_job: submit_job raised: %s", exc)
+        cache_backend.clear_job_slot()
+        return None
+
+    if not submitted_id:
+        logger.warning(
+            "_submit_dashboard_job: submit_job returned falsy value %r; clearing slot",
+            submitted_id,
+        )
+        cache_backend.clear_job_slot()
+        return None
+
+    return str(submitted_id)
+
+
+def _render_complete_response(request, session, cached_row: dict) -> HTMLResponse:
+    """
+    Render the complete dashboard state using depmap_job_status.html.
+
+    Parses result_json from cached_row and applies the Story #342 content
+    health merge (same logic as the original synchronous endpoint).
+
+    Args:
+        request: FastAPI Request.
+        session: Authenticated session object (provides username).
+        cached_row: Dict from DependencyMapDashboardCacheBackend.get_cached().
+
+    Returns:
+        TemplateResponse rendering partials/depmap_job_status.html.
+    """
+    import json as _json
+
+    result_json = cached_row.get("result_json") or "{}"
+    try:
+        job_status = _json.loads(result_json)
+    except ValueError as exc:
+        logger.warning(
+            "_render_complete_response: failed to parse result_json: %s", exc
+        )
+        job_status = {}
+
+    # Story #342: merge content health — same guard as original endpoint
+    output_dir = _get_dep_map_output_dir()
+    if output_dir is not None and job_status.get("status") != "running":
+        from ..services.dep_map_health_detector import DepMapHealthDetector
+
+        try:
+            detector = DepMapHealthDetector()
+            known_repos = _get_known_repo_names()
+            content_report = detector.detect(output_dir, known_repos=known_repos)
+            if not content_report.is_healthy:
+                if content_report.status == "critical":
+                    job_status["health"] = "Critical"
+                    job_status["color"] = "RED"
+                elif content_report.status == "needs_repair":
+                    job_status["health"] = (
+                        "Needs Repair"
+                        if content_report.repairable_count > 0
+                        else "Unhealthy"
+                    )
+                    job_status["color"] = "YELLOW"
+                job_status["content_anomaly_count"] = len(content_report.anomalies)
+                job_status["content_anomalies"] = [
+                    a.to_dict() for a in content_report.anomalies
+                ]
+                job_status["repairable_count"] = content_report.repairable_count
+        except Exception as exc:
+            logger.debug(
+                "_render_complete_response: content health check failed: %s", exc
+            )
+
+    return templates.TemplateResponse(
+        "partials/depmap_job_status.html",
+        {
+            "request": request,
+            "job_status": job_status,
+            "username": session.username,
+        },
+    )
+
+
+def _render_computing_response(request, job_id: str, tracker) -> HTMLResponse:
+    """
+    Render the in-progress computing partial (depmap_job_status_computing.html).
+
+    Reads current progress from the tracker if available; defaults to 0.
+
+    Args:
+        request: FastAPI Request.
+        job_id: Running job ID embedded in the partial for HTMX polling.
+        tracker: JobTracker instance (may be None).
+
+    Returns:
+        TemplateResponse rendering partials/depmap_job_status_computing.html.
+    """
+    progress = 0
+    progress_info = ""
+    if tracker is not None:
+        try:
+            job = tracker.get_job(job_id)
+            if job is not None:
+                progress = getattr(job, "progress", 0) or 0
+                progress_info = getattr(job, "progress_info", "") or ""
+        except Exception as exc:
+            logger.debug(
+                "_render_computing_response: tracker.get_job(%r) raised: %s",
+                job_id,
+                exc,
+            )
+
+    return templates.TemplateResponse(
+        "partials/depmap_job_status_computing.html",
+        {
+            "request": request,
+            "job_id": job_id,
+            "progress": progress,
+            "progress_info": progress_info,
+        },
+    )
+
+
+def _render_error_response(request, error_message: str) -> HTMLResponse:
+    """
+    Render the error partial (depmap_job_status_error.html).
+
+    Args:
+        request: FastAPI Request.
+        error_message: Human-readable failure description shown to the admin.
+
+    Returns:
+        TemplateResponse rendering partials/depmap_job_status_error.html.
+    """
+    return templates.TemplateResponse(
+        "partials/depmap_job_status_error.html",
+        {
+            "request": request,
+            "error_message": error_message,
+        },
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,55 +600,102 @@ def dependency_map_page(request: Request):
 @dependency_map_router.get("/partials/depmap-job-status", response_class=HTMLResponse)
 def depmap_job_status_partial(request: Request):
     """
-    HTMX partial for Dependency Map job status section.
+    HTMX partial for Dependency Map job status section (Story #684 async state machine).
 
-    GET /admin/partials/depmap-job-status
+    GET /admin/partials/depmap-job-status[?job_id=<id>]
 
-    Admin-only. Returns HTML fragment with health badge, timestamps, error banner,
-    and Run Now dropdown. HTMX auto-refresh every 5s when status=running.
+    Admin-only. Routes through four states in order:
+      STATE 1: Fresh cache -> renders complete template with cached result.
+      STATE 2: job_id param present -> polls that specific job and routes by status.
+      STATE 3: Any in-flight job running -> renders computing partial.
+      STATE 4: No cache, no job -> submits background job, returns computing partial.
+
+    STATE 2 is evaluated before STATE 3 so an explicit poll is never short-circuited
+    by an unrelated in-flight job.  Content health merge (Story #342) is applied
+    inside _render_complete_response.  Error partial is returned if STATE 4 fails.
     """
     session = _require_admin_session(request)
     if not session:
         return HTMLResponse(content="", status_code=401)
 
-    job_status = _get_job_status_data()
+    cache_backend = _get_dashboard_cache_backend()
+    tracker = _get_job_tracker()
 
-    # Story #342: Merge content health into job status (single source of truth)
-    # Content health overrides job health when it's worse than job health
-    output_dir = _get_dep_map_output_dir()
-    if output_dir is not None and job_status.get("status") != "running":
-        from ..services.dep_map_health_detector import DepMapHealthDetector
+    # STATE 1: fresh cache available
+    if cache_backend is not None and cache_backend.is_fresh(
+        _DASHBOARD_CACHE_TTL_DEFAULT
+    ):
+        cached = cache_backend.get_cached()
+        if cached is not None:
+            return _render_complete_response(request, session, cached)
 
-        try:
-            detector = DepMapHealthDetector()
-            known_repos = _get_known_repo_names()
-            content_report = detector.detect(output_dir, known_repos=known_repos)
-            if not content_report.is_healthy:
-                if content_report.status == "critical":
-                    job_status["health"] = "Critical"
-                    job_status["color"] = "RED"
-                elif content_report.status == "needs_repair":
-                    if content_report.repairable_count > 0:
-                        job_status["health"] = "Needs Repair"
-                    else:
-                        job_status["health"] = "Unhealthy"
-                    job_status["color"] = "YELLOW"
-                job_status["content_anomaly_count"] = len(content_report.anomalies)
-                job_status["content_anomalies"] = [
-                    a.to_dict() for a in content_report.anomalies
-                ]
-                job_status["repairable_count"] = content_report.repairable_count
-        except Exception as e:
-            logger.debug("Content health check failed in partial: %s", e)
+    # STATE 2: caller is polling a specific job (must be checked before STATE 3)
+    job_id = request.query_params.get("job_id")
+    if job_id:
+        job = tracker.get_job(job_id) if tracker is not None else None
+        if job is not None:
+            if job.status == "completed":
+                cached = (
+                    cache_backend.get_cached() if cache_backend is not None else None
+                )
+                if cached is not None:
+                    return _render_complete_response(request, session, cached)
+            elif job.status == "failed":
+                error = getattr(job, "error", None) or "Unknown error"
+                return _render_error_response(request, error)
+            elif job.status in ("running", "pending"):
+                return _render_computing_response(request, job_id, tracker)
 
-    return templates.TemplateResponse(
-        "partials/depmap_job_status.html",
-        {
-            "request": request,
-            "job_status": job_status,
-            "username": session.username,
-        },
+    # STATE 3: any in-flight job running (generic, no specific job_id from caller)
+    running_job_id = (
+        cache_backend.get_running_job_id(tracker) if cache_backend is not None else None
     )
+    if running_job_id:
+        return _render_computing_response(request, running_job_id, tracker)
+
+    # STATE 4: no cache, no in-flight job — submit a new background job
+    bg_manager = _get_background_job_manager()
+    dashboard_service = _get_dashboard_service()
+    new_job_id = _submit_dashboard_job(
+        cache_backend, bg_manager, dashboard_service, tracker
+    )
+    if new_job_id:
+        return _render_computing_response(request, new_job_id, tracker)
+
+    # Submission failed: async infrastructure unavailable
+    logger.warning(
+        "depmap_job_status_partial: failed to submit dashboard job "
+        "(cache_backend=%s, bg_manager=%s, dashboard_service=%s)",
+        cache_backend is not None,
+        bg_manager is not None,
+        dashboard_service is not None,
+    )
+    return _render_error_response(
+        request, "Dashboard analysis infrastructure unavailable"
+    )
+
+
+@dependency_map_router.post(
+    "/partials/depmap-job-status/retry", response_class=HTMLResponse
+)
+def depmap_job_status_retry(request: Request):
+    """
+    Retry endpoint for failed dashboard background jobs (Story #684).
+
+    POST /admin/partials/depmap-job-status/retry
+
+    Admin-only. Clears the failed/stuck job slot, then delegates to the
+    GET handler which will submit a new background job.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    cache_backend = _get_dashboard_cache_backend()
+    if cache_backend is not None:
+        cache_backend.clear_job_slot_for_retry()
+
+    return depmap_job_status_partial(request)
 
 
 @dependency_map_router.get(
