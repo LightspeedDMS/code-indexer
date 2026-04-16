@@ -322,9 +322,16 @@ class GoldenRepoManager:
         # so BackgroundJobManager can inject it (Story #482 PATH A).
         def background_worker(progress_callback=None) -> Dict[str, Any]:
             """Execute add operation in background thread."""
+            nonlocal default_branch
             try:
                 # Clone repository
                 clone_path = self._clone_repository(repo_url, alias, default_branch)
+
+                # Bug #699: When no branch was specified, resolve the actual
+                # checked-out branch so metadata always stores a concrete value
+                # for future refreshes (GoldenRepo model requires a string).
+                if default_branch is None:
+                    default_branch = self._resolve_cloned_branch(clone_path)
 
                 # Execute post-clone workflow
                 self._execute_post_clone_workflow(
@@ -1043,6 +1050,44 @@ class GoldenRepoManager:
             raise GitOperationError("Git clone operation timed out")
         except subprocess.SubprocessError as e:
             raise GitOperationError(f"Git clone subprocess error: {str(e)}")
+
+    def _resolve_cloned_branch(self, clone_path: str) -> str:
+        """Detect the checked-out branch in a freshly cloned repository.
+
+        Used after a clone with no explicit --branch to discover which branch
+        the remote's HEAD pointed to (e.g., 'master', 'main', 'develop').
+
+        Returns:
+            Branch name string (never None). Falls back to 'main' with a
+            logged warning if detection fails, which is strictly better than
+            the old behavior that always hardcoded 'main' regardless.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=clone_path,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=self.resource_config.git_local_timeout,
+            )
+            branch = result.stdout.strip()
+            if not branch:
+                logger.warning(
+                    "git rev-parse returned empty output for cloned repo at %s. "
+                    "Falling back to 'main'.",
+                    clone_path,
+                )
+                return "main"
+            return branch
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            logger.warning(
+                "Failed to detect default branch in cloned repo at %s: %s. "
+                "Falling back to 'main'.",
+                clone_path,
+                e,
+            )
+            return "main"
 
     def _cleanup_repository_files(self, clone_path: str) -> bool:
         """
