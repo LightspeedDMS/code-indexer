@@ -13,11 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - feat: Story #680 -- External dependency latency observability. Adds end-to-end pipeline for tracking, aggregating, and evaluating latency for external HTTP dependencies (VoyageAI, Cohere, Langfuse, etc.). DependencyLatencyBackend persists raw latency samples and per-minute aggregated buckets to SQLite with a 7-day retention window. DependencyLatencyTracker provides thread-safe in-process sample recording with configurable buffer flush. DependencyLatencyAggregator computes p50/p95/p99 percentiles, request rate, and error rate from the stored buckets. DependencyHealthEvaluator applies threshold-based rules to classify dependency status as healthy, degraded, or unhealthy. LatencyTrackingHttpxTransport wraps any httpx.AsyncBaseTransport to record timing and status for every outbound request transparently. Dashboard dependency latency section styled with new CSS classes: .dependency-latency-section, .dependency-row, .dep-name, .dep-metrics, .dep-trend, .dependency-status-healthy, .dependency-status-degraded, .dependency-status-unhealthy. 73 new tests across all five components.
 
+- feat: Story #686 -- Grouped-by-Category view toggle on Groups page repo access table. Handler enriches golden repos with category_id, category_name, category_priority from RepoCategoryService with graceful degradation on failure. Template adds toggle button (Group by Category / Flat View) and data-repo-alias, data-category-name, data-category-priority attributes on repo rows. repo_categories.js extended: _getGroupedStorageKey, toggleGroupedView, applyStoredGroupedView all detect .repo-access-table with dedicated localStorage key cidx-groups-repo-access-grouped. Bootstrap call applyStoredGroupedView() injected at end of partial for HTMX refresh persistence. 15 new tests.
+
+## v9.15.4
+
+### Fixes
+
+- fix: Bug #699 -- `add_golden_repo` and web batch-create silently hardcoded `default_branch="main"` when caller omitted `branch`, passing `--branch main` to `git clone`. Any upstream repo with a non-`main` default branch (e.g., `master`) failed with exit code 128. Fix: all call sites now pass `None` when caller omits branch, and `_clone_remote_repository()` omits `--branch` from the clone command when branch is `None`, letting git resolve the remote's HEAD naturally. Affected sites fixed: MCP `add_golden_repo` handler, web `_batch_create_repos` helper, web single-repo add endpoint, `AddGoldenRepoRequest` model default, and `GoldenRepoManager._clone_remote_repository()`. 7 new tests (2 fast command-construction tests + 5 slow local-bare-repo integration tests).
+
+## v9.15.3
+
+### Fixes
+
+- fix: `git_diff` response metadata `files_changed` counter was always 0 when `stat_only=true`. Root cause: `git_operations_service.git_diff()` computed `files_changed` by counting `"diff --git"` markers in the raw output, but git's `--stat` format emits no such markers -- only a summary line like "N files changed, K insertions(+), L deletions(-)". Fix: when the marker count is zero and output is non-empty, fall back to parsing the stat summary line via regex `r"(\d+) files? changed"`. Unified-diff path is unchanged; only stat/stat_only paths get the new fallback. The actual diff_text content was always correct -- only the counter metadata was wrong, so MCP clients that read `diff_text` saw the right data but clients that read `files_changed` saw 0. 1 new regression test.
+
 ## v9.15.2
 
-### Features
+### Fixes
 
-- feat: Story #686 -- Grouped-by-Category view toggle on Groups page repo access table. Handler enriches golden repos with category_id, category_name, category_priority from RepoCategoryService with graceful degradation on failure. Template adds toggle button (Group by Category / Flat View) and data-repo-alias, data-category-name, data-category-priority attributes on repo rows. repo_categories.js extended: _getGroupedStorageKey, toggleGroupedView, applyStoredGroupedView all detect .repo-access-table with dedicated localStorage key cidx-groups-repo-access-grouped. Bootstrap call applyStoredGroupedView() injected at end of partial for HTMX refresh persistence. 15 new tests.
+- fix: Bug #696 -- `git_diff` MCP handler silently discarded every revision-related parameter advertised in its tool schema. `from_revision`, `to_revision`, `path`, `context_lines`, and `stat_only` were accepted by the handler but never forwarded to `git_operations_service.git_diff()`, so every invocation degenerated into a working-tree diff against a clean golden repo and returned empty. Handler now reads all five parameters from `args` and forwards them to the service. `from_revision` is validated as required per the schema. Invalid revisions now produce `success:false` errors via the existing `GitCommandError` branch. 7 new unit tests with real git repos (no MagicMock).
+
+- fix: Bug #697 -- `git_log` MCP handler silently discarded every filter parameter (`path`, `author`, `until`, `branch`) AND suffered from a key-name mismatch where it read `args.get("since_date")` but the schema parameter is named `since`. Every filter was dead across the MCP surface. Handler now reads the correct schema key `since` and forwards it as `since_date=` to the service (kept service parameter name stable to avoid touching other callers). All five missing filter parameters now read from `args` and forwarded. 7 new unit tests including an explicit regression guard (`test_git_log_reads_since_not_since_date`) that locks in the key-name fix.
+
+- fix: Bug #698 -- `git_show_commit` stats always reported `insertions: 0, deletions: 0` for every file because combining `--numstat` and `--name-status` in a single `git show` command causes git to silently suppress numstat output (only name-status is emitted). `_get_commit_stats()` now runs the two git commands separately and merges results by path, matching the two-command pattern already used by `get_diff()`. Also fixed a latent rename-path resolution bug: numstat emits paths like `"old => new"` and `"dir/{old => new}/file.py"` which didn't match the name-status keys. Added `_resolve_numstat_rename_path()` helper that handles both simple and brace forms. 8 new unit tests covering add/modify/delete/rename/binary/multi-file/empty-commit cases.
 
 ## v9.15.1
 

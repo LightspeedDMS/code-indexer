@@ -2299,7 +2299,7 @@ def _batch_create_repos(
             job_id = golden_repo_manager.add_golden_repo(
                 repo_url=repo_data["clone_url"],
                 alias=alias,
-                default_branch=repo_data.get("branch", "main"),
+                default_branch=repo_data.get("branch") or None,
                 submitter_username=submitter_username,
             )
 
@@ -2595,7 +2595,7 @@ def add_golden_repo(
     request: Request,
     alias: str = Form(...),
     repo_url: str = Form(...),
-    default_branch: str = Form("main"),
+    default_branch: str = Form(""),
     csrf_token: Optional[str] = Form(None),
 ):
     """Add a new golden repository."""
@@ -2626,7 +2626,7 @@ def add_golden_repo(
         job_id = manager.add_golden_repo(
             repo_url=repo_url.strip(),
             alias=alias.strip(),
-            default_branch=default_branch.strip() or "main",
+            default_branch=default_branch.strip() or None,
             submitter_username=session.username,
         )
         return _create_golden_repos_page_response(

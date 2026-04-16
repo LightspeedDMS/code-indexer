@@ -411,8 +411,82 @@ class GitOperationsService:
             parents=parents,
         )
 
+    @staticmethod
+    def _resolve_numstat_rename_path(raw_path: str) -> str:
+        """Resolve git's numstat rename-path forms to the canonical new path.
+
+        git emits two rename forms in --numstat output:
+          - simple:  "old_name.py => new_name.py"
+          - brace:   "dir/{old => new}/file.py"  (partial-path rename)
+
+        In both cases we want the post-rename path so it matches what
+        --name-status emits (which always reports the new path).
+        """
+        if " => " not in raw_path:
+            return raw_path
+        if "{" in raw_path and "}" in raw_path:
+            # Brace form: dir/{old => new}/file.py → dir/new/file.py
+            start = raw_path.index("{")
+            end = raw_path.index("}", start)
+            inner = raw_path[start + 1 : end]
+            _old, _sep, new = inner.partition(" => ")
+            return raw_path[:start] + new + raw_path[end + 1 :]
+        # Simple form: "old => new" → "new"
+        _old, _sep, new = raw_path.partition(" => ")
+        return new
+
+    def _parse_numstat_output(self, output: str) -> "dict[str, tuple[int, int]]":
+        """Parse 'git show --numstat' output into {path: (insertions, deletions)}.
+
+        Binary files appear as '-\t-\tpath' and are mapped to (0, 0).
+        Rename lines use git's "old => new" or "dir/{old => new}/file" syntax
+        and are resolved to the new path so merge() matches --name-status.
+        Preserves the line-order of the git output.
+        """
+        result: "dict[str, tuple[int, int]]" = {}
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) == 3:
+                insertions_str, deletions_str, raw_path = parts
+                path = self._resolve_numstat_rename_path(raw_path)
+                insertions = 0 if insertions_str == "-" else int(insertions_str)
+                deletions = 0 if deletions_str == "-" else int(deletions_str)
+                result[path] = (insertions, deletions)
+        return result
+
+    def _parse_name_status_output(self, output: str) -> "dict[str, str]":
+        """Parse 'git show --name-status' output into {path: status_string}.
+
+        Handles:
+          - 2-field lines: "<status>\\t<path>"          (A, M, D, T, U)
+          - 3-field lines: "<R|C><score>\\t<old>\\t<new>" (renames, copies)
+        For renames/copies the new path is used as key so it aligns with
+        the path emitted by --numstat for the same file.
+        """
+        result: "dict[str, str]" = {}
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) == 3:
+                status_char, _old_path, new_path = parts
+                result[new_path] = self._map_status_char(status_char)
+            elif len(parts) == 2:
+                status_char, path = parts
+                result[path] = self._map_status_char(status_char)
+        return result
+
     def _get_commit_stats(self, commit_hash: str) -> List[FileChangeStats]:
         """Get file change statistics for a commit.
+
+        Bug #698 fix: combining --numstat and --name-status in a single
+        'git show' command silently suppresses numstat output.  Run the two
+        commands separately and merge results — matching the pattern used in
+        get_diff() / _parse_diff_stat_separate().
 
         Args:
             commit_hash: Full commit SHA
@@ -420,56 +494,50 @@ class GitOperationsService:
         Returns:
             List of FileChangeStats
         """
-        # Use numstat and name-status together
-        cmd = [
-            "git",
-            "show",
-            commit_hash,
-            "--numstat",
-            "--name-status",
-            "--format=",  # No commit info, just file stats
-        ]
+        # -M enables rename detection so "git show --name-status -M" emits
+        # "R<score>\t<old>\t<new>" instead of falling back to D+A pairs.
+        numstat_cmd = ["git", "show", commit_hash, "--numstat", "-M", "--format="]
+        status_cmd = ["git", "show", commit_hash, "--name-status", "-M", "--format="]
 
         try:
-            result = run_git_command(cmd, cwd=self.repo_path, check=True)
-        except subprocess.CalledProcessError:
+            numstat_result = run_git_command(
+                numstat_cmd, cwd=self.repo_path, check=True
+            )
+            status_result = run_git_command(status_cmd, cwd=self.repo_path, check=True)
+        except subprocess.CalledProcessError as e:
+            logger.debug(
+                "_get_commit_stats: git command failed for %s: %s", commit_hash, e
+            )
             return []
 
-        # Parse output - numstat gives insertions/deletions, name-status gives status
-        stats_dict = {}
-        lines = result.stdout.strip().split("\n")
+        numstat_map = self._parse_numstat_output(numstat_result.stdout)
+        status_map = self._parse_name_status_output(status_result.stdout)
 
-        # First pass: numstat lines (insertions, deletions, path)
-        for line in lines:
-            if not line.strip():
-                continue
-
-            parts = line.split("\t")
-            if len(parts) == 3:
-                insertions_str, deletions_str, path = parts
-                # Binary files show - for insertions/deletions
-                insertions = 0 if insertions_str == "-" else int(insertions_str)
-                deletions = 0 if deletions_str == "-" else int(deletions_str)
-                stats_dict[path] = FileChangeStats(
+        # Merge: numstat order is primary; status-only paths appended after.
+        stats: List[FileChangeStats] = []
+        seen: "set[str]" = set()
+        for path, (insertions, deletions) in numstat_map.items():
+            status = status_map.get(path, "modified")
+            stats.append(
+                FileChangeStats(
                     path=path,
                     insertions=insertions,
                     deletions=deletions,
-                    status="modified",  # Default, will be updated
+                    status=status,
                 )
-            elif len(parts) == 2:
-                # name-status line: status\tpath
-                status_char, path = parts
-                if path in stats_dict:
-                    stats_dict[path].status = self._map_status_char(status_char)
-                else:
-                    stats_dict[path] = FileChangeStats(
+            )
+            seen.add(path)
+        for path, status in status_map.items():
+            if path not in seen:
+                stats.append(
+                    FileChangeStats(
                         path=path,
                         insertions=0,
                         deletions=0,
-                        status=self._map_status_char(status_char),
+                        status=status,
                     )
-
-        return list(stats_dict.values())
+                )
+        return stats
 
     def _map_status_char(self, status: str) -> str:
         """Map git status character to human-readable status.

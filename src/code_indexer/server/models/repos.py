@@ -27,8 +27,11 @@ class AddGoldenRepoRequest(BaseModel):
     alias: str = Field(
         ..., min_length=1, max_length=100, description="Unique alias for repository"
     )
-    default_branch: str = Field(
-        default="main", min_length=1, max_length=100, description="Default branch"
+    default_branch: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Default branch. When omitted, git uses the remote HEAD ref.",
     )
     description: Optional[str] = Field(
         default=None, max_length=500, description="Optional repository description"
@@ -63,8 +66,10 @@ class AddGoldenRepoRequest(BaseModel):
 
     @field_validator("default_branch")
     @classmethod
-    def validate_default_branch(cls, v: str) -> str:
-        """Validate branch name."""
+    def validate_default_branch(cls, v: Optional[str]) -> Optional[str]:
+        """Validate branch name. None means use the remote's HEAD ref."""
+        if v is None:
+            return None
         v = v.strip()
         if not v:
             raise ValueError("Branch name cannot be empty")
