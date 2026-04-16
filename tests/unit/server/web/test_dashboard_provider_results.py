@@ -160,11 +160,15 @@ class TestPartialBackwardCompatNoProviderResults:
         assert "Providers" not in html
 
     def test_th_count_is_four_without_provider_results(self, recent_jobs_template):
-        """Without provider_results, exactly 4 <th> column headers are rendered."""
+        """Without provider_results, partial renders tbody-only rows with 4 <td> cells and zero <th> elements."""
         jobs = [_make_job(), _make_job(job_id="xyz999", repo_name="other")]
         html = recent_jobs_template.render(recent_jobs=jobs)
         assert "Providers" not in html
-        assert _count_th_elements(html) == 4
+        # Partial is tbody-only — parent template owns the <thead>; zero <th> here
+        assert _count_th_elements(html) == 0
+        # Each row has exactly 4 <td> cells (repo, job_type, completion_time, status)
+        td_count = len(re.findall(r"<td[>\s]", html, re.IGNORECASE))
+        assert td_count == 4 * len(jobs)
 
     def test_empty_state_colspan_is_four_without_provider_results(
         self, recent_jobs_template
@@ -188,11 +192,16 @@ class TestEmptyStateColspan:
     """colspan must increase to 5 when Providers column is active."""
 
     def test_th_count_is_five_when_provider_results_present(self, recent_jobs_template):
-        """With provider_results in a job, exactly 5 <th> headers are rendered."""
+        """With provider_results in a job, partial renders a 5th <td> providers column with provider-dot spans."""
         jobs = [_make_job(result={"provider_results": _make_provider_results()})]
         html = recent_jobs_template.render(recent_jobs=jobs)
-        assert "Providers" in html
-        assert _count_th_elements(html) == 5
+        # Partial is tbody-only — no <th> elements; provider column is a <td> with dot spans
+        assert _count_th_elements(html) == 0
+        # Providers column rendered as <td> with provider-dot spans
+        assert "provider-dot" in html
+        # Row has 5 <td> cells (repo, job_type, completion_time, status, providers)
+        td_count = len(re.findall(r"<td[>\s]", html, re.IGNORECASE))
+        assert td_count == 5
 
     def test_empty_state_colspan_is_five_when_provider_results_context_set(
         self, recent_jobs_template
@@ -213,13 +222,15 @@ class TestPartialRendersProviderDots:
     def test_providers_column_shown_when_any_job_has_provider_results(
         self, recent_jobs_template
     ):
-        """Providers column header appears when at least one job has provider_results."""
+        """Providers column renders provider-dot spans when at least one job has provider_results."""
         jobs = [
             _make_job(result={"provider_results": _make_provider_results()}),
             _make_job(job_id="old-job", result={}),
         ]
         html = recent_jobs_template.render(recent_jobs=jobs)
-        assert "Providers" in html
+        # Partial is tbody-only — "Providers" header is in the parent template, not here
+        # The providers column is proven by the presence of provider-dot span elements
+        assert "provider-dot" in html
 
     def test_success_provider_dot_uses_success_css_class(self, recent_jobs_template):
         """Success provider renders span with provider-dot-success CSS class."""

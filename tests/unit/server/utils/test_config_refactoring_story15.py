@@ -1,7 +1,12 @@
 """
 Unit tests for Story #15 - Refactor Misplaced Configuration Settings.
 
-AC1: IndexingConfig dataclass with temporal_stale_threshold_days and indexing_timeout_seconds
+AC1: IndexingConfig dataclass.
+
+NOTE (Story #683 AC1): temporal_stale_threshold_days and indexing_timeout_seconds
+were duplicated in IndexingConfig and ScipConfig. Story #683 removed them from
+IndexingConfig — ScipConfig is now the canonical location for these fields.
+Tests updated accordingly.
 """
 
 import tempfile
@@ -22,33 +27,31 @@ class TestIndexingConfig:
 
         assert IndexingConfig is not None
 
-    def test_indexing_config_has_temporal_stale_threshold_days(self):
-        """AC1: IndexingConfig should have temporal_stale_threshold_days field."""
+    def test_indexing_config_does_not_have_temporal_stale_threshold_days(self):
+        """Story #683 AC1: temporal_stale_threshold_days removed from IndexingConfig (canonical in ScipConfig)."""
         from code_indexer.server.utils.config_manager import IndexingConfig
 
         config = IndexingConfig()
+        assert not hasattr(config, "temporal_stale_threshold_days")
+
+    def test_indexing_config_does_not_have_indexing_timeout_seconds(self):
+        """Story #683 AC1: indexing_timeout_seconds removed from IndexingConfig (canonical in ScipConfig)."""
+        from code_indexer.server.utils.config_manager import IndexingConfig
+
+        config = IndexingConfig()
+        assert not hasattr(config, "indexing_timeout_seconds")
+
+    def test_scip_config_has_temporal_stale_threshold_days(self):
+        """Story #683 AC1: temporal_stale_threshold_days canonical location is ScipConfig."""
+        config = ScipConfig()
         assert hasattr(config, "temporal_stale_threshold_days")
         assert config.temporal_stale_threshold_days == 7
 
-    def test_indexing_config_has_indexing_timeout_seconds(self):
-        """AC1: IndexingConfig should have indexing_timeout_seconds field."""
-        from code_indexer.server.utils.config_manager import IndexingConfig
-
-        config = IndexingConfig()
+    def test_scip_config_has_indexing_timeout_seconds(self):
+        """Story #683 AC1: indexing_timeout_seconds canonical location is ScipConfig."""
+        config = ScipConfig()
         assert hasattr(config, "indexing_timeout_seconds")
         assert config.indexing_timeout_seconds == 3600
-
-    def test_indexing_config_custom_values(self):
-        """AC1: IndexingConfig should accept custom values."""
-        from code_indexer.server.utils.config_manager import IndexingConfig
-
-        config = IndexingConfig(
-            temporal_stale_threshold_days=14,
-            indexing_timeout_seconds=7200,
-        )
-
-        assert config.temporal_stale_threshold_days == 14
-        assert config.indexing_timeout_seconds == 7200
 
     def test_server_config_has_indexing_config(self):
         """AC1: ServerConfig should have indexing_config attribute."""
@@ -61,14 +64,15 @@ class TestIndexingConfig:
         assert isinstance(config.indexing_config, IndexingConfig)
 
     def test_save_load_preserves_indexing_config(self):
-        """Test IndexingConfig is properly serialized/deserialized."""
+        """Test IndexingConfig (without removed fields) is properly serialized/deserialized."""
         from code_indexer.server.utils.config_manager import IndexingConfig
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
             original_config = ServerConfig(
                 server_dir=tmpdir,
-                indexing_config=IndexingConfig(
+                indexing_config=IndexingConfig(),
+                scip_config=ScipConfig(
                     temporal_stale_threshold_days=14,
                     indexing_timeout_seconds=7200,
                 ),
@@ -79,8 +83,9 @@ class TestIndexingConfig:
 
             assert loaded_config is not None
             assert loaded_config.indexing_config is not None
-            assert loaded_config.indexing_config.temporal_stale_threshold_days == 14
-            assert loaded_config.indexing_config.indexing_timeout_seconds == 7200
+            # Removed fields are now in ScipConfig (canonical location)
+            assert loaded_config.scip_config.temporal_stale_threshold_days == 14
+            assert loaded_config.scip_config.indexing_timeout_seconds == 7200
 
 
 class TestScipWorkspaceRetentionDaysMove:

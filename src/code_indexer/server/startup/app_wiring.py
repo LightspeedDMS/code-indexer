@@ -80,9 +80,16 @@ def create_fastapi_app(services: Dict[str, Any], lifespan: Callable) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Add global error handler middleware
-    global_error_handler = GlobalErrorHandler()
-    app.add_middleware(GlobalErrorHandler)
+    # Add global error handler middleware (Story #683 AC4: wire error_handling_config).
+    # ErrorHandlingConfig uses _seconds suffix; GlobalErrorHandler params do not.
+    err_cfg = server_config.error_handling_config
+    _error_handler_kwargs = dict(
+        max_retry_attempts=err_cfg.max_retry_attempts,
+        base_retry_delay=err_cfg.base_retry_delay_seconds,
+        max_retry_delay=err_cfg.max_retry_delay_seconds,
+    )
+    global_error_handler = GlobalErrorHandler(**_error_handler_kwargs)
+    app.add_middleware(GlobalErrorHandler, **_error_handler_kwargs)
 
     # Add correlation ID bridge middleware for OTEL tracing (Story #697)
     from code_indexer.server.telemetry.correlation_bridge import (

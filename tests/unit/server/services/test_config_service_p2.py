@@ -82,7 +82,6 @@ class TestConfigServiceGetAllSettingsP2:
         settings = service.get_all_settings()
 
         assert "web_security" in settings
-        assert "csrf_max_age_seconds" in settings["web_security"]
         assert "web_session_timeout_seconds" in settings["web_security"]
 
     def test_get_all_settings_web_security_default_values(self, tmp_path):
@@ -90,7 +89,6 @@ class TestConfigServiceGetAllSettingsP2:
         service = ConfigService(server_dir_path=str(tmp_path))
         settings = service.get_all_settings()
 
-        assert settings["web_security"]["csrf_max_age_seconds"] == 600
         assert settings["web_security"]["web_session_timeout_seconds"] == 28800
 
 
@@ -293,16 +291,6 @@ class TestConfigServiceUpdateSettingApiLimits:
 class TestConfigServiceUpdateSettingWebSecurity:
     """Test ConfigService.update_setting() for web_security category."""
 
-    def test_update_csrf_max_age_seconds(self, tmp_path):
-        """AC25: Can update csrf_max_age_seconds via ConfigService."""
-        service = ConfigService(server_dir_path=str(tmp_path))
-        service.load_config()
-
-        service.update_setting("web_security", "csrf_max_age_seconds", 1200)
-
-        config = service.get_config()
-        assert config.web_security_config.csrf_max_age_seconds == 1200
-
     def test_update_web_session_timeout_seconds(self, tmp_path):
         """AC26: Can update web_session_timeout_seconds via ConfigService."""
         service = ConfigService(server_dir_path=str(tmp_path))
@@ -407,12 +395,10 @@ class TestConfigServiceP2Persistence:
         service = ConfigService(server_dir_path=str(tmp_path))
         service.load_config()
 
-        service.update_setting("web_security", "csrf_max_age_seconds", 1200)
         service.update_setting("web_security", "web_session_timeout_seconds", 43200)
 
         # Load with new service instance
         new_service = ConfigService(server_dir_path=str(tmp_path))
         config = new_service.load_config()
 
-        assert config.web_security_config.csrf_max_age_seconds == 1200
         assert config.web_security_config.web_session_timeout_seconds == 43200

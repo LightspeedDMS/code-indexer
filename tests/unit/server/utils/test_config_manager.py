@@ -6,6 +6,7 @@ environment variable overrides, and default configuration handling.
 """
 
 import json
+import logging
 import os
 from unittest.mock import patch
 
@@ -198,3 +199,96 @@ class TestServerConfigManager:
         assert secret is not None
         assert len(secret) > 0
         assert (tmp_path / ".jwt_secret").exists()
+
+
+class TestExpectedOrphanKeys:
+    """Test EXPECTED_ORPHAN_KEYS allow-list in ServerConfigManager._dict_to_server_config."""
+
+    def test_expected_orphan_keys_stripped_silently_no_warning(self, tmp_path, caplog):
+        """Keys in EXPECTED_ORPHAN_KEYS are stripped without emitting a WARNING."""
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+        config_manager.save_config(config)
+
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw["mfa_config"] = {"mfa_enabled": False}
+        raw["login_security_config"] = {"login_rate_limiting_enabled": True}
+        raw["auto_watch_config"] = {"auto_watch_enabled": True}
+        config_path.write_text(json.dumps(raw))
+
+        with caplog.at_level(
+            logging.WARNING, logger="code_indexer.server.utils.config_manager"
+        ):
+            loaded = config_manager.load_config()
+
+        assert loaded is not None
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        for key in ("mfa_config", "login_security_config", "auto_watch_config"):
+            assert not any(key in msg for msg in warning_messages), (
+                f"Expected no WARNING for allow-listed orphan key '{key}', got: {warning_messages}"
+            )
+
+    def test_unknown_orphan_keys_still_emit_warning(self, tmp_path, caplog):
+        """Keys NOT in EXPECTED_ORPHAN_KEYS still emit a WARNING when stripped."""
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+        config_manager.save_config(config)
+
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw["completely_unknown_key_xyz"] = {"value": 42}
+        config_path.write_text(json.dumps(raw))
+
+        with caplog.at_level(
+            logging.WARNING, logger="code_indexer.server.utils.config_manager"
+        ):
+            loaded = config_manager.load_config()
+
+        assert loaded is not None
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any("completely_unknown_key_xyz" in msg for msg in warning_messages), (
+            f"Expected WARNING for unknown orphan key, got: {warning_messages}"
+        )
+
+    def test_expected_orphan_keys_emit_info_with_sorted_names(self, tmp_path, caplog):
+        """When expected orphan keys are stripped, exactly one INFO log lists them in sorted order."""
+        config_manager = ServerConfigManager(str(tmp_path))
+        config = config_manager.create_default_config()
+        config_manager.save_config(config)
+
+        config_path = tmp_path / "config.json"
+        raw = json.loads(config_path.read_text())
+        raw["mfa_config"] = {"mfa_enabled": False}
+        raw["auto_watch_config"] = {"auto_watch_enabled": True}
+        config_path.write_text(json.dumps(raw))
+
+        with caplog.at_level(
+            logging.INFO, logger="code_indexer.server.utils.config_manager"
+        ):
+            loaded = config_manager.load_config()
+
+        assert loaded is not None
+        # Find INFO records that are the expected-orphan summary (mention stripped expected keys)
+        summary_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO
+            and "auto_watch_config" in r.message
+            and "mfa_config" in r.message
+        ]
+        assert len(summary_records) == 1, (
+            f"Expected exactly 1 INFO summary for expected orphan keys, got {len(summary_records)}: "
+            f"{[r.message for r in summary_records]}"
+        )
+        summary_msg = summary_records[0].message
+        # Verify sorted order: auto_watch_config must appear before mfa_config
+        pos_auto = summary_msg.index("auto_watch_config")
+        pos_mfa = summary_msg.index("mfa_config")
+        assert pos_auto < pos_mfa, (
+            f"Expected 'auto_watch_config' before 'mfa_config' in sorted INFO message, got: {summary_msg}"
+        )

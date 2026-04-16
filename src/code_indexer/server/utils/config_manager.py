@@ -14,6 +14,18 @@ from typing import Optional, Dict, List, Union
 
 logger = logging.getLogger(__name__)
 
+# Top-level ServerConfig keys that have been removed from the dataclass but may
+# still appear in existing config.json files written by older server versions.
+# These are stripped silently (INFO only) to avoid log floods on server restart.
+EXPECTED_ORPHAN_KEYS: frozenset = frozenset(
+    {
+        "auto_watch_config",  # Story #640 - removed in cleanup Story #682
+        "login_security_config",  # Story #557 - removed in cleanup Story #682
+        "mfa_config",  # Story #558 - removed in cleanup Story #682
+        "auth_config",  # Story #3 Phase 2 AC36 - removed in cleanup Story #683
+    }
+)
+
 
 @dataclass
 class PasswordSecurityConfig:
@@ -87,24 +99,16 @@ class ServerResourceConfig:
 
     # Refresh scheduler timeouts (in seconds)
     cow_clone_timeout: int = 600  # 10 minutes for CoW clone of large repos (11GB)
-    git_update_index_timeout: int = 300  # 5 minutes for git update-index --refresh
-    git_restore_timeout: int = 300  # 5 minutes for git restore .
+    # Story #683 AC7: git_update_index_timeout, git_restore_timeout, and
+    # cidx_scip_generate_timeout removed — NOT wired in activated_repo_manager.py
+    # (hardcoded 60s) or SCIP generate (uses ScipConfig.scip_generation_timeout_seconds).
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
-    cidx_scip_generate_timeout: int = 1800  # 30 minutes for cidx scip generate (AC4)
 
     # HNSW index configuration (Story #588)
     hnsw_max_elements: int = 1000000  # Maximum HNSW index elements
 
     # NOTE: Artificial resource limits (max_golden_repos, max_repo_size_bytes, max_jobs_per_user)
     # have been REMOVED from the codebase. They were nonsensical limitations that served no purpose.
-
-
-@dataclass
-class AutoWatchConfig:
-    """Auto-watch configuration for server file operations - Story #640."""
-
-    auto_watch_enabled: bool = True
-    auto_watch_timeout: int = 300  # Timeout in seconds for auto-stop
 
 
 @dataclass
@@ -368,12 +372,13 @@ class WebSecurityConfig:
     """
     Web security configuration (Story #3 - Phase 2, AC25-AC26).
 
-    Controls CSRF token and session timeout settings for the web UI.
+    Controls session timeout settings for the web UI.
     Migrated from hardcoded constants in routes.py and auth.py.
+
+    Story #683 AC2: csrf_max_age_seconds removed (dead field, no consumer).
+    Loader guard strips it from old config files at load time.
     """
 
-    # AC25-AC26: CSRF max age in seconds (default 600s/10min, range 60-3600s)
-    csrf_max_age_seconds: int = 600
     # AC25-AC26: Web session timeout in seconds (default 28800s/8hr, range 1800-86400s)
     web_session_timeout_seconds: int = 28800
     # Story #564: Admin session timeout in seconds (default 3600s/1hr, range 300-86400s)
@@ -384,19 +389,6 @@ class WebSecurityConfig:
 
 
 @dataclass
-class AuthConfig:
-    """
-    Authentication configuration (Story #3 - Phase 2, AC36).
-
-    Controls OAuth token extension and authentication settings.
-    Migrated from hardcoded constants in oauth_service.py.
-    """
-
-    # AC36: OAuth extension threshold in hours (default 4hr, range 1-24hr)
-    oauth_extension_threshold_hours: int = 4
-
-
-@dataclass
 class IndexingConfig:
     """
     Indexing configuration (Story #15 - AC1).
@@ -404,12 +396,12 @@ class IndexingConfig:
     Contains settings related to indexing operations that were previously
     misplaced in ScipConfig. These settings are general indexing settings,
     not specific to SCIP.
+
+    Story #683 AC1: temporal_stale_threshold_days and indexing_timeout_seconds
+    removed (duplicates of ScipConfig fields). Loader guards strip them from
+    old config files at load time.
     """
 
-    # Temporal index staleness threshold in days (moved from ScipConfig)
-    temporal_stale_threshold_days: int = 7
-    # General indexing timeout in seconds (moved from ScipConfig)
-    indexing_timeout_seconds: int = 3600
     # Story #223 - AC1: Configurable file extensions for indexing.
     # 60 unique extensions with leading dots matching CLI Config.file_extensions defaults.
     indexable_extensions: List[str] = field(
@@ -854,26 +846,6 @@ class ClusterConfig:
 
 
 @dataclass
-class MfaConfig:
-    """MFA settings (Story #558)."""
-
-    mfa_enabled: bool = False
-    require_mfa_for_non_sso_admins: bool = False
-    totp_window_tolerance: int = 1
-    recovery_code_count: int = 10
-    mfa_challenge_token_ttl_seconds: int = 90
-
-
-@dataclass
-class LoginSecurityConfig:
-    """Login security settings (Story #557)."""
-
-    login_rate_limiting_enabled: bool = True
-    max_failed_login_attempts: int = 5
-    login_lockout_duration_minutes: int = 15
-
-
-@dataclass
 class RerankConfig:
     """
     Reranking configuration (Story #652 — Epic #649 Voyage AI + Cohere Reranker).
@@ -948,7 +920,6 @@ class ServerConfig:
     password_security: Optional[PasswordSecurityConfig] = None
     resource_config: Optional[ServerResourceConfig] = None
     cache_config: Optional[CacheConfig] = None
-    auto_watch_config: Optional[AutoWatchConfig] = None
     oidc_provider_config: Optional[OIDCProviderConfig] = None
     telemetry_config: Optional[TelemetryConfig] = None
 
@@ -967,9 +938,6 @@ class ServerConfig:
     error_handling_config: Optional[ErrorHandlingConfig] = None
     api_limits_config: Optional[ApiLimitsConfig] = None
     web_security_config: Optional[WebSecurityConfig] = None
-
-    # Story #3 - Phase 2: P3 settings (AC36)
-    auth_config: Optional[AuthConfig] = None
 
     # Story #15 - Configuration Refactoring: Indexing settings
     indexing_config: Optional[IndexingConfig] = None
@@ -1003,8 +971,6 @@ class ServerConfig:
 
     # Story #400 - Unified data retention configuration
     data_retention_config: Optional[DataRetentionConfig] = None
-    login_security_config: Optional[LoginSecurityConfig] = None  # Story #557
-    mfa_config: Optional[MfaConfig] = None  # Story #558
     password_expiry_config: Optional[PasswordExpiryConfig] = None  # Story #565
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
@@ -1033,8 +999,6 @@ class ServerConfig:
             self.resource_config = ServerResourceConfig()
         if self.cache_config is None:
             self.cache_config = CacheConfig()
-        if self.auto_watch_config is None:
-            self.auto_watch_config = AutoWatchConfig()
         if self.oidc_provider_config is None:
             self.oidc_provider_config = OIDCProviderConfig()
         if self.telemetry_config is None:
@@ -1062,9 +1026,6 @@ class ServerConfig:
             self.api_limits_config = ApiLimitsConfig()
         if self.web_security_config is None:
             self.web_security_config = WebSecurityConfig()
-        # Story #3 - Phase 2: Initialize P3 configs (AC36)
-        if self.auth_config is None:
-            self.auth_config = AuthConfig()
         # Story #15 - Configuration Refactoring: Initialize indexing config
         if self.indexing_config is None:
             self.indexing_config = IndexingConfig()
@@ -1098,10 +1059,6 @@ class ServerConfig:
         # Story #400 - Initialize data retention config
         if self.data_retention_config is None:
             self.data_retention_config = DataRetentionConfig()
-        if self.login_security_config is None:
-            self.login_security_config = LoginSecurityConfig()
-        if self.mfa_config is None:
-            self.mfa_config = MfaConfig()
         # Story #565 - Initialize password expiry config
         if self.password_expiry_config is None:
             self.password_expiry_config = PasswordExpiryConfig()
@@ -1233,6 +1190,10 @@ class ServerConfigManager:
         ):
             # Bug #467: Remove obsolete cidx_index_timeout (indexing no longer has timeout)
             config_dict["resource_config"].pop("cidx_index_timeout", None)
+            # Story #683 AC7: Remove 3 dead fields (not wired in activated_repo_manager.py)
+            config_dict["resource_config"].pop("git_update_index_timeout", None)
+            config_dict["resource_config"].pop("git_restore_timeout", None)
+            config_dict["resource_config"].pop("cidx_scip_generate_timeout", None)
             config_dict["resource_config"] = ServerResourceConfig(
                 **config_dict["resource_config"]
             )
@@ -1402,24 +1363,22 @@ class ServerConfigManager:
         if "web_security_config" in config_dict and isinstance(
             config_dict["web_security_config"], dict
         ):
+            # Story #683 AC2: Strip dead field from old config files.
+            config_dict["web_security_config"].pop("csrf_max_age_seconds", None)
             config_dict["web_security_config"] = WebSecurityConfig(
                 **config_dict["web_security_config"]
             )
-
-        # Story #3 - Phase 2: Convert P3 config dicts (AC36)
-        # Convert nested auth_config dict to AuthConfig
-        if "auth_config" in config_dict and isinstance(
-            config_dict["auth_config"], dict
-        ):
-            config_dict["auth_config"] = AuthConfig(**config_dict["auth_config"])
 
         # Story #15 - Configuration Refactoring: Convert indexing_config
         if "indexing_config" in config_dict and isinstance(
             config_dict["indexing_config"], dict
         ):
-            config_dict["indexing_config"] = IndexingConfig(
-                **config_dict["indexing_config"]
-            )
+            # Story #683 AC1: Strip duplicate fields removed from IndexingConfig.
+            # These are now canonical in ScipConfig; strip silently from old files.
+            idx_dict = config_dict["indexing_config"]
+            idx_dict.pop("indexing_timeout_seconds", None)
+            idx_dict.pop("temporal_stale_threshold_days", None)
+            config_dict["indexing_config"] = IndexingConfig(**idx_dict)
 
         # Story #15 AC2 Migration: Move scip_workspace_retention_days to scip_config
         if "scip_workspace_retention_days" in config_dict:
@@ -1636,14 +1595,28 @@ class ServerConfigManager:
         config_dict.pop("reindexing_config", None)
 
         # Strip unknown keys to prevent TypeError on upgrade from older versions.
-        # Any key not in ServerConfig dataclass fields is silently removed.
+        # Keys in EXPECTED_ORPHAN_KEYS are stripped silently (INFO only) to avoid
+        # log floods when upgrading from versions that still serialized those fields.
+        # All other unknown keys still emit WARNING so genuinely unexpected keys are visible.
         from dataclasses import fields as dc_fields
 
         known_fields = {f.name for f in dc_fields(ServerConfig)}
         unknown_keys = [k for k in config_dict if k not in known_fields]
+        stripped_expected: list = []
         for k in unknown_keys:
             config_dict.pop(k)
-            logger.warning("Stripped unknown config key '%s' (not in ServerConfig)", k)
+            if k in EXPECTED_ORPHAN_KEYS:
+                stripped_expected.append(k)
+            else:
+                logger.warning(
+                    "Stripped unknown config key '%s' (not in ServerConfig)", k
+                )
+        if stripped_expected:
+            logger.info(
+                "Stripped %d expected-orphan config key(s) from older config: %s",
+                len(stripped_expected),
+                ", ".join(sorted(stripped_expected)),
+            )
 
         return ServerConfig(**config_dict)
 
@@ -1991,12 +1964,8 @@ class ServerConfigManager:
                 )
 
         # Validate web_security_config (Story #3 - Phase 2, AC25-AC26)
+        # Story #683 AC2: csrf_max_age_seconds removed (dead field, no consumer).
         if config.web_security_config:
-            # AC26: csrf_max_age_seconds range 60-3600
-            if not (60 <= config.web_security_config.csrf_max_age_seconds <= 3600):
-                raise ValueError(
-                    f"csrf_max_age_seconds must be between 60 and 3600, got {config.web_security_config.csrf_max_age_seconds}"
-                )
             # AC26: web_session_timeout_seconds range 1800-86400
             if not (
                 1800 <= config.web_security_config.web_session_timeout_seconds <= 86400
@@ -2005,13 +1974,7 @@ class ServerConfigManager:
                     f"web_session_timeout_seconds must be between 1800 and 86400, got {config.web_security_config.web_session_timeout_seconds}"
                 )
 
-        # Validate auth_config (Story #3 - Phase 2, AC36)
-        if config.auth_config:
-            # AC36: oauth_extension_threshold_hours range 1-24
-            if not (1 <= config.auth_config.oauth_extension_threshold_hours <= 24):
-                raise ValueError(
-                    f"oauth_extension_threshold_hours must be between 1 and 24, got {config.auth_config.oauth_extension_threshold_hours}"
-                )
+        # Story #683 AC3: auth_config validation removed (AuthConfig deleted entirely).
 
         # Validate multi_search_limits_config (Story #25, Story #29)
         if config.multi_search_limits_config:

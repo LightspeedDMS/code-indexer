@@ -206,6 +206,32 @@ def initialize_services() -> Dict[str, Any]:
     except Exception:
         pass  # Default to sqlite on any config read error
 
+    # Story #680: Initialize DependencyLatencyTracker (External Dependency Latency Observability)
+    from code_indexer.server.storage.dependency_latency_backend import (
+        DependencyLatencyBackend,
+    )
+    from code_indexer.server.services.dependency_latency_tracker import (
+        DependencyLatencyTracker,
+    )
+
+    _cluster_cfg = _raw_config.get("cluster") if _raw_config else None
+    _node_id = (
+        _cluster_cfg.get("node_id", "local")
+        if isinstance(_cluster_cfg, dict)
+        else "local"
+    )
+    _latency_backend = DependencyLatencyBackend(str(db_path))
+    latency_tracker = DependencyLatencyTracker(
+        backend=_latency_backend, node_id=_node_id
+    )
+    latency_tracker.start()
+    from code_indexer.server.services.dependency_latency_tracker import (
+        set_instance as _set_latency_tracker_instance,
+    )
+
+    _set_latency_tracker_instance(latency_tracker)
+    logger.info("DependencyLatencyTracker started (node_id=%r)", _node_id)
+
     if _storage_mode == "postgres":
         try:
             _postgres_dsn = _raw_config.get("postgres_dsn", "")
@@ -527,4 +553,5 @@ def initialize_services() -> Dict[str, Any]:
         "_server_hnsw_cache": _server_hnsw_cache,
         "_server_fts_cache": _server_fts_cache,
         "scip_audit_repository": scip_audit_repository,
+        "latency_tracker": latency_tracker,
     }

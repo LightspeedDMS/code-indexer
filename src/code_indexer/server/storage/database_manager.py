@@ -520,6 +520,24 @@ class DatabaseSchema:
         )
     """
 
+    # Story #680: External Dependency Latency Observability
+    # Stores raw per-request latency samples for windowed percentile computation.
+    CREATE_DEPENDENCY_LATENCY_SAMPLES_TABLE = """
+        CREATE TABLE IF NOT EXISTS dependency_latency_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT NOT NULL,
+            dependency_name TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            latency_ms REAL NOT NULL,
+            status_code INTEGER NOT NULL
+        )
+    """
+
+    CREATE_IDX_DEPENDENCY_LATENCY_DEP_TIMESTAMP = """
+        CREATE INDEX IF NOT EXISTS idx_dependency_latency_dep_timestamp
+        ON dependency_latency_samples(dependency_name, timestamp)
+    """
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         """
         Initialize DatabaseSchema.
@@ -632,6 +650,9 @@ class DatabaseSchema:
             conn.execute(self.CREATE_TOKEN_BLACKLIST_TABLE)
             # Bug #577: Delegation job results for cross-node visibility
             conn.execute(self.CREATE_DELEGATION_JOB_RESULTS_TABLE)
+            # Story #680: External Dependency Latency Observability
+            conn.execute(self.CREATE_DEPENDENCY_LATENCY_SAMPLES_TABLE)
+            conn.execute(self.CREATE_IDX_DEPENDENCY_LATENCY_DEP_TIMESTAMP)
 
             conn.commit()
 

@@ -5838,3 +5838,298 @@ class MaintenanceSqliteBackend:
     def close(self) -> None:
         """Close the DatabaseConnectionManager connection."""
         self._conn_manager.close_all()
+
+
+class DependencyMapDashboardCacheBackend:
+    """
+    SQLite backend for dependency map dashboard cache (Story #684).
+
+    Provides table creation, cached row retrieval, and cache-freshness checking.
+    A single row (cache_key='default') represents the most recently computed
+    job-status result.
+    """
+
+    _CACHE_KEY = "default"
+
+    def __init__(self, db_path: str) -> None:
+        """
+        Initialize the backend.
+
+        Args:
+            db_path: Path to SQLite database file.
+        """
+        self._db_path = db_path
+        self._conn_manager = DatabaseConnectionManager.get_instance(db_path)
+        self._ensure_table()
+
+    def _ensure_table(self) -> None:
+        """Create dependency_map_dashboard_cache table if it does not exist."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dependency_map_dashboard_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    result_json TEXT,
+                    computed_at TEXT,
+                    job_id TEXT,
+                    last_failure_message TEXT,
+                    last_failure_at TEXT
+                )
+                """
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def get_cached(self) -> Optional[Dict[str, Any]]:
+        """
+        Return the cached row as a dict or None if no row exists.
+
+        Returns:
+            Dict with keys result_json, computed_at, job_id,
+            last_failure_message, last_failure_at — or None.
+        """
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT result_json, computed_at, job_id, last_failure_message, last_failure_at "
+            "FROM dependency_map_dashboard_cache WHERE cache_key = ?",
+            (self._CACHE_KEY,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "result_json": row[0],
+            "computed_at": row[1],
+            "job_id": row[2],
+            "last_failure_message": row[3],
+            "last_failure_at": row[4],
+        }
+
+    def is_fresh(self, ttl_seconds: int) -> bool:
+        """
+        Return True if a cached result exists and is within ttl_seconds.
+
+        Args:
+            ttl_seconds: Maximum age in seconds. Must be non-negative.
+
+        Returns:
+            True if computed_at is set and within TTL, False otherwise.
+
+        Raises:
+            ValueError: If ttl_seconds is negative.
+        """
+        if ttl_seconds < 0:
+            raise ValueError(f"ttl_seconds must be non-negative, got {ttl_seconds!r}")
+        cached = self.get_cached()
+        if cached is None:
+            return False
+        computed_at_str = cached.get("computed_at")
+        if not computed_at_str:
+            return False
+        try:
+            computed_at = datetime.fromisoformat(computed_at_str)
+            if computed_at.tzinfo is None:
+                computed_at = computed_at.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - computed_at).total_seconds()
+            return age_seconds <= ttl_seconds
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "DependencyMapDashboardCacheBackend.is_fresh: "
+                "failed to parse computed_at=%r: %s",
+                computed_at_str,
+                exc,
+            )
+            return False
+
+    def set_cached(self, result_json: str, job_id: Optional[str] = None) -> None:
+        """
+        Upsert the cached result, clearing job_id and all failure fields.
+
+        Args:
+            result_json: JSON string of the computed result. Must not be None.
+            job_id: Accepted for API compatibility but always stored as NULL.
+
+        Raises:
+            ValueError: If result_json is None.
+        """
+        if result_json is None:
+            raise ValueError("result_json must not be None")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO dependency_map_dashboard_cache
+                    (cache_key, result_json, computed_at, job_id,
+                     last_failure_message, last_failure_at)
+                VALUES (?, ?, ?, NULL, NULL, NULL)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    result_json = excluded.result_json,
+                    computed_at = excluded.computed_at,
+                    job_id = NULL,
+                    last_failure_message = NULL,
+                    last_failure_at = NULL
+                """,
+                (self._CACHE_KEY, result_json, now),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def clear_job_slot(self) -> None:
+        """Set job_id to NULL, preserving all other fields."""
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE dependency_map_dashboard_cache SET job_id = NULL WHERE cache_key = ?",
+                (self._CACHE_KEY,),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def mark_job_failed(self, error_message: str) -> None:
+        """
+        Record a job failure: clear job_id, set failure fields.
+
+        Preserves existing result_json and computed_at (stale cache survives failure).
+        Creates the row if it does not exist yet.
+
+        Args:
+            error_message: Human-readable error description. Must not be None.
+
+        Raises:
+            ValueError: If error_message is None.
+        """
+        if error_message is None:
+            raise ValueError("error_message must not be None")
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                INSERT INTO dependency_map_dashboard_cache
+                    (cache_key, result_json, computed_at, job_id,
+                     last_failure_message, last_failure_at)
+                VALUES (?, NULL, NULL, NULL, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    job_id = NULL,
+                    last_failure_message = excluded.last_failure_message,
+                    last_failure_at = excluded.last_failure_at
+                """,
+                (self._CACHE_KEY, error_message, now),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def clear_job_slot_for_retry(self) -> None:
+        """
+        Clear job_id and failure fields to allow a clean retry.
+
+        Preserves result_json and computed_at so stale cache remains available.
+        """
+
+        def _op(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                """
+                UPDATE dependency_map_dashboard_cache
+                SET job_id = NULL,
+                    last_failure_message = NULL,
+                    last_failure_at = NULL
+                WHERE cache_key = ?
+                """,
+                (self._CACHE_KEY,),
+            )
+
+        self._conn_manager.execute_atomic(_op)
+
+    def claim_job_slot(self, new_job_id: str) -> Optional[str]:
+        """
+        Atomic compare-and-swap: claim the job slot if currently empty.
+
+        Args:
+            new_job_id: The job ID to claim.
+
+        Returns:
+            None if the claim succeeded (slot was empty).
+            The existing job_id string if the slot was already taken.
+        """
+        result: List[Optional[str]] = [None]
+
+        def _op(conn: sqlite3.Connection) -> None:
+            cursor = conn.execute(
+                "SELECT job_id FROM dependency_map_dashboard_cache WHERE cache_key = ?",
+                (self._CACHE_KEY,),
+            )
+            row = cursor.fetchone()
+
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO dependency_map_dashboard_cache
+                        (cache_key, result_json, computed_at, job_id,
+                         last_failure_message, last_failure_at)
+                    VALUES (?, NULL, NULL, ?, NULL, NULL)
+                    """,
+                    (self._CACHE_KEY, new_job_id),
+                )
+                result[0] = None
+                return
+
+            existing_job_id = row[0]
+            if existing_job_id is not None:
+                result[0] = existing_job_id
+                return
+
+            conn.execute(
+                "UPDATE dependency_map_dashboard_cache SET job_id = ? WHERE cache_key = ?",
+                (new_job_id, self._CACHE_KEY),
+            )
+            result[0] = None
+
+        self._conn_manager.execute_atomic(_op)
+        return result[0]
+
+    def get_running_job_id(self, job_tracker: Any = None) -> Optional[str]:
+        """
+        Return the current job_id if a job is actively running, else None.
+
+        If job_tracker is provided, verifies the job is still alive. A job whose
+        status is not in ('running', 'pending', 'queued') is considered a zombie:
+        the slot is cleared and None is returned.
+
+        When job_tracker.get_job() raises, the exception is logged as a warning
+        and job_id is returned conservatively (unavailable tracker should not
+        incorrectly evict a legitimately running job).
+
+        Args:
+            job_tracker: Optional object with get_job(job_id) returning an object
+                         with a .status attribute, or None.
+
+        Returns:
+            job_id string if a live job is running, None otherwise.
+        """
+        cached = self.get_cached()
+        if cached is None:
+            return None
+        job_id = cached.get("job_id")
+        if job_id is None:
+            return None
+
+        if job_tracker is None:
+            return str(job_id)
+
+        try:
+            job = job_tracker.get_job(job_id)
+            if job is None or job.status not in ("running", "pending", "queued"):
+                self.clear_job_slot()
+                return None
+        except Exception as exc:
+            logger.warning(
+                "DependencyMapDashboardCacheBackend.get_running_job_id: "
+                "job_tracker.get_job(%r) raised, treating job as still running: %s",
+                job_id,
+                exc,
+            )
+            return str(job_id)
+
+        return str(job_id)

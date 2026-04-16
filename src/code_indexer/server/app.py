@@ -227,6 +227,7 @@ def create_app():
         register_langfuse_golden_repos=register_langfuse_golden_repos,
         storage_mode=services.get("storage_mode", "sqlite"),
         backend_registry=services.get("backend_registry"),
+        latency_tracker=services.get("latency_tracker"),
     )
 
     app = create_fastapi_app(services, lifespan)

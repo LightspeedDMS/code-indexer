@@ -103,10 +103,15 @@ class ActivatedRepoManager:
         # Set up class-level logger
         self.logger = logging.getLogger(__name__)
 
-        # Set dependencies
-        self.golden_repo_manager = golden_repo_manager or GoldenRepoManager(
-            self.data_dir
-        )
+        # Set dependencies (Story #683 AC8.2: pass resource_config to GoldenRepoManager)
+        if golden_repo_manager is None:
+            from code_indexer.server.services.config_service import get_config_service
+
+            resource_config = get_config_service().get_config().resource_config
+            golden_repo_manager = GoldenRepoManager(
+                data_dir=self.data_dir, resource_config=resource_config
+            )
+        self.golden_repo_manager = golden_repo_manager
         self.background_job_manager = background_job_manager or BackgroundJobManager()
 
     def set_connection_pool(self, pool: Any) -> None:

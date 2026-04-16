@@ -54,6 +54,7 @@ REPAIRABLE_ANOMALY_TYPES = {
     "undersized_domain",
     "incomplete_domain",
     "malformed_domain",
+    "frontmatter_json_mismatch",
 }
 
 
@@ -224,6 +225,9 @@ class DepMapHealthDetector:
 
         # Check 8: Domains with empty JSON description/evidence but valid .md files
         anomalies.extend(self._check_empty_json_metadata(output_dir, domain_list))
+
+        # Check 9: Frontmatter participating_repos differs from _domains.json
+        anomalies.extend(self._check_frontmatter_json_mismatch(output_dir, domain_list))
 
         # Determine overall status
         status = self._compute_status(anomalies)
@@ -537,6 +541,50 @@ class DepMapHealthDetector:
         return anomalies
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Check 9: Frontmatter/JSON participating_repos mismatch (Story #688)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _check_frontmatter_json_mismatch(
+        self,
+        output_dir: Path,
+        domain_list: List[Dict[str, Any]],
+    ) -> List[Anomaly]:
+        """
+        Check 9: Flag domains where frontmatter participating_repos differs from
+        _domains.json participating_repos (set-based, case-sensitive).
+
+        Skips domains where _read_domain_frontmatter returns None -- this covers
+        missing files (Check 1), unreadable files (logged), and files without
+        valid YAML frontmatter (Check 5).
+
+        frontmatter_json_mismatch is in REPAIRABLE_ANOMALY_TYPES.
+        Repaired by Phase 3.5 frontmatter sync in dep_map_repair_executor.
+        """
+        anomalies = []
+        for domain in domain_list:
+            name = domain.get("name", "")
+            if not name:
+                continue
+            frontmatter = self._read_domain_frontmatter(output_dir, name)
+            if frontmatter is None:
+                continue  # missing, unreadable, or no YAML frontmatter
+            fm_raw = frontmatter.get("participating_repos")
+            fm_repos: Set[str] = set(fm_raw) if isinstance(fm_raw, list) else set()
+            json_repos: Set[str] = set(domain.get("participating_repos") or [])
+            if fm_repos == json_repos:
+                continue
+            json_only = sorted(json_repos - fm_repos)
+            fm_only = sorted(fm_repos - json_repos)
+            anomalies.append(
+                Anomaly(
+                    type="frontmatter_json_mismatch",
+                    domain=name,
+                    detail=f"json_only: {json_only}; frontmatter_only: {fm_only}",
+                )
+            )
+        return anomalies
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Status computation
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -579,6 +627,27 @@ class DepMapHealthDetector:
     def _parse_yaml_frontmatter(self, content: str) -> Optional[Dict[str, Any]]:
         """Parse YAML frontmatter block from markdown content."""
         return cast(Optional[Dict[str, Any]], _parse_yaml_frontmatter_util(content))
+
+    def _read_domain_frontmatter(
+        self, output_dir: Path, name: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Read and parse YAML frontmatter from a domain .md file.
+
+        Returns None if:
+          - File does not exist (Check 1 handles missing files)
+          - File cannot be read (OSError logged)
+          - File has no valid YAML frontmatter (Check 5 handles malformed files)
+        """
+        md_file = output_dir / f"{name}.md"
+        if not md_file.exists():
+            return None
+        try:
+            content = md_file.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("Check 9: could not read domain file %s: %s", md_file, e)
+            return None
+        return self._parse_yaml_frontmatter(content)  # None if no frontmatter
 
     def _parse_simple_yaml(self, lines: List[str]) -> Dict[str, Any]:
         """Parse a simplified YAML structure from frontmatter lines."""

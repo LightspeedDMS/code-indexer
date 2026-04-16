@@ -274,7 +274,16 @@ class VoyageRerankerClient(RerankerClient):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=self.timeout) as client:
+        from code_indexer.server.services.latency_tracking_httpx_transport import (
+            build_latency_transport,
+        )
+
+        latency_transport = build_latency_transport()
+        if latency_transport is not None:
+            client_ctx = httpx.Client(timeout=self.timeout, transport=latency_transport)
+        else:
+            client_ctx = httpx.Client(timeout=self.timeout)
+        with client_ctx as client:
             return client.post(self._base_url, json=body, headers=headers)
 
     def _parse_response(self, response: httpx.Response) -> List[RerankResult]:
@@ -554,7 +563,16 @@ class CohereRerankerClient(RerankerClient):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=self.timeout) as client:
+        from code_indexer.server.services.latency_tracking_httpx_transport import (
+            build_latency_transport,
+        )
+
+        latency_transport = build_latency_transport()
+        if latency_transport is not None:
+            client_ctx = httpx.Client(timeout=self.timeout, transport=latency_transport)
+        else:
+            client_ctx = httpx.Client(timeout=self.timeout)
+        with client_ctx as client:
             return client.post(self._base_url, json=body, headers=headers)
 
     def _parse_response(self, response: httpx.Response) -> List[RerankResult]:

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.16.0
+
+### Features
+
+- feat: Story #684 -- Dependency Map dashboard background-job progress UI. Adds three HTMX partial templates: depmap_job_status_computing.html polls every 2s and renders a progress bar with percentage and progress_info label; depmap_job_status_complete.html renders cached HTML results with an optional stale-warning banner when a prior run failed; depmap_job_status_error.html shows an error banner with the failure message and a Retry Analysis button that POSTs to the retry endpoint.
+
+- feat: Story #680 -- External dependency latency observability. Adds end-to-end pipeline for tracking, aggregating, and evaluating latency for external HTTP dependencies (VoyageAI, Cohere, Langfuse, etc.). DependencyLatencyBackend persists raw latency samples and per-minute aggregated buckets to SQLite with a 7-day retention window. DependencyLatencyTracker provides thread-safe in-process sample recording with configurable buffer flush. DependencyLatencyAggregator computes p50/p95/p99 percentiles, request rate, and error rate from the stored buckets. DependencyHealthEvaluator applies threshold-based rules to classify dependency status as healthy, degraded, or unhealthy. LatencyTrackingHttpxTransport wraps any httpx.AsyncBaseTransport to record timing and status for every outbound request transparently. Dashboard dependency latency section styled with new CSS classes: .dependency-latency-section, .dependency-row, .dep-name, .dep-metrics, .dep-trend, .dependency-status-healthy, .dependency-status-degraded, .dependency-status-unhealthy. 73 new tests across all five components.
+
+## v9.15.2
+
+### Features
+
+- feat: Story #686 -- Grouped-by-Category view toggle on Groups page repo access table. Handler enriches golden repos with category_id, category_name, category_priority from RepoCategoryService with graceful degradation on failure. Template adds toggle button (Group by Category / Flat View) and data-repo-alias, data-category-name, data-category-priority attributes on repo rows. repo_categories.js extended: _getGroupedStorageKey, toggleGroupedView, applyStoredGroupedView all detect .repo-access-table with dedicated localStorage key cidx-groups-repo-access-grouped. Bootstrap call applyStoredGroupedView() injected at end of partial for HTMX refresh persistence. 15 new tests.
+
 ## v9.15.1
 
 ### Fixes

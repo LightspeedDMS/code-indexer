@@ -194,26 +194,6 @@ class TestMFALifecycle:
         assert totp_service.is_mfa_enabled("alice") is False
 
 
-class TestMfaConfig:
-    """MfaConfig dataclass in config_manager."""
-
-    def test_mfa_config_exists(self):
-        from code_indexer.server.utils.config_manager import MfaConfig
-
-        config = MfaConfig()
-        assert config.mfa_enabled is False
-        assert config.totp_window_tolerance == 1
-        assert config.recovery_code_count == 10
-
-    def test_server_config_has_mfa_config(self):
-        from code_indexer.server.utils.config_manager import ServerConfig
-
-        config = ServerConfig(server_dir="/tmp/test")
-        assert hasattr(config, "mfa_config")
-        assert config.mfa_config is not None
-        assert config.mfa_config.mfa_enabled is False
-
-
 # ------------------------------------------------------------------
 # Cluster/PostgreSQL mode test infrastructure (C1 + C2)
 # ------------------------------------------------------------------

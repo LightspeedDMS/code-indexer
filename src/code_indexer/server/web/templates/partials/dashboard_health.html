@@ -32,6 +32,17 @@
             </ul>
         </div>
         {% endif %}
+        {% if dependency_rows %}
+        <!-- Story #680: External Dependency Latency Observability -->
+        <div class="dependency-latency-section">
+            {% for dep in dependency_rows %}
+            <div class="dependency-row dependency-status-{{ dep.status }}">
+                <span class="dep-name">{{ dep.name }}</span>
+                <span class="dep-metrics">{{ dep.p50_ms | round(0) }}/{{ dep.p95_ms | round(0) }}/{{ dep.p99_ms | round(0) }}ms</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
         <footer>
             <small>Last checked: {{ health.timestamp.strftime('%Y-%m-%d %H:%M:%S') if health.timestamp else 'N/A' }}</small>
         </footer>

@@ -557,65 +557,6 @@ class TestWebLoginLockout:
 
 
 # ---------------------------------------------------------------------------
-# LoginSecurityConfig dataclass tests
-# ---------------------------------------------------------------------------
-
-
-class TestLoginSecurityConfig:
-    """LoginSecurityConfig dataclass must exist in config_manager."""
-
-    def test_login_security_config_exists(self):
-        """LoginSecurityConfig must be importable from config_manager."""
-        from code_indexer.server.utils.config_manager import LoginSecurityConfig
-
-        config = LoginSecurityConfig()
-        assert config is not None
-
-    def test_default_values(self):
-        """LoginSecurityConfig must have correct defaults."""
-        from code_indexer.server.utils.config_manager import LoginSecurityConfig
-
-        config = LoginSecurityConfig()
-        assert config.login_rate_limiting_enabled is True
-        assert config.max_failed_login_attempts == 5
-        assert config.login_lockout_duration_minutes == 15
-
-    def test_custom_values(self):
-        """LoginSecurityConfig must accept custom values."""
-        from code_indexer.server.utils.config_manager import LoginSecurityConfig
-
-        config = LoginSecurityConfig(
-            login_rate_limiting_enabled=False,
-            max_failed_login_attempts=3,
-            login_lockout_duration_minutes=30,
-        )
-        assert config.login_rate_limiting_enabled is False
-        assert config.max_failed_login_attempts == 3
-        assert config.login_lockout_duration_minutes == 30
-
-    def test_server_config_has_login_security_config(self):
-        """ServerConfig must include login_security_config field."""
-        from code_indexer.server.utils.config_manager import ServerConfig
-
-        config = ServerConfig(server_dir="/tmp/test")
-        assert hasattr(config, "login_security_config")
-        assert config.login_security_config is not None
-
-    def test_server_config_login_security_config_has_correct_defaults(self):
-        """ServerConfig.login_security_config must use LoginSecurityConfig defaults."""
-        from code_indexer.server.utils.config_manager import (
-            LoginSecurityConfig,
-            ServerConfig,
-        )
-
-        config = ServerConfig(server_dir="/tmp/test")
-        assert isinstance(config.login_security_config, LoginSecurityConfig)
-        assert config.login_security_config.login_rate_limiting_enabled is True
-        assert config.login_security_config.max_failed_login_attempts == 5
-        assert config.login_security_config.login_lockout_duration_minutes == 15
-
-
-# ---------------------------------------------------------------------------
 # Cluster mode tests (H1): LoginRateLimiter with PostgreSQL connection pool
 # ---------------------------------------------------------------------------
 

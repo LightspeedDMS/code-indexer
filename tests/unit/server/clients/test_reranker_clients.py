@@ -1288,3 +1288,104 @@ class TestCohereRerankerClientErrorPropagation:
         health = monitor.get_health("cohere-reranker")
         status = health["cohere-reranker"]
         assert status.failed_requests >= 1
+
+
+# ---------------------------------------------------------------------------
+# Latency transport wiring tests
+# ---------------------------------------------------------------------------
+
+
+class _RecordingTracker:
+    """Minimal tracker stub that records samples without I/O."""
+
+    def __init__(self) -> None:
+        self.samples: list = []
+
+    def record_sample(self, dep: str, latency_ms: float, code: int) -> None:
+        self.samples.append(
+            {"dependency_name": dep, "latency_ms": latency_ms, "status_code": code}
+        )
+
+
+def _reset_latency_singleton() -> None:
+    from code_indexer.server.services.dependency_latency_tracker import set_instance
+
+    set_instance(None)
+
+
+from code_indexer.server.clients.reranker_clients import (  # noqa: E402
+    CohereRerankerClient,
+    VoyageRerankerClient,
+)
+
+_LATENCY_WIRING_CASES = [
+    (VoyageRerankerClient, _add_rerank_response, _make_config_service, "voyage_rerank"),
+    (
+        CohereRerankerClient,
+        _add_cohere_rerank_response,
+        _make_cohere_config_service,
+        "cohere_rerank",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "client_cls,add_response_fn,config_fn,expected_dep",
+    _LATENCY_WIRING_CASES,
+)
+class TestRerankerClientLatencyWiring:
+    """Verify reranker clients record latency samples via transport wiring."""
+
+    def setup_method(self) -> None:
+        _reset_latency_singleton()
+
+    def teardown_method(self) -> None:
+        _reset_latency_singleton()
+
+    def test_rerank_records_latency_sample_when_tracker_registered(
+        self,
+        httpx_mock: HTTPXMock,
+        client_cls,
+        add_response_fn,
+        config_fn,
+        expected_dep,
+    ) -> None:
+        """When a tracker is set, a successful rerank() records a sample with correct dep name."""
+        from unittest.mock import patch
+
+        from code_indexer.server.services.dependency_latency_tracker import set_instance
+
+        tracker = _RecordingTracker()
+        set_instance(tracker)
+        add_response_fn(httpx_mock)
+        client = client_cls()
+        with patch(
+            "code_indexer.server.clients.reranker_clients.get_config_service",
+            return_value=config_fn(),
+        ):
+            client.rerank(query="test query", documents=["doc1"])
+
+        assert len(tracker.samples) == 1
+        assert tracker.samples[0]["dependency_name"] == expected_dep
+        assert tracker.samples[0]["latency_ms"] >= 0.0
+
+    def test_rerank_completes_without_tracker_registered(
+        self,
+        httpx_mock: HTTPXMock,
+        client_cls,
+        add_response_fn,
+        config_fn,
+        expected_dep,
+    ) -> None:
+        """When no tracker is set, rerank() completes and returns results without error."""
+        from unittest.mock import patch
+
+        add_response_fn(httpx_mock)
+        client = client_cls()
+        with patch(
+            "code_indexer.server.clients.reranker_clients.get_config_service",
+            return_value=config_fn(),
+        ):
+            results = client.rerank(query="test query", documents=["doc1"])
+
+        assert len(results) == 1

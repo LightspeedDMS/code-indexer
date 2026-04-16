@@ -229,8 +229,7 @@ class ConfigService:
         assert config.error_handling_config is not None
         assert config.api_limits_config is not None
         assert config.web_security_config is not None
-        # Story #3 - Phase 2: Assert P3 config objects (AC36)
-        assert config.auth_config is not None
+        # Story #683 AC3: auth_config assert removed (AuthConfig deleted).
         # Story #15 AC3: Assert ClaudeIntegrationConfig is not None
         assert config.claude_integration_config is not None
         # Story #25: Assert MultiSearchLimitsConfig is not None
@@ -270,6 +269,15 @@ class ConfigService:
                 "git_pull_timeout": config.resource_config.git_pull_timeout,
                 "git_refresh_timeout": config.resource_config.git_refresh_timeout,
                 "hnsw_max_elements": config.resource_config.hnsw_max_elements,
+                # Story #683 AC7: 8 genuinely-wired advanced timeout fields
+                "git_init_conflict_timeout": config.resource_config.git_init_conflict_timeout,
+                "git_service_conflict_timeout": config.resource_config.git_service_conflict_timeout,
+                "git_service_cleanup_timeout": config.resource_config.git_service_cleanup_timeout,
+                "git_service_wait_timeout": config.resource_config.git_service_wait_timeout,
+                "git_process_check_timeout": config.resource_config.git_process_check_timeout,
+                "git_untracked_file_timeout": config.resource_config.git_untracked_file_timeout,
+                "cow_clone_timeout": config.resource_config.cow_clone_timeout,
+                "cidx_fix_config_timeout": config.resource_config.cidx_fix_config_timeout,
             },
             # Password security
             "password_security": {
@@ -469,13 +477,10 @@ class ConfigService:
                 "log_page_size_max": config.api_limits_config.log_page_size_max,
             },
             "web_security": {
-                "csrf_max_age_seconds": config.web_security_config.csrf_max_age_seconds,
+                # Story #683 AC2: csrf_max_age_seconds removed (dead field).
                 "web_session_timeout_seconds": config.web_security_config.web_session_timeout_seconds,
             },
-            # Story #3 - Phase 2: P3 settings (AC36)
-            "auth": {
-                "oauth_extension_threshold_hours": config.auth_config.oauth_extension_threshold_hours,
-            },
+            # Story #683 AC3: "auth" section removed (AuthConfig deleted entirely).
             # Story #25/29 - Multi-search limits configuration (includes omni settings)
             "multi_search": {
                 "multi_search_max_workers": config.multi_search_limits_config.multi_search_max_workers,
@@ -636,9 +641,7 @@ class ConfigService:
             self._update_api_limits_setting(config, key, value)
         elif category == "web_security":
             self._update_web_security_setting(config, key, value)
-        # Story #3 - Phase 2: P3 categories (AC36)
-        elif category == "auth":
-            self._update_auth_setting(config, key, value)
+        # Story #683 AC3: "auth" category removed (AuthConfig deleted).
         # Story #25/29 - Multi-search limits (includes omni settings)
         elif category == "multi_search":
             self._update_multi_search_setting(config, key, value)
@@ -747,6 +750,23 @@ class ConfigService:
             timeouts.git_refresh_timeout = int(value)
         elif key == "hnsw_max_elements":
             timeouts.hnsw_max_elements = int(value)
+        # Story #683 AC7: 8 genuinely-wired advanced timeout fields
+        elif key == "git_init_conflict_timeout":
+            timeouts.git_init_conflict_timeout = int(value)
+        elif key == "git_service_conflict_timeout":
+            timeouts.git_service_conflict_timeout = int(value)
+        elif key == "git_service_cleanup_timeout":
+            timeouts.git_service_cleanup_timeout = int(value)
+        elif key == "git_service_wait_timeout":
+            timeouts.git_service_wait_timeout = int(value)
+        elif key == "git_process_check_timeout":
+            timeouts.git_process_check_timeout = int(value)
+        elif key == "git_untracked_file_timeout":
+            timeouts.git_untracked_file_timeout = int(value)
+        elif key == "cow_clone_timeout":
+            timeouts.cow_clone_timeout = int(value)
+        elif key == "cidx_fix_config_timeout":
+            timeouts.cidx_fix_config_timeout = int(value)
         else:
             raise ValueError(f"Unknown timeout setting: {key}")
 
@@ -1166,24 +1186,16 @@ class ConfigService:
     def _update_web_security_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:
-        """Update a web security setting (Story #3 - Phase 2, AC25-AC26)."""
+        """Update a web security setting (Story #3 - Phase 2, AC25-AC26).
+
+        Story #683 AC2: csrf_max_age_seconds removed (dead field).
+        """
         web_security = config.web_security_config
         assert web_security is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "csrf_max_age_seconds":
-            web_security.csrf_max_age_seconds = int(value)
-        elif key == "web_session_timeout_seconds":
+        if key == "web_session_timeout_seconds":
             web_security.web_session_timeout_seconds = int(value)
         else:
             raise ValueError(f"Unknown web security setting: {key}")
-
-    def _update_auth_setting(self, config: ServerConfig, key: str, value: Any) -> None:
-        """Update an auth setting (Story #3 - Phase 2, AC36)."""
-        auth = config.auth_config
-        assert auth is not None  # Guaranteed by ServerConfig.__post_init__
-        if key == "oauth_extension_threshold_hours":
-            auth.oauth_extension_threshold_hours = int(value)
-        else:
-            raise ValueError(f"Unknown auth setting: {key}")
 
     def _update_multi_search_setting(
         self, config: ServerConfig, key: str, value: Any

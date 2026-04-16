@@ -170,14 +170,28 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         for attempt in range(max_attempts):
             try:
                 _start = time.time()
-                with httpx.Client(
-                    timeout=httpx.Timeout(
-                        connect=self.config.connect_timeout,
-                        read=self.config.timeout,
-                        write=self.config.timeout,
-                        pool=self.config.timeout,
+                try:
+                    from code_indexer.server.services.latency_tracking_httpx_transport import (
+                        build_latency_transport,
                     )
-                ) as client:
+
+                    _latency_transport = build_latency_transport()
+                except ImportError:
+                    # Server module not available in CLI-only deployments.
+                    _latency_transport = None
+                _timeout = httpx.Timeout(
+                    connect=self.config.connect_timeout,
+                    read=self.config.timeout,
+                    write=self.config.timeout,
+                    pool=self.config.timeout,
+                )
+                if _latency_transport is not None:
+                    _client_ctx = httpx.Client(
+                        timeout=_timeout, transport=_latency_transport
+                    )
+                else:
+                    _client_ctx = httpx.Client(timeout=_timeout)
+                with _client_ctx as client:
                     response = client.post(
                         self.config.api_endpoint,
                         headers=headers,

@@ -1557,3 +1557,61 @@ button.danger, .button.danger {
 [data-theme="dark"] .health-error {
     color: #f87171;
 }
+
+/* Dependency Latency Section (Story #680) */
+.dependency-latency-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
+
+.dependency-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    gap: 0.75rem;
+}
+
+.dependency-row:last-child {
+    border-bottom: none;
+}
+
+.dep-name {
+    font-size: 0.85rem;
+    font-weight: 500;
+    flex: 0 0 auto;
+    min-width: 6rem;
+}
+
+.dep-metrics {
+    font-size: 0.8rem;
+    color: var(--pico-muted-color);
+    flex: 1 1 auto;
+}
+
+.dep-trend {
+    font-size: 0.8rem;
+    flex: 0 0 auto;
+}
+
+.dependency-status-healthy {
+    color: var(--pico-color);
+}
+
+.dependency-status-degraded {
+    color: #d97706;
+}
+
+[data-theme="dark"] .dependency-status-degraded {
+    color: #fbbf24;
+}
+
+.dependency-status-unhealthy {
+    color: #dc2626;
+}
+
+[data-theme="dark"] .dependency-status-unhealthy {
+    color: #f87171;
+}

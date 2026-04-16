@@ -209,18 +209,34 @@ class VoyageAIClient(EmbeddingProvider):
         for attempt in range(self.config.max_retries + 1):
             try:
                 _start = time.time()
-                with httpx.Client(
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=httpx.Timeout(
-                        connect=self.config.connect_timeout,
-                        read=self.config.timeout,
-                        write=self.config.timeout,
-                        pool=self.config.timeout,
-                    ),
-                ) as client:
+                try:
+                    from code_indexer.server.services.latency_tracking_httpx_transport import (
+                        build_latency_transport,
+                    )
+
+                    _latency_transport = build_latency_transport()
+                except ImportError:
+                    # Server module not available in CLI-only deployments.
+                    _latency_transport = None
+                _timeout = httpx.Timeout(
+                    connect=self.config.connect_timeout,
+                    read=self.config.timeout,
+                    write=self.config.timeout,
+                    pool=self.config.timeout,
+                )
+                _headers = {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                }
+                if _latency_transport is not None:
+                    _client_ctx = httpx.Client(
+                        headers=_headers,
+                        timeout=_timeout,
+                        transport=_latency_transport,
+                    )
+                else:
+                    _client_ctx = httpx.Client(headers=_headers, timeout=_timeout)
+                with _client_ctx as client:
                     response = client.post(self.config.api_endpoint, json=payload)
                 response.raise_for_status()
 

@@ -44,9 +44,13 @@ class DependencyMapDashboardService:
         self._config_manager = config_manager
         self._dependency_map_service = dependency_map_service
 
-    def get_job_status(self) -> Dict[str, Any]:
+    def get_job_status(self, progress_callback=None) -> Dict[str, Any]:
         """
         Get full job status dict for dashboard rendering.
+
+        Args:
+            progress_callback: Optional callable(completed: int, total: int) forwarded
+                               to detect_changes/_enrich_repo_sizes. Defaults to None.
 
         Returns:
             Dict with:
@@ -61,7 +65,7 @@ class DependencyMapDashboardService:
         config = self._config_manager.get_claude_integration_config()
 
         # Detect changes (safe - exception treated as no changes)
-        changes = self._safe_detect_changes()
+        changes = self._safe_detect_changes(progress_callback=progress_callback)
 
         health, color = self._compute_health(tracking, config, changes)
 
@@ -83,9 +87,13 @@ class DependencyMapDashboardService:
             "run_history": run_history,
         }
 
-    def _safe_detect_changes(self) -> Tuple[list, list, list]:
+    def _safe_detect_changes(self, progress_callback=None) -> Tuple[list, list, list]:
         """
         Call detect_changes() on dependency_map_service, returning empty lists on any failure.
+
+        Args:
+            progress_callback: Optional callable(completed: int, total: int) forwarded
+                               to detect_changes. Defaults to None.
 
         Returns:
             Tuple of (changed_repos, new_repos, removed_repos) - empty on error or no service
@@ -95,7 +103,10 @@ class DependencyMapDashboardService:
 
         try:
             return cast(
-                Tuple[list, list, list], self._dependency_map_service.detect_changes()
+                Tuple[list, list, list],
+                self._dependency_map_service.detect_changes(
+                    progress_callback=progress_callback
+                ),
             )
         except Exception as e:
             logger.warning(

@@ -3,6 +3,8 @@ Unit tests for Phase 2 P2 Priority Configuration (AC12-AC26).
 
 Story #3: Server Configuration Consolidation
 Tests for GitTimeoutsConfig, ErrorHandlingConfig, ApiLimitsConfig, WebSecurityConfig.
+
+NOTE (Story #683 AC2): csrf_max_age_seconds removed from WebSecurityConfig — dead field.
 """
 
 import tempfile
@@ -17,6 +19,14 @@ from code_indexer.server.utils.config_manager import (
     ApiLimitsConfig,
     WebSecurityConfig,
 )
+
+# WebSecurityConfig boundary constants (AC26)
+_WEB_SESSION_DEFAULT_SECONDS = 28800  # 8 hours
+_WEB_SESSION_CUSTOM_SECONDS = 43200  # 12 hours
+_WEB_SESSION_MIN_SECONDS = 1800  # 30 minutes (AC26 lower bound)
+_WEB_SESSION_MAX_SECONDS = 86400  # 24 hours (AC26 upper bound)
+_WEB_SESSION_BELOW_MIN_SECONDS = 1799  # just below AC26 lower bound
+_ADMIN_SESSION_DEFAULT_SECONDS = 3600  # 1 hour
 
 
 class TestGitTimeoutsConfig:
@@ -309,65 +319,67 @@ class TestApiLimitsConfig:
 
 
 class TestWebSecurityConfig:
-    """Tests for AC25-AC26: Web Security Configuration."""
+    """Tests for AC25-AC26: Web Security Configuration.
+
+    Story #683 AC2: csrf_max_age_seconds removed (dead field, no consumer).
+    """
 
     def test_default_values(self):
-        """AC25: WebSecurityConfig has correct default values."""
+        """AC25: WebSecurityConfig has correct default values (no csrf_max_age_seconds)."""
         config = WebSecurityConfig()
-        assert config.csrf_max_age_seconds == 600
-        assert config.web_session_timeout_seconds == 28800
+        assert not hasattr(config, "csrf_max_age_seconds")
+        assert config.web_session_timeout_seconds == _WEB_SESSION_DEFAULT_SECONDS
 
     def test_custom_values(self):
-        """WebSecurityConfig accepts custom values."""
+        """WebSecurityConfig accepts custom web_session_timeout_seconds."""
         config = WebSecurityConfig(
-            csrf_max_age_seconds=1200,
-            web_session_timeout_seconds=43200,
+            web_session_timeout_seconds=_WEB_SESSION_CUSTOM_SECONDS
         )
-        assert config.csrf_max_age_seconds == 1200
-        assert config.web_session_timeout_seconds == 43200
+        assert config.web_session_timeout_seconds == _WEB_SESSION_CUSTOM_SECONDS
 
     def test_serialization(self):
-        """WebSecurityConfig serializes to dict correctly."""
+        """WebSecurityConfig serializes to exact dict without csrf_max_age_seconds."""
         config = WebSecurityConfig()
         data = asdict(config)
         assert data == {
-            "csrf_max_age_seconds": 600,
-            "web_session_timeout_seconds": 28800,
-            "admin_session_timeout_seconds": 3600,
+            "web_session_timeout_seconds": _WEB_SESSION_DEFAULT_SECONDS,
+            "admin_session_timeout_seconds": _ADMIN_SESSION_DEFAULT_SECONDS,
             "restrict_non_sso_to_web_ui": False,
         }
 
-    def test_validation_csrf_max_age_range(self):
-        """AC26: csrf_max_age_seconds must be in range 60-3600."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            manager = ServerConfigManager(tmpdir)
-            server_config = ServerConfig(
-                server_dir=tmpdir,
-                web_security_config=WebSecurityConfig(csrf_max_age_seconds=59),
-            )
-            with pytest.raises(ValueError, match="csrf_max_age_seconds"):
-                manager.validate_config(server_config)
-
-    def test_validation_web_session_timeout_range(self):
-        """AC26: web_session_timeout_seconds must be in range 1800-86400."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            manager = ServerConfigManager(tmpdir)
-            server_config = ServerConfig(
-                server_dir=tmpdir,
-                web_security_config=WebSecurityConfig(web_session_timeout_seconds=1799),
-            )
-            with pytest.raises(ValueError, match="web_session_timeout_seconds"):
-                manager.validate_config(server_config)
-
-    def test_valid_boundary_values(self):
-        """All web security values at boundaries pass validation."""
+    def test_validation_web_session_timeout_below_min(self):
+        """AC26: web_session_timeout_seconds below 1800 fails validation."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = ServerConfigManager(tmpdir)
             server_config = ServerConfig(
                 server_dir=tmpdir,
                 web_security_config=WebSecurityConfig(
-                    csrf_max_age_seconds=60,
-                    web_session_timeout_seconds=1800,
+                    web_session_timeout_seconds=_WEB_SESSION_BELOW_MIN_SECONDS
+                ),
+            )
+            with pytest.raises(ValueError, match="web_session_timeout_seconds"):
+                manager.validate_config(server_config)
+
+    def test_valid_boundary_min(self):
+        """AC26: web_session_timeout_seconds at minimum boundary (1800) passes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ServerConfigManager(tmpdir)
+            server_config = ServerConfig(
+                server_dir=tmpdir,
+                web_security_config=WebSecurityConfig(
+                    web_session_timeout_seconds=_WEB_SESSION_MIN_SECONDS
+                ),
+            )
+            manager.validate_config(server_config)
+
+    def test_valid_boundary_max(self):
+        """AC26: web_session_timeout_seconds at maximum boundary (86400) passes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = ServerConfigManager(tmpdir)
+            server_config = ServerConfig(
+                server_dir=tmpdir,
+                web_security_config=WebSecurityConfig(
+                    web_session_timeout_seconds=_WEB_SESSION_MAX_SECONDS
                 ),
             )
             manager.validate_config(server_config)
@@ -433,8 +445,7 @@ class TestServerConfigP2Integration:
                     max_log_commits=1000,
                 ),
                 web_security_config=WebSecurityConfig(
-                    csrf_max_age_seconds=1200,
-                    web_session_timeout_seconds=43200,
+                    web_session_timeout_seconds=_WEB_SESSION_CUSTOM_SECONDS,
                 ),
             )
 
@@ -465,9 +476,9 @@ class TestServerConfigP2Integration:
             assert loaded_config.api_limits_config.default_log_commits == 100
             assert loaded_config.api_limits_config.max_log_commits == 1000
 
-            # Verify web_security_config
+            # Verify web_security_config (csrf_max_age_seconds removed in Story #683 AC2)
             assert isinstance(loaded_config.web_security_config, WebSecurityConfig)
-            assert loaded_config.web_security_config.csrf_max_age_seconds == 1200
             assert (
-                loaded_config.web_security_config.web_session_timeout_seconds == 43200
+                loaded_config.web_security_config.web_session_timeout_seconds
+                == _WEB_SESSION_CUSTOM_SECONDS
             )

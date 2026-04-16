@@ -1065,18 +1065,23 @@ class DependencyMapService:
         return journal
 
     def _enrich_repo_sizes(
-        self, repo_list: List[Dict[str, Any]]
+        self,
+        repo_list: List[Dict[str, Any]],
+        progress_callback=None,
     ) -> List[Dict[str, Any]]:
         """
         Add file_count and total_bytes to each repo dict. Sort by total_bytes descending.
 
         Args:
             repo_list: List of repo dicts with clone_path
+            progress_callback: Optional callable(completed: int, total: int).
+                               Called after each repo is enriched. Defaults to None.
 
         Returns:
             Enriched and sorted repo list
         """
-        for repo in repo_list:
+        total = len(repo_list)
+        for idx, repo in enumerate(repo_list):
             clone_path = Path(repo.get("clone_path", ""))
             if clone_path.exists():
                 file_count = 0
@@ -1098,6 +1103,9 @@ class DependencyMapService:
             else:
                 repo["file_count"] = 0
                 repo["total_bytes"] = 0
+
+            if progress_callback is not None:
+                progress_callback(idx + 1, total)
 
         # Filter out empty repos (AC8: exclude repos with 0 files — they contribute nothing to analysis)
         non_empty = []
@@ -1261,12 +1269,17 @@ class DependencyMapService:
 
     def detect_changes(
         self,
+        progress_callback=None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
         """
         Detect changed, new, and removed repos via commit hash comparison (Story #193, AC2).
 
         Compares stored commit hashes from tracking table with current repo commits
         in metadata.json files.
+
+        Args:
+            progress_callback: Optional callable(completed: int, total: int) forwarded
+                               to _enrich_repo_sizes. Defaults to None.
 
         Returns:
             Tuple of (changed_repos, new_repos, removed_repos) where:
@@ -1293,7 +1306,9 @@ class DependencyMapService:
         # Apply same empty-repo filter as analysis pipeline (_enrich_repo_sizes).
         # Empty repos never get tracked in commit_hashes, so without this filter
         # they perpetually appear as "new" repos triggering degraded health.
-        current_repos = self._enrich_repo_sizes(current_repos)
+        current_repos = self._enrich_repo_sizes(
+            current_repos, progress_callback=progress_callback
+        )
 
         changed_repos = []
         new_repos = []

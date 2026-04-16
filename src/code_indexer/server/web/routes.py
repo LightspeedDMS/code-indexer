@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 # Self-Monitoring constants (Story #74)
 SCAN_HISTORY_LIMIT = 50
 ISSUES_HISTORY_LIMIT = 100
+UNASSIGNED_CATEGORY_PRIORITY = (
+    999999  # Story #686: sentinel sort priority for uncategorised repos
+)
 
 # Story #198: Settings that require server restart
 # These settings are read during server startup (singleton init, thread pool creation)
@@ -125,6 +128,48 @@ CSRF_COOKIE_NAME = "_csrf"
 CSRF_MAX_AGE_SECONDS = 600  # 10 minutes
 # Story #674: Default time window (seconds) for per-user API breakdown card
 _DEFAULT_PER_USER_API_FILTER_SECONDS = 86_400  # 24 hours
+
+# Story #683 AC5: immutable tuple used by POST /config/{section} handler.
+# "job_queue" removed — it was a fabricated section (SyncJobConfig defaults), not persisted.
+_VALID_CONFIG_SECTIONS = (
+    "server",
+    "cache",
+    "timeouts",
+    "password_security",
+    "oidc",
+    "telemetry",
+    "langfuse",
+    "search_limits",
+    "file_content_limits",
+    "golden_repos",
+    "mcp_session",
+    "health",
+    "scip",
+    # Story #3 - Phase 2: P2 settings (AC12-AC26)
+    "git_timeouts",
+    "error_handling",
+    "api_limits",
+    "web_security",
+    # Story #683 AC3: "auth" section removed (AuthConfig deleted).
+    # Story #25 - Multi-search limits configuration
+    "multi_search",
+    # Story #26 - Background jobs configuration
+    "background_jobs",
+    # Story #28 - Omni-search configuration
+    "omni_search",
+    # Story #32 - Unified content limits configuration
+    "content_limits",
+    # Story #190 - Claude CLI configuration
+    "claude_cli",
+    # Story #223 - Indexing configuration
+    "indexing",
+    # Story #323 - Wiki metadata fields configuration
+    "wiki",
+    # Story #400 - Data retention configuration
+    "data_retention",
+    # Story #652 - Reranking configuration
+    "rerank",
+)
 
 
 def _get_csrf_serializer() -> URLSafeTimedSerializer:
@@ -419,6 +464,42 @@ def dashboard_health_partial(request: Request):
     except Exception as exc:
         logger.debug("Could not query scheduler from cluster_nodes: %s", exc)
 
+    # Story #680: Compute dependency latency rows for the Server Status card.
+    # Queries the last 5-minute window (current window only — aggregator operates
+    # on current window; trend computation would need a separate previous window
+    # query which is intentionally deferred until the full aggregation pipeline
+    # is wired). Error resilience is intentional: dashboard display must never
+    # crash the server even if the latency backend is unreachable.
+    _CURRENT_WINDOW_S = 300.0  # 5 minutes — matches DependencyLatencyTracker retention
+    dependency_rows = []
+    try:
+        _latency_tracker = getattr(request.app.state, "latency_tracker", None)
+        if _latency_tracker is not None and _latency_tracker._backend is not None:
+            import time as _time
+            from code_indexer.server.services.dependency_latency_aggregator import (
+                DependencyLatencyAggregator,
+            )
+
+            _now = _time.time()
+            _samples = _latency_tracker._backend.select_samples_for_window(
+                start_time=_now - _CURRENT_WINDOW_S,
+                end_time=_now,
+            )
+            _storage_mode = getattr(request.app.state, "storage_mode", "sqlite")
+            _clone_backend = getattr(request.app.state, "clone_backend", "none")
+            _aggregator = DependencyLatencyAggregator()
+            _stats = _aggregator.compute_stats(_samples)
+            dependency_rows = _aggregator.build_rows(
+                all_stats=_stats,
+                storage_mode=_storage_mode,
+                clone_backend=_clone_backend,
+                registered_dep_names=[],
+            )
+    except (
+        Exception
+    ):  # broad catch intentional: dashboard display must never crash server
+        logger.debug("Failed to compute dependency latency rows", exc_info=True)
+
     return templates.TemplateResponse(
         "partials/dashboard_health.html",
         {
@@ -428,6 +509,7 @@ def dashboard_health_partial(request: Request):
             "server_version": cidx_version,
             "node_metrics": node_metrics,
             "scheduler_node_id": scheduler_node_id,
+            "dependency_rows": dependency_rows,
         },
     )
 
@@ -1418,6 +1500,30 @@ def _create_groups_page_response(
         # GoldenRepoManager not initialized during startup
         logger.debug("Golden repo manager not available for repo access tab: %s", e)
 
+    # Category enrichment for repo access matrix (Story #686)
+    try:
+        category_service = _get_repo_category_service()
+        repo_map = category_service.get_repo_category_map()
+        for repo in golden_repos:
+            info = repo_map.get(repo["name"], {})
+            repo["category_id"] = info.get("category_id")
+            repo["category_name"] = info.get("category_name") or "Unassigned"
+            repo["category_priority"] = info.get(
+                "priority", UNASSIGNED_CATEGORY_PRIORITY
+            )
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-048",
+                f"Could not load category information for groups repo access: {e}",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        for repo in golden_repos:
+            repo["category_id"] = None
+            repo["category_name"] = "Unassigned"
+            repo["category_priority"] = UNASSIGNED_CATEGORY_PRIORITY
+
     response = templates.TemplateResponse(
         "groups.html",
         {
@@ -1792,6 +1898,30 @@ def groups_repo_access_partial(request: Request):
             repo_access_map[group.id] = [r for r in repos_for_group if r != "cidx-meta"]
     except RuntimeError as e:
         logger.debug("Golden repo manager not available: %s", e)
+
+    # Category enrichment (Story #686)
+    try:
+        category_service = _get_repo_category_service()
+        repo_map = category_service.get_repo_category_map()
+        for repo in golden_repos:
+            info = repo_map.get(repo["name"], {})
+            repo["category_id"] = info.get("category_id")
+            repo["category_name"] = info.get("category_name") or "Unassigned"
+            repo["category_priority"] = info.get(
+                "priority", UNASSIGNED_CATEGORY_PRIORITY
+            )
+    except Exception as e:
+        logger.warning(
+            format_error_log(
+                "SCIP-GENERAL-048",
+                f"Could not load category information for groups repo access: {e}",
+            ),
+            extra={"correlation_id": get_correlation_id()},
+        )
+        for repo in golden_repos:
+            repo["category_id"] = None
+            repo["category_name"] = "Unassigned"
+            repo["category_priority"] = UNASSIGNED_CATEGORY_PRIORITY
 
     response = templates.TemplateResponse(
         "partials/groups_repo_access.html",
@@ -3846,14 +3976,6 @@ def get_queue_status_api(request: Request):
 
     queue_status = _get_queue_status()
 
-    # Add average_job_duration_minutes to the response
-    # BackgroundJobManager doesn't have this attribute, use SyncJobConfig defaults
-    from ..jobs.config import SyncJobConfig
-
-    queue_status["average_job_duration_minutes"] = (
-        SyncJobConfig.DEFAULT_AVERAGE_JOB_DURATION_MINUTES
-    )
-
     return JSONResponse({"success": True, **queue_status})
 
 
@@ -5075,8 +5197,7 @@ def _get_current_config() -> dict:
         ErrorHandlingConfig,
         ApiLimitsConfig,
         WebSecurityConfig,
-        # Story #3 - Phase 2: P3 settings (AC36)
-        AuthConfig,
+        # Story #683 AC3: AuthConfig import removed (deleted).
         # Story #32 - Unified content limits configuration
         ContentLimitsConfig,
         # Story #223 - Indexing configuration
@@ -5096,17 +5217,6 @@ def _get_current_config() -> dict:
     if not oidc_config:
         # Provide defaults if OIDC config is missing
         oidc_config = asdict(OIDCProviderConfig())
-
-    # Get job queue settings from SyncJobConfig defaults
-    # Note: BackgroundJobManager doesn't have these attributes directly, they're managed
-    # via SyncJobConfig for the sync job system. For display purposes, use defaults.
-    from ..jobs.config import SyncJobConfig
-
-    job_queue_config = {
-        "max_total_concurrent_jobs": SyncJobConfig.DEFAULT_MAX_TOTAL_CONCURRENT_JOBS,
-        "max_concurrent_jobs_per_user": SyncJobConfig.DEFAULT_MAX_CONCURRENT_JOBS_PER_USER,
-        "average_job_duration_minutes": SyncJobConfig.DEFAULT_AVERAGE_JOB_DURATION_MINUTES,
-    }
 
     # Ensure telemetry config has all required fields with defaults
     telemetry_config = settings.get("telemetry")
@@ -5173,10 +5283,7 @@ def _get_current_config() -> dict:
     if not web_security_config:
         web_security_config = asdict(WebSecurityConfig())
 
-    # Story #3 - Phase 2: P3 settings (AC36)
-    auth_config = settings.get("auth")
-    if not auth_config:
-        auth_config = asdict(AuthConfig())
+    # Story #683 AC3: auth_config section removed (AuthConfig deleted).
 
     # Story #20: Provider API Keys (Anthropic/VoyageAI)
     # Bug #153: Provide defaults when claude_cli is None or empty dict
@@ -5247,7 +5354,6 @@ def _get_current_config() -> dict:
         "timeouts": settings["timeouts"],
         "password_security": settings["password_security"],
         "oidc": oidc_config,
-        "job_queue": job_queue_config,
         "telemetry": telemetry_config,
         "langfuse": langfuse_config,
         "claude_delegation": claude_delegation_config,
@@ -5263,8 +5369,7 @@ def _get_current_config() -> dict:
         "error_handling": error_handling_config,
         "api_limits": api_limits_config,
         "web_security": web_security_config,
-        # Story #3 - Phase 2: P3 settings (AC36)
-        "auth": auth_config,
+        # Story #683 AC3: "auth" key removed (AuthConfig deleted).
         # Story #20: Provider API Keys
         "provider_api_keys": provider_api_keys_config,
         # Claude CLI integration settings (for Claude Integration config section)
@@ -5481,37 +5586,6 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                 except (ValueError, TypeError):
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
-
-    elif section == "job_queue":
-        # Validate max_total_concurrent_jobs (1-50)
-        max_total = data.get("max_total_concurrent_jobs")
-        if max_total is not None:
-            try:
-                max_total_int = int(max_total)
-                if max_total_int < 1 or max_total_int > 50:
-                    return "Max Concurrent Jobs (System-wide) must be between 1 and 50"
-            except (ValueError, TypeError):
-                return "Max Concurrent Jobs (System-wide) must be a valid number"
-
-        # Validate max_concurrent_jobs_per_user (1-10)
-        max_per_user = data.get("max_concurrent_jobs_per_user")
-        if max_per_user is not None:
-            try:
-                max_per_user_int = int(max_per_user)
-                if max_per_user_int < 1 or max_per_user_int > 10:
-                    return "Max Concurrent Jobs (Per User) must be between 1 and 10"
-            except (ValueError, TypeError):
-                return "Max Concurrent Jobs (Per User) must be a valid number"
-
-        # Validate average_job_duration_minutes (1-120)
-        avg_duration = data.get("average_job_duration_minutes")
-        if avg_duration is not None:
-            try:
-                avg_duration_int = int(avg_duration)
-                if avg_duration_int < 1 or avg_duration_int > 120:
-                    return "Average Job Duration must be between 1 and 120 minutes"
-            except (ValueError, TypeError):
-                return "Average Job Duration must be a valid number"
 
     elif section == "telemetry":
         # Validate trace_sample_rate (0.0 to 1.0)
@@ -5985,24 +6059,11 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
 
     elif section == "web_security":
         # Story #3 Phase 2 AC25-AC26: Web security configuration
+        # Story #683 AC2: csrf_max_age_seconds validation removed (field deleted).
         from ..services.constants import (
-            MIN_CSRF_MAX_AGE_SECONDS,
-            MAX_CSRF_MAX_AGE_SECONDS,
             MIN_WEB_SESSION_TIMEOUT_SECONDS,
             MAX_WEB_SESSION_TIMEOUT_SECONDS,
         )
-
-        csrf_max_age = data.get("csrf_max_age_seconds")
-        if csrf_max_age is not None:
-            try:
-                age_int = int(csrf_max_age)
-                if (
-                    age_int < MIN_CSRF_MAX_AGE_SECONDS
-                    or age_int > MAX_CSRF_MAX_AGE_SECONDS
-                ):
-                    return f"CSRF Max Age must be between {MIN_CSRF_MAX_AGE_SECONDS} and {MAX_CSRF_MAX_AGE_SECONDS} seconds"
-            except (ValueError, TypeError):
-                return "CSRF Max Age must be a valid number"
 
         session_timeout = data.get("web_session_timeout_seconds")
         if session_timeout is not None:
@@ -6016,24 +6077,7 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
             except (ValueError, TypeError):
                 return "Web Session Timeout must be a valid number"
 
-    elif section == "auth":
-        # Story #3 Phase 2 AC36: Authentication configuration
-        from ..services.constants import (
-            MIN_OAUTH_EXTENSION_THRESHOLD_HOURS,
-            MAX_OAUTH_EXTENSION_THRESHOLD_HOURS,
-        )
-
-        oauth_threshold = data.get("oauth_extension_threshold_hours")
-        if oauth_threshold is not None:
-            try:
-                threshold_int = int(oauth_threshold)
-                if (
-                    threshold_int < MIN_OAUTH_EXTENSION_THRESHOLD_HOURS
-                    or threshold_int > MAX_OAUTH_EXTENSION_THRESHOLD_HOURS
-                ):
-                    return f"OAuth Extension Threshold must be between {MIN_OAUTH_EXTENSION_THRESHOLD_HOURS} and {MAX_OAUTH_EXTENSION_THRESHOLD_HOURS} hours"
-            except (ValueError, TypeError):
-                return "OAuth Extension Threshold must be a valid number"
+    # Story #683 AC3: "auth" validation block removed (AuthConfig deleted).
 
     elif section == "multi_search":
         # Story #25: Multi-search limits configuration
@@ -6996,48 +7040,7 @@ async def update_config_section(
         )
 
     # Validate section
-    valid_sections = [
-        "server",
-        "cache",
-        "timeouts",
-        "password_security",
-        "oidc",
-        "job_queue",
-        "telemetry",
-        "langfuse",
-        "search_limits",
-        "file_content_limits",
-        "golden_repos",
-        "mcp_session",
-        "health",
-        "scip",
-        # Story #3 - Phase 2: P2 settings (AC12-AC26)
-        "git_timeouts",
-        "error_handling",
-        "api_limits",
-        "web_security",
-        # Story #3 - Phase 2: P3 settings (AC36)
-        "auth",
-        # Story #25 - Multi-search limits configuration
-        "multi_search",
-        # Story #26 - Background jobs configuration
-        "background_jobs",
-        # Story #28 - Omni-search configuration
-        "omni_search",
-        # Story #32 - Unified content limits configuration
-        "content_limits",
-        # Story #190 - Claude CLI configuration
-        "claude_cli",
-        # Story #223 - Indexing configuration
-        "indexing",
-        # Story #323 - Wiki metadata fields configuration
-        "wiki",
-        # Story #400 - Data retention configuration
-        "data_retention",
-        # Story #652 - Reranking configuration
-        "rerank",
-    ]
-    if section not in valid_sections:
+    if section not in _VALID_CONFIG_SECTIONS:
         return _create_config_page_response(
             request, session, error_message=f"Invalid section: {section}"
         )
@@ -7054,24 +7057,6 @@ async def update_config_section(
             session,
             error_message=error,
             validation_errors={section: error},
-        )
-
-    # Special handling for job_queue - these are currently read-only defaults from SyncJobConfig
-    # Note: BackgroundJobManager doesn't have these attributes. The job queue settings are managed
-    # via SyncJobConfig which returns hardcoded defaults. Dynamic updates would require
-    # extending SyncJobConfig with persistence support.
-    if section == "job_queue":
-        logger.warning(
-            format_error_log(
-                "STORE-GENERAL-046",
-                "Job queue configuration save attempted but settings are read-only defaults from SyncJobConfig.",
-                extra={"correlation_id": get_correlation_id()},
-            )
-        )
-        return _create_config_page_response(
-            request,
-            session,
-            success_message="Job Queue settings are read-only defaults (dynamic configuration not currently supported)",
         )
 
     # Save configuration using ConfigService

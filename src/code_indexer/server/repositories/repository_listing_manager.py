@@ -47,10 +47,14 @@ class RepositoryListingManager:
         """
         if golden_repo_manager is None:
             from pathlib import Path
+            from code_indexer.server.services.config_service import get_config_service
 
             home_dir = Path.home()
             data_dir = str(home_dir / ".cidx-server" / "data")
-            golden_repo_manager = GoldenRepoManager(data_dir=data_dir)
+            resource_config = get_config_service().get_config().resource_config
+            golden_repo_manager = GoldenRepoManager(
+                data_dir=data_dir, resource_config=resource_config
+            )
         self.golden_repo_manager = golden_repo_manager
         self.activated_repo_manager = activated_repo_manager or ActivatedRepoManager()
         self.logger = logging.getLogger(__name__)

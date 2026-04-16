@@ -370,7 +370,7 @@ class DepMapRepairExecutor:
             errors.append(f"Failed to regenerate _index.md: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Phase 3.5: Backfill JSON description from .md files (Bug #687 Fix 4/5)
+    # Phase 3.5: Backfill JSON description + sync frontmatter repos
     # ─────────────────────────────────────────────────────────────────────────
 
     def _run_phase35(
@@ -380,24 +380,35 @@ class DepMapRepairExecutor:
         errors: List[str],
     ) -> None:
         """
-        Phase 3.5: For each domain in _domains.json with an empty description,
-        extract description from the corresponding .md file and update _domains.json.
+        Phase 3.5 orchestrator — two sub-tasks run in sequence:
 
-        Only description is backfilled — evidence cannot be parsed from .md files
-        and requires Claude CLI re-analysis (Phase 1) to populate.
+        Sub-task A (Bug #687 Fix 4): Backfill empty JSON descriptions from .md.
+        Sub-task B (Story #688): Sync frontmatter participating_repos from JSON.
+        """
+        self._backfill_json_descriptions(output_dir, fixed, errors)
+        self._sync_all_frontmatter_repos(output_dir, fixed, errors)
 
-        Idempotent: domains that already have a non-empty description are unchanged.
+    def _backfill_json_descriptions(
+        self,
+        output_dir: Path,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """
+        Sub-task A of Phase 3.5: backfill empty JSON descriptions from .md files.
+
+        Idempotent: domains with a non-empty description are unchanged.
         """
         domain_list = self._load_domains_json(output_dir)
         updated_count = 0
 
         for domain in domain_list:
             name = domain.get("name", "")
-            if not name or "/" in name or "\\" in name or ".." in name:
+            if not self._is_safe_domain_name(name):
                 continue
             desc = domain.get("description", "") or ""
             if desc.strip():
-                continue  # already has description — leave it untouched
+                continue
             md_file = output_dir / f"{name}.md"
             if not md_file.exists():
                 continue
@@ -419,6 +430,126 @@ class DepMapRepairExecutor:
             except OSError as e:
                 errors.append(f"Phase 3.5: failed to write _domains.json: {e}")
                 self._log(f"Phase 3.5 write error: {e}")
+
+    def _sync_all_frontmatter_repos(
+        self,
+        output_dir: Path,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """
+        Sub-task B of Phase 3.5: sync frontmatter participating_repos from JSON.
+
+        Re-loads domain_list so sub-task A writes are visible.
+        Calls _sync_frontmatter_repos for each domain whose .md exists.
+        """
+        domain_list = self._load_domains_json(output_dir)
+        for domain in domain_list:
+            name = domain.get("name", "")
+            if not self._is_safe_domain_name(name):
+                continue
+            json_repos = domain.get("participating_repos") or []
+            if not isinstance(json_repos, list):
+                continue
+            md_file = output_dir / f"{name}.md"
+            if not md_file.exists():
+                continue
+            try:
+                if self._sync_frontmatter_repos(md_file, json_repos):
+                    fixed.append(f"synced frontmatter repos for: {name}")
+                    self._log(f"Phase 3.5: synced frontmatter repos for {name}")
+            except OSError as e:
+                errors.append(f"Phase 3.5: failed to sync frontmatter for {name}: {e}")
+                self._log(f"Phase 3.5 frontmatter sync error for {name}: {e}")
+
+    def _sync_frontmatter_repos(self, md_file: Path, json_repos: List[str]) -> bool:
+        """
+        Rewrite md_file's frontmatter participating_repos to match json_repos.
+
+        Idempotent: returns False without writing when current_repos == json_repos
+        (exact ordered equality). Appends the key if absent. Preserves all other
+        frontmatter keys and the full markdown body. Returns True only when the
+        file content actually changed.
+        """
+        content = md_file.read_text(encoding="utf-8")
+        frontmatter = _parse_yaml_frontmatter_util(content)
+        if frontmatter is None:
+            return False
+
+        current_repos = frontmatter.get("participating_repos")
+        if not isinstance(current_repos, list):
+            current_repos = []
+        if current_repos == json_repos:
+            return False
+
+        bounds = self._locate_frontmatter_bounds(content)
+        if bounds is None:
+            return False
+        open_idx, close_idx = bounds
+
+        lines = content.split("\n")
+        fm_lines = lines[open_idx + 1 : close_idx]
+        body_lines = lines[close_idx:]
+
+        new_fm_lines = self._rebuild_frontmatter_repos_block(fm_lines, json_repos)
+        new_content = "\n".join(["---"] + new_fm_lines + body_lines)
+        if new_content == content:
+            return False
+
+        md_file.write_text(new_content, encoding="utf-8")
+        return True
+
+    @staticmethod
+    def _locate_frontmatter_bounds(content: str):
+        """
+        Return (open_idx, close_idx) line indices for the --- delimiters, or None.
+
+        open_idx is always 0 (the opening ---).
+        close_idx is the index of the closing --- line.
+        """
+        lines = content.split("\n")
+        if not lines or lines[0].strip() != "---":
+            return None
+        for i, line in enumerate(lines[1:], start=1):
+            if line.strip() == "---":
+                return (0, i)
+        return None
+
+    @staticmethod
+    def _rebuild_frontmatter_repos_block(
+        fm_lines: List[str], json_repos: List[str]
+    ) -> List[str]:
+        """
+        Return fm_lines with participating_repos replaced by json_repos.
+
+        If the key is absent, it is appended at the end.
+        Old indented list items belonging to participating_repos are dropped.
+        """
+        new_repos_lines: List[str]
+        if json_repos:
+            new_repos_lines = ["participating_repos:"] + [
+                f"  - {r}" for r in json_repos
+            ]
+        else:
+            new_repos_lines = ["participating_repos: []"]
+
+        result: List[str] = []
+        key_found = False
+        skip_indented = False
+        for line in fm_lines:
+            if line.startswith("participating_repos:"):
+                result.extend(new_repos_lines)
+                key_found = True
+                skip_indented = True
+                continue
+            if skip_indented and (line.startswith("  ") or line.startswith("\t")):
+                continue
+            skip_indented = False
+            result.append(line)
+
+        if not key_found:
+            result.extend(new_repos_lines)
+        return result
 
     def _extract_description_from_md(self, md_file: Path) -> str:
         """
@@ -460,6 +591,11 @@ class DepMapRepairExecutor:
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers
     # ─────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_safe_domain_name(name: str) -> bool:
+        """Return True if name is a non-empty string with no path-traversal chars."""
+        return bool(name) and "/" not in name and "\\" not in name and ".." not in name
 
     def _load_domains_json(self, output_dir: Path) -> List[Dict[str, Any]]:
         """Load _domains.json, returning empty list if missing or invalid."""

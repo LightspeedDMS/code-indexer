@@ -1316,71 +1316,6 @@ function saveLlmCredsConfig() {
 
 <!-- Provider API Keys Section (Story #20) -->
 
-<!-- Job Queue Settings Section -->
-<details class="config-section" id="section-job_queue">
-    <summary>
-        <h2>Repository Sync Queue</h2>
-    </summary>
-    <p class="section-description">
-        Controls the <strong>SyncJob queue</strong> for repository synchronization operations. <strong>Affected operations:</strong> git clone, git pull, repository sync, and repository refresh jobs. System-wide limits prevent server overload, while per-user limits ensure fair resource allocation. Average job duration is used to estimate queue wait times displayed to users when jobs are queued behind others.
-    </p>
-    <article>
-        <!-- Display Mode -->
-        <div id="display-job_queue">
-            <table class="config-table">
-                <tbody>
-                    <tr>
-                        <td class="config-label">Max Concurrent Jobs (System-wide)</td>
-                        <td class="config-value">{{ config.job_queue.max_total_concurrent_jobs }}</td>
-                        <td class="config-note"><small>Maximum jobs running simultaneously across all users</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Max Concurrent Jobs (Per User)</td>
-                        <td class="config-value">{{ config.job_queue.max_concurrent_jobs_per_user }}</td>
-                        <td class="config-note"><small>Maximum jobs a single user can run at once</small></td>
-                    </tr>
-                    <tr>
-                        <td class="config-label">Average Job Duration (minutes)</td>
-                        <td class="config-value">{{ config.job_queue.average_job_duration_minutes }}</td>
-                        <td class="config-note"><small>Used for estimating wait times in queue</small></td>
-                    </tr>
-                </tbody>
-            </table>
-            <div class="section-actions">
-                <button class="outline small" onclick="toggleEditMode('job_queue')">Edit</button>
-            </div>
-        </div>
-        <!-- Edit Mode -->
-        <form id="edit-form-job_queue" method="post" action="/admin/config/job_queue" style="display: none;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            {% if validation_errors.job_queue %}
-            <div class="validation-error">{{ validation_errors.job_queue }}</div>
-            {% endif %}
-            <div class="form-grid">
-                <label for="job-queue-max-total">
-                    Max Concurrent Jobs (System-wide)
-                    <input type="number" id="job-queue-max-total" name="max_total_concurrent_jobs" value="{{ config.job_queue.max_total_concurrent_jobs }}" min="1" max="50">
-                    <small>1-50 jobs</small>
-                </label>
-                <label for="job-queue-max-per-user">
-                    Max Concurrent Jobs (Per User)
-                    <input type="number" id="job-queue-max-per-user" name="max_concurrent_jobs_per_user" value="{{ config.job_queue.max_concurrent_jobs_per_user }}" min="1" max="10">
-                    <small>1-10 jobs per user</small>
-                </label>
-                <label for="job-queue-avg-duration">
-                    Average Job Duration (minutes)
-                    <input type="number" id="job-queue-avg-duration" name="average_job_duration_minutes" value="{{ config.job_queue.average_job_duration_minutes }}" min="1" max="120">
-                    <small>Used for queue wait time estimates</small>
-                </label>
-            </div>
-            <div class="form-actions">
-                <button type="submit" class="primary">Save</button>
-                <button type="button" class="secondary" onclick="cancelEdit('job_queue')">Cancel</button>
-            </div>
-        </form>
-    </article>
-</details>
-
 
 </div>
 
@@ -1552,6 +1487,54 @@ function saveLlmCredsConfig() {
                     </tr>
                 </tbody>
             </table>
+            <!-- Advanced Timeouts (collapsed by default) -->
+            <details>
+                <summary><small>Advanced Timeouts</small></summary>
+                <table class="config-table">
+                    <tbody>
+                        <tr>
+                            <td class="config-label">Git Init Conflict Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.git_init_conflict_timeout }}</td>
+                            <td class="config-note"><small>Timeout for init conflict resolution</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">Git Service Conflict Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.git_service_conflict_timeout }}</td>
+                            <td class="config-note"><small>Timeout for service conflict resolution</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">Git Service Cleanup Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.git_service_cleanup_timeout }}</td>
+                            <td class="config-note"><small>Timeout for service cleanup</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">Git Service Wait Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.git_service_wait_timeout }}</td>
+                            <td class="config-note"><small>Timeout for service cleanup wait</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">Git Process Check Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.git_process_check_timeout }}</td>
+                            <td class="config-note"><small>Timeout for process check</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">Git Untracked File Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.git_untracked_file_timeout }}</td>
+                            <td class="config-note"><small>Timeout for untracked file check</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">CoW Clone Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.cow_clone_timeout }}</td>
+                            <td class="config-note"><small>Timeout for CoW clone of large repos</small></td>
+                        </tr>
+                        <tr>
+                            <td class="config-label">CIDX Fix Config Timeout (sec)</td>
+                            <td class="config-value">{{ config.timeouts.cidx_fix_config_timeout }}</td>
+                            <td class="config-note"><small>Timeout for cidx fix-config command</small></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </details>
             <div class="section-actions">
                 <button class="outline small" onclick="toggleEditMode('timeouts')">Edit</button>
             </div>
@@ -1580,6 +1563,52 @@ function saveLlmCredsConfig() {
                     <input type="number" id="hnsw-max-elements" name="hnsw_max_elements" value="{{ config.timeouts.hnsw_max_elements }}" min="10000" step="100000">
                 </label>
             </div>
+            <!-- Advanced Timeouts (collapsed by default) -->
+            <details>
+                <summary><small>Advanced Timeouts</small></summary>
+                <div class="form-grid">
+                    <label for="timeout-git-init-conflict">
+                        Git Init Conflict Timeout (sec)
+                        <input type="number" id="timeout-git-init-conflict" name="git_init_conflict_timeout" value="{{ config.timeouts.git_init_conflict_timeout }}" min="0">
+                        <small>Timeout for init conflict resolution</small>
+                    </label>
+                    <label for="timeout-git-service-conflict">
+                        Git Service Conflict Timeout (sec)
+                        <input type="number" id="timeout-git-service-conflict" name="git_service_conflict_timeout" value="{{ config.timeouts.git_service_conflict_timeout }}" min="0">
+                        <small>Timeout for service conflict resolution</small>
+                    </label>
+                    <label for="timeout-git-service-cleanup">
+                        Git Service Cleanup Timeout (sec)
+                        <input type="number" id="timeout-git-service-cleanup" name="git_service_cleanup_timeout" value="{{ config.timeouts.git_service_cleanup_timeout }}" min="0">
+                        <small>Timeout for service cleanup</small>
+                    </label>
+                    <label for="timeout-git-service-wait">
+                        Git Service Wait Timeout (sec)
+                        <input type="number" id="timeout-git-service-wait" name="git_service_wait_timeout" value="{{ config.timeouts.git_service_wait_timeout }}" min="0">
+                        <small>Timeout for service cleanup wait</small>
+                    </label>
+                    <label for="timeout-git-process-check">
+                        Git Process Check Timeout (sec)
+                        <input type="number" id="timeout-git-process-check" name="git_process_check_timeout" value="{{ config.timeouts.git_process_check_timeout }}" min="0">
+                        <small>Timeout for process check</small>
+                    </label>
+                    <label for="timeout-git-untracked">
+                        Git Untracked File Timeout (sec)
+                        <input type="number" id="timeout-git-untracked" name="git_untracked_file_timeout" value="{{ config.timeouts.git_untracked_file_timeout }}" min="0">
+                        <small>Timeout for untracked file check</small>
+                    </label>
+                    <label for="timeout-cow-clone">
+                        CoW Clone Timeout (sec)
+                        <input type="number" id="timeout-cow-clone" name="cow_clone_timeout" value="{{ config.timeouts.cow_clone_timeout }}" min="0">
+                        <small>Timeout for CoW clone of large repos</small>
+                    </label>
+                    <label for="timeout-cidx-fix-config">
+                        CIDX Fix Config Timeout (sec)
+                        <input type="number" id="timeout-cidx-fix-config" name="cidx_fix_config_timeout" value="{{ config.timeouts.cidx_fix_config_timeout }}" min="0">
+                        <small>Timeout for cidx fix-config command</small>
+                    </label>
+                </div>
+            </details>
             <div class="form-actions">
                 <button type="submit" class="primary">Save</button>
                 <button type="button" class="secondary" onclick="cancelEdit('timeouts')">Cancel</button>

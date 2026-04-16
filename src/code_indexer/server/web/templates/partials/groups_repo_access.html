@@ -1,3 +1,6 @@
+<div style="margin-bottom: 1rem;">
+    <button id="toggle-grouped" class="outline secondary" onclick="toggleGroupedView()">Group by Category</button>
+</div>
 <table class="repo-access-table">
     <thead>
         <tr>
@@ -10,7 +13,10 @@
     <tbody>
         {% if golden_repos %}
         {% for repo in golden_repos %}
-        <tr>
+        <tr data-repo-alias="{{ repo.name }}"
+            data-category-id="{{ repo.category_id or '' }}"
+            data-category-name="{{ repo.category_name or 'Unassigned' }}"
+            data-category-priority="{{ repo.category_priority if repo.category_priority is not none else 999999 }}">
             <td class="repo-name">
                 {{ repo.name }}
                 {% if repo.name == 'cidx-meta' %}
@@ -148,3 +154,4 @@
     padding: 2rem;
 }
 </style>
+<script>applyStoredGroupedView();</script>

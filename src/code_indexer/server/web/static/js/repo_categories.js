@@ -17,6 +17,7 @@
 function _getGroupedStorageKey() {
     if (document.querySelector('.golden-repos-table')) return 'cidx-golden-repos-grouped';
     if (document.querySelector('.repos-table')) return 'cidx-activated-repos-grouped';
+    if (document.querySelector('.repo-access-table')) return 'cidx-groups-repo-access-grouped';
     return 'cidx-repos-grouped';
 }
 
@@ -24,7 +25,7 @@ function _getGroupedStorageKey() {
  * Toggle between flat and grouped view
  */
 function toggleGroupedView() {
-    const table = document.querySelector('.golden-repos-table') || document.querySelector('.repos-table') || document.querySelector('table');
+    const table = document.querySelector('.golden-repos-table') || document.querySelector('.repos-table') || document.querySelector('.repo-access-table') || document.querySelector('table');
     if (!table) return;
 
     const btn = document.getElementById('toggle-grouped');
@@ -262,7 +263,7 @@ function escapeHtml(text) {
 function applyStoredGroupedView() {
     const key = _getGroupedStorageKey();
     if (localStorage.getItem(key) === '1') {
-        const table = document.querySelector('.golden-repos-table') || document.querySelector('.repos-table') || document.querySelector('table');
+        const table = document.querySelector('.golden-repos-table') || document.querySelector('.repos-table') || document.querySelector('.repo-access-table') || document.querySelector('table');
         const btn = document.getElementById('toggle-grouped');
         if (table && btn) {
             table.classList.add('grouped-view');

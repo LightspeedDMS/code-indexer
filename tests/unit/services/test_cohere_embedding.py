@@ -1113,3 +1113,95 @@ class TestConnectReadTimeoutSplit:
         assert timeout_arg.connect != timeout_arg.read, (
             f"connect={timeout_arg.connect} must differ from read={timeout_arg.read}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Latency transport wiring tests
+# ---------------------------------------------------------------------------
+
+
+class _RecordingTracker:
+    """Minimal tracker stub that records samples without I/O."""
+
+    def __init__(self) -> None:
+        self.samples: list = []
+
+    def record_sample(self, dep: str, latency_ms: float, code: int) -> None:
+        self.samples.append(
+            {"dependency_name": dep, "latency_ms": latency_ms, "status_code": code}
+        )
+
+
+def _reset_latency_singleton() -> None:
+    from code_indexer.server.services.dependency_latency_tracker import set_instance
+
+    set_instance(None)
+
+
+_VOYAGE_EMBED_URL = "https://api.voyageai.com/v1/embeddings"
+_COHERE_EMBED_URL = "https://api.cohere.com/v2/embed"
+
+_VOYAGE_EMBED_RESPONSE = {
+    "data": [{"embedding": [0.1] * 1024, "index": 0}],
+    "model": "voyage-code-3",
+    "usage": {"total_tokens": 1},
+}
+_COHERE_EMBED_RESPONSE = {
+    "id": "test",
+    "embeddings": {"float": [[0.1] * 1024]},
+    "texts": ["hello"],
+    "meta": {"api_version": {"version": "2"}},
+}
+
+
+@pytest.mark.parametrize(
+    "client_fixture,url,expected_dep",
+    [
+        ("voyage_client", _VOYAGE_EMBED_URL, "voyageai_embed"),
+        ("cohere_provider", _COHERE_EMBED_URL, "cohere_embed"),
+    ],
+)
+class TestEmbeddingClientLatencyWiring:
+    """Verify embedding clients record latency samples via transport wiring."""
+
+    def setup_method(self) -> None:
+        _reset_latency_singleton()
+
+    def teardown_method(self) -> None:
+        _reset_latency_singleton()
+
+    def test_make_sync_request_records_sample_when_tracker_set(
+        self, httpx_mock, request, client_fixture, url, expected_dep
+    ) -> None:
+        """When tracker is registered, _make_sync_request records sample with correct dep name."""
+        from code_indexer.server.services.dependency_latency_tracker import set_instance
+
+        client = request.getfixturevalue(client_fixture)
+        tracker = _RecordingTracker()
+        set_instance(tracker)
+
+        if "voyage" in url:
+            httpx_mock.add_response(method="POST", url=url, json=_VOYAGE_EMBED_RESPONSE)
+            client._make_sync_request(["hello"])
+        else:
+            httpx_mock.add_response(method="POST", url=url, json=_COHERE_EMBED_RESPONSE)
+            client._make_sync_request(["hello"])
+
+        assert len(tracker.samples) == 1
+        assert tracker.samples[0]["dependency_name"] == expected_dep
+        assert tracker.samples[0]["latency_ms"] >= 0.0
+
+    def test_make_sync_request_completes_without_tracker(
+        self, httpx_mock, request, client_fixture, url, expected_dep
+    ) -> None:
+        """When no tracker is set, _make_sync_request completes without error."""
+        client = request.getfixturevalue(client_fixture)
+
+        if "voyage" in url:
+            httpx_mock.add_response(method="POST", url=url, json=_VOYAGE_EMBED_RESPONSE)
+            result = client._make_sync_request(["hello"])
+            assert "data" in result
+        else:
+            httpx_mock.add_response(method="POST", url=url, json=_COHERE_EMBED_RESPONSE)
+            result = client._make_sync_request(["hello"])
+            assert "embeddings" in result

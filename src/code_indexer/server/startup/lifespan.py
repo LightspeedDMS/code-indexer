@@ -26,6 +26,7 @@ def make_lifespan(
     register_langfuse_golden_repos: Callable,
     storage_mode: str = "sqlite",
     backend_registry: Any = None,
+    latency_tracker: Any = None,  # Any: matches existing pattern; avoids circular import from services
 ):
     """
     Factory that returns a lifespan context manager bound to the given service instances.
@@ -53,6 +54,9 @@ def make_lifespan(
         # Story #505/#506: Store storage_mode in app.state early so web routes
         # and MCP handlers can access it without re-reading config.
         app.state.storage_mode = storage_mode
+
+        # Story #680: Store latency_tracker in app.state for dashboard route access.
+        app.state.latency_tracker = latency_tracker
 
         # Startup: Initialize SQLite log handler FIRST (to capture all startup logs)
         logger.info(
@@ -2014,6 +2018,24 @@ def make_lifespan(
                     format_error_log(
                         "APP-GENERAL-025",
                         f"Error stopping PayloadCache: {e}",
+                        exc_info=True,
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+
+        # Shutdown: Stop DependencyLatencyTracker background flush (Story #680)
+        if latency_tracker is not None:
+            try:
+                latency_tracker.shutdown()
+                logger.info(
+                    "DependencyLatencyTracker stopped successfully",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            except Exception as e:  # broad catch intentional: shutdown must not abort remaining cleanup chain
+                logger.error(
+                    format_error_log(
+                        "APP-GENERAL-027",
+                        f"Error stopping DependencyLatencyTracker: {e}",
                         exc_info=True,
                         extra={"correlation_id": get_correlation_id()},
                     )

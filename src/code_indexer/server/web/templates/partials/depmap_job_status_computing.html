@@ -1,0 +1,14 @@
+<!-- Story #684: Dependency Map dashboard background-job progress partial -->
+<div id="depmap-job-status"
+     hx-get="/admin/partials/depmap-job-status?job_id={{ job_id }}"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML">
+    <div style="margin: 1rem 0;">
+        <div style="background: var(--pico-muted-border-color); border-radius: 4px; height: 24px; overflow: hidden;">
+            <div style="background: var(--pico-primary); height: 100%; width: {{ progress }}%; transition: width 0.3s ease;"></div>
+        </div>
+        <p style="margin-top: 0.5rem; color: var(--pico-muted-color);">
+            Processing {{ progress_info }}...
+        </p>
+    </div>
+</div>
