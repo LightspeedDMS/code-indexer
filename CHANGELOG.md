@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.15.4
+
+### Fixes
+
+- fix: Bug #699 -- `add_golden_repo` and web batch-create silently hardcoded `default_branch="main"` when caller omitted `branch`, passing `--branch main` to `git clone`. Any upstream repo with a non-`main` default branch (e.g., `master`) failed with exit code 128. Fix: all call sites now pass `None` when caller omits branch, and `_clone_remote_repository()` omits `--branch` from the clone command when branch is `None`, letting git resolve the remote's HEAD naturally. Affected sites fixed: MCP `add_golden_repo` handler, web `_batch_create_repos` helper, web single-repo add endpoint, `AddGoldenRepoRequest` model default, and `GoldenRepoManager._clone_remote_repository()`. 7 new tests (2 fast command-construction tests + 5 slow local-bare-repo integration tests).
+
 ## v9.15.3
 
 ### Fixes

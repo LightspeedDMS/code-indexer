@@ -252,7 +252,7 @@ class GoldenRepoManager:
         self,
         repo_url: str,
         alias: str,
-        default_branch: str = "main",
+        default_branch: Optional[str] = None,
         description: Optional[str] = None,
         enable_temporal: bool = False,
         temporal_options: Optional[Dict] = None,
@@ -267,7 +267,8 @@ class GoldenRepoManager:
         Args:
             repo_url: Git repository URL
             alias: Unique alias for the repository
-            default_branch: Default branch to clone (default: main)
+            default_branch: Branch to clone. When None (the default), git uses the
+                            remote's HEAD ref so any default branch name works.
             description: Optional description for the repository
             enable_temporal: Enable temporal git history indexing
             temporal_options: Temporal indexing configuration options
@@ -998,7 +999,7 @@ class GoldenRepoManager:
             )
 
     def _clone_remote_repository(
-        self, repo_url: str, clone_path: str, branch: str
+        self, repo_url: str, clone_path: str, branch: Optional[str] = None
     ) -> str:
         """
         Clone a remote git repository using git clone.
@@ -1006,7 +1007,8 @@ class GoldenRepoManager:
         Args:
             repo_url: Remote git repository URL
             clone_path: Destination path
-            branch: Branch to clone
+            branch: Branch to clone. When None, git uses the remote's HEAD ref
+                    (its natural default), so no --branch flag is passed.
 
         Returns:
             Path to cloned repository
@@ -1015,16 +1017,16 @@ class GoldenRepoManager:
             GitOperationError: If cloning fails
         """
         try:
-            # Clone full repository with complete history for semantic search
+            # Clone full repository with complete history for semantic search.
+            # Only pass --branch when explicitly requested; omitting it lets git
+            # resolve the remote HEAD, which works for any default branch name.
+            cmd = ["git", "clone"]
+            if branch is not None:
+                cmd.extend(["--branch", branch])
+            cmd.extend([repo_url, clone_path])
+
             result = subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--branch",
-                    branch,
-                    repo_url,
-                    clone_path,
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_pull_timeout,

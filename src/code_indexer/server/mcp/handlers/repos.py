@@ -862,7 +862,7 @@ def add_golden_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "error": "Missing required parameters: url and alias",
                 }
             )
-        default_branch = params.get("branch", "main")
+        default_branch = params.get("branch") or None
         enable_temporal = params.get("enable_temporal", False)
         temporal_options = params.get("temporal_options")
 
