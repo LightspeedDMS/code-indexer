@@ -1069,7 +1069,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 check=True,
-                timeout=self.resource_config.git_local_timeout,
+                timeout=self.resource_config.git_pull_timeout,
             )
             branch = result.stdout.strip()
             if not branch:
