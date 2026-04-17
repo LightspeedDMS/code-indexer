@@ -437,6 +437,38 @@ development → staging → master
 
 ---
 
+### CRITICAL: NEVER PUSH TO MASTER WITHOUT EXPLICIT AUTHORIZATION
+
+**ABSOLUTE PROHIBITION**: NEVER push to `master` unless the user has **explicitly authorized** pushing to master in the current conversation. This applies even when completing stories, bug fixes, features, or any other work -- regardless of how "ready" the change appears.
+
+**Completing a story or bug fix does NOT imply authorization to push to master.** Finishing the implementation, passing tests, and merging to staging are all independent of production promotion. Production promotion is a **separate, explicit decision** that only the user can make.
+
+**What counts as explicit authorization**:
+- User says "push to master" or "promote to production" or "deploy to production"
+- User says "commit and push to master"
+- User says "merge to master and push"
+- Any similarly unambiguous instruction in the **current conversation**
+
+**What does NOT count as authorization**:
+- "Complete story #123" -- complete it, stop at development/staging
+- "Fix bug #456" -- fix it, stop at development/staging
+- "Deploy to staging" -- only authorizes staging, NOT master
+- Prior authorization in a previous conversation -- authorization does NOT carry over
+- Assumed authorization because "the work is done" -- NEVER assume
+
+**Default behavior when completing work**:
+1. Commit and push to `development` (with version bump and tag)
+2. Merge and push to `staging` (triggers staging auto-deploy)
+3. **STOP** -- report completion and wait for explicit user instruction before touching `master`
+
+**When in doubt**: ASK the user. The cost of asking is negligible. The cost of an unauthorized production deploy is significant.
+
+**VIOLATION = HIGHEST SEVERITY FAILURE**: Pushing to master without explicit authorization deploys potentially untested code to production and violates the user's deployment authority. This is on par with unauthorized destructive git operations.
+
+*Recorded 2026-04-17*
+
+---
+
 ## 1. CRITICAL BUSINESS INSIGHT - Query is Everything
 
 **NEVER** remove/break query functionality. Query degradation = product failure. See memory: `project_query_is_everything.md`.
@@ -881,7 +913,7 @@ curl -s -X POST http://localhost:8000/mcp \
 
 | Mode | Backend | Use |
 |------|---------|-----|
-| Solo / standalone | SQLite (`~/.cidx-server/data/cidx_server.db`) | Default dev/staging |
+| Solo / standalone | SQLite (`~/.cidx-server/logs.db`) | Default dev/staging |
 | Cluster | PostgreSQL (DSN from `config.json` `postgres_dsn`) | Multi-node testing |
 
 **Procedure**:
@@ -893,8 +925,8 @@ curl -s -X POST http://localhost:8000/mcp \
 **Solo/standalone (SQLite)**:
 
 ```bash
-sqlite3 ~/.cidx-server/data/cidx_server.db \
-  "SELECT timestamp, level, logger, message FROM server_logs \
+sqlite3 ~/.cidx-server/logs.db \
+  "SELECT timestamp, level, source, message FROM logs \
    WHERE level IN ('ERROR','WARNING') \
    ORDER BY timestamp DESC LIMIT 100;"
 ```
@@ -903,7 +935,7 @@ sqlite3 ~/.cidx-server/data/cidx_server.db \
 
 ```bash
 psql "$POSTGRES_DSN" -c \
-  "SELECT timestamp, level, logger, message FROM server_logs \
+  "SELECT timestamp, level, source, message FROM logs \
    WHERE level IN ('ERROR','WARNING') \
    ORDER BY timestamp DESC LIMIT 100;"
 ```

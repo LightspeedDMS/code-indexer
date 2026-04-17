@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.5
+
+### Bug Fixes
+
+- fix: Bug #732 -- CLAUDE.md Section 11 post-E2E log audit referenced wrong database file (`~/.cidx-server/data/cidx_server.db`) and wrong identifiers (`server_logs` table, `logger` column). The actual logs are written to `~/.cidx-server/logs.db` in a table named `logs` with a column named `source`. Both SQLiteLogHandler and LogsSqliteBackend correctly create the `logs` table in `logs.db` at startup; the bug was documentation-only. Corrected the post-E2E audit query in CLAUDE.md Section 11 to use the right file, table, and column names. Regression tests in `tests/unit/server/services/test_sqlite_log_table_creation.py` (17 tests) confirm correct table creation and query patterns.
+
 ## v9.17.4
 
 ### Bug Fixes
