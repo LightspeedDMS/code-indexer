@@ -191,9 +191,6 @@ class HNSWIndexManager:
                 f"got {len(query_vector)}"
             )
 
-        # Set ef parameter for query-time accuracy
-        index.set_ef(ef)
-
         # Load ID mapping from metadata (reflects actual non-deleted vectors)
         id_mapping = self._load_id_mapping(collection_path)
 
@@ -210,6 +207,15 @@ class HNSWIndexManager:
         # Ensure k_actual is at least 1 if there are any vectors
         if k_actual == 0 and queryable_count > 0:
             k_actual = 1
+
+        # Bug #743: hnswlib requires ef >= k. Auto-adjust ef upward when needed.
+        # Without this, small-corpus repos with ef < k_actual raise:
+        #   RuntimeError: Cannot return the results in a contiguous 2D array.
+        #   Probably ef or M is too small
+        ef_actual = max(ef, k_actual)
+
+        # Set ef parameter for query-time accuracy (must be set after k_actual is known)
+        index.set_ef(ef_actual)
 
         # Query index (returns labels and distances)
         labels, distances = index.knn_query(query_vector, k=k_actual)

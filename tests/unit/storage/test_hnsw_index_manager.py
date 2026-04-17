@@ -575,3 +575,126 @@ class TestHNSWIndexManagerGracefulDegradation:
         # In practice, __init__ would fail first, but we test the pattern
         with pytest.raises(ImportError):
             HNSWIndexManager()
+
+
+class TestHNSWQuerySoftDeletesRobustness:
+    """Regression tests for Bug #743: HNSW 'ef or M is too small' errors.
+
+    hnswlib raises RuntimeError("Cannot return the results in a contiguous 2D array.
+    Probably ef or M is too small") in two scenarios:
+    1. k > number of live (non-deleted) elements in the index: soft-deleted vectors
+       inflate get_current_count() so the k-clamping guard allows k > actual returnable.
+    2. ef < k_actual: hnswlib requires ef >= k at query time.
+    3. Small corpus with k > corpus size: even without soft deletes, tiny repos on
+       staging had k requests far exceeding their vector count.
+    """
+
+    def test_query_with_mostly_soft_deleted_vectors_does_not_crash(
+        self, tmp_path: Path
+    ):
+        """Bug #743: query must not raise RuntimeError when soft deletes leave
+        fewer live vectors than requested k.
+
+        Scenario: index has 10 vectors total, 8 are soft-deleted, only 2 are live.
+        Caller requests k=5. Without the fix, hnswlib raises:
+          RuntimeError: Cannot return the results in a contiguous 2D array.
+          Probably ef or M is too small
+        """
+        manager = HNSWIndexManager(vector_dim=64)
+
+        # Build index with 10 vectors
+        num_vectors = 10
+        vectors = np.random.randn(num_vectors, 64).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(num_vectors)]
+        manager.build_index(tmp_path, vectors, ids)
+
+        # Load the index for incremental operations
+        index, id_to_label, label_to_id, next_label = (
+            manager.load_for_incremental_update(tmp_path)
+        )
+
+        # Soft-delete 8 out of 10 vectors, leaving only 2 live
+        ids_to_delete = [f"vec_{i}" for i in range(8)]
+        for point_id in ids_to_delete:
+            manager.remove_vector(index, point_id, id_to_label, label_to_id)
+
+        # Save incremental update (only 2 live vectors remain in id_to_label)
+        manager.save_incremental_update(
+            index, tmp_path, id_to_label, label_to_id, vector_count=num_vectors
+        )
+
+        # get_current_count() still returns 10 (includes soft-deleted)
+        assert index.get_current_count() == num_vectors
+
+        # Query requesting k=5, but only 2 live vectors exist
+        # This previously raised RuntimeError in hnswlib
+        query_vec = np.random.randn(64).astype(np.float32)
+        result_ids, distances = manager.query(index, query_vec, tmp_path, k=5)
+
+        # Must return partial results (up to 2) without crashing
+        assert len(result_ids) >= 1
+        assert len(result_ids) <= 2
+        assert len(distances) == len(result_ids)
+        assert all(isinstance(d, float) for d in distances)
+
+    def test_query_ef_auto_adjusted_when_smaller_than_k(self, tmp_path: Path):
+        """Bug #743: ef must be >= k_actual to satisfy hnswlib invariant.
+
+        When the caller passes ef=10 but k_actual=20, hnswlib raises:
+          RuntimeError: Cannot return the results in a contiguous 2D array.
+          Probably ef or M is too small
+        The query() method must auto-adjust ef = max(ef, k_actual) before
+        calling index.knn_query().
+
+        Note: hnswlib.Index is a C extension whose methods are read-only
+        attributes on instances — mock_patch.object cannot spy on them.
+        We verify the invariant through observable behavior instead: the
+        call must succeed without exception and return the correct number
+        of results, which is only possible if ef was adjusted upward.
+        """
+        manager = HNSWIndexManager(vector_dim=64)
+
+        # Build index with 30 vectors so k=20 is valid
+        num_vectors = 30
+        vectors = np.random.randn(num_vectors, 64).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(num_vectors)]
+        manager.build_index(tmp_path, vectors, ids)
+
+        index = manager.load_index(tmp_path, max_elements=100)
+        query_vec = np.random.randn(64).astype(np.float32)
+
+        # ef=10 is smaller than k=20.
+        # Without auto-adjustment hnswlib raises RuntimeError.
+        # The call succeeding at all proves ef was adjusted to >= k_actual.
+        result_ids, distances = manager.query(index, query_vec, tmp_path, k=20, ef=10)
+
+        # Results must be valid and complete
+        assert len(result_ids) == 20
+        assert len(distances) == 20
+        assert all(isinstance(d, float) for d in distances)
+
+    def test_query_small_corpus_k_larger_than_corpus(self, tmp_path: Path):
+        """Bug #743: small corpus (3 vectors) with k=20 must not crash.
+
+        Verified to reproduce the hnswlib error when k > index.get_current_count():
+          RuntimeError: Cannot return the results in a contiguous 2D array.
+          Probably ef or M is too small
+        Typical of tiny staging repos (simple-cache, k8s-wildfly-sandboxes-prod).
+        """
+        manager = HNSWIndexManager(vector_dim=64)
+
+        # Only 3 vectors — typical of tiny repos on staging
+        num_vectors = 3
+        vectors = np.random.randn(num_vectors, 64).astype(np.float32)
+        ids = [f"vec_{i}" for i in range(num_vectors)]
+        manager.build_index(tmp_path, vectors, ids)
+
+        index = manager.load_index(tmp_path, max_elements=100)
+        query_vec = np.random.randn(64).astype(np.float32)
+
+        # k=20 >> num_vectors=3; without the fix this crashes hnswlib
+        result_ids, distances = manager.query(index, query_vec, tmp_path, k=20)
+
+        # Must return up to 3 results without error
+        assert len(result_ids) == num_vectors
+        assert len(distances) == num_vectors
