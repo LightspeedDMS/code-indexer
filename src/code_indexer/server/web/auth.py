@@ -37,6 +37,7 @@ class SessionData:
     role: str
     csrf_token: str
     created_at: float
+    session_timeout: int = SESSION_TIMEOUT_SECONDS
 
 
 class SessionManager:
@@ -154,6 +155,7 @@ class SessionManager:
                 role=data["role"],
                 csrf_token=data["csrf_token"],
                 created_at=data["created_at"],
+                session_timeout=int(max_age),
             )
 
         except SignatureExpired:
@@ -165,6 +167,67 @@ class SessionManager:
         except (KeyError, TypeError):
             # Invalid session data structure
             return None
+
+    def _should_refresh_session(self, session: SessionData) -> bool:
+        """
+        Return True when the session has consumed more than 50% of its lifetime.
+
+        Mirrors the JWT sliding-window pattern so active users are never logged
+        out due to session expiry while they are still working.
+
+        Args:
+            session: Validated SessionData containing created_at and session_timeout
+
+        Returns:
+            True if elapsed time > 50% of session_timeout, False otherwise
+        """
+        elapsed = time.time() - session.created_at
+        return elapsed >= session.session_timeout * 0.5
+
+    def get_and_refresh_session(
+        self, request: Request, response: Response
+    ) -> Optional[SessionData]:
+        """
+        Get and validate session from request cookies, re-issuing the cookie
+        when the session has consumed more than 50% of its lifetime.
+
+        This implements a sliding-window expiry: active users keep their session
+        alive as long as they keep making requests, while inactive users are
+        logged out after session_timeout seconds.
+
+        CSRF token, samesite, secure, and httponly flags are all preserved on
+        the refreshed cookie.
+
+        Args:
+            request: FastAPI Request object
+            response: FastAPI Response object (used to set refreshed cookie)
+
+        Returns:
+            SessionData if valid session exists, None otherwise
+        """
+        session = self.get_session(request)
+        if session is None:
+            return None
+
+        if self._should_refresh_session(session):
+            session_data = {
+                "username": session.username,
+                "role": session.role,
+                "csrf_token": session.csrf_token,
+                "created_at": time.time(),
+                "session_timeout": session.session_timeout,
+            }
+            signed_value = self._serializer.dumps(session_data, salt=self._salt)
+            response.set_cookie(
+                key=SESSION_COOKIE_NAME,
+                value=signed_value,
+                httponly=True,
+                secure=should_use_secure_cookies(self._config),
+                samesite="lax",
+                max_age=session.session_timeout,
+            )
+
+        return session
 
     def is_session_expired(self, request: Request) -> bool:
         """

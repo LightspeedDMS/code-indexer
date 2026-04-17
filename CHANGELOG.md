@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.6
+
+### Bug Fixes
+
+- fix: Bug #726 -- Admin Web UI sessions expired after the hard 1-hour limit regardless of user activity because `SessionManager.get_session()` never re-issued the cookie. Added `_should_refresh_session()` helper (fires when elapsed time >= 50% of session lifetime) and `get_and_refresh_session()` method that re-signs and sets a new cookie with a reset `created_at`, preserving CSRF token, httponly, secure, and samesite flags. Also added `session_timeout` field to `SessionData` so the refresh method can re-sign with the original role-specific timeout. Seven regression tests in `tests/unit/server/web/test_session_refresh_bug726.py` verify: refresh fires past 50% threshold, no refresh before threshold, expired sessions return None, CSRF token preserved, security flags correct for localhost and production, and continuous activity keeps admin alive past the hard timeout.
+
 ## v9.17.5
 
 ### Bug Fixes
