@@ -169,6 +169,7 @@ class TestApplyRerankingSync:
 
             monitor_inst = MockMonitor.get_instance.return_value
             monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
 
             returned, _ = self._fn(
                 results=results,
@@ -217,6 +218,7 @@ class TestApplyRerankingSync:
 
             monitor_inst = MockMonitor.get_instance.return_value
             monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
 
             returned, _ = self._fn(
                 results=results,
@@ -256,6 +258,7 @@ class TestApplyRerankingSync:
 
             monitor_inst = MockMonitor.get_instance.return_value
             monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
 
             with caplog.at_level(
                 logging.WARNING, logger="code_indexer.server.mcp.reranking"
@@ -309,6 +312,7 @@ class TestApplyRerankingSync:
                 if provider == "voyage-reranker"
                 else {}
             )
+            monitor_inst.is_sinbinned.return_value = False
 
             MockCohere.return_value.rerank.return_value = cohere_results
 
@@ -433,7 +437,9 @@ class TestApplyRerankingSyncTelemetry:
             ) as MockMonitor,
         ):
             MockVoyage.return_value.rerank.return_value = voyage_results
-            MockMonitor.get_instance.return_value.get_health.return_value = {}
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
 
             _, meta = self._fn(
                 results=results,
@@ -470,7 +476,9 @@ class TestApplyRerankingSyncTelemetry:
         ):
             MockVoyage.return_value.rerank.side_effect = RuntimeError("voyage error")
             MockCohere.return_value.rerank.return_value = cohere_results
-            MockMonitor.get_instance.return_value.get_health.return_value = {}
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
 
             _, meta = self._fn(
                 results=results,
@@ -506,7 +514,9 @@ class TestApplyRerankingSyncTelemetry:
         ):
             MockVoyage.return_value.rerank.side_effect = RuntimeError("voyage down")
             MockCohere.return_value.rerank.side_effect = RuntimeError("cohere down")
-            MockMonitor.get_instance.return_value.get_health.return_value = {}
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
 
             _, meta = self._fn(
                 results=results,
@@ -676,6 +686,185 @@ class TestApplyRerankingSyncTelemetry:
 # ---------------------------------------------------------------------------
 # Tests: calculate_overfetch_limit
 # ---------------------------------------------------------------------------
+
+
+class TestBug744SinbinnedProviderSkipped:
+    """Regression tests for Bug #744: _attempt_provider_rerank must check is_sinbinned().
+
+    A sin-binned provider should be short-circuited with (None, "skipped")
+    before any client is instantiated, just like a "down" provider.
+    """
+
+    def setup_method(self):
+        from code_indexer.server.mcp.reranking import _attempt_provider_rerank
+
+        self._fn = _attempt_provider_rerank
+
+    def test_sinbinned_voyage_returns_skipped_without_client(self):
+        """Bug #744: sin-binned Voyage provider must return (None, 'skipped') without client."""
+        with (
+            patch(
+                "code_indexer.server.mcp.reranking.VoyageRerankerClient"
+            ) as MockVoyage,
+            patch(
+                "code_indexer.server.mcp.reranking.ProviderHealthMonitor"
+            ) as MockMonitor,
+        ):
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}  # not "down"
+            monitor_inst.is_sinbinned.return_value = True  # but IS sinbinned
+
+            indices, reason = self._fn(
+                provider_name="Voyage",
+                health_key="voyage-reranker",
+                client_cls=MockVoyage,
+                query="test",
+                documents=["doc1"],
+                instruction=None,
+                top_k=1,
+                monitor=monitor_inst,
+            )
+
+        assert indices is None
+        assert reason == "skipped"
+        MockVoyage.assert_not_called()
+
+    def test_sinbinned_cohere_returns_skipped_without_client(self):
+        """Bug #744: sin-binned Cohere provider must return (None, 'skipped') without client."""
+        with (
+            patch(
+                "code_indexer.server.mcp.reranking.CohereRerankerClient"
+            ) as MockCohere,
+            patch(
+                "code_indexer.server.mcp.reranking.ProviderHealthMonitor"
+            ) as MockMonitor,
+        ):
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = True
+
+            indices, reason = self._fn(
+                provider_name="Cohere",
+                health_key="cohere-reranker",
+                client_cls=MockCohere,
+                query="test",
+                documents=["doc1"],
+                instruction=None,
+                top_k=1,
+                monitor=monitor_inst,
+            )
+
+        assert indices is None
+        assert reason == "skipped"
+        MockCohere.assert_not_called()
+
+    def test_not_sinbinned_proceeds_to_client(self):
+        """Bug #744: non-sinbinned provider must still call the client."""
+        rerank_result = MagicMock()
+        rerank_result.index = 0
+
+        with (
+            patch(
+                "code_indexer.server.mcp.reranking.VoyageRerankerClient"
+            ) as MockVoyage,
+            patch(
+                "code_indexer.server.mcp.reranking.ProviderHealthMonitor"
+            ) as MockMonitor,
+        ):
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
+            MockVoyage.return_value.rerank.return_value = [rerank_result]
+
+            indices, reason = self._fn(
+                provider_name="Voyage",
+                health_key="voyage-reranker",
+                client_cls=MockVoyage,
+                query="test",
+                documents=["doc1"],
+                instruction=None,
+                top_k=1,
+                monitor=monitor_inst,
+            )
+
+        assert indices == [0]
+        assert reason is None
+
+
+class TestBug739SinbinnedExceptionAsSkipped:
+    """Regression tests for Bug #739: RerankerSinbinnedException must be caught
+    by _attempt_provider_rerank and returned as (None, 'skipped'), not (None, 'failed').
+    """
+
+    def setup_method(self):
+        from code_indexer.server.mcp.reranking import _attempt_provider_rerank
+
+        self._fn = _attempt_provider_rerank
+
+    def _run_attempt(self, client_patch_target, provider_name, health_key, side_effect):
+        """Run _attempt_provider_rerank with a mocked monitor and client side-effect."""
+        with (
+            patch(client_patch_target) as MockClient,
+            patch(
+                "code_indexer.server.mcp.reranking.ProviderHealthMonitor"
+            ) as MockMonitor,
+        ):
+            monitor_inst = MockMonitor.get_instance.return_value
+            monitor_inst.get_health.return_value = {}
+            monitor_inst.is_sinbinned.return_value = False
+            MockClient.return_value.rerank.side_effect = side_effect
+
+            return self._fn(
+                provider_name=provider_name,
+                health_key=health_key,
+                client_cls=MockClient,
+                query="test",
+                documents=["doc1"],
+                instruction=None,
+                top_k=1,
+                monitor=monitor_inst,
+            )
+
+    def test_voyage_sinbinned_exception_returns_skipped(self):
+        """Bug #739: Voyage client raising RerankerSinbinnedException must yield 'skipped'."""
+        from code_indexer.server.clients.reranker_clients import (
+            RerankerSinbinnedException,
+        )
+
+        indices, reason = self._run_attempt(
+            "code_indexer.server.mcp.reranking.VoyageRerankerClient",
+            "Voyage",
+            "voyage-reranker",
+            RerankerSinbinnedException("voyage-reranker"),
+        )
+        assert indices is None
+        assert reason == "skipped"
+
+    def test_cohere_sinbinned_exception_returns_skipped(self):
+        """Bug #739: Cohere client raising RerankerSinbinnedException must yield 'skipped'."""
+        from code_indexer.server.clients.reranker_clients import (
+            RerankerSinbinnedException,
+        )
+
+        indices, reason = self._run_attempt(
+            "code_indexer.server.mcp.reranking.CohereRerankerClient",
+            "Cohere",
+            "cohere-reranker",
+            RerankerSinbinnedException("cohere-reranker"),
+        )
+        assert indices is None
+        assert reason == "skipped"
+
+    def test_generic_exception_returns_failed(self):
+        """Bug #739 control: generic exceptions must still yield 'failed'."""
+        indices, reason = self._run_attempt(
+            "code_indexer.server.mcp.reranking.VoyageRerankerClient",
+            "Voyage",
+            "voyage-reranker",
+            RuntimeError("network error"),
+        )
+        assert indices is None
+        assert reason == "failed"
 
 
 class TestCalculateOverfetchLimit:

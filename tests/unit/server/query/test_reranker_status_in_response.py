@@ -71,6 +71,7 @@ def _healthy_monitor():
     """Return a mock ProviderHealthMonitor with no providers in 'down' state."""
     monitor = MagicMock()
     monitor.get_health.return_value = {}
+    monitor.is_sinbinned.return_value = False
     return monitor
 
 
@@ -80,6 +81,7 @@ def _down_monitor(health_key: str = "voyage-reranker"):
     down_status = MagicMock()
     down_status.status = "down"
     monitor.get_health.return_value = {health_key: down_status}
+    monitor.is_sinbinned.return_value = False
     return monitor
 
 

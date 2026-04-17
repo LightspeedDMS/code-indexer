@@ -200,6 +200,21 @@ class VoyageRerankerClient(RerankerClient):
             response.raise_for_status()
             latency_ms = time.monotonic() * 1000 - start_ms
             self._record_health(latency_ms=latency_ms, success=True)
+        except httpx.HTTPStatusError as exc:
+            latency_ms = time.monotonic() * 1000 - start_ms
+            self._record_health(latency_ms=latency_ms, success=False)
+            response_body = "<unavailable>"
+            try:
+                response_body = exc.response.text
+            except Exception as body_exc:
+                logger.debug("Could not read Voyage error response body: %s", body_exc)
+            logger.warning(
+                "Voyage reranker HTTP %s: %s — response: %s",
+                exc.response.status_code,
+                str(exc),
+                response_body,
+            )
+            raise
         except Exception:
             latency_ms = time.monotonic() * 1000 - start_ms
             self._record_health(latency_ms=latency_ms, success=False)
@@ -467,6 +482,21 @@ class CohereRerankerClient(RerankerClient):
             response.raise_for_status()
             latency_ms = time.monotonic() * 1000 - start_ms
             self._record_health(latency_ms=latency_ms, success=True)
+        except httpx.HTTPStatusError as exc:
+            latency_ms = time.monotonic() * 1000 - start_ms
+            self._record_health(latency_ms=latency_ms, success=False)
+            response_body = "<unavailable>"
+            try:
+                response_body = exc.response.text
+            except Exception as body_exc:
+                logger.debug("Could not read Cohere error response body: %s", body_exc)
+            logger.warning(
+                "Cohere reranker HTTP %s: %s — response: %s",
+                exc.response.status_code,
+                str(exc),
+                response_body,
+            )
+            raise
         except Exception:
             latency_ms = time.monotonic() * 1000 - start_ms
             self._record_health(latency_ms=latency_ms, success=False)

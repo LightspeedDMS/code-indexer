@@ -28,6 +28,7 @@ from typing import Any, Callable, List, Optional, Tuple, Type
 
 from code_indexer.server.clients.reranker_clients import (
     CohereRerankerClient,
+    RerankerSinbinnedException,
     VoyageRerankerClient,
 )
 from code_indexer.server.utils.config_manager import RerankConfig
@@ -109,12 +110,17 @@ def _attempt_provider_rerank(
     status = health.get(health_key)
     if status is not None and status.status == "down":
         return None, "skipped"
+    if monitor.is_sinbinned(health_key):
+        return None, "skipped"
     try:
         client = client_cls()
         rerank_results = client.rerank(
             query=query, documents=documents, instruction=instruction, top_k=top_k
         )
         return [r.index for r in rerank_results], None
+    except RerankerSinbinnedException:
+        logger.info("%s reranker sin-binned, skipping", provider_name.capitalize())
+        return None, "skipped"
     except Exception as exc:
         logger.warning("%s reranker failed: %s", provider_name.capitalize(), exc)
         return None, "failed"
