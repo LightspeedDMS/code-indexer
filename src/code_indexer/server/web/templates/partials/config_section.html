@@ -2090,6 +2090,18 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.claude_cli.refinement_domains_per_run }}</td>
                         <td class="config-note"><small>Number of domains to refine per cycle (default: 3)</small></td>
                     </tr>
+                    <!-- Post-Generation Verification Settings (Story #724) -->
+                    <tr><td colspan="3" style="padding-top: 1em;"><strong>Post-Generation Verification</strong></td></tr>
+                    <tr>
+                        <td class="config-label">Post-generation verification pass (fact-check)</td>
+                        <td class="config-value">{{ 'Yes' if config.claude_cli.dep_map_fact_check_enabled else 'No' }}</td>
+                        <td class="config-note"><small>When enabled, verify dependency maps and descriptions against source code after generation. Adds latency. Default: off.</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Verification timeout (seconds, 60-3600)</td>
+                        <td class="config-value">{{ config.claude_cli.fact_check_timeout_seconds }}</td>
+                        <td class="config-note"><small>Per-invocation timeout for the verification Claude CLI call. Retries once after 30s delay; falls back to original on double timeout. Default: 600.</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -2178,6 +2190,20 @@ function saveLlmCredsConfig() {
                     Domains Per Run
                     <input type="number" id="refinement-domains-per-run" name="refinement_domains_per_run" value="{{ config.claude_cli.refinement_domains_per_run }}" min="1" max="50">
                     <small>Number of domains to refine per cycle (default: 3)</small>
+                </label>
+                <!-- Post-Generation Verification Settings (Story #724) -->
+                <label for="dep-map-fact-check-enabled">
+                    Post-generation verification pass (fact-check)
+                    <select id="dep-map-fact-check-enabled" name="dep_map_fact_check_enabled">
+                        <option value="true" {% if config.claude_cli.dep_map_fact_check_enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.claude_cli.dep_map_fact_check_enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>When enabled, verify dependency maps and descriptions against source code after generation. Runs after Pass 2 per-domain, delta merge, description generation, and repair Phase 1. Adds latency. Default: off.</small>
+                </label>
+                <label for="fact-check-timeout">
+                    Verification timeout (seconds, 60-3600)
+                    <input type="number" id="fact-check-timeout" name="fact_check_timeout_seconds" value="{{ config.claude_cli.fact_check_timeout_seconds }}" min="60" max="3600">
+                    <small>Per-invocation timeout for the verification Claude CLI call. Retries once after a 30s delay; falls back to original content on double timeout. Default: 600.</small>
                 </label>
             </div>
             <div class="form-actions">

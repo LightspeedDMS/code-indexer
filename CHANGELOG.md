@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.18.0
+
+### Features
+
+- feat: Story #724 — Post-Generation Verification Pass for Dependency Map and Description Generation. Adds an optional second Claude CLI pass that re-reads generated dependency-map domain markdown and repository descriptions against the actual source code, producing a corrected document with per-claim source evidence citations. Defaults to **off** (`dep_map_fact_check_enabled = false`); enable via Admin Web UI Config Screen → Claude Integration. Controlled timeout via `fact_check_timeout_seconds` (default 600, bounds [60, 3600]).
+  - Evidence filter: CORRECTED and ADDED items without concrete source evidence (file+line_range OR symbol+definition_location) are discarded; any discard triggers conservative fallback to the original document.
+  - `discovery_mode=false` (current pipeline default) unconditionally discards ADDED items.
+  - Safety guards: corrected_document under 50% of original length, REMOVED ratio ≥ 50%, or zero classified claims on a non-empty original all trigger fallback.
+  - Timeout handling: single retry after a fixed 30-second delay with semaphore released during the wait; double-timeout falls back to original.
+  - Shared `threading.Semaphore` caps concurrent Claude subprocess invocations across verification AND existing generation paths using `max_concurrent_claude_cli` from runtime config.
+  - Structured `logger.info` payload on every run: `domain_or_repo`, `counts`, `evidence`, `diff_summary` (bounded unified diff), `duration_ms`, `fallback_reason`. Activity journal summary only when session active AND document actually changed.
+  - Rolling-upgrade safety: `_dict_to_server_config` now uses `dataclasses.fields()` to pop unknown keys before constructing `ClaudeIntegrationConfig`, preventing startup crash when a new-code node writes a future-version `server_config` blob to the DB and an old-code node reads it during cluster rolling restart.
+  - Wired into Pass 2 per-domain, delta merge, description generation (before `atomic_write_description` — no double-lock), and repair Phase 1 (inherits Pass 2 wiring).
+  - Scheduler: refresh collisions from verification-extended cycles now log at INFO (not DEBUG) with a contextual message so operators can detect cycle-overrun.
+  - Verification prompt externalized to `src/code_indexer/global_repos/prompts/fact_check.md` (Messi Rule #11).
+  - 107 new unit tests covering parser, evidence filter, discovery-mode rules, safety guards at 49/50/51% boundaries, timeout + 30s delay, concurrency gate (cap=2 with 3 callers, cold-start compatibility), AC9 log payload shape, AC10 journal gating, rolling-upgrade deserialization, Web UI template fields, and POST validation bounds.
+
 ## v9.17.10
 
 ### Test Hygiene

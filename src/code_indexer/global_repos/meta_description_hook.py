@@ -6,10 +6,12 @@ when golden repos are added/removed, eliminating the need for special-case
 meta directory management code.
 """
 
+import difflib
 import logging
 import os
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -26,6 +28,9 @@ from code_indexer.server.services.claude_cli_manager import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of unified-diff lines emitted in the AC9 structured log (Story #724 B1).
+_AC9_DIFF_MAX_LINES = 200
 
 # README file detection order
 README_NAMES = [
@@ -364,8 +369,77 @@ def on_repo_added(
                 clone_path,
                 mcp_registration_service=mcp_registration_service,
             )
+
+            # --- Story #724 Phase B1: optional post-generation verification pass ---
+            # Load config lazily to avoid circular imports at module level.
+            write_content = md_content
+            verification_result = None
+            try:
+                from code_indexer.server.services.config_service import (
+                    get_config_service,
+                )
+                from code_indexer.global_repos.dependency_map_analyzer import (
+                    DependencyMapAnalyzer,
+                )
+
+                ci_config = get_config_service().get_config().claude_integration_config
+                if ci_config is not None and ci_config.dep_map_fact_check_enabled:
+                    _analyzer = DependencyMapAnalyzer(
+                        golden_repos_root=Path(golden_repos_dir),
+                        cidx_meta_path=cidx_meta_path,
+                        pass_timeout=ci_config.dependency_map_pass_timeout_seconds,
+                    )
+                    _verif_started = time.monotonic()
+                    verification_result = _analyzer.invoke_verification_pass(
+                        document_content=md_content,
+                        repo_list=[{"alias": repo_name, "clone_path": clone_path}],
+                        discovery_mode=False,
+                        claude_integration_config=ci_config,
+                    )
+                    _verif_duration_ms = int(
+                        round((time.monotonic() - _verif_started) * 1000)
+                    )
+                    write_content = verification_result.verified_document
+            except Exception as _verif_exc:
+                logger.warning(
+                    "Verification pass failed for %s (using original content): %s",
+                    repo_name,
+                    _verif_exc,
+                )
+                write_content = md_content
+            # --- End verification pass ---
+
             md_file = cidx_meta_path / f"{repo_name}.md"
-            atomic_write_description(md_file, md_content)
+            atomic_write_description(md_file, write_content)
+
+            # AC9: emit structured log after the single atomic write
+            if verification_result is not None:
+                diff_lines = list(
+                    difflib.unified_diff(
+                        md_content.splitlines(keepends=True),
+                        write_content.splitlines(keepends=True),
+                        fromfile="original",
+                        tofile="verified",
+                    )
+                )
+                truncated = len(diff_lines) > _AC9_DIFF_MAX_LINES
+                diff_summary = "".join(diff_lines[:_AC9_DIFF_MAX_LINES])
+                if truncated:
+                    diff_summary += (
+                        "\n... diff truncated (exceeded _AC9_DIFF_MAX_LINES)\n"
+                    )
+                logger.info(
+                    "verification_pass",
+                    extra={
+                        "domain_or_repo": repo_name,
+                        "counts": verification_result.counts,
+                        "evidence": verification_result.evidence,
+                        "diff_summary": diff_summary,
+                        "duration_ms": _verif_duration_ms,
+                        "fallback_reason": verification_result.fallback_reason,
+                    },
+                )
+
             logger.info(
                 f"Created meta description file: {md_file} "
                 f"(phase2_outcome={phase2_outcome})"

@@ -5396,6 +5396,9 @@ def _get_current_config() -> dict:
             "dependency_map_pass1_max_turns": 50,
             "dependency_map_pass2_max_turns": 60,
             "dependency_map_delta_max_turns": 30,
+            # Story #724: post-generation verification pass
+            "dep_map_fact_check_enabled": False,
+            "fact_check_timeout_seconds": 600,
         }
     else:
         # If dict exists, merge with defaults (preserve existing values)
@@ -5429,6 +5432,13 @@ def _get_current_config() -> dict:
             ),
             "dependency_map_delta_max_turns": claude_cli_raw.get(
                 "dependency_map_delta_max_turns", 30
+            ),
+            # Story #724: post-generation verification pass
+            "dep_map_fact_check_enabled": claude_cli_raw.get(
+                "dep_map_fact_check_enabled", False
+            ),
+            "fact_check_timeout_seconds": claude_cli_raw.get(
+                "fact_check_timeout_seconds", 600
             ),
         }
         # Preserve additional keys like API keys
@@ -6406,6 +6416,17 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                         return f"{label} must be a positive integer"
                 except (ValueError, TypeError):
                     return f"{label} must be a valid number"
+
+    elif section == "claude_cli":
+        # Story #724: post-generation verification pass timeout
+        fact_check_timeout = data.get("fact_check_timeout_seconds")
+        if fact_check_timeout is not None:
+            try:
+                timeout_int = int(fact_check_timeout)
+                if timeout_int < 60 or timeout_int > 3600:
+                    return "Verification timeout must be between 60 and 3600 seconds"
+            except (ValueError, TypeError):
+                return "Verification timeout must be a valid number"
 
     return None
 

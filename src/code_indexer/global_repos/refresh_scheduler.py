@@ -886,9 +886,11 @@ class RefreshScheduler:
                     try:
                         self._submit_refresh_job(alias_name)
                     except DuplicateJobError:
-                        # Job already running for this repo — skip silently
-                        logger.debug(
-                            f"Refresh already running for {alias_name}, skipping this cycle"
+                        # Job already running for this repo — expected when prior refresh
+                        # is still in flight (possibly extended by a verification pass).
+                        logger.info(
+                            f"Refresh skipped for {alias_name}: prior refresh still running "
+                            f"(possibly extended by verification pass)"
                         )
                     except Exception as e:
                         logger.error(

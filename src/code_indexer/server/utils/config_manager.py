@@ -8,7 +8,7 @@ and directory structure setup for the CIDX server installation.
 import json
 import logging
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 from typing import Optional, Dict, List, Union
 
@@ -508,6 +508,11 @@ class ClaudeIntegrationConfig:
     dependency_map_interval_hours: int = 168
     # Pass timeout in seconds (default: 1800 = 30 minutes, Pass 2 uses full, Pass 1/3 use half)
     dependency_map_pass_timeout_seconds: int = 1800  # Fix 5: Increased from 600
+    # Story #724: Fact-check pass after dependency map generation
+    # Enable/disable fact-check pass on dependency map output (default: off for upgrade safety)
+    dep_map_fact_check_enabled: bool = False
+    # Timeout in seconds for the fact-check Claude CLI pass (default: 600 = 10 minutes)
+    fact_check_timeout_seconds: int = 600
     # Pass 1 (synthesis) max turns (default: 0 = single-shot mode, no tool use)
     dependency_map_pass1_max_turns: int = 0
     # Pass 2 (per-domain) max turns (default: 50 = agentic mode with search_code tool)
@@ -1425,13 +1430,18 @@ class ServerConfigManager:
         if "claude_integration_config" in config_dict and isinstance(
             config_dict["claude_integration_config"], dict
         ):
-            # Migration: remove obsolete dependency_map_pass3_max_turns field
-            # Pass 3 is now deterministic and no longer uses a max_turns setting
-            config_dict["claude_integration_config"].pop(
-                "dependency_map_pass3_max_turns", None
-            )
+            # Rolling-upgrade safety (Story #724 AC12): strip any keys that are not
+            # valid fields on the current ClaudeIntegrationConfig dataclass.  This
+            # ensures old-code nodes can deserialize blobs written by new-code nodes
+            # during a cluster rolling restart without raising TypeError.
+            # The known-obsolete key is included for backward-compat with old blobs.
+            _ci_dict = config_dict["claude_integration_config"]
+            _ci_allowed = {f.name for f in fields(ClaudeIntegrationConfig)}
+            for _k in list(_ci_dict.keys()):
+                if _k not in _ci_allowed:
+                    _ci_dict.pop(_k)
             config_dict["claude_integration_config"] = ClaudeIntegrationConfig(
-                **config_dict["claude_integration_config"]
+                **_ci_dict
             )
 
         # Story #15 AC4 Migration: Move repository settings to repository_config

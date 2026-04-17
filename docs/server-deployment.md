@@ -552,6 +552,48 @@ ps aux | grep cidx-server
 # 3. Restart server to clear cache
 ```
 
+## Post-Generation Verification Pass (Story #724)
+
+The cidx-server supports an optional post-generation verification pass that
+re-reads generated dependency-map artifacts and repo descriptions against
+their actual source code and produces a corrected version with evidence
+citations.
+
+**Default: disabled.** Enable via the Admin Web UI Config Screen, Claude
+CLI Integration section, "Post-generation verification pass (fact-check)"
+toggle.
+
+### Latency cost
+
+Verification invokes Claude CLI once per generated document. Expected cost:
+
+- Per-invocation: approximately 20-45 seconds (within the configured timeout).
+- Per refresh cycle: adds verification time multiplied by the number of
+  generated artifacts (per-domain for dependency maps, once for descriptions).
+
+Before enabling in production, run the baseline measurement procedure
+described in the story: measure the fabrication rate on a fixed 3-repo corpus
+both with and without verification to confirm the corrections justify the cost.
+
+### Configuration fields
+
+- `dep_map_fact_check_enabled` (bool, default `false`): master toggle.
+- `fact_check_timeout_seconds` (int, default `600`): per-invocation timeout.
+  Accepts 60-3600.
+
+### Known limitations
+
+- Changes to `max_concurrent_claude_cli` require a service restart to take
+  effect. The shared subprocess semaphore that bounds total Claude CLI
+  concurrency is initialized once at process start and does not resize at
+  runtime. Restart the `cidx-server` systemd unit after changing this field.
+- Verification is a heuristic second pass using the same model class as the
+  generator. It reduces hallucinated claims but does not guarantee factual
+  correctness.
+- Source-code bugs found by verification are NOT automatically corrected in
+  deployed code; the feature only corrects the generated markdown artifacts.
+  Code-level bugs are filed as GitHub issues per the existing bug-report flow.
+
 ## Additional Resources
 
 - [Main README](../README.md) - Project overview and features

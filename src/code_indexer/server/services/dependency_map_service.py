@@ -14,6 +14,7 @@ Consider extracting scheduler methods or delta analysis methods into separate mo
 Deferred to future refactoring to avoid disrupting Story #193 acceptance criteria.
 """
 
+import difflib
 import json
 import logging
 import os
@@ -24,8 +25,9 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
+from code_indexer.global_repos.dependency_map_analyzer import VerificationResult
 from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
 
 from .activity_journal_service import ActivityJournalService
@@ -40,6 +42,56 @@ THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 _BACKFILL_JOB_ID_SUFFIX_LEN = (
     8  # Story #728: hex suffix length for lifecycle_backfill job IDs
 )
+
+# Story #724 Phase B2: AC9 diff cap (lines)
+_AC9_DIFF_MAX_LINES = 200
+
+
+def _build_bounded_diff(
+    original: str, verified: str, cap_lines: int = _AC9_DIFF_MAX_LINES
+) -> str:
+    """Build a unified diff between original and verified, capped at cap_lines lines.
+
+    cap_lines must be positive; values <= 0 are clamped to 1.
+    """
+    safe_cap = max(1, cap_lines)
+    diff_lines = list(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            verified.splitlines(keepends=True),
+            fromfile="original",
+            tofile="verified",
+        )
+    )
+    if not diff_lines:
+        return ""
+    truncated = len(diff_lines) > safe_cap
+    snippet = "".join(diff_lines[:safe_cap])
+    if truncated:
+        snippet += f"\n... diff truncated (exceeded {safe_cap} lines)\n"
+    return snippet
+
+
+def _format_journal_summary(
+    context_label: str, result: Optional[VerificationResult]
+) -> str:
+    """Format a single-line AC10 activity journal summary for a verification result.
+
+    Returns a safe fallback string only when result is None (the union-None branch).
+    When result is a VerificationResult, attributes are accessed directly.
+    """
+    if result is None:
+        return f"verification {context_label}: result=None"
+    counts = result.counts or {}
+    fallback = result.fallback_reason or "none"
+    return (
+        f"verification {context_label}: "
+        f"verified={counts.get('verified', 0)} "
+        f"corrected={counts.get('corrected', 0)} "
+        f"removed={counts.get('removed', 0)} "
+        f"added={counts.get('added', 0)} "
+        f"fallback={fallback}"
+    )
 
 
 class DependencyMapService:
@@ -91,6 +143,62 @@ class DependencyMapService:
     def activity_journal(self) -> ActivityJournalService:
         """Return the ActivityJournalService instance (Story #329)."""
         return self._activity_journal  # type: ignore[no-any-return]
+
+    def _run_verification_and_log(
+        self,
+        *,
+        document_content: str,
+        repo_list: List[Dict[str, Any]],
+        discovery_mode: bool,
+        context_label: str,
+    ) -> str:
+        """Run verification pass and emit AC9 log + AC10 journal summary.
+
+        Returns the verified document on success, or the original on fallback.
+        Always emits the AC9 structured logger.info entry.
+        Writes to the activity journal only when the session is active (AC10).
+
+        Story #724 Phase B2.
+        """
+        ci_config = self._config_manager.get_claude_integration_config()
+        started = time.monotonic()
+        result = self._analyzer.invoke_verification_pass(
+            document_content=document_content,
+            repo_list=repo_list,
+            discovery_mode=discovery_mode,
+            claude_integration_config=ci_config,
+        )
+        duration_ms = int(round((time.monotonic() - started) * 1000))
+
+        # AC9: structured log entry, always emitted
+        diff_summary = _build_bounded_diff(document_content, result.verified_document)
+        logger.info(
+            "verification_pass",
+            extra={
+                "domain_or_repo": context_label,
+                "counts": result.counts,
+                "evidence": result.evidence,
+                "diff_summary": diff_summary,
+                "duration_ms": duration_ms,
+                "fallback_reason": result.fallback_reason,
+            },
+        )
+
+        # AC10: activity journal — only when session is active AND document actually changed.
+        # If fallback_reason is set, verified_document IS the original — no change.
+        # If the model returned identical content, no change either.
+        changed = (
+            result.fallback_reason is None
+            and result.verified_document != document_content
+        )
+        if self._activity_journal.is_active and changed:
+            try:
+                summary = _format_journal_summary(context_label, result)
+                self._activity_journal.log(summary)
+            except Exception as e:
+                logger.debug(f"Non-fatal journal log error (verification): {e}")
+
+        return cast(str, result.verified_document)
 
     def is_available(self) -> bool:
         """
@@ -566,6 +674,24 @@ class DependencyMapService:
                     chars = len(domain_file.read_text()) if domain_file.exists() else 0
 
                     if chars > 0:
+                        # Story #724 Phase B2: optional post-generation verification pass
+                        if config.dep_map_fact_check_enabled:
+                            try:
+                                original_content = domain_file.read_text()
+                                verified_content = self._run_verification_and_log(
+                                    document_content=original_content,
+                                    repo_list=repo_list,
+                                    discovery_mode=False,
+                                    context_label=f"pass2:{domain_name}",
+                                )
+                                if verified_content != original_content:
+                                    domain_file.write_text(verified_content)
+                                    chars = len(verified_content)
+                            except Exception as verif_exc:
+                                logger.warning(
+                                    f"Verification pass failed for domain '{domain_name}' "
+                                    f"(using original content): {verif_exc}"
+                                )
                         # Success
                         break
 
@@ -1588,6 +1714,26 @@ class DependencyMapService:
         updated_content = self._update_frontmatter_timestamp(
             existing_content, result, domain_name
         )
+
+        # Story #724 Phase B2: optional post-merge verification pass
+        if config.dep_map_fact_check_enabled:
+            try:
+                # Build a minimal repo_list from the aliases involved in this delta
+                all_aliases = list(
+                    dict.fromkeys(changed_repos + new_repos + removed_repos)
+                )
+                delta_repo_list = [{"alias": a} for a in all_aliases]
+                updated_content = self._run_verification_and_log(
+                    document_content=updated_content,
+                    repo_list=delta_repo_list,
+                    discovery_mode=False,
+                    context_label=f"delta_merge:{domain_name}",
+                )
+            except Exception as verif_exc:
+                logger.warning(
+                    f"Verification pass failed for delta merge domain '{domain_name}' "
+                    f"(using original merged content): {verif_exc}"
+                )
 
         domain_file.write_text(updated_content)
         logger.info(f"Updated domain file in-place: {domain_file}")
