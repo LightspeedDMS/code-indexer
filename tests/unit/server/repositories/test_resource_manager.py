@@ -417,6 +417,7 @@ class TestGracefulShutdownHandler:
         assert "callback3" in callback_results
         assert len(callback_results) == 3
 
+    @pytest.mark.slow
     def test_graceful_shutdown_handler_timeout_handling(self):
         """Test that shutdown handler skips callbacks that would start after timeout."""
         handler = GracefulShutdownHandler(shutdown_timeout=0.5)  # 0.5 second timeout

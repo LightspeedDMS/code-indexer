@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.9
+
+### Bug Fixes
+
+- fix: Bug #743 (P1) -- HNSW "ef or M is too small" errors on semantic search across multiple golden repos. Index construction now raises the HNSW parameters past the point at which the library emits the spurious warning/error for corpora above a small threshold, eliminating the noisy log on routine searches.
+- fix: Bug #741 (P2) -- Golden repo alias ending in '-global' produced phantom '*-global-global' entries and a refresh storm. Alias validation now rejects (or normalizes) the '-global' suffix at ingestion so the downstream global-name derivation cannot double-suffix.
+- fix: Bug #737 (P2) -- Server status reported RAM usage twice (once under top-level system resources, again duplicated under Storage). Health service now emits RAM exactly once.
+- fix: Bug #739 (P2) -- `RerankerSinbinnedException` was treated as 'failed' instead of 'skipped'. Sinbin is a normal degraded-mode path, not a failure; reporting it as failed triggered operator alerts for self-healing conditions.
+- fix: Bug #740 (P2) -- Reranker Voyage/Cohere 4xx errors logged status code only, discarding the response body. Response body is now captured and logged so 4xx debugging does not require ad-hoc instrumentation.
+- fix: Bug #744 (P2) -- Reranker `_attempt_provider_rerank` checked 'down' signal but not 'sin-binned' signal; the two health states were evaluated independently by different callers, causing uncoordinated routing decisions. Both signals are now consulted in the same gate.
+- fix: Bug #736 (P3) -- Dependency map refresh jobs missing from the admin Web UI Jobs tab despite appearing on the dashboard 'recent jobs' card. Jobs tab query now includes `dep_map_refresh` operation type for parity with the dashboard.
+
+### Test Hygiene
+
+- `tests/unit/server/repositories/test_resource_manager.py::TestGracefulShutdownHandler::test_graceful_shutdown_handler_timeout_handling` marked `@pytest.mark.slow` so it no longer flakes in parallel `server-fast-automation.sh` chunk runs (test passes in isolation; fails only under CPU contention due to hardcoded `time.sleep(0.2)` × 3 with a tight `total_time < 0.8s` upper bound). Codex verified in v9.17.1 and v9.17.2 cycles that this is a pre-existing timing-brittle test, not a code regression.
+- `tests/unit/server/services/test_research_assistant_security_flags.py` updated to align its `required_denies` list with the Story #738 loosening (removed `curl`, `rm`, `mv`, `cp`, `chmod`, `kill` from the asserted must-deny list; split categories into network (still denied: `wget`, `ssh`, `scp`, `nc`, `nmap`), interpreters, shell escapes, privilege, packages, service management, git writes, exfiltration, persistence).
+
+### Authorship
+
+This release batches work delivered by a parallel bug-fixer agent. Each individual bug fix is committed as its own reviewable commit (see `git log` between v9.17.8 and v9.17.9 tags). Commits were taken over and curated by Claude Opus 4.7 to apply one-bug-per-commit discipline and wrap the release with CHANGELOG + version bump + tag.
+
 ## v9.17.8
 
 ### Features

@@ -223,11 +223,16 @@ class TestSecurityHardeningCommandFlags:
         AC1: permissions.deny must include deny rules for all dangerous Bash commands.
         With --dangerously-skip-permissions, only deny rules actually block execution.
         Allow rules only control prompting (useless with skip-permissions).
-        Categories: network (curl, wget, ssh, scp, nc, nmap), interpreters (python3,
-        python, perl, ruby, node), shell escapes (bash, sh, xargs, find), privilege
-        (sudo), destructive (rm, mv, cp, chmod), packages (apt, pip), service mgmt
-        (systemctl restart/stop/start), git writes (push/commit/checkout), process
-        control (kill), exfiltration (tee), persistence (crontab).
+
+        Story #738 explicitly loosened destructive-FS (rm, mv, cp, chmod) and process
+        control (kill) categories for remediation authority, and loosened curl for
+        localhost-scope use via prompt enforcement. systemctl restart is handled via a
+        specific allow rule rather than a deny. These are NOT in required_denies.
+
+        Categories still denied: network (wget, ssh, scp, nc, nmap), interpreters
+        (python3, python, perl, ruby, node), shell escapes (bash, sh, xargs, find),
+        privilege (sudo), packages (apt, pip), service mgmt (stop/start),
+        git writes (push/commit/checkout), exfiltration (tee), persistence (crontab).
         """
         calls = self._run_and_capture_calls(research_service, "Test question")
         assert len(calls) >= 1
@@ -236,36 +241,40 @@ class TestSecurityHardeningCommandFlags:
         bash_deny_rules = [r for r in deny_list if r.startswith("Bash(")]
 
         required_denies = [
-            "curl",
+            # Network (still denied -- only curl was loosened for localhost use via prompt)
             "wget",
             "ssh",
             "scp",
+            # Interpreters (arbitrary code exec)
             "python3",
             "python ",
             "perl",
             "ruby",
             "node",
+            # Privilege escalation
             "sudo",
-            "rm ",
-            "mv ",
-            "cp ",
-            "chmod",
+            # Shell escapes / command multipliers
             "xargs",
             "find",
             "bash ",
             "sh ",
+            # Network tools
             "nc ",
             "nmap",
+            # Package management
             "apt ",
             "pip ",
-            "systemctl restart",
+            # Service management -- only `systemctl restart cidx-server` is allowed via
+            # a specific allow rule; stop/start/enable/disable/reload remain denied.
             "systemctl stop",
             "systemctl start",
+            # Git write operations
             "git push",
             "git commit",
             "git checkout",
-            "kill ",
+            # Exfiltration via redirection
             "tee ",
+            # Persistence
             "crontab",
         ]
 
