@@ -801,6 +801,7 @@ class RefreshScheduler:
         logger.debug("Refresh scheduler loop started")
 
         while self._running:
+            refresh_interval = 300  # Defensive init prevents UnboundLocalError if try block fails early
             try:
                 # Bug #240: Periodically evict orphaned write mode markers from
                 # clients that disconnected without calling exit_write_mode.
