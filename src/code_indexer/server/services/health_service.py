@@ -292,26 +292,19 @@ class HealthCheckService:
 
         try:
             # Check disk space (use percentage for consistency with multi-volume checks)
+            # Note: memory/RAM is NOT checked here — it is reported separately by
+            # _collect_resource_failures() to avoid duplicate "Storage: High memory usage"
+            # entries in failure_reasons (Bug #737).
             disk_usage = psutil.disk_usage("/")
             free_space_gb = disk_usage.free / (1024**3)
             disk_used_percent = disk_usage.percent
 
-            # Check memory usage
-            memory = psutil.virtual_memory()
-            memory_percent = memory.percent
-
             response_time = int((time.time() - start_time) * 1000)
 
-            # Determine status based on resource availability (percentage-based for disk)
-            if (
-                disk_used_percent < DISK_WARNING_THRESHOLD_PERCENT
-                and memory_percent <= MEMORY_WARNING_THRESHOLD
-            ):
+            # Determine status based on disk usage only
+            if disk_used_percent < DISK_WARNING_THRESHOLD_PERCENT:
                 status = HealthStatus.HEALTHY
-            elif (
-                disk_used_percent < DISK_CRITICAL_THRESHOLD_PERCENT
-                and memory_percent <= MEMORY_CRITICAL_THRESHOLD
-            ):
+            elif disk_used_percent < DISK_CRITICAL_THRESHOLD_PERCENT:
                 status = HealthStatus.DEGRADED
             else:
                 status = HealthStatus.UNHEALTHY
@@ -319,8 +312,6 @@ class HealthCheckService:
             error_message = None
             if disk_used_percent >= DISK_WARNING_THRESHOLD_PERCENT:
                 error_message = f"Low disk space: {disk_used_percent:.0f}% used ({free_space_gb:.1f}GB free)"
-            elif memory_percent > MEMORY_WARNING_THRESHOLD:
-                error_message = f"High memory usage: {memory_percent:.1f}%"
 
             return ServiceHealthInfo(
                 status=status,
