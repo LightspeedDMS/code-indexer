@@ -3735,6 +3735,64 @@ def _get_background_job_manager():
         return None
 
 
+def _get_job_tracker():
+    """Get the JobTracker instance (Bug #736: needed to show dep-map jobs on Jobs tab).
+
+    Returns None gracefully when job_tracker is not set in the app module
+    (e.g. in tests or before server lifespan initialises it).
+    """
+    try:
+        from ..app import job_tracker
+
+        return job_tracker
+    except Exception as e:
+        logger.error(
+            format_error_log("STORE-GENERAL-030", f"Failed to get job tracker: {e}"),
+            exc_info=True,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+
+
+def _apply_job_filters(
+    jobs: list,
+    status_filter: Optional[str],
+    type_filter: Optional[str],
+    search: Optional[str],
+) -> list:
+    """Apply status/type/search filters to a list of job dicts (in-Python).
+
+    Mirrors the filter semantics BackgroundJobManager applies internally so that
+    JobTracker-only jobs are subject to the same criteria.
+    """
+    result = []
+    for job in jobs:
+        if status_filter and job.get("status") != status_filter:
+            continue
+        if type_filter and job.get("operation_type") != type_filter:
+            continue
+        if search:
+            search_lower = search.lower()
+            repo = (job.get("repo_alias") or "").lower()
+            user = (job.get("username") or "").lower()
+            op = (job.get("operation_type") or "").lower()
+            err = (job.get("error") or "").lower()
+            if not (
+                search_lower in repo
+                or search_lower in user
+                or search_lower in op
+                or search_lower in err
+            ):
+                continue
+        result.append(job)
+    return result
+
+
+# Upper bound for the "fetch all" call when merging with JobTracker results.
+# Job counts are bounded by retention policy (typically < 10 000 at any time).
+_MAX_JOBS_FOR_MERGE = 10_000
+
+
 def _get_all_jobs(
     status_filter: Optional[str] = None,
     type_filter: Optional[str] = None,
@@ -3745,23 +3803,60 @@ def _get_all_jobs(
     """
     Get all jobs with filters and pagination.
 
-    Story #271: Delegates to BackgroundJobManager.get_jobs_for_display() which
-    merges in-memory active jobs with historical SQLite jobs, applies filters
-    at the database level, and handles pagination correctly.
+    Story #271: Delegates to BackgroundJobManager.get_jobs_for_display() for the
+    primary job list.
 
-    Returns jobs from background job manager with optional filtering.
+    Bug #736: Also merges in JobTracker-only jobs (e.g. dependency_map_full /
+    dependency_map_delta) that are not tracked by BackgroundJobManager.
+    When a JobTracker instance is available:
+    1. Fetch all matching BG jobs (large page to avoid pre-pagination).
+    2. Fetch and filter all JobTracker jobs with the same criteria.
+    3. Deduplicate by job_id (BG manager record wins for shared IDs).
+    4. Re-paginate the merged list and recompute total_count / total_pages.
+
+    Returns jobs from both tracking systems with consistent filtering and
+    pagination.
     """
     job_manager = _get_background_job_manager()
     if not job_manager:
         return [], 0, 1
 
-    return job_manager.get_jobs_for_display(
+    job_tracker = _get_job_tracker()
+    if job_tracker is None:
+        # Fast path: no tracker available, delegate entirely to BG manager.
+        return job_manager.get_jobs_for_display(
+            status_filter=status_filter,
+            type_filter=type_filter,
+            search_text=search,
+            page=page,
+            page_size=page_size,
+        )
+
+    # Fetch all matching BG jobs (un-paginated) so we can merge before slicing.
+    all_bg_jobs, _bg_total, _bg_pages = job_manager.get_jobs_for_display(
         status_filter=status_filter,
         type_filter=type_filter,
         search_text=search,
-        page=page,
-        page_size=page_size,
+        page=1,
+        page_size=_MAX_JOBS_FOR_MERGE,
     )
+
+    seen_ids = {j["job_id"] for j in all_bg_jobs}
+    tracker_jobs = _apply_job_filters(
+        job_tracker.get_recent_jobs(),
+        status_filter,
+        type_filter,
+        search,
+    )
+    extra_jobs = [j for j in tracker_jobs if j["job_id"] not in seen_ids]
+
+    merged = list(all_bg_jobs) + extra_jobs
+    total_count = len(merged)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    offset = (page - 1) * page_size
+    paginated = merged[offset : offset + page_size]
+
+    return paginated, total_count, total_pages
 
 
 def _get_queue_status() -> dict:
