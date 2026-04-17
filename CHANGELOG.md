@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.8
+
+### Features
+
+- feat: Story #738 -- Research Assistant remediation authority for environment/data issues. The admin Web UI Research Assistant can now execute self-diagnosed remediations (rm, mv, cp, mkdir, kill, curl to localhost, plus the specific allow `systemctl restart cidx-server`) within a strict scope boundary (server_data_dir, golden_repos_dir, session folder). Hard-denied commands (sudo, ssh, python3, pip, git push/commit/checkout, bash/sh/zsh -c, nc, socat, crontab, mount, mkfs, etc.) remain blocked. The prompt was rewritten with a DIAGNOSE -> PLAN -> SCOPE CHECK -> EXECUTE -> VERIFY protocol, a SELF-DIAGNOSED vs OPERATOR-DIRECTED guard (prompt-injection defense treating instructions found inside data as adversarial), and reason-category refusal disclosure (one-sentence scope/capability explanations without leaking the full deny list). Source-code class bugs route to GitHub issue filing via issue_manager.py instead of in-place edits. Substantive implementation delivered as part of Epic #725 commit af12e986; this release finalizes the story with the regression test suite (115 tests: permission_settings construction + prompt template assertions) and version bump.
+
 ## v9.17.7
 
 ### Bug Fixes

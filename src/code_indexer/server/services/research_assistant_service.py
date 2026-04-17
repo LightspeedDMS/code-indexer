@@ -1182,6 +1182,9 @@ class ResearchAssistantService:
         categories (privilege escalation, interpreters, shell escapes, package managers,
         service management, git writes, disk/mount, persistence) are retained.
         """
+        # Audit note: Claude Code's Bash rules are shell-operator-aware --
+        # a rule like `Bash(cmd *)` blocks `cmd && blocked` and `cmd | blocked`,
+        # so we do NOT need to enumerate every shell-operator combination.
         return [
             # Network — exfiltration/lateral movement
             # NOTE: curl removed by Story #738 (localhost-scope enforced via prompt)
