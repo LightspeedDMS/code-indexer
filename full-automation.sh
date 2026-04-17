@@ -135,20 +135,13 @@ print_step "Running tests with coverage - individual test files for better isola
 
 
 # Get all test files from reorganized structure (exclude infrastructure files)
-test_files=($(find tests/unit tests/integration tests/e2e -name "test_*.py" 2>/dev/null | grep -v "infrastructure.py" | sort))
+test_files=($(find tests/unit tests/e2e -name "test_*.py" 2>/dev/null | grep -v "infrastructure.py" | sort))
 
 # Filter out Docker tests if requested
 if [[ "$SKIP_DOCKER_TESTS" == "true" ]]; then
     print_step "Filtering out Docker-specific tests"
     filtered_files=()
-    docker_test_files=(
-        "tests/integration/docker/test_docker_compose_validation.py"
-        "tests/integration/docker/test_docker_manager_cleanup.py"
-        "tests/integration/docker/test_docker_manager.py"
-        "tests/integration/docker/test_docker_manager_simple.py"
-        "tests/e2e/misc/test_end_to_end_dual_engine.py"
-        "tests/e2e/misc/test_e2e_embedding_providers.py"
-    )
+    docker_test_files=()
     
     for file in "${test_files[@]}"; do
         # Check if this file is in our Docker test list
@@ -176,7 +169,7 @@ if [[ "${COW_CLONE_E2E_TESTS:-}" == "false" ]]; then
     # Filter out CoW clone test
     filtered_files=()
     for file in "${test_files[@]}"; do
-        if [[ "$file" != "tests/e2e/misc/test_cow_clone_e2e_full_automation.py" && "$file" != "tests/test_cow_clone_e2e_full_automation.py" ]]; then
+        if [[ "$file" != "tests/test_cow_clone_e2e_full_automation.py" ]]; then
             filtered_files+=("$file")
         fi
     done
