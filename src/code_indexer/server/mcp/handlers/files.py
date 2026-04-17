@@ -552,7 +552,7 @@ def _omni_filter_errors(errors: Dict[str, str], user: User) -> Dict[str, str]:
         return {
             k: v
             for k, v in errors.items()
-            if k.replace("-global", "") in _ac7_accessible or k in _ac7_accessible
+            if k.removesuffix("-global") in _ac7_accessible or k in _ac7_accessible
         }
     return errors
 

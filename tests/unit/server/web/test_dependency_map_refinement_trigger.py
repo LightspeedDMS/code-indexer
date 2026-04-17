@@ -276,6 +276,9 @@ def admin_session_cookie(client):
     )
     assert login_resp.status_code == 303, f"Form login failed: {login_resp.status_code}"
     assert "session" in login_resp.cookies, "No session cookie set by form login"
+    # Fix: starlette 0.49+ deprecated per-request cookies= parameter
+    for name, value in login_resp.cookies.items():
+        client.cookies.set(name, value)
     return login_resp.cookies
 
 

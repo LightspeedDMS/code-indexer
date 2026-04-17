@@ -4,10 +4,38 @@ Unit tests for AC7: Delta merge has source code access.
 Story #216 AC7:
 - build_delta_merge_prompt includes clone_path for changed/new repos
 - build_delta_merge_prompt includes search_code MCP tool guidance
-- invoke_delta_merge passes allowed_tools containing search_code
+- invoke_delta_merge_file passes allowed_tools and dangerously_skip_permissions
 """
 
 from unittest.mock import patch
+
+_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+_MTIME_TICK_S = 0.05
+
+
+def _make_subprocess_result(returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""):
+    from unittest.mock import MagicMock
+
+    result = MagicMock()
+    result.returncode = returncode
+    result.stdout = stdout
+    result.stderr = stderr
+    return result
+
+
+def _make_edit_side_effect(temp_glob: str, new_content: str, tmp_path):
+    """Return a subprocess.run side_effect that writes new_content to the temp file."""
+    import time
+    from pathlib import Path
+
+    def _side_effect(*args, **kwargs):
+        time.sleep(_MTIME_TICK_S)
+        matched = list(Path(str(tmp_path)).glob(temp_glob))
+        if matched:
+            matched[0].write_text(new_content)
+        return _make_subprocess_result()
+
+    return _side_effect
 
 
 def _make_analyzer(tmp_path):
@@ -94,32 +122,37 @@ class TestBuildDeltaMergePromptClonePaths:
         assert "auth-svc" in prompt
 
 
-class TestInvokeDeltaMergeAllowedTools:
-    """AC7: invoke_delta_merge passes allowed_tools to _invoke_claude_cli."""
+class TestInvokeDeltaMergeFileAllowedTools:
+    """AC7: invoke_delta_merge_file passes allowed_tools and dangerously_skip_permissions."""
 
-    def test_invoke_delta_merge_passes_search_code_tool(self, tmp_path):
-        """AC7: invoke_delta_merge passes allowed_tools containing search_code."""
+    def test_invoke_delta_merge_file_passes_search_code_tool(self, tmp_path):
+        """AC7: invoke_delta_merge_file passes --allowedTools mcp__cidx-local__search_code."""
         analyzer = _make_analyzer(tmp_path)
+        updated_content = "# Domain Analysis: auth\n\nUpdated content."
 
-        with patch.object(
-            analyzer,
-            "_invoke_claude_cli",
-            return_value="# Domain Analysis: auth\n\nContent.",
-        ) as mock_invoke:
-            analyzer.invoke_delta_merge(prompt="test", timeout=60, max_turns=5)
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_delta_merge_*.md", updated_content, tmp_path
+            ),
+        ) as mock_run:
+            analyzer.invoke_delta_merge_file(
+                domain_name="auth",
+                existing_content=EXISTING_CONTENT,
+                merge_prompt="test prompt",
+                timeout=60,
+                max_turns=5,
+                temp_dir=tmp_path,
+            )
 
-        args = mock_invoke.call_args[0] if mock_invoke.call_args[0] else []
-        kwargs = mock_invoke.call_args[1] if mock_invoke.call_args[1] else {}
-
-        allowed_tools_value = None
-        if len(args) >= 4:
-            allowed_tools_value = args[3]
-        elif "allowed_tools" in kwargs:
-            allowed_tools_value = kwargs["allowed_tools"]
-
-        assert allowed_tools_value is not None, (
-            "allowed_tools must be passed to _invoke_claude_cli"
+        cmd = mock_run.call_args[0][0]
+        assert "--allowedTools" in cmd, (
+            "invoke_delta_merge_file must pass --allowedTools"
         )
-        assert "search_code" in str(allowed_tools_value), (
-            f"allowed_tools must contain search_code, got: {allowed_tools_value}"
+        allowed_tools_idx = cmd.index("--allowedTools")
+        assert cmd[allowed_tools_idx + 1] == "mcp__cidx-local__search_code", (
+            f"--allowedTools must be mcp__cidx-local__search_code, got: {cmd[allowed_tools_idx + 1]}"
+        )
+        assert "--dangerously-skip-permissions" in cmd, (
+            "invoke_delta_merge_file must pass --dangerously-skip-permissions"
         )

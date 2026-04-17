@@ -86,6 +86,9 @@ def admin_session_cookie(client):
     session_cookies = response.cookies
     assert "session" in session_cookies, "No session cookie found in login response"
 
+    # Fix: starlette 0.49+ deprecated per-request cookies= parameter
+    for name, value in session_cookies.items():
+        client.cookies.set(name, value)
     return session_cookies
 
 

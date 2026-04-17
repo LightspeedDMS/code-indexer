@@ -55,6 +55,8 @@ REPAIRABLE_ANOMALY_TYPES = {
     "incomplete_domain",
     "malformed_domain",
     "frontmatter_json_mismatch",
+    "uncovered_repo",
+    "stale_participating_repo",
 }
 
 

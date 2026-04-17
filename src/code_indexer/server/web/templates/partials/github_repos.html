@@ -15,6 +15,12 @@
     {% if search_term %}
     <button type="button" class="outline small" onclick="clearGitHubSearch()">Clear</button>
     {% endif %}
+    <label style="margin-left: 1rem; display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.9em; cursor: pointer;">
+        <input type="checkbox" id="github-show-hidden"
+            {% if show_hidden %}checked{% endif %}
+            onchange="toggleShowHidden('github', this.checked)">
+        Show hidden
+    </label>
 </div>
 
 {% if error_type == 'not_configured' %}
@@ -74,12 +80,6 @@
 
 {% else %}
 <!-- Repositories Table -->
-{% if partial_due_to_cap %}
-<article class="message-info partial-cap-notice">
-    <p>Most repositories on this page were already indexed — click Next for more.</p>
-</article>
-{% endif %}
-
 <div class="repos-table-container">
     <table class="discovery-table" role="grid">
         <thead>
@@ -116,7 +116,7 @@
                     <strong>{{ repo.name }}</strong>
                 </td>
                 <td class="repo-description" title="{{ repo.description or '' }}">
-                    {{ (repo.description or '-') | truncate(60) }}
+                    {{ repo.description or '-' }}
                 </td>
                 <td>
                     <code>{{ repo.default_branch }}</code>
@@ -154,6 +154,24 @@
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <button type="submit" class="small" title="Add as golden repository">Add</button>
                     </form>
+                    {% set repo_id = "github:" ~ (repo.clone_url_ssh if repo.is_private else repo.clone_url_https) %}
+                    {% if show_hidden and repo_id in hidden_identifiers %}
+                    <button type="button" class="small outline"
+                        title="Unhide from discovery"
+                        hx-post="/admin/api/discovery/unhide"
+                        hx-vals='{"repo_identifier": "{{ repo_id }}", "csrf_token": "{{ csrf_token }}"}'
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        style="display:block; margin-top:4px; width:100%;">Unhide</button>
+                    {% else %}
+                    <button type="button" class="small outline secondary"
+                        title="Hide from discovery"
+                        hx-post="/admin/api/discovery/hide"
+                        hx-vals='{"repo_identifier": "{{ repo_id }}", "csrf_token": "{{ csrf_token }}"}'
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        style="display:block; margin-top:4px; width:100%;">Hide</button>
+                    {% endif %}
                 </td>
             </tr>
             {% endfor %}
@@ -389,6 +407,13 @@ function clearGitHubSearch() {
     document.getElementById('github-search').value = '';
     window.githubCursorStack = [null];
     htmx.ajax('GET', '/admin/partials/auto-discovery/github', {target: '#github-repos-section', swap: 'innerHTML'});
+}
+
+function toggleShowHidden(platform, checked) {
+    var searchInput = document.getElementById(platform + '-search');
+    var searchVal = searchInput ? searchInput.value : '';
+    var url = '/admin/partials/auto-discovery/' + platform + '?show_hidden=' + checked + (searchVal ? '&search=' + encodeURIComponent(searchVal) : '');
+    htmx.ajax('GET', url, {target: '#' + platform + '-repos-section', swap: 'innerHTML'});
 }
 
 // Set initial back button state after each partial load

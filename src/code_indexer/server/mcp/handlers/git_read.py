@@ -250,7 +250,7 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         errors = {
             k: v
             for k, v in errors.items()
-            if k.replace("-global", "") in _ac7_accessible or k in _ac7_accessible
+            if k.removesuffix("-global") in _ac7_accessible or k in _ac7_accessible
         }
 
     response_format = args.get("response_format", "flat")
@@ -845,7 +845,7 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
         errors = {
             k: v
             for k, v in errors.items()
-            if k.replace("-global", "") in _ac7_accessible or k in _ac7_accessible
+            if k.removesuffix("-global") in _ac7_accessible or k in _ac7_accessible
         }
 
     response_format = args.get("response_format", "flat")

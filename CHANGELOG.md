@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.0
+
+### Features
+
+- feat: Epic #714 -- Dependency map file-based output and coverage gaps. Converts all Claude CLI document operations (delta merge, Pass 2, refinement, repair Phase 1) from stdout-based to file-based I/O using dangerously_skip_permissions=True. Eliminates stdout truncation for large domain documents (17K+ chars). New methods: invoke_delta_merge_file(), invoke_refinement_file(), invoke_new_domain_generation(). Old stdout methods and truncation guard constants removed.
+
+- feat: Story #716 -- Delta refresh discovers uncovered repos. Delta refresh now queries DepMapHealthDetector for uncovered_repo anomalies before processing, runs domain discovery for unassigned repos, and includes discovered domains in the affected set. Adds uncovered_repo to REPAIRABLE_ANOMALY_TYPES and repair Phase 0 with discovery_callback.
+
+- feat: Story #717 -- Stale repo cleanup in repair. Adds repair Phase 1.5 that removes stale participating repo references from _domains.json and domain .md files, then regenerates _index.md. Adds stale_participating_repo to REPAIRABLE_ANOMALY_TYPES. Repair phase ordering: 0, 1, 1.5, 2, 3, 3.5, 4, 5.
+
+- feat: Story #719 -- Hide repositories from auto-discovery view. Adds HiddenDiscoveryReposSqliteBackend with add/remove/list/get_hidden_set/is_repo_hidden operations. PostgreSQL migration 018_hidden_discovery_repos.sql. GitLab and GitHub providers accept hidden_identifiers parameter to filter hidden repos. POST /admin/api/discovery/hide and /unhide endpoints with CSRF and admin auth. Show hidden toggle and Hide/Unhide buttons in both GitLab and GitHub discovery partials. partial_due_to_cap banner removed from both partials.
+
+- feat: Bug #723 -- GitLab discovery search_namespaces parameter. Adds search_namespaces=true to GitLab API calls when search is provided, enabling discovery of repos whose namespace path matches the search term.
+
+### Fixes
+
+- fix: Bug #720 -- Refresh fails for aliases containing -global substring. Replaced all 16 occurrences of .replace("-global", "") with .removesuffix("-global") across 6 files. Python's str.replace() removed ALL occurrences of -global; removesuffix() correctly strips only the trailing suffix.
+
+- fix: Bug #722 -- FTS index status incorrectly shown as Not Present. Fixed repository_health.py to check .code-indexer/tantivy_index/ (correct path) instead of .code-indexer/index/tantivy (wrong path).
+
+- fix: Starlette 0.49+ cookie deprecation. Updated admin_session_cookie fixture in 7 web test files to set cookies on the client instance instead of per-request, fixing 401 errors from deprecated per-request cookies= parameter.
+
+- fix: Depmap running state bug tests. Updated TestJobStatusRunningBadgeNotOverriddenByContentHealth tests to work with the refactored cache-based state machine route (Story #684).
+
 ## v9.16.0
 
 ### Features

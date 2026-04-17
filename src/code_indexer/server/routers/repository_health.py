@@ -432,7 +432,7 @@ async def get_repository_indexes(
 
     Index detection logic:
     - Semantic: {repo_path}/.code-indexer/index/voyage-code-3/hnsw_index.bin exists
-    - FTS: {repo_path}/.code-indexer/index/tantivy/ directory exists
+    - FTS: {repo_path}/.code-indexer/tantivy_index/ directory exists
     - Temporal: {repo_path}/.code-indexer/index/temporal/ OR
                 {repo_path}/.code-indexer/index/code-indexer-temporal/ directory exists
                 with hnsw_index.bin
@@ -502,8 +502,8 @@ async def get_repository_indexes(
         # Semantic index: dynamic detection across all embedding providers
         has_semantic = detect_semantic_index(index_base_path)
 
-        # FTS index: tantivy/ directory
-        fts_path = index_base_path / "tantivy"
+        # FTS index: tantivy_index/ directory (sibling to index/, not subdirectory)
+        fts_path = clone_path / ".code-indexer" / "tantivy_index"
         has_fts = fts_path.exists() and fts_path.is_dir()
 
         # Temporal index: temporal/ (legacy) OR any code-indexer-temporal* directory

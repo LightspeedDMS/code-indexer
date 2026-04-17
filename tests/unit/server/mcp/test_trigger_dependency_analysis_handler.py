@@ -103,13 +103,13 @@ def test_handler_returns_error_when_feature_disabled(admin_user, mock_app_state)
         mock_app_module.app.state.dependency_map_service = mock_app_state
 
         with patch(
-            "code_indexer.server.utils.config_manager.ServerConfigManager"
-        ) as mock_scm:
+            "code_indexer.server.services.config_service.get_config_service"
+        ) as mock_get_cs:
             mock_config = Mock()
             mock_config.claude_integration_config.dependency_map_enabled = (
                 False  # Disabled
             )
-            mock_scm.return_value.load_config.return_value = mock_config
+            mock_get_cs.return_value.get_config.return_value = mock_config
 
             # Act
             mcp_result = handle_trigger_dependency_analysis(

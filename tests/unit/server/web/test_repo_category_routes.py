@@ -35,6 +35,9 @@ def admin_session_cookie(client):
 
     # Extract session cookie
     cookies = response.cookies
+    # Fix: starlette 0.49+ deprecated per-request cookies= parameter
+    for name, value in cookies.items():
+        client.cookies.set(name, value)
     return cookies
 
 

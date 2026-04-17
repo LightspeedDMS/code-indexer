@@ -3,8 +3,10 @@ DepMapRepairExecutor for Story #342.
 
 Orchestrates surgical repair of dependency map anomalies detected by DepMapHealthDetector.
 
-5-phase repair algorithm:
+6-phase repair algorithm:
+  Phase 0: Discover uncovered repos via domain discovery (Story #716)
   Phase 1: Re-analyze broken domains via Claude CLI (expensive, optional)
+  Phase 1.5: Remove stale repo references from domains (Story #717)
   Phase 2: Remove orphan files (free)
   Phase 3: Reconcile _domains.json to match disk state (free)
   Phase 4: Regenerate _index.md programmatically (free)
@@ -20,13 +22,15 @@ Anomaly types handled:
   - domain_count_mismatch -> Phase 3 (reconcile JSON)
   - missing_index        -> Phase 4 (regenerate)
   - stale_index          -> Phase 4 (regenerate)
+  - uncovered_repo       -> Phase 0 (discover)
+  - stale_participating_repo -> Phase 1.5 (cleanup)
 """
 
 import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from code_indexer.server.services.dep_map_file_utils import (
     load_domains_json as _load_domains_json_util,
@@ -88,12 +92,14 @@ class DepMapRepairExecutor:
         health_detector: DepMapHealthDetector,
         index_regenerator: IndexRegenerator,
         domain_analyzer: Optional[Callable] = None,
+        discovery_callback: Optional[Callable] = None,
         journal_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> None:
         self._health_detector = health_detector
         self._index_regenerator = index_regenerator
         self._domain_analyzer = domain_analyzer
+        self._discovery_callback = discovery_callback
         self._journal_callback = journal_callback
         self._progress_callback = progress_callback
 
@@ -130,9 +136,17 @@ class DepMapRepairExecutor:
             f"(status={health_report.status})"
         )
 
+        # Phase 0: Discover uncovered repos (Story #716)
+        self._report_progress(5, "Phase 0: Discovering uncovered repos")
+        self._run_phase0(output_dir, health_report, fixed, errors)
+
         # Phase 1: Re-analyze broken domains (EXPENSIVE -- Claude CLI)
         self._report_progress(10, "Phase 1: Re-analyzing broken domains")
         self._run_phase1(output_dir, health_report, fixed, errors)
+
+        # Phase 1.5: Stale repo cleanup (FREE -- Story #717)
+        self._report_progress(60, "Phase 1.5: Cleaning stale repo references")
+        self._run_phase15(output_dir, health_report, fixed, errors)
 
         # Phase 2: Remove orphan files (FREE)
         self._report_progress(65, "Phase 2: Removing orphan files")
@@ -178,6 +192,61 @@ class DepMapRepairExecutor:
             anomalies_before=anomalies_before,
             anomalies_after=anomalies_after,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase 0: Discover uncovered repos (Story #716)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_phase0(
+        self,
+        output_dir: Path,
+        health_report: HealthReport,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """Phase 0: Discover and assign uncovered repos via domain discovery."""
+        if self._discovery_callback is None:
+            return  # Phase 0 skipped when no discovery callback provided
+
+        uncovered_anomalies = [
+            a
+            for a in health_report.anomalies
+            if a.type == "uncovered_repo" and a.missing_repos
+        ]
+
+        if not uncovered_anomalies:
+            return
+
+        # Collect all uncovered repo aliases
+        uncovered_aliases: List[str] = []
+        for anomaly in uncovered_anomalies:
+            if anomaly.missing_repos:
+                uncovered_aliases.extend(anomaly.missing_repos)
+
+        if not uncovered_aliases:
+            return
+
+        self._log(
+            f"Phase 0: Discovering domains for {len(uncovered_aliases)} "
+            f"uncovered repos: {sorted(uncovered_aliases)}"
+        )
+
+        try:
+            discovered_domains = self._discovery_callback(output_dir, uncovered_aliases)
+            if discovered_domains:
+                fixed.append(
+                    f"discovered domains for {len(uncovered_aliases)} "
+                    f"uncovered repos: {sorted(discovered_domains)}"
+                )
+                self._log(
+                    f"Phase 0: Assigned uncovered repos to "
+                    f"{len(discovered_domains)} domains"
+                )
+            else:
+                self._log("Phase 0: No domain assignments returned")
+        except Exception as e:
+            errors.append(f"Phase 0 discovery failed: {e}")
+            self._log(f"Phase 0 FAILED: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 1: Re-analyze broken domains
@@ -260,6 +329,82 @@ class DepMapRepairExecutor:
                     f"{self.MAX_DOMAIN_RETRIES} attempts"
                 )
                 self._log(f"FAILED: {anomaly.domain}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase 1.5: Stale repo cleanup (Story #717)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_phase15(
+        self,
+        output_dir: Path,
+        health_report: HealthReport,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """Phase 1.5: Remove stale repo references from _domains.json and .md files."""
+        stale_aliases = self._collect_stale_aliases(health_report)
+        if not stale_aliases:
+            return
+
+        self._log(
+            f"Phase 1.5: Removing {len(stale_aliases)} stale repo references: "
+            f"{sorted(stale_aliases)}"
+        )
+
+        domain_list = self._load_domains_json(output_dir)
+        if not domain_list:
+            return
+
+        changed = self._remove_stale_aliases_from_domains(
+            domain_list, stale_aliases, output_dir
+        )
+        if not changed:
+            return
+
+        if not self._persist_domains_and_regenerate(output_dir, domain_list, errors):
+            return
+
+        fixed.append(f"removed stale repo references: {sorted(stale_aliases)}")
+
+    def _collect_stale_aliases(self, health_report: HealthReport) -> Set[str]:
+        """Collect all stale repo aliases from stale_participating_repo anomalies."""
+        stale_aliases: Set[str] = set()
+        for anomaly in health_report.anomalies:
+            if anomaly.type == "stale_participating_repo" and anomaly.missing_repos:
+                stale_aliases.update(anomaly.missing_repos)
+        return stale_aliases
+
+    def _remove_stale_aliases_from_domains(
+        self,
+        domain_list: List[Dict[str, Any]],
+        stale_aliases: Set[str],
+        output_dir: Path,
+    ) -> bool:
+        """
+        Mutate domain_list in-place, removing stale aliases from participating_repos.
+
+        Also triggers cleanup of stale sections from each affected domain .md file.
+        Uses _is_safe_domain_name to validate domain names before path construction.
+        Returns True if any domain was modified.
+        """
+        changed = False
+        for domain in domain_list:
+            participating = domain.get("participating_repos", [])
+            cleaned = [r for r in participating if r not in stale_aliases]
+            if len(cleaned) < len(participating):
+                domain["participating_repos"] = cleaned
+                changed = True
+                removed = len(participating) - len(cleaned)
+                self._log(
+                    f"  Removed {removed} stale repo(s) from domain "
+                    f"'{domain.get('name', '?')}'"
+                )
+                domain_name = domain.get("name", "")
+                if self._is_safe_domain_name(domain_name):
+                    domain_file = output_dir / f"{domain_name}.md"
+                    if domain_file.exists():
+                        self._remove_stale_sections_from_md(domain_file, stale_aliases)
+        return changed
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 2: Remove orphan files
@@ -591,6 +736,74 @@ class DepMapRepairExecutor:
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers
     # ─────────────────────────────────────────────────────────────────────────
+
+    def _persist_domains_and_regenerate(
+        self,
+        output_dir: Path,
+        domain_list: List[Dict[str, Any]],
+        errors: List[str],
+    ) -> bool:
+        """Write updated _domains.json and regenerate _index.md. Returns True on success."""
+        try:
+            domains_json_path = output_dir / "_domains.json"
+            domains_json_path.write_text(json.dumps(domain_list, indent=2))
+            self._log("Phase 1.5: Updated _domains.json")
+        except Exception as e:
+            errors.append(f"Phase 1.5: Failed to write _domains.json: {e}")
+            return False
+
+        try:
+            self._index_regenerator.regenerate(output_dir)
+            self._log("Phase 1.5: Regenerated _index.md")
+        except Exception as e:
+            errors.append(f"Phase 1.5: Failed to regenerate _index.md: {e}")
+            return False
+
+        return True
+
+    def _remove_stale_sections_from_md(
+        self, domain_file: Path, stale_aliases: Set[str]
+    ) -> None:
+        """Remove markdown sections whose header references a stale repo alias."""
+        import re
+
+        try:
+            content = domain_file.read_text()
+        except OSError as e:
+            self._log(f"  Warning: Could not read {domain_file.name}: {e}")
+            return
+
+        lines = content.split("\n")
+        result_lines: List[str] = []
+        skip_until_next_header = False
+        current_header_level = 0
+
+        for line in lines:
+            header_match = re.match(r"^(#{1,6})\s+(.*)", line)
+            if header_match:
+                level = len(header_match.group(1))
+                header_text = header_match.group(2).strip()
+                if skip_until_next_header:
+                    if level <= current_header_level:
+                        skip_until_next_header = False
+                    else:
+                        continue  # Still inside stale repo subsection
+                if any(alias in header_text for alias in stale_aliases):
+                    skip_until_next_header = True
+                    current_header_level = level
+                    continue
+                result_lines.append(line)
+            else:
+                if not skip_until_next_header:
+                    result_lines.append(line)
+
+        new_content = "\n".join(result_lines)
+        if new_content != content:
+            try:
+                domain_file.write_text(new_content)
+                self._log(f"  Cleaned stale repo sections from {domain_file.name}")
+            except OSError as e:
+                self._log(f"  Warning: Could not write {domain_file.name}: {e}")
 
     @staticmethod
     def _is_safe_domain_name(name: str) -> bool:

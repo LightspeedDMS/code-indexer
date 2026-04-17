@@ -103,7 +103,7 @@ def make_service(
     """Create a DependencyMapService with mock dependencies for unit testing."""
     if mock_analyzer is None:
         mock_analyzer = Mock()
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        mock_analyzer.invoke_refinement_file.return_value = FULL_DOMAIN_BODY
         mock_analyzer.build_refinement_prompt.return_value = "refinement prompt"
         mock_analyzer.build_new_domain_prompt.return_value = "new domain prompt"
 

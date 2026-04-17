@@ -39,7 +39,7 @@ class TestCursorBatchSelection:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        mock_analyzer.invoke_refinement_file.return_value = FULL_DOMAIN_BODY
         mock_analyzer.build_new_domain_prompt.return_value = "new prompt"
         mock_analyzer._generate_index_md = Mock()
 
@@ -73,7 +73,7 @@ class TestCursorBatchSelection:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        mock_analyzer.invoke_refinement_file.return_value = FULL_DOMAIN_BODY
         mock_analyzer.build_new_domain_prompt.return_value = "new prompt"
         mock_analyzer._generate_index_md = Mock()
 
@@ -109,7 +109,7 @@ class TestCursorWrapsAround:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        mock_analyzer.invoke_refinement_file.return_value = FULL_DOMAIN_BODY
         mock_analyzer.build_new_domain_prompt.return_value = "new prompt"
         mock_analyzer._generate_index_md = Mock()
 
@@ -141,7 +141,7 @@ class TestCursorWrapsAround:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        mock_analyzer.invoke_refinement_file.return_value = FULL_DOMAIN_BODY
         mock_analyzer.build_new_domain_prompt.return_value = "new prompt"
         mock_analyzer._generate_index_md = Mock()
 
@@ -180,7 +180,7 @@ class TestEmptyDomainList:
 
         service.run_refinement_cycle()  # Must not raise
 
-        mock_analyzer.invoke_refinement.assert_not_called()
+        mock_analyzer.invoke_refinement_file.assert_not_called()
 
     def test_missing_domains_json_no_error(self, tmp_path: Path):
         """
@@ -196,4 +196,4 @@ class TestEmptyDomainList:
 
         service.run_refinement_cycle()  # Must not raise
 
-        mock_analyzer.invoke_refinement.assert_not_called()
+        mock_analyzer.invoke_refinement_file.assert_not_called()

@@ -59,6 +59,9 @@ def admin_session_cookie(client):
     )
     assert login_resp.status_code == 303, f"Form login failed: {login_resp.status_code}"
     assert "session" in login_resp.cookies, "No session cookie set by form login"
+    # Fix: starlette 0.49+ deprecated per-request cookies= parameter
+    for name, value in login_resp.cookies.items():
+        client.cookies.set(name, value)
     return login_resp.cookies
 
 
@@ -73,11 +76,14 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
     when DepMapHealthDetector reports the content as unhealthy/critical, as long
     as the job tracking status is "running".
 
-    Fix: Guard the content health override block with
+    Fix: Guard in _render_complete_response:
          ``if output_dir is not None and job_status.get("status") != "running":``
     """
 
     ENDPOINT = "/admin/partials/depmap-job-status"
+    # Named constants so the intent of fake values is explicit across all helpers/tests.
+    _FAKE_OUTPUT_DIR = Path("/fake/dep-map-output")
+    _COMPLETED_LAST_RUN = "2026-01-01T00:00:00Z"
 
     def _make_unhealthy_report(self, status="needs_repair"):
         """Build a HealthReport that reports unhealthy content."""
@@ -109,6 +115,52 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
             "run_history": [],
         }
 
+    def _completed_job_status(self):
+        """Return a job_status dict with status='completed'."""
+        return {
+            "health": "Healthy",
+            "color": "GREEN",
+            "status": "completed",
+            "last_run": self._COMPLETED_LAST_RUN,
+            "next_run": None,
+            "error_message": None,
+            "run_history": [],
+        }
+
+    def _fetch_status_partial(
+        self, client, admin_session_cookie, job_status_dict, health_report
+    ):
+        """
+        Build a fresh-cache backend for job_status_dict, patch the three
+        dependencies, fire GET /admin/partials/depmap-job-status, and
+        return the response text.
+        """
+        import json
+        from unittest.mock import MagicMock
+
+        cache = MagicMock()
+        cache.is_fresh.return_value = True
+        cache.get_cached.return_value = {"result_json": json.dumps(job_status_dict)}
+
+        with (
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dashboard_cache_backend",
+                return_value=cache,
+            ),
+            patch(
+                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
+                return_value=self._FAKE_OUTPUT_DIR,
+            ),
+            patch(
+                "code_indexer.server.services.dep_map_health_detector.DepMapHealthDetector"
+            ) as mock_detector_cls,
+        ):
+            mock_detector_cls.return_value.detect.return_value = health_report
+            response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
+
+        assert response.status_code == 200
+        return response.text
+
     def test_running_badge_preserved_when_content_needs_repair(
         self, client, admin_session_cookie
     ):
@@ -116,30 +168,12 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
         When tracking status=running AND content health=needs_repair,
         the partial must display 'Running' badge (not 'Unhealthy').
         """
-        fake_dir = Path("/fake/dep-map-output")
-        unhealthy_report = self._make_unhealthy_report("needs_repair")
-        running_status = self._running_job_status()
-
-        with (
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_job_status_data",
-                return_value=running_status,
-            ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-                return_value=fake_dir,
-            ),
-            patch(
-                "code_indexer.server.services.dep_map_health_detector.DepMapHealthDetector"
-            ) as mock_detector_cls,
-        ):
-            mock_detector_cls.return_value.detect.return_value = unhealthy_report
-
-            response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
-
-        assert response.status_code == 200
-        content = response.text
-        # Must show "Running", must NOT show "Unhealthy"
+        content = self._fetch_status_partial(
+            client,
+            admin_session_cookie,
+            self._running_job_status(),
+            self._make_unhealthy_report("needs_repair"),
+        )
         assert "Running" in content, (
             f"Expected 'Running' in response but got: {content[:500]}"
         )
@@ -154,29 +188,12 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
         When tracking status=running AND content health=critical,
         the partial must display 'Running' badge (not 'Critical').
         """
-        fake_dir = Path("/fake/dep-map-output")
-        critical_report = self._make_critical_report()
-        running_status = self._running_job_status()
-
-        with (
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_job_status_data",
-                return_value=running_status,
-            ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-                return_value=fake_dir,
-            ),
-            patch(
-                "code_indexer.server.services.dep_map_health_detector.DepMapHealthDetector"
-            ) as mock_detector_cls,
-        ):
-            mock_detector_cls.return_value.detect.return_value = critical_report
-
-            response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
-
-        assert response.status_code == 200
-        content = response.text
+        content = self._fetch_status_partial(
+            client,
+            admin_session_cookie,
+            self._running_job_status(),
+            self._make_critical_report(),
+        )
         assert "Running" in content, (
             f"Expected 'Running' in response but got: {content[:500]}"
         )
@@ -188,45 +205,22 @@ class TestJobStatusRunningBadgeNotOverriddenByContentHealth:
         self, client, admin_session_cookie
     ):
         """
-        When tracking status is NOT running (e.g. 'idle'), content health
-        override MUST still apply — this is the original Story #342 behaviour.
+        When status is NOT 'running' (e.g. 'completed') AND content health=needs_repair,
+        the content health SHOULD override the badge to 'Needs Repair'.
+
+        A needs_repair report with repairable_count=1 renders exactly "Needs Repair"
+        (see _render_complete_response: health = "Needs Repair" if repairable_count > 0).
         """
-        fake_dir = Path("/fake/dep-map-output")
-        unhealthy_report = self._make_unhealthy_report("needs_repair")
-        idle_status = {  # type: ignore[var-annotated]
-            "health": "Healthy",
-            "color": "GREEN",
-            "status": "idle",
-            "last_run": None,
-            "next_run": None,
-            "error_message": None,
-            "run_history": [],
-        }
-
-        with (
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_job_status_data",
-                return_value=idle_status,
-            ),
-            patch(
-                "code_indexer.server.web.dependency_map_routes._get_dep_map_output_dir",
-                return_value=fake_dir,
-            ),
-            patch(
-                "code_indexer.server.services.dep_map_health_detector.DepMapHealthDetector"
-            ) as mock_detector_cls,
-        ):
-            mock_detector_cls.return_value.detect.return_value = unhealthy_report
-
-            response = client.get(self.ENDPOINT, cookies=admin_session_cookie)
-
-        assert response.status_code == 200
-        content = response.text
-        # Content health IS applied when not running - "Unhealthy" or "Needs Repair"
-        # should appear, NOT "Healthy"
-        assert any(
-            label in content for label in ("Unhealthy", "Needs Repair", "Critical")
-        ), f"Content health override must apply when not running. Got: {content[:500]}"
+        content = self._fetch_status_partial(
+            client,
+            admin_session_cookie,
+            self._completed_job_status(),
+            self._make_unhealthy_report("needs_repair"),
+        )
+        assert "Needs Repair" in content, (
+            f"Content health override must apply when not running — "
+            f"expected 'Needs Repair' but got: {content[:500]}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

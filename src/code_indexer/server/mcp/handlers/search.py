@@ -97,7 +97,7 @@ def _filter_errors_for_user(errors: dict, user: User) -> dict:
         return {
             k: v
             for k, v in errors.items()
-            if k.replace("-global", "") in accessible or k in accessible
+            if k.removesuffix("-global") in accessible or k in accessible
         }
     return errors
 
@@ -209,7 +209,7 @@ def _flatten_multi_results(
             if "score" in result and "similarity_score" not in result:
                 result["similarity_score"] = result["score"]
 
-            golden_alias = repo_alias.replace("-global", "") if repo_alias else None
+            golden_alias = repo_alias.removesuffix("-global") if repo_alias else None
             if golden_alias:
                 category_info = category_map.get(golden_alias, {})
                 result["repo_category"] = category_info.get("category_name")
@@ -369,7 +369,9 @@ def _enrich_results_with_category(
 
     Modifies results in place.
     """
-    golden_alias = repository_alias.replace("-global", "") if repository_alias else None
+    golden_alias = (
+        repository_alias.removesuffix("-global") if repository_alias else None
+    )
     for res in results:
         if golden_alias:
             category_info = category_map.get(golden_alias, {})
@@ -635,7 +637,7 @@ def _enrich_activated_results(result: dict, params: Dict[str, Any]) -> None:
     for res in result["results"]:
         repo_alias = res.get("source_repo") or res.get("repository_alias")
         if repo_alias:
-            golden_alias = repo_alias.replace("-global", "")
+            golden_alias = repo_alias.removesuffix("-global")
             category_info = category_map.get(golden_alias, {})
             res["repo_category"] = category_info.get("category_name")
 
@@ -920,6 +922,12 @@ async def handle_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any
 
     if isinstance(repository_alias, list):
         return await _omni_regex_search(args, user)
+
+    # Bug #721: regex_search is in _SELF_TRACKING_TOOLS, so handler must track itself.
+    # Placed after the omni branch: _omni_regex_search recurses into handle_regex_search
+    # once per repo with a single alias, so each recursive call increments here —
+    # giving exactly N increments for N repos, with no double-count at the omni entry.
+    api_metrics_service.increment_regex_search(username=user.username)
 
     try:
         golden_repos_dir = _get_golden_repos_dir()

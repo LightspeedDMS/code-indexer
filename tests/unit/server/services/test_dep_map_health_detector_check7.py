@@ -399,16 +399,14 @@ class TestCheckSkippedWhenKnownReposNone:
 
 
 class TestStaleParticipatingRepoIsRepairable:
-    """stale_participating_repo must NOT be in REPAIRABLE_ANOMALY_TYPES."""
+    """stale_participating_repo must be in REPAIRABLE_ANOMALY_TYPES."""
 
-    def test_stale_participating_repo_not_in_repairable_types(self, tmp_path):
+    def test_stale_participating_repo_in_repairable_types(self, tmp_path):
         """
-        Verify that 'stale_participating_repo' is NOT in REPAIRABLE_ANOMALY_TYPES.
-        This anomaly is fixed by re-running delta analysis (Bug #396), not by the
-        repair executor. The repair executor filters on a.domain is not None and
-        this anomaly has domain=None, so including it would be misleading.
+        Verify that 'stale_participating_repo' IS in REPAIRABLE_ANOMALY_TYPES.
+        Story #717 added Phase 1.5 repair for stale repo cleanup.
         """
-        assert "stale_participating_repo" not in REPAIRABLE_ANOMALY_TYPES
+        assert "stale_participating_repo" in REPAIRABLE_ANOMALY_TYPES
 
     def test_stale_repo_not_counted_as_repairable(self, tmp_path):
         """When a stale repo anomaly is detected, repairable_count is NOT incremented."""
@@ -426,7 +424,7 @@ class TestStaleParticipatingRepoIsRepairable:
             a for a in report.anomalies if a.type == "stale_participating_repo"
         ]
         assert len(stale_anomalies) == 1
-        assert report.repairable_count == 0
+        assert report.repairable_count == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

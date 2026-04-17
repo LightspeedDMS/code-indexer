@@ -28,14 +28,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
+from .dep_map_health_detector import DepMapHealthDetector
 
 logger = logging.getLogger(__name__)
 
 # Constants
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
-REFINEMENT_TRUNCATION_MIN_BODY_LENGTH = 500  # Story #359: truncation guard threshold
-REFINEMENT_TRUNCATION_MIN_RATIO = 0.5  # Story #359: result must be >= 50% of body
 
 
 class DependencyMapService:
@@ -1563,28 +1562,20 @@ class DependencyMapService:
             journal_path=self._activity_journal.journal_path,
         )
 
-        # Invoke Claude CLI via public method (Code Review H1: proper encapsulation)
-        result = self._analyzer.invoke_delta_merge(
-            prompt=merge_prompt,
+        # Story #715: File-based delta merge — Claude edits temp file in-place
+        result = self._analyzer.invoke_delta_merge_file(
+            domain_name=domain_name,
+            existing_content=existing_content,
+            merge_prompt=merge_prompt,
             timeout=config.dependency_map_pass_timeout_seconds,
             max_turns=config.dependency_map_delta_max_turns,
+            temp_dir=domain_file.parent,
         )
 
-        # Story #234 AC3: Truncation guard — prevent short summary-only responses from
-        # overwriting full domain documentation.
-        # Strip frontmatter from existing content to measure meaningful body length.
-        frontmatter_split = existing_content.split("---\n\n", 1)
-        existing_body = (
-            frontmatter_split[-1] if len(frontmatter_split) > 1 else existing_content
-        )
-        existing_body_len = len(existing_body)
-
-        if existing_body_len > 500 and len(result) < int(existing_body_len * 0.5):
-            logger.warning(
-                f"Truncation guard fired for domain '{domain_name}': "
-                f"delta result is suspiciously short ({len(result)} chars) "
-                f"compared to existing body ({existing_body_len} chars). "
-                f"Preserving existing content to prevent data loss."
+        if result is None:
+            logger.info(
+                f"Delta merge returned no changes for domain '{domain_name}', "
+                f"preserving existing content."
             )
             return
 
@@ -2103,8 +2094,40 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
-            # Skip if no changes
-            if not changed_repos and not new_repos and not removed_repos:
+            # Story #716: Detect uncovered repos via health check before processing
+            uncovered_repo_aliases: Set[str] = set()
+            uncov_read_path = self._get_cidx_meta_read_path() / "dependency-map"
+            all_activated_repos = self._get_activated_repos()
+            if uncov_read_path.exists():
+                try:
+                    known_aliases = {
+                        r.get("alias", r.get("name", "")) for r in all_activated_repos
+                    }
+                    known_aliases.discard("")
+                    if known_aliases:
+                        hd = DepMapHealthDetector()
+                        hr = hd.detect(uncov_read_path, known_repos=known_aliases)
+                        for anomaly in hr.anomalies:
+                            if (
+                                anomaly.type == "uncovered_repo"
+                                and anomaly.missing_repos
+                            ):
+                                uncovered_repo_aliases.update(anomaly.missing_repos)
+                        if uncovered_repo_aliases:
+                            logger.info(
+                                f"Story #716: Detected {len(uncovered_repo_aliases)} "
+                                f"uncovered repos: {sorted(uncovered_repo_aliases)}"
+                            )
+                except Exception as e:
+                    logger.warning(f"Uncovered repo detection failed (non-fatal): {e}")
+
+            # Skip if no changes AND no uncovered repos
+            if (
+                not changed_repos
+                and not new_repos
+                and not removed_repos
+                and not uncovered_repo_aliases
+            ):
                 logger.info("No changes detected, skipping delta analysis")
                 next_run = (
                     datetime.now(timezone.utc)
@@ -2186,6 +2209,38 @@ class DependencyMapService:
                     )
                 )
                 affected_domains.update(discovered)
+
+            # Story #716: Discover and assign uncovered repos
+            if uncovered_repo_aliases:
+                try:
+                    uncovered_repo_dicts = [
+                        r
+                        for r in all_activated_repos
+                        if r.get("alias", r.get("name", "")) in uncovered_repo_aliases
+                    ]
+                    if uncovered_repo_dicts:
+                        existing_domains_list = (
+                            [
+                                f.stem
+                                for f in dependency_map_read_dir.glob("*.md")
+                                if not f.name.startswith("_")
+                            ]
+                            if dependency_map_read_dir.exists()
+                            else []
+                        )
+                        uncov_discovered, _ = self._discover_and_assign_new_repos(
+                            new_repos=uncovered_repo_dicts,
+                            existing_domains=existing_domains_list,
+                            dependency_map_dir=dependency_map_dir,
+                            config=config,
+                        )
+                        affected_domains.update(uncov_discovered)
+                        logger.info(
+                            f"Story #716: Uncovered repo discovery added "
+                            f"{len(uncov_discovered)} domains to affected set"
+                        )
+                except Exception as e:
+                    logger.warning(f"Uncovered repo discovery failed (non-fatal): {e}")
 
             # Ensure live dependency-map directory exists before writing domain files
             # (versioned cidx-meta repos have empty live path; content is in .versioned/)
@@ -2734,31 +2789,19 @@ class DependencyMapService:
             existing_body=existing_body,
             participating_repos=participating_repos,
         )
-        result_body = self._analyzer.invoke_refinement(
-            prompt,
-            config.dependency_map_pass_timeout_seconds,
-            config.dependency_map_delta_max_turns,
+
+        # Story #715: File-based refinement — Claude edits temp file in-place
+        result_body = self._analyzer.invoke_refinement_file(
+            domain_name=domain_name,
+            existing_content=existing_body,
+            refinement_prompt=prompt,
+            timeout=config.dependency_map_pass_timeout_seconds,
+            max_turns=config.dependency_map_delta_max_turns,
+            temp_dir=dependency_map_dir,
         )
 
-        body_len = len(existing_body)
-        if (
-            body_len > REFINEMENT_TRUNCATION_MIN_BODY_LENGTH
-            and len(result_body) < body_len * REFINEMENT_TRUNCATION_MIN_RATIO
-        ):
-            logger.warning(
-                "Refinement truncation guard fired for domain '%s': "
-                "result %d chars < %.0f%% of body %d chars, skipping write",
-                domain_name,
-                len(result_body),
-                REFINEMENT_TRUNCATION_MIN_RATIO * 100,
-                body_len,
-            )
-            return False
-
-        if result_body.strip() == existing_body.strip():
-            logger.debug(
-                "Refinement no-op for domain '%s': content identical", domain_name
-            )
+        if result_body is None:
+            logger.debug("Refinement produced no changes for domain '%s'", domain_name)
             return False
 
         updated_content = self._build_refinement_frontmatter(
@@ -2784,9 +2827,9 @@ class DependencyMapService:
         Reads from dependency_map_read_dir (versioned/read path).
         Writes to dependency_map_dir (live/write path).
 
-        For missing files: uses build_new_domain_prompt + invoke_refinement to create.
-        For existing files: delegates to _refine_existing_domain() for truncation guard,
-            no-op detection, and frontmatter management.
+        For missing files: uses build_new_domain_prompt + invoke_new_domain_generation.
+        For existing files: delegates to _refine_existing_domain() for file-based
+            refinement via invoke_refinement_file().
 
         Returns:
             True if the domain file was created or updated, False otherwise.
@@ -2804,7 +2847,9 @@ class DependencyMapService:
                 domain_name=domain_name,
                 participating_repos=participating_repos,
             )
-            result_body = self._analyzer.invoke_refinement(prompt, timeout, max_turns)
+            result_body = self._analyzer.invoke_new_domain_generation(
+                prompt, timeout, max_turns
+            )
             now = datetime.now(timezone.utc).isoformat()
             new_content = (
                 f"---\ndomain: {domain_name}\nlast_refined: {now}\n---\n\n{result_body}"

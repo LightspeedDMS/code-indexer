@@ -809,6 +809,7 @@ class GitHubProvider(RepositoryProviderBase):
         kept: List[DiscoveredRepository],
         target: int,
         indexed_urls: Set[str],
+        hidden_identifiers: Optional[Set[str]] = None,
     ) -> Tuple[List[DiscoveredRepository], Optional[int]]:
         """
         Walk batch from skip offset, collect unindexed repos until target reached.
@@ -817,11 +818,18 @@ class GitHubProvider(RepositoryProviderBase):
             (updated_kept, stop_index_or_None)
             stop_index is the batch index where target was hit (inclusive); None if not hit.
         """
+        _hidden = hidden_identifiers or set()
         for i, repo in enumerate(batch):
             if i < skip:
                 continue
             if self._is_repo_indexed(
                 repo.clone_url_https, repo.clone_url_ssh, indexed_urls
+            ):
+                continue
+            # Story #719: skip hidden repos (check both SSH and HTTPS variants)
+            if _hidden and (
+                f"github:{repo.clone_url_ssh}" in _hidden
+                or f"github:{repo.clone_url_https}" in _hidden
             ):
                 continue
             kept.append(repo)
@@ -881,6 +889,7 @@ class GitHubProvider(RepositoryProviderBase):
         page_size: int,
         search: Optional[str],
         indexed_urls: Set[str],
+        hidden_identifiers: Optional[Set[str]] = None,
     ) -> RepositoryDiscoveryResult:
         """
         Run the filter-fill loop and return a RepositoryDiscoveryResult.
@@ -899,7 +908,7 @@ class GitHubProvider(RepositoryProviderBase):
             if source_total is None and batch_total is not None:
                 source_total = batch_total
             kept, stop_idx = self._collect_unindexed_from_batch(
-                batch, state.skip, kept, effective, indexed_urls
+                batch, state.skip, kept, effective, indexed_urls, hidden_identifiers
             )
             if stop_idx is not None:
                 return self._result_from_stop(
@@ -996,6 +1005,7 @@ class GitHubProvider(RepositoryProviderBase):
         cursor: Optional[str] = None,
         page_size: int = 50,
         search: Optional[str] = None,
+        hidden_identifiers: Optional[Set[str]] = None,
     ) -> RepositoryDiscoveryResult:
         """
         Discover repositories from GitHub using cursor-based pagination.
@@ -1024,4 +1034,6 @@ class GitHubProvider(RepositoryProviderBase):
         indexed_urls = self._get_indexed_canonical_urls()
         effective = min(page_size, GITHUB_MAX_PAGE_SIZE)
         state = self._init_discovery_state(cursor, search)
-        return self._run_fill_loop(state, effective, page_size, search, indexed_urls)
+        return self._run_fill_loop(
+            state, effective, page_size, search, indexed_urls, hidden_identifiers
+        )

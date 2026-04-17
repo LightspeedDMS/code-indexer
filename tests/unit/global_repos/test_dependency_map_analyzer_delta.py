@@ -5,7 +5,7 @@ Tests delta-specific prompt construction:
 - Delta merge prompts with self-correction mandate (5 critical rules)
 - Domain discovery prompts for new repos
 - New domain creation prompts
-- Public invoke_delta_merge() method for encapsulation
+- File-based invoke_delta_merge_file() and invoke_refinement_file() methods
 """
 
 from unittest.mock import patch
@@ -1095,28 +1095,206 @@ None documented.
             )
 
 
-class TestInvokeDeltaMerge:
-    """Test public invoke_delta_merge() method for encapsulation (Code Review H1)."""
+# ---------------------------------------------------------------------------
+# Shared constants and helpers for file-based invocation tests (Story #715)
+# ---------------------------------------------------------------------------
 
-    @patch.object(DependencyMapAnalyzer, "_invoke_claude_cli")
-    def test_invoke_delta_merge_calls_internal_method(self, mock_invoke, analyzer):
-        """Test that invoke_delta_merge() properly delegates to _invoke_claude_cli()."""
-        # Setup mock
-        mock_invoke.return_value = "Claude CLI result"
+_TEST_TIMEOUT = 60
+_TEST_MAX_TURNS = 5
+_MTIME_TICK_S = 0.02  # Sleep duration to guarantee mtime advances
 
-        # Call public method
-        prompt = "Test delta merge prompt"
-        timeout = 600
-        max_turns = 10
 
-        result = analyzer.invoke_delta_merge(
-            prompt=prompt,
-            timeout=timeout,
-            max_turns=max_turns,
+def _make_subprocess_result(stdout: str = "FILE_EDIT_COMPLETE") -> object:
+    """Return a CompletedProcess-like object with returncode=0."""
+    import subprocess as _subprocess
+
+    return _subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _make_edit_side_effect(temp_glob: str, new_content: str, tmp_path: object):
+    """Return a subprocess.run side_effect that writes new_content to the temp file."""
+
+    def _side_effect(*args, **kwargs):
+        import time
+        from pathlib import Path
+
+        time.sleep(_MTIME_TICK_S)
+        matched = list(Path(str(tmp_path)).glob(temp_glob))
+        assert len(matched) == 1, (
+            f"Expected 1 temp file matching {temp_glob}, got {matched}"
+        )
+        matched[0].write_text(new_content)
+        return _make_subprocess_result()
+
+    return _side_effect
+
+
+def _make_no_edit_side_effect():
+    """Return a subprocess.run side_effect that does NOT touch the temp file."""
+
+    def _side_effect(*args, **kwargs):
+        return _make_subprocess_result(stdout="some output without edit")
+
+    return _side_effect
+
+
+_SUBPROCESS_PATH = "code_indexer.global_repos.dependency_map_analyzer.subprocess.run"
+
+_EXISTING_DELTA = "# Domain Analysis: test\n\nOriginal delta content"
+_UPDATED_DELTA = "# Domain Analysis: test\n\nUpdated delta content with changes"
+_EXISTING_REFINEMENT = "# Domain Analysis: test\n\nOriginal refinement body"
+_REFINED_CONTENT = "# Domain Analysis: test\n\nRefined body with facts"
+
+
+class TestInvokeDeltaMergeFile:
+    """Tests for invoke_delta_merge_file() — file-based delta merge (Story #715)."""
+
+    def _call(self, analyzer, tmp_path, existing=_EXISTING_DELTA):
+        return analyzer.invoke_delta_merge_file(
+            domain_name="test",
+            existing_content=existing,
+            merge_prompt="merge prompt",
+            timeout=_TEST_TIMEOUT,
+            max_turns=_TEST_MAX_TURNS,
+            temp_dir=tmp_path,
         )
 
-        # Verify internal method was called with correct parameters
-        mock_invoke.assert_called_once_with(
-            prompt, timeout, max_turns, allowed_tools="mcp__cidx-local__search_code"
+    def test_success_returns_updated_content(self, analyzer, tmp_path):
+        """When subprocess edits the temp file, returns the updated content."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_delta_merge_*.md", _UPDATED_DELTA, tmp_path
+            ),
+        ):
+            result = self._call(analyzer, tmp_path)
+        assert result == _UPDATED_DELTA
+
+    def test_uses_dangerously_skip_permissions(self, analyzer, tmp_path):
+        """subprocess.run command must include --dangerously-skip-permissions flag."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_delta_merge_*.md", _UPDATED_DELTA, tmp_path
+            ),
+        ) as mock_run:
+            self._call(analyzer, tmp_path)
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+
+    @pytest.mark.parametrize("exception_cls", [RuntimeError, Exception])
+    def test_cli_exception_returns_none_and_cleans_up(
+        self, analyzer, tmp_path, exception_cls
+    ):
+        """When subprocess raises, returns None and cleans up the temp file."""
+        with patch(_SUBPROCESS_PATH, side_effect=exception_cls("CLI failed")):
+            result = self._call(analyzer, tmp_path)
+        assert result is None
+        assert not list(tmp_path.glob("_delta_merge_*.md"))
+
+    def test_mtime_unchanged_returns_none(self, analyzer, tmp_path):
+        """When subprocess does not modify the file, returns None."""
+        with patch(_SUBPROCESS_PATH, side_effect=_make_no_edit_side_effect()):
+            result = self._call(analyzer, tmp_path)
+        assert result is None
+
+    def test_identical_content_returns_none(self, analyzer, tmp_path):
+        """When subprocess writes back identical content, returns None (no-op)."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_delta_merge_*.md", _EXISTING_DELTA, tmp_path
+            ),
+        ):
+            result = self._call(analyzer, tmp_path, existing=_EXISTING_DELTA)
+        assert result is None
+
+    def test_temp_file_cleaned_up_on_success(self, analyzer, tmp_path):
+        """Temp file is removed after a successful operation."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_delta_merge_*.md", _UPDATED_DELTA, tmp_path
+            ),
+        ):
+            self._call(analyzer, tmp_path)
+        assert not list(tmp_path.glob("_delta_merge_*.md"))
+
+
+class TestInvokeRefinementFile:
+    """Tests for invoke_refinement_file() — file-based refinement (Story #715)."""
+
+    def _call(self, analyzer, tmp_path, existing=_EXISTING_REFINEMENT):
+        return analyzer.invoke_refinement_file(
+            domain_name="test",
+            existing_content=existing,
+            refinement_prompt="refinement prompt",
+            timeout=_TEST_TIMEOUT,
+            max_turns=_TEST_MAX_TURNS,
+            temp_dir=tmp_path,
         )
-        assert result == "Claude CLI result"
+
+    def test_success_returns_refined_content(self, analyzer, tmp_path):
+        """When subprocess edits the temp file, returns the refined content."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_refinement_*.md", _REFINED_CONTENT, tmp_path
+            ),
+        ):
+            result = self._call(analyzer, tmp_path)
+        assert result == _REFINED_CONTENT
+
+    def test_uses_dangerously_skip_permissions_and_all_tools(self, analyzer, tmp_path):
+        """subprocess.run command includes --dangerously-skip-permissions; no --allowedTools restriction."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_refinement_*.md", _REFINED_CONTENT, tmp_path
+            ),
+        ) as mock_run:
+            self._call(analyzer, tmp_path)
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+        # Refinement uses allowed_tools=None → no MCP tool restriction passed
+        cmd_str = " ".join(cmd)
+        assert "mcp__cidx-local__search_code" not in cmd_str
+
+    def test_mtime_unchanged_returns_none(self, analyzer, tmp_path):
+        """When subprocess does not modify the file, returns None."""
+        with patch(_SUBPROCESS_PATH, side_effect=_make_no_edit_side_effect()):
+            result = self._call(analyzer, tmp_path)
+        assert result is None
+
+    def test_temp_file_cleaned_up_on_success(self, analyzer, tmp_path):
+        """Temp file is removed after a successful operation."""
+        with patch(
+            _SUBPROCESS_PATH,
+            side_effect=_make_edit_side_effect(
+                "_refinement_*.md", _REFINED_CONTENT, tmp_path
+            ),
+        ):
+            self._call(analyzer, tmp_path)
+        assert not list(tmp_path.glob("_refinement_*.md"))
+
+
+class TestCleanupTempFile:
+    """Tests for _cleanup_temp_file() helper method."""
+
+    def test_cleanup_removes_existing_file(self, analyzer, tmp_path):
+        """Cleanup removes the temp file when it exists."""
+        temp_file = tmp_path / "test_cleanup.md"
+        temp_file.write_text("content")
+        assert temp_file.exists()
+
+        analyzer._cleanup_temp_file(temp_file)
+
+        assert not temp_file.exists()
+
+    def test_cleanup_does_not_raise_if_file_missing(self, analyzer, tmp_path):
+        """Cleanup silently ignores OSError when file does not exist."""
+        temp_file = tmp_path / "nonexistent.md"
+        assert not temp_file.exists()
+
+        # Should not raise
+        analyzer._cleanup_temp_file(temp_file)

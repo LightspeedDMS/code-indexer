@@ -66,15 +66,28 @@ def _assert_forwarded_to_all(attr_name: str, sentinel: object) -> None:
 
 @contextmanager
 def _swap_app_module(sentinel: Any) -> Generator[None, None, None]:
-    """Temporarily replace app_module, restoring original on exit."""
+    """Temporarily replace app_module, restoring original on exit.
+
+    Must restore BOTH _utils.app_module AND handlers.__dict__["app_module"].
+    setattr(handlers, "app_module", x) via _ForwardingModule.__setattr__ writes
+    to both locations.  Restoring only _utils leaves handlers.__dict__ holding a
+    MagicMock, which later patch() calls save as "original" and restore back,
+    permanently poisoning _utils.app_module for all subsequent tests.
+    """
     _ensure_modules_loaded()
+    import code_indexer.server.mcp.handlers as handlers
     import code_indexer.server.mcp.handlers._utils as utils
 
-    original = utils.app_module
+    original_utils = utils.app_module
+    original_handlers = handlers.__dict__.get("app_module")
     try:
         yield
     finally:
-        utils.app_module = original
+        utils.app_module = original_utils
+        if original_handlers is not None:
+            handlers.__dict__["app_module"] = original_handlers
+        elif "app_module" in handlers.__dict__:
+            del handlers.__dict__["app_module"]
 
 
 # ---------------------------------------------------------------------------

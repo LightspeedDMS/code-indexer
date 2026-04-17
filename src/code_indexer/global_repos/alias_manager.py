@@ -56,7 +56,7 @@ class AliasManager:
             "target_path": target_path,
             "created_at": now,
             "last_refresh": now,
-            "repo_name": repo_name or alias_name.replace("-global", ""),
+            "repo_name": repo_name or alias_name.removesuffix("-global"),
         }
 
         # Atomic write using temp file + rename

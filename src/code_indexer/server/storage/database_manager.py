@@ -135,6 +135,15 @@ class DatabaseSchema:
         )
     """
 
+    # Story #719: Hide Repositories from Auto-Discovery View
+    CREATE_HIDDEN_DISCOVERY_REPOS_TABLE = """
+        CREATE TABLE IF NOT EXISTS hidden_discovery_repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_identifier TEXT NOT NULL UNIQUE,
+            hidden_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+
     CREATE_SSH_KEYS_TABLE = """
         CREATE TABLE IF NOT EXISTS ssh_keys (
             name TEXT PRIMARY KEY,
@@ -653,6 +662,8 @@ class DatabaseSchema:
             # Story #680: External Dependency Latency Observability
             conn.execute(self.CREATE_DEPENDENCY_LATENCY_SAMPLES_TABLE)
             conn.execute(self.CREATE_IDX_DEPENDENCY_LATENCY_DEP_TIMESTAMP)
+            # Story #719: Hide Repositories from Auto-Discovery View
+            conn.execute(self.CREATE_HIDDEN_DISCOVERY_REPOS_TABLE)
 
             conn.commit()
 
@@ -1246,18 +1257,32 @@ class DatabaseConnectionManager:
 
     def close_all(self) -> None:
         """
-        Close all thread-local connections.
+        Close all thread-local connections and deregister this instance.
 
         Should be called during application shutdown to release resources.
+        Removes this instance from the singleton registry so that a subsequent
+        get_instance() call for the same path creates a fresh instance with
+        clean thread-local state.  Without deregistration, a stopped-and-
+        restarted app (common in tests) retrieves the same stale instance whose
+        connections are already closed, causing "Cannot operate on a closed
+        database" errors.
         """
         with self._lock:
             for conn in self._connections.values():
                 try:
                     conn.close()
-                except Exception:
-                    pass  # Ignore errors during cleanup
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to close SQLite connection during shutdown: %s", exc
+                    )
             self._connections.clear()
 
         # Clear local connection reference
         if hasattr(self._local, "connection"):
             self._local.connection = None
+
+        # Deregister from the singleton registry so the next get_instance()
+        # call for this path creates a fresh instance.
+        resolved = os.path.abspath(self.db_path)
+        with self.__class__._instance_lock:
+            self.__class__._instances.pop(resolved, None)

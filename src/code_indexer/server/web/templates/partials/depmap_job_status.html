@@ -19,7 +19,7 @@
     'GRAY':   'status-disabled'
 } %}
 <div class="health-grid">
-    <article class="health-card">
+    <article class="health-card"{% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 %} style="grid-column: span 2;"{% endif %}>
         <header>
             <h3>Health</h3>
         </header>
@@ -27,41 +27,43 @@
             <span class="status-indicator {{ color_class_map.get(job_status.color, 'status-disabled') }}"></span>
             <span class="status-text">{{ job_status.health }}</span>
         </div>
+        {% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 and job_status.content_anomalies is defined %}
+        <div style="margin: 0.5rem 0; max-height: 10rem; overflow-y: auto;">
+            <ul style="margin: 0; padding: 0; list-style: none;">
+                {% for a in job_status.content_anomalies %}
+                <li style="font-size: 0.85em; color: var(--pico-color-amber-600, #d97706); padding: 0.15rem 0;">
+                    {% if a.type == "missing_domain_file" %}
+                        Missing file for domain: {{ a.domain }}
+                    {% elif a.type == "zero_char_domain" %}
+                        Empty file for domain: {{ a.domain }}
+                    {% elif a.type == "undersized_domain" %}
+                        Undersized file for domain: {{ a.domain }} ({{ a.size }} bytes)
+                    {% elif a.type == "incomplete_domain" %}
+                        Incomplete domain: {{ a.domain }} (missing required sections)
+                    {% elif a.type == "malformed_domain" %}
+                        Malformed domain: {{ a.domain }} ({{ a.detail }})
+                    {% elif a.type == "orphan_domain_file" %}
+                        Orphan file: {{ a.file }} (not in _domains.json)
+                    {% elif a.type == "domain_count_mismatch" %}
+                        Domain count mismatch: {{ a.json_count }} in JSON vs {{ a.file_count }} files
+                    {% elif a.type == "missing_index" %}
+                        Missing _index.md
+                    {% elif a.type == "stale_index" %}
+                        Stale _index.md (missing repos)
+                    {% elif a.type == "uncovered_repo" %}
+                        Uncovered repos: {{ a.missing_repos | join(", ") }}
+                    {% else %}
+                        {{ a.type }}{% if a.domain %}: {{ a.domain }}{% endif %}
+                    {% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
         <footer>
             <small>
                 {% if job_status.content_anomaly_count is defined and job_status.content_anomaly_count > 0 %}
                     {{ job_status.content_anomaly_count }} anomal{{ 'y' if job_status.content_anomaly_count == 1 else 'ies' }} — run Full Analysis
-                    {% if job_status.content_anomalies is defined %}
-                    <ul style="margin: 0.25rem 0 0 0; padding: 0; list-style: none;">
-                        {% for a in job_status.content_anomalies %}
-                        <li style="font-size: 0.85em; color: var(--pico-color-amber-600, #92400e);">
-                            {% if a.type == "missing_domain_file" %}
-                                Missing file for domain: {{ a.domain }}
-                            {% elif a.type == "zero_char_domain" %}
-                                Empty file for domain: {{ a.domain }}
-                            {% elif a.type == "undersized_domain" %}
-                                Undersized file for domain: {{ a.domain }} ({{ a.size }} bytes)
-                            {% elif a.type == "incomplete_domain" %}
-                                Incomplete domain: {{ a.domain }} (missing required sections)
-                            {% elif a.type == "malformed_domain" %}
-                                Malformed domain: {{ a.domain }} ({{ a.detail }})
-                            {% elif a.type == "orphan_domain_file" %}
-                                Orphan file: {{ a.file }} (not in _domains.json)
-                            {% elif a.type == "domain_count_mismatch" %}
-                                Domain count mismatch: {{ a.json_count }} in JSON vs {{ a.file_count }} files
-                            {% elif a.type == "missing_index" %}
-                                Missing _index.md
-                            {% elif a.type == "stale_index" %}
-                                Stale _index.md (missing repos)
-                            {% elif a.type == "uncovered_repo" %}
-                                Uncovered repos: {{ a.missing_repos | join(", ") }}
-                            {% else %}
-                                {{ a.type }}{% if a.domain %}: {{ a.domain }}{% endif %}
-                            {% endif %}
-                        </li>
-                        {% endfor %}
-                    </ul>
-                    {% endif %}
                 {% else %}
                     Status: {{ job_status.status or "unknown" }}
                 {% endif %}

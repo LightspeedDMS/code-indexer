@@ -1009,7 +1009,7 @@ class RefreshScheduler:
                 # Story #236 Fix 2: Always derive master path from golden_repos_dir / repo_name.
                 # current_target from alias JSON may point to a .versioned/ snapshot after first
                 # refresh — using it for git pull or as snapshot source would be wrong.
-                repo_name = alias_name.replace("-global", "")
+                repo_name = alias_name.removesuffix("-global")
                 master_path = str(self.golden_repos_dir / repo_name)
 
                 # AC6: Reconcile registry with filesystem at START of refresh
@@ -1119,7 +1119,7 @@ class RefreshScheduler:
                             )
                             _meta_backend = GoldenRepoMetadataSqliteBackend(db_path)
                             # golden_repos_metadata uses base alias (no -global suffix)
-                            base_alias = alias_name.replace("-global", "")
+                            base_alias = alias_name.removesuffix("-global")
                             meta = _meta_backend.get_repo(base_alias)
                             if meta and meta.get("default_branch"):
                                 default_branch = meta["default_branch"]
@@ -1584,7 +1584,7 @@ class RefreshScheduler:
         timestamp = int(time.time())
         version = f"v_{timestamp}"
 
-        repo_name = alias_name.replace("-global", "")
+        repo_name = alias_name.removesuffix("-global")
         versioned_base = self.golden_repos_dir / ".versioned" / repo_name
         versioned_path = versioned_base / version
 
@@ -1776,7 +1776,7 @@ class RefreshScheduler:
         Returns:
             True if changes detected or first version needed, False otherwise
         """
-        repo_name = alias_name.replace("-global", "")
+        repo_name = alias_name.removesuffix("-global")
         versioned_base = self.golden_repos_dir / ".versioned" / repo_name
 
         # Find all v_* versioned directories
@@ -1939,7 +1939,7 @@ class RefreshScheduler:
         Returns:
             True if restoration succeeded, False on any error
         """
-        repo_name = alias_name.replace("-global", "")
+        repo_name = alias_name.removesuffix("-global")
         versioned_base = self.golden_repos_dir / ".versioned" / repo_name
 
         if not versioned_base.exists():
@@ -2026,7 +2026,7 @@ class RefreshScheduler:
             True if description was queued, False if already exists or error
         """
         cidx_meta_dir = self.golden_repos_dir / "cidx-meta"
-        repo_name = alias_name.replace("-global", "")
+        repo_name = alias_name.removesuffix("-global")
         description_file = cidx_meta_dir / f"{repo_name}.md"
 
         if description_file.exists():
@@ -2102,7 +2102,7 @@ class RefreshScheduler:
             if not _is_git_repo_url(repo_url):
                 continue
 
-            repo_name = alias_name.replace("-global", "")
+            repo_name = alias_name.removesuffix("-global")
             master_path = self.golden_repos_dir / repo_name
 
             # AC4: Restore missing master via reverse CoW clone

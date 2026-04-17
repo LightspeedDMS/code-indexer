@@ -46,7 +46,7 @@ class TestOrphanedDomainCreation:
         mock_analyzer = Mock()
         mock_analyzer.build_new_domain_prompt.return_value = "new domain prompt"
         mock_analyzer.build_refinement_prompt.return_value = "refinement prompt"
-        mock_analyzer.invoke_refinement.return_value = new_domain_result
+        mock_analyzer.invoke_new_domain_generation.return_value = new_domain_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -78,7 +78,7 @@ class TestOrphanedDomainCreation:
 
         mock_analyzer = Mock()
         mock_analyzer.build_new_domain_prompt.return_value = "new domain prompt"
-        mock_analyzer.invoke_refinement.return_value = new_domain_result
+        mock_analyzer.invoke_new_domain_generation.return_value = new_domain_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -111,7 +111,7 @@ class TestOrphanedDomainCreation:
 
         mock_analyzer = Mock()
         mock_analyzer.build_new_domain_prompt.return_value = "new domain prompt"
-        mock_analyzer.invoke_refinement.return_value = new_domain_result
+        mock_analyzer.invoke_new_domain_generation.return_value = new_domain_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -147,7 +147,7 @@ class TestLastRefinedTimestampSet:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = different_result
+        mock_analyzer.invoke_refinement_file.return_value = different_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -178,7 +178,7 @@ class TestLastRefinedTimestampSet:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = different_result
+        mock_analyzer.invoke_refinement_file.return_value = different_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -227,7 +227,7 @@ class TestLastAnalyzedPreserved:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = different_result
+        mock_analyzer.invoke_refinement_file.return_value = different_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -268,7 +268,7 @@ class TestRefinementDisabledSkips:
 
         service.run_refinement_cycle()
 
-        mock_analyzer.invoke_refinement.assert_not_called()
+        mock_analyzer.invoke_refinement_file.assert_not_called()
         mock_analyzer.build_refinement_prompt.assert_not_called()
 
     def test_refinement_disabled_returns_none(self, tmp_path: Path):
@@ -307,7 +307,7 @@ class TestIndexMdRegenerationAfterBatch:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = different_result
+        mock_analyzer.invoke_refinement_file.return_value = different_result
         mock_analyzer._generate_index_md = Mock()
 
         config = make_config(refinement_domains_per_run=1)
@@ -330,10 +330,10 @@ class TestIndexMdRegenerationAfterBatch:
         (dep_map / "auth-domain.md").write_text(FULL_DOMAIN_CONTENT)
         make_live_dep_map(tmp_path)
 
-        # Return identical body — no change
+        # invoke_refinement_file returns None when content is unchanged (no-op)
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        mock_analyzer.invoke_refinement_file.return_value = None
         mock_analyzer._generate_index_md = Mock()
 
         config = make_config(refinement_domains_per_run=1)

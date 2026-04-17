@@ -1,10 +1,10 @@
 """
 Unit tests for Story #234: Fix Delta Analysis Overwriting Full Domain Documentation.
 
-Tests the truncation guard in _update_domain_file() and related behaviors:
+Tests the delta merge behavior in _update_domain_file() and related behaviors:
 - AC1: Delta analysis preserves full document structure
-- AC3: Truncation guard prevents data loss from summary-only responses
-- AC4: Legitimate short updates are not blocked
+- AC3: When invoke_delta_merge_file returns None, existing content is preserved
+- AC4: When invoke_delta_merge_file returns content, the file is updated normally
 """
 
 import logging
@@ -195,7 +195,7 @@ class TestTruncationGuardAC3:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = CHANGE_SUMMARY_RESPONSE
+        mock_analyzer.invoke_delta_merge_file.return_value = None
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
@@ -234,11 +234,11 @@ class TestTruncationGuardAC3:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = CHANGE_SUMMARY_RESPONSE
+        mock_analyzer.invoke_delta_merge_file.return_value = None
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.INFO):
             service._update_domain_file(
                 domain_name="cidx-platform",
                 domain_file=domain_file,
@@ -249,16 +249,12 @@ class TestTruncationGuardAC3:
                 config=_make_config(),
             )
 
-        # Should have logged a warning mentioning "short" or length discrepancy
-        warning_messages = [
-            r.message for r in caplog.records if r.levelno >= logging.WARNING
-        ]
+        # Should have logged info about preserving content (file-based method returned None)
+        info_messages = [r.message for r in caplog.records if r.levelno >= logging.INFO]
         assert any(
-            "short" in msg.lower()
-            or "truncat" in msg.lower()
-            or "preserv" in msg.lower()
-            for msg in warning_messages
-        ), f"Expected truncation warning in logs. Got warnings: {warning_messages}"
+            "no changes" in msg.lower() or "preserv" in msg.lower()
+            for msg in info_messages
+        ), f"Expected info about no changes in logs. Got: {info_messages}"
 
     def test_truncation_guard_threshold_exactly_50_percent_of_body(
         self, tmp_path: Path
@@ -281,7 +277,7 @@ class TestTruncationGuardAC3:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = response_at_50_pct
+        mock_analyzer.invoke_delta_merge_file.return_value = response_at_50_pct
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
@@ -328,7 +324,7 @@ class TestLegitimateShortUpdatesAC4:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = short_but_valid_response
+        mock_analyzer.invoke_delta_merge_file.return_value = short_but_valid_response
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
@@ -360,7 +356,7 @@ class TestLegitimateShortUpdatesAC4:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = UPDATED_FULL_RESPONSE
+        mock_analyzer.invoke_delta_merge_file.return_value = UPDATED_FULL_RESPONSE
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
@@ -393,7 +389,7 @@ class TestLegitimateShortUpdatesAC4:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = (
+        mock_analyzer.invoke_delta_merge_file.return_value = (
             "# Domain Analysis: empty-domain\n\nNew content."
         )
 
@@ -425,7 +421,7 @@ class TestLegitimateShortUpdatesAC4:
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = proportional_response
+        mock_analyzer.invoke_delta_merge_file.return_value = proportional_response
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 
@@ -527,7 +523,7 @@ Updated repo roles with evidence.
 
         mock_analyzer = Mock()
         mock_analyzer.build_delta_merge_prompt.return_value = "test prompt"
-        mock_analyzer.invoke_delta_merge.return_value = UPDATED_FULL_RESPONSE
+        mock_analyzer.invoke_delta_merge_file.return_value = UPDATED_FULL_RESPONSE
 
         service = _make_service_with_mock_analyzer(tmp_path, mock_analyzer)
 

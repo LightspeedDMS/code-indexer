@@ -51,7 +51,8 @@ class TestTruncationGuardRejectsShortOutput:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = short_result
+        # invoke_refinement_file returns None when truncation guard fires internally
+        mock_analyzer.invoke_refinement_file.return_value = None
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -77,7 +78,8 @@ class TestTruncationGuardRejectsShortOutput:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = "Too short."
+        # invoke_refinement_file returns None when truncation guard fires internally
+        mock_analyzer.invoke_refinement_file.return_value = None
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -115,7 +117,7 @@ class TestTruncationGuardAcceptsNormalOutput:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = good_result
+        mock_analyzer.invoke_refinement_file.return_value = good_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -143,7 +145,7 @@ class TestTruncationGuardAcceptsNormalOutput:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = larger_result
+        mock_analyzer.invoke_refinement_file.return_value = larger_result
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -186,7 +188,7 @@ class TestTruncationGuardSkipsShortOriginals:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = very_short_result
+        mock_analyzer.invoke_refinement_file.return_value = very_short_result
 
         tiny_domain_info = {
             "name": "tiny",
@@ -227,7 +229,8 @@ class TestNoopWhenContentIdentical:
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
         # Return exact same body (stripped of frontmatter)
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        # invoke_refinement_file returns None when content is identical (no-op)
+        mock_analyzer.invoke_refinement_file.return_value = None
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)
@@ -255,7 +258,8 @@ class TestNoopWhenContentIdentical:
 
         mock_analyzer = Mock()
         mock_analyzer.build_refinement_prompt.return_value = "prompt"
-        mock_analyzer.invoke_refinement.return_value = FULL_DOMAIN_BODY
+        # invoke_refinement_file returns None when content is identical (no-op)
+        mock_analyzer.invoke_refinement_file.return_value = None
 
         config = make_config()
         service = make_service(tmp_path, mock_analyzer, config)

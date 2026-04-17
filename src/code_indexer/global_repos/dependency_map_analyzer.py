@@ -1046,7 +1046,32 @@ Rules:
         else:
             hook_thresh = None
 
+        # Story #715: File-based output — Claude writes body to temp file
+        safe_name = self._sanitize_domain_name_for_path(domain_name)
+        body_file = staging_dir / f"_pass2_body_{safe_name}.md"
+        if body_file.exists():
+            body_file.unlink()
+
+        try:
+            body_file_rel = body_file.relative_to(self.golden_repos_root)
+        except ValueError:
+            body_file_rel = body_file
+
+        file_write_instructions = (
+            f"\n\n## CRITICAL: File-Based Output\n\n"
+            f"You MUST write your complete analysis to a file using the Write tool.\n"
+            f"Target file: `{body_file}`\n"
+            f"Relative from your cwd: `./{body_file_rel}`\n\n"
+            f"Write ONLY the document body (starting with # Domain Analysis heading).\n"
+            f"Do NOT include YAML frontmatter — the system adds it automatically.\n"
+            f"After writing the file, print exactly: FILE_WRITE_COMPLETE\n\n"
+            f"Do NOT output the full document to stdout — use the Write tool.\n"
+        )
+
+        prompt = prompt + file_write_instructions
+
         # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
+        # Story #715: dangerously_skip_permissions enables Write tool for file output
         result = self._invoke_claude_cli(
             prompt,
             self.pass_timeout,
@@ -1054,10 +1079,11 @@ Rules:
             allowed_tools="mcp__cidx-local__search_code",
             post_tool_hook=hook_reminder,
             hook_thresholds=hook_thresh,
+            dangerously_skip_permissions=True,
         )
 
-        # Strip meta-commentary from output
-        result = self._strip_meta_commentary(result)
+        # Story #715: Read from file if Claude wrote it, else fall back to stdout
+        result = self._read_pass2_file_or_strip(body_file, result)
 
         # Fix 2 (Iteration 12): Detect max-turns exhaustion and retry with search budget guidance
         # Iteration 13: Large domains use write-only retry, small domains use budget search retry
@@ -1079,6 +1105,7 @@ Rules:
                     8,
                     allowed_tools="",  # NO MCP tools
                     post_tool_hook=hook_reminder,
+                    dangerously_skip_permissions=True,
                 )
             else:
                 # Small domain: existing retry logic (budget search)
@@ -1093,8 +1120,10 @@ Rules:
                     15,
                     allowed_tools="mcp__cidx-local__search_code",
                     post_tool_hook=hook_reminder,
+                    dangerously_skip_permissions=True,
                 )
-            result = self._strip_meta_commentary(result)
+            # Story #715: Read from file if Claude wrote it, else fall back to stdout
+            result = self._read_pass2_file_or_strip(body_file, result)
 
         # Check for insufficient output and retry with reduced turns (Fix 1: raised threshold to 1000)
         # FIX 2 (Iteration 10): Also check for missing headings (pure meta-commentary)
@@ -1118,8 +1147,10 @@ Rules:
                 10,
                 allowed_tools="",  # No MCP tools - write only
                 post_tool_hook=hook_reminder,
+                dangerously_skip_permissions=True,
             )
-            result = self._strip_meta_commentary(result)
+            # Story #715: Read from file if Claude wrote it, else fall back to stdout
+            result = self._read_pass2_file_or_strip(body_file, result)
 
             # If retry also fails (insufficient), skip writing garbage file
             # FIX 3 (Iteration 11): When both attempts fail, skip this domain - don't write garbage
@@ -1131,6 +1162,7 @@ Rules:
                     f"Pass 2 retry also returned insufficient output for domain '{domain_name}' "
                     f"({reason}) - SKIPPING domain file (will not write garbage content)"
                 )
+                self._cleanup_temp_file(body_file)
                 return
 
         # Build YAML frontmatter (description included so Phase 3.5 can backfill JSON)
@@ -2529,28 +2561,138 @@ Rules:
 
         return prompt
 
-    def invoke_delta_merge(self, prompt: str, timeout: int, max_turns: int) -> str:
-        """
-        Invoke Claude CLI for delta merge analysis (Story #193).
+    def _sanitize_domain_name_for_path(self, domain_name: str) -> str:
+        """Return a filesystem-safe version of domain_name for use in filenames."""
+        return re.sub(r"[^A-Za-z0-9._-]", "_", domain_name)
 
-        Public method for delta merge invocations that maintains encapsulation
-        by wrapping the private _invoke_claude_cli method.
+    def _read_pass2_file_or_strip(self, body_file: Path, stdout_result: str) -> str:
+        """Read from body_file if Claude wrote it, else strip meta-commentary from stdout."""
+        if body_file.exists() and body_file.stat().st_size > 0:
+            content = body_file.read_text()
+            body_file.unlink()
+            return content
+        return self._strip_meta_commentary(stdout_result)
+
+    def _build_file_based_instructions(self, temp_file: Path) -> str:
+        """Build the prompt suffix that instructs Claude to edit temp_file in place."""
+        try:
+            temp_file_rel = temp_file.relative_to(self.golden_repos_root)
+        except ValueError:
+            temp_file_rel = temp_file
+        return (
+            f"\n\n## CRITICAL: File-Based Output\n\n"
+            f"You MUST edit the domain document file directly using the Edit tool.\n"
+            f"The current domain document is at: `{temp_file}`\n"
+            f"Relative path from your cwd: `./{temp_file_rel}`\n\n"
+            f"1. Read the file at the path above\n"
+            f"2. Apply your changes using the Edit tool (NOT stdout)\n"
+            f"3. After ALL edits are complete, print exactly this line: FILE_EDIT_COMPLETE\n\n"
+            f"Do NOT output the full document to stdout. Edit the FILE.\n"
+        )
+
+    def _verify_file_modified(
+        self, temp_file: Path, original_mtime: float, domain_name: str
+    ) -> bool:
+        """Return True if temp_file mtime changed; log and return False otherwise."""
+        try:
+            new_mtime = temp_file.stat().st_mtime
+        except OSError:
+            logger.error(f"Temp file disappeared after operation for '{domain_name}'")
+            return False
+        if new_mtime == original_mtime:
+            logger.warning(
+                f"File not modified for '{domain_name}' (mtime unchanged). "
+                f"Returning False to preserve original."
+            )
+            return False
+        return True
+
+    def _read_file_if_changed(
+        self, temp_file: Path, existing_content: str, domain_name: str, operation: str
+    ) -> Optional[str]:
+        """Read temp_file; return content if different from existing_content, else None."""
+        updated_content = temp_file.read_text()
+        if updated_content.strip() == existing_content.strip():
+            logger.info(f"{operation} produced no changes for '{domain_name}'")
+            return None
+        return updated_content
+
+    def invoke_delta_merge_file(
+        self,
+        domain_name: str,
+        existing_content: str,
+        merge_prompt: str,
+        timeout: int,
+        max_turns: int,
+        temp_dir: Path,
+    ) -> Optional[str]:
+        """
+        File-based delta merge: writes existing content to temp file,
+        Claude edits in-place via Edit tool (Story #715).
+
+        allowed_tools=None lets Claude use all tools: built-in Edit (for in-place
+        file edits) and MCP search tools (for code lookup during merge).
 
         Args:
-            prompt: Delta merge prompt to send to Claude
+            domain_name: Name of the domain being updated
+            existing_content: Current domain file content
+            merge_prompt: The delta merge prompt (from build_delta_merge_prompt)
             timeout: Timeout in seconds
-            max_turns: Maximum number of agentic turns
+            max_turns: Maximum agentic turns
+            temp_dir: Directory for temp file
 
         Returns:
-            Claude CLI stdout output
-
-        Raises:
-            subprocess.CalledProcessError: If Claude CLI fails
-            subprocess.TimeoutExpired: If timeout is exceeded
+            Updated content string, or None on failure (caller preserves original)
         """
-        return self._invoke_claude_cli(
-            prompt, timeout, max_turns, allowed_tools="mcp__cidx-local__search_code"
-        )
+        safe_name = self._sanitize_domain_name_for_path(domain_name)
+        temp_file = temp_dir / f"_delta_merge_{safe_name}.md"
+        try:
+            temp_file.write_text(existing_content)
+            original_mtime = temp_file.stat().st_mtime
+            prompt = merge_prompt + self._build_file_based_instructions(temp_file)
+            try:
+                result = self._invoke_claude_cli(
+                    prompt,
+                    timeout,
+                    max_turns,
+                    allowed_tools="mcp__cidx-local__search_code",
+                    dangerously_skip_permissions=True,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Delta merge file invocation failed for '{domain_name}': {e}"
+                )
+                return None
+            if not self._verify_file_modified(temp_file, original_mtime, domain_name):
+                return None
+            if "FILE_EDIT_COMPLETE" not in (result or ""):
+                logger.warning(
+                    f"Completion signal missing for delta merge of '{domain_name}'"
+                )
+            return self._read_file_if_changed(
+                temp_file, existing_content, domain_name, "Delta merge"
+            )
+        finally:
+            self._cleanup_temp_file(temp_file)
+
+    def invoke_new_domain_generation(
+        self, prompt: str, timeout: int, max_turns: int
+    ) -> str:
+        """
+        Invoke Claude CLI to generate a new domain document from scratch (Story #715).
+
+        Used when a domain file is missing and needs creation. Output is small enough
+        that stdout is adequate (unlike delta merge/refinement of large existing docs).
+
+        Args:
+            prompt: New domain generation prompt
+            timeout: Timeout in seconds
+            max_turns: Maximum agentic turns
+
+        Returns:
+            Claude CLI stdout output (new domain document body)
+        """
+        return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
 
     def invoke_domain_discovery(self, prompt: str, timeout: int, max_turns: int) -> str:
         """
@@ -2641,25 +2783,65 @@ Rules:
 
         return prompt
 
-    def invoke_refinement(self, prompt: str, timeout: int, max_turns: int) -> str:
+    def invoke_refinement_file(
+        self,
+        domain_name: str,
+        existing_content: str,
+        refinement_prompt: str,
+        timeout: int,
+        max_turns: int,
+        temp_dir: Path,
+    ) -> Optional[str]:
         """
-        Invoke Claude CLI for domain document refinement (Story #359).
-
-        Public method for refinement invocations that maintains encapsulation
-        by wrapping the private _invoke_claude_cli method. Refinement uses all
-        MCP tools (allowed_tools=None) to enable full code exploration for
-        fact-checking.
+        File-based refinement: writes existing content to temp file,
+        Claude edits in-place via Edit tool (Story #715).
 
         Args:
-            prompt: Refinement prompt to send to Claude
+            domain_name: Name of the domain being refined
+            existing_content: Current domain body content (without frontmatter)
+            refinement_prompt: The refinement prompt (from build_refinement_prompt)
             timeout: Timeout in seconds
-            max_turns: Maximum number of agentic turns
+            max_turns: Maximum agentic turns
+            temp_dir: Directory for temp file
 
         Returns:
-            Claude CLI stdout output (refined domain document body)
-
-        Raises:
-            subprocess.CalledProcessError: If Claude CLI fails
-            subprocess.TimeoutExpired: If timeout is exceeded
+            Updated content string, or None on failure
         """
-        return self._invoke_claude_cli(prompt, timeout, max_turns, allowed_tools=None)
+        safe_name = self._sanitize_domain_name_for_path(domain_name)
+        temp_file = temp_dir / f"_refinement_{safe_name}.md"
+        try:
+            temp_file.write_text(existing_content)
+            original_mtime = temp_file.stat().st_mtime
+            prompt = refinement_prompt + self._build_file_based_instructions(temp_file)
+            try:
+                result = self._invoke_claude_cli(
+                    prompt,
+                    timeout,
+                    max_turns,
+                    allowed_tools=None,
+                    dangerously_skip_permissions=True,
+                )
+            except Exception as e:
+                logger.error(
+                    f"Refinement file invocation failed for '{domain_name}': {e}"
+                )
+                return None
+            if not self._verify_file_modified(temp_file, original_mtime, domain_name):
+                return None
+            if "FILE_EDIT_COMPLETE" not in (result or ""):
+                logger.warning(
+                    f"Completion signal missing for refinement of '{domain_name}'"
+                )
+            return self._read_file_if_changed(
+                temp_file, existing_content, domain_name, "Refinement"
+            )
+        finally:
+            self._cleanup_temp_file(temp_file)
+
+    def _cleanup_temp_file(self, temp_file: Path) -> None:
+        """Remove temp file, logging but not raising on failure."""
+        try:
+            if temp_file.exists():
+                temp_file.unlink()
+        except OSError as e:
+            logger.warning("Failed to remove temp file '%s': %s", temp_file, e)

@@ -210,7 +210,7 @@ def _resolve_repo_path(repo_identifier: str, golden_repos_dir: str) -> Optional[
         return None
 
     # Get repo name without -global suffix
-    repo_name = repo_identifier.replace("-global", "")
+    repo_name = repo_identifier.removesuffix("-global")
 
     # Try 1: index_path directly (might be a git repo in test environments)
     index_path = repo_entry.get("index_path")

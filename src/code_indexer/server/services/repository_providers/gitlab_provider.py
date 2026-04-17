@@ -577,6 +577,7 @@ class GitLabProvider(RepositoryProviderBase):
         }
         if search:
             params["search"] = search
+            params["search_namespaces"] = "true"
         response = self._make_api_request_checked("projects", params=params)
         projects = response.json()
         source_total = int(response.headers.get("x-total", "0")) or None
@@ -593,6 +594,7 @@ class GitLabProvider(RepositoryProviderBase):
         kept: List[DiscoveredRepository],
         target: int,
         indexed_urls: Set[str],
+        hidden_identifiers: Optional[Set[str]] = None,
     ) -> Tuple[List[DiscoveredRepository], Optional[int]]:
         """
         Walk batch from skip offset, collect unindexed repos until target reached.
@@ -600,11 +602,18 @@ class GitLabProvider(RepositoryProviderBase):
         Returns:
             (updated_kept, stop_index_or_None)
         """
+        _hidden = hidden_identifiers or set()
         for i, repo in enumerate(batch):
             if i < skip:
                 continue
             if self._is_repo_indexed(
                 repo.clone_url_https, repo.clone_url_ssh, indexed_urls
+            ):
+                continue
+            # Story #719: skip hidden repos
+            if _hidden and (
+                f"gitlab:{repo.clone_url_ssh}" in _hidden
+                or f"gitlab:{repo.clone_url_https}" in _hidden
             ):
                 continue
             kept.append(repo)
@@ -681,6 +690,7 @@ class GitLabProvider(RepositoryProviderBase):
         page_size: int,
         search: Optional[str],
         indexed_urls: Set[str],
+        hidden_identifiers: Optional[Set[str]] = None,
     ) -> RepositoryDiscoveryResult:
         """Run the filter-fill loop and return a RepositoryDiscoveryResult."""
         kept: List[DiscoveredRepository] = []
@@ -696,7 +706,7 @@ class GitLabProvider(RepositoryProviderBase):
             if source_total is None and batch_total is not None:
                 source_total = batch_total
             kept, stop_idx = self._collect_unindexed_from_batch(
-                batch, state.skip, kept, effective, indexed_urls
+                batch, state.skip, kept, effective, indexed_urls, hidden_identifiers
             )
             if stop_idx is not None:
                 return self._result_from_stop(
@@ -722,6 +732,7 @@ class GitLabProvider(RepositoryProviderBase):
         cursor: Optional[str] = None,
         page_size: int = 50,
         search: Optional[str] = None,
+        hidden_identifiers: Optional[Set[str]] = None,
     ) -> RepositoryDiscoveryResult:
         """
         Discover repositories from GitLab using cursor-based pagination.
@@ -749,7 +760,9 @@ class GitLabProvider(RepositoryProviderBase):
             raise GitLabProviderError("page_size must be at least 1")
         indexed_urls = self._get_indexed_canonical_urls()
         state = self._init_discovery_state(cursor)
-        result = self._run_fill_loop(state, page_size, page_size, search, indexed_urls)
+        result = self._run_fill_loop(
+            state, page_size, page_size, search, indexed_urls, hidden_identifiers
+        )
         # Enrich with commit info via GraphQL (REST doesn't provide it)
         if result.repositories:
             self._enrich_repositories_with_commits(result.repositories)

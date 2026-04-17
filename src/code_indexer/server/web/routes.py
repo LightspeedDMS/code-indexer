@@ -6399,6 +6399,16 @@ def _get_github_provider():
     )
 
 
+def _get_hidden_discovery_backend():
+    """Get or create HiddenDiscoveryReposSqliteBackend instance."""
+    from ..storage.sqlite_backends import HiddenDiscoveryReposSqliteBackend
+    from ..services.config_service import get_config_service
+
+    config_service = get_config_service()
+    db_path = str(config_service.config_manager.server_dir / "data" / "cidx_server.db")
+    return HiddenDiscoveryReposSqliteBackend(db_path)
+
+
 def _build_gitlab_repos_response(
     request: Request,
     repositories: Optional[list] = None,
@@ -6410,6 +6420,8 @@ def _build_gitlab_repos_response(
     error_type: Optional[str] = None,
     error_message: Optional[str] = None,
     search_term: Optional[str] = None,
+    show_hidden: bool = False,
+    hidden_identifiers: Optional[set] = None,
 ):
     """Build GitLab repos partial template response."""
     # Get existing CSRF token from cookie or generate new one
@@ -6429,6 +6441,8 @@ def _build_gitlab_repos_response(
             "error_type": error_type,
             "error_message": error_message,
             "search_term": search_term or "",
+            "show_hidden": show_hidden,
+            "hidden_identifiers": hidden_identifiers or set(),
         },
     )
 
@@ -6448,6 +6462,8 @@ def _build_github_repos_response(
     error_type: Optional[str] = None,
     error_message: Optional[str] = None,
     search_term: Optional[str] = None,
+    show_hidden: bool = False,
+    hidden_identifiers: Optional[set] = None,
 ):
     """Build GitHub repos partial template response."""
     # Get existing CSRF token from cookie or generate new one
@@ -6467,6 +6483,8 @@ def _build_github_repos_response(
             "error_type": error_type,
             "error_message": error_message,
             "search_term": search_term or "",
+            "show_hidden": show_hidden,
+            "hidden_identifiers": hidden_identifiers or set(),
         },
     )
 
@@ -6502,6 +6520,7 @@ def gitlab_repos_partial(
     cursor: Optional[str] = None,
     page_size: int = Query(default=50, ge=1, le=100),
     search: Optional[str] = None,
+    show_hidden: bool = Query(default=False),
 ):
     """HTMX partial for GitLab repository discovery."""
     session = _require_admin_session(request)
@@ -6510,7 +6529,6 @@ def gitlab_repos_partial(
 
     from ..services.repository_providers.gitlab_provider import GitLabProviderError
 
-    # Normalize search: treat empty string as None
     search_term = search.strip() if search else None
 
     try:
@@ -6523,8 +6541,12 @@ def gitlab_repos_partial(
                 search_term=search_term,
             )
 
+        hidden_ids, all_hidden = _load_hidden_ids(show_hidden)
         result = provider.discover_repositories(
-            cursor=cursor, page_size=page_size, search=search_term
+            cursor=cursor,
+            page_size=page_size,
+            search=search_term,
+            hidden_identifiers=hidden_ids,
         )
         return _build_gitlab_repos_response(
             request,
@@ -6535,8 +6557,11 @@ def gitlab_repos_partial(
             result.partial_due_to_cap,
             result.source_total,
             search_term=search_term,
+            show_hidden=show_hidden,
+            hidden_identifiers=all_hidden if show_hidden else set(),
         )
     except GitLabProviderError as e:
+        logger.warning("GitLab provider error: %s", e)
         return _build_gitlab_repos_response(
             request,
             page_size=page_size,
@@ -6561,12 +6586,23 @@ def gitlab_repos_partial(
         )
 
 
+def _load_hidden_ids(show_hidden):
+    """Load hidden discovery repo identifiers (Story #719)."""
+    try:
+        all_hidden = _get_hidden_discovery_backend().get_hidden_set()
+    except Exception as e:
+        logger.warning("Failed to load hidden repos: %s", e)
+        all_hidden = set()
+    return (set() if show_hidden else all_hidden), all_hidden
+
+
 @web_router.get("/partials/auto-discovery/github", response_class=HTMLResponse)
 def github_repos_partial(
     request: Request,
     cursor: Optional[str] = None,
     page_size: int = Query(default=50, ge=1, le=100),
     search: Optional[str] = None,
+    show_hidden: bool = Query(default=False),
 ):
     """HTMX partial for GitHub repository discovery."""
     session = _require_admin_session(request)
@@ -6575,7 +6611,6 @@ def github_repos_partial(
 
     from ..services.repository_providers.github_provider import GitHubProviderError
 
-    # Normalize search: treat empty string as None
     search_term = search.strip() if search else None
 
     try:
@@ -6588,8 +6623,12 @@ def github_repos_partial(
                 search_term=search_term,
             )
 
+        hidden_ids, all_hidden = _load_hidden_ids(show_hidden)
         result = provider.discover_repositories(
-            cursor=cursor, page_size=page_size, search=search_term
+            cursor=cursor,
+            page_size=page_size,
+            search=search_term,
+            hidden_identifiers=hidden_ids,
         )
         return _build_github_repos_response(
             request,
@@ -6600,13 +6639,13 @@ def github_repos_partial(
             result.partial_due_to_cap,
             result.source_total,
             search_term=search_term,
+            show_hidden=show_hidden,
+            hidden_identifiers=all_hidden if show_hidden else set(),
         )
     except GitHubProviderError as e:
+        logger.warning("GitHub provider error: %s", e)
         error_msg = str(e)
-        error_type = "api_error"
-        # Check for rate limit specific error
-        if "rate limit" in error_msg.lower():
-            error_type = "rate_limit"
+        error_type = "rate_limit" if "rate limit" in error_msg.lower() else "api_error"
         return _build_github_repos_response(
             request,
             page_size=page_size,
@@ -6629,6 +6668,71 @@ def github_repos_partial(
             error_message=f"Unexpected error: {e}",
             search_term=search_term,
         )
+
+
+# =============================================================================
+# Discovery Hide/Unhide Endpoints (Story #719)
+# =============================================================================
+
+
+async def _validate_discovery_hide_request(
+    request: Request,
+) -> Tuple[Optional[HTMLResponse], str]:
+    """Validate session, CSRF, and repo_identifier for hide/unhide endpoints.
+
+    Returns (error_response, repo_identifier). If error_response is not None,
+    the caller should return it immediately.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=status.HTTP_401_UNAUTHORIZED), ""
+
+    form_data = await request.form()
+    repo_identifier = str(form_data.get("repo_identifier", ""))
+    csrf_token = str(form_data.get("csrf_token", ""))
+
+    if not validate_login_csrf_token(request, csrf_token):
+        return (
+            HTMLResponse(
+                content="Invalid CSRF token", status_code=status.HTTP_403_FORBIDDEN
+            ),
+            "",
+        )
+
+    if not repo_identifier:
+        return (
+            HTMLResponse(
+                content="Missing repo_identifier",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            ),
+            "",
+        )
+
+    return None, repo_identifier
+
+
+@web_router.post("/api/discovery/hide", response_class=HTMLResponse)
+async def hide_discovery_repo(request: Request):
+    """Hide a repository from the auto-discovery view (Story #719)."""
+    error, repo_identifier = await _validate_discovery_hide_request(request)
+    if error is not None:
+        return error
+
+    backend = _get_hidden_discovery_backend()
+    backend.add_hidden_repo(repo_identifier)
+    return HTMLResponse(content="", status_code=status.HTTP_200_OK)
+
+
+@web_router.post("/api/discovery/unhide", response_class=HTMLResponse)
+async def unhide_discovery_repo(request: Request):
+    """Unhide a repository from the auto-discovery view (Story #719)."""
+    error, repo_identifier = await _validate_discovery_hide_request(request)
+    if error is not None:
+        return error
+
+    backend = _get_hidden_discovery_backend()
+    backend.remove_hidden_repo(repo_identifier)
+    return HTMLResponse(content="", status_code=status.HTTP_200_OK)
 
 
 # =============================================================================

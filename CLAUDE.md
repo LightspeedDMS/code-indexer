@@ -27,7 +27,7 @@ Use plain text headers: `### Performance Improvements`
 **NEVER** assume or guess SSH passwords, server credentials, usernames, or connection details.
 
 **ALWAYS** read `.local-testing` (gitignored, project root) for:
-- SSH usernames and passwords for staging (.20), production (.30), Mac laptop
+- SSH usernames and passwords for staging (.20), Mac laptop
 - CIDX admin credentials per environment
 - API keys (Langfuse, GitHub, GitLab, Anthropic)
 - MCPB deployment details and encrypted credential paths
@@ -46,7 +46,7 @@ Use plain text headers: `### Performance Improvements`
 **Local workflow**:
 - Development/testing: localhost:8000
 - Callbacks: dev machine's external IP (visible to Claude Server)
-- Production (.30): firewalled, DO NOT TOUCH
+- Production: deploys via master branch auto-deployer (see .local-testing for details)
 
 **Deploy ONLY when** user says: "commit and push to master" OR "deploy manually to production server"
 
@@ -351,14 +351,14 @@ setting = config.some_setting
 |--------|---------|----------------|
 | `development` | Active work, version bumps | YES |
 | `staging` | Staging env (.20 server) | NO (merge only) |
-| `master` | Production env (.30 server) | NO (merge only) |
+| `master` | Production env (auto-deploy) | NO (merge only) |
 
 ### Auto-Deployment
 
 | Branch | Tag | Deploys To |
 |--------|-----|------------|
 | `staging` | v8.x.x | .20 server |
-| `master` | v8.x.x | .30 server |
+| `master` | v8.x.x | production (auto-deploy) |
 | `development` | any | No auto-deploy |
 
 Tags transfer automatically during merges.
@@ -387,7 +387,7 @@ git checkout staging && git describe --exact-match HEAD
 # 2. Merge to master
 git checkout master && git merge staging
 
-# 3. Push (triggers .30 deployment)
+# 3. Push (triggers production auto-deployment)
 git push origin master
 ```
 

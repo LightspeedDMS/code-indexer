@@ -915,8 +915,8 @@ class TestDetectUncoveredRepos:
         assert len(uncovered) == 1
         assert "1" in uncovered[0].detail  # "1 repo(s) not in any domain"
 
-    def test_detect_uncovered_not_in_repairable_types(self, tmp_path):
-        """uncovered_repo anomaly is NOT counted as repairable (requires full re-run)."""
+    def test_detect_uncovered_in_repairable_types(self, tmp_path):
+        """uncovered_repo anomaly IS counted as repairable (Story #716 AC4)."""
         make_healthy_output_dir(tmp_path)
         known_repos = {"repo-alpha", "repo-beta", "new-uncovered-repo"}
 
@@ -925,8 +925,8 @@ class TestDetectUncoveredRepos:
 
         uncovered = [a for a in report.anomalies if a.type == "uncovered_repo"]
         assert len(uncovered) == 1
-        # repairable_count must NOT include uncovered_repo
-        assert report.repairable_count == 0
+        # Story #716 AC4: uncovered_repo is now in REPAIRABLE_ANOMALY_TYPES
+        assert report.repairable_count == 1
 
     def test_detect_uncovered_not_critical(self, tmp_path):
         """uncovered_repo anomaly escalates to needs_repair, not critical."""
