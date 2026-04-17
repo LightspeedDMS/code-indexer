@@ -25,7 +25,7 @@ from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
-from code_indexer.server.utils.config_manager import ServerResourceConfig
+from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
 
 if TYPE_CHECKING:
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
@@ -759,7 +759,17 @@ class RefreshScheduler:
         # Bug #240: On startup, ALL .write_mode/ markers are orphaned because no
         # MCP sessions survive a server restart. Force-clean them before the
         # scheduler loop starts so refresh cycles are not blocked.
-        self.cleanup_stale_write_mode_markers(force=True)
+        # Bug #734: wrap in try/except — if cleanup raises, log the error and
+        # proceed to thread launch regardless (same defensive pattern as in-loop fix).
+        try:
+            self.cleanup_stale_write_mode_markers(force=True)
+        except Exception as e:
+            logger.error(
+                "Bug #734: startup cleanup_stale_write_mode_markers failed: %s; "
+                "continuing to launch scheduler thread anyway",
+                e,
+                exc_info=True,
+            )
 
         self._thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self._thread.start()
@@ -806,6 +816,13 @@ class RefreshScheduler:
         # always has a bound value even when the try block raises before
         # get_refresh_interval() is called (Bug #722 — UnboundLocalError fix).
         refresh_interval = DEFAULT_REFRESH_INTERVAL
+
+        # Bug #735: exponential-backoff circuit breaker — track consecutive
+        # iteration failures so a permanently-broken upstream does not flood
+        # logs at a fixed cadence.  Counter resets to 0 on each successful
+        # iteration.  Backoff: 30s, 60s, 120s, ..., capped at 1 hour.
+        consecutive_failures = 0
+        MAX_BACKOFF_SECONDS = 3600  # 1 hour ceiling — Bug #735
 
         while self._running:
             try:
@@ -889,10 +906,26 @@ class RefreshScheduler:
                             f"Failed to persist next_refresh for {alias_name}: {e}"
                         )
 
+                # Bug #735: successful iteration — reset consecutive failure counter.
+                consecutive_failures = 0
+
             except Exception as e:
-                logger.error(
-                    f"Error in scheduler loop: {type(e).__name__}: {e}", exc_info=True
+                # Bug #735: increment counter and apply exponential backoff so a
+                # permanently-broken upstream does not flood logs at a fixed cadence.
+                consecutive_failures += 1
+                backoff = min(
+                    30 * (2 ** (consecutive_failures - 1)), MAX_BACKOFF_SECONDS
                 )
+                logger.error(
+                    "Bug #735: scheduler iteration failed (%d consecutive); backing off %ds: %s",
+                    consecutive_failures,
+                    backoff,
+                    e,
+                    exc_info=True,
+                )
+                if self._stop_event.wait(timeout=backoff):
+                    return
+                continue
 
             # Short poll interval instead of full refresh_interval wait
             poll_interval = self._calculate_poll_interval(refresh_interval)
@@ -1524,6 +1557,9 @@ class RefreshScheduler:
                     phase="scip",
                     detail="SCIP: generating code intelligence index...",
                 )
+            # Bug #730: apply SCIP generation timeout.  ScipConfig is the canonical
+            # source of truth for this value (default defined in its dataclass).
+            scip_timeout = ScipConfig().scip_generation_timeout_seconds
             try:
                 subprocess.run(
                     scip_command,
@@ -1531,6 +1567,7 @@ class RefreshScheduler:
                     capture_output=True,
                     text=True,
                     check=True,
+                    timeout=scip_timeout,
                 )
                 logger.info("cidx scip generate on source completed successfully")
                 if progress_callback is not None:
@@ -1539,6 +1576,14 @@ class RefreshScheduler:
                         phase="scip",
                         detail="SCIP: complete",
                     )
+            except subprocess.TimeoutExpired as e:
+                logger.error(
+                    f"SCIP indexing on source timed out after {scip_timeout}s for {alias_name}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"cidx scip generate timed out after {scip_timeout}s: {e}"
+                ) from e
             except subprocess.CalledProcessError as e:
                 if e.returncode == -15:  # SIGTERM — server restart interrupted indexing
                     logger.warning(

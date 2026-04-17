@@ -89,37 +89,6 @@ class TestProgressiveMetadataResumeAfterFailed:
         assert timestamp == 0.0
 
 
-class TestIndexSourceNoTimeout:
-    """Bug #467 Fix A: _index_source() has no subprocess timeout."""
-
-    def test_index_source_has_no_timeout_parameter(self):
-        """Verify _index_source() subprocess calls have no timeout parameter."""
-        from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-
-        source = inspect.getsource(RefreshScheduler._index_source)
-        # Should have no timeout= in subprocess.run calls
-        # (excluding comments which may mention "timeout" in explanatory text)
-        lines = source.split("\n")
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue  # Skip comments
-            if "timeout=" in stripped and "subprocess" in source:
-                # Allow timeout=None but not timeout=<value>
-                assert "timeout=None" in stripped, (
-                    f"Found timeout in subprocess call: {stripped}"
-                )
-
-    def test_index_source_has_no_timeout_expired_handler(self):
-        """Verify _index_source() has no TimeoutExpired exception handler."""
-        from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-
-        source = inspect.getsource(RefreshScheduler._index_source)
-        assert "TimeoutExpired" not in source, (
-            "_index_source should not handle TimeoutExpired"
-        )
-
-
 class TestIndexSourceConditionalReconcile:
     """Bug #467 Fix D: _index_source() uses --reconcile conditionally."""
 

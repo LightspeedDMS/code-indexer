@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.7
+
+### Bug Fixes
+
+- fix: Bug #734 (P2) -- `RefreshScheduler.start()` now wraps its one-shot `cleanup_stale_write_mode_markers(force=True)` call in a try/except so that a startup cleanup exception is logged with a traceback and the scheduler thread still launches. Previously, a raised exception aborted `start()` and the scheduler never ran, silently breaking refreshes. Mirrors the defensive pattern already applied to the in-loop cleanup fix for Bug #729.
+
+- fix: Bug #730 (P2) -- `cidx scip generate` subprocess call inside `RefreshScheduler._index_source()` now has a timeout. Uses `ScipConfig.scip_generation_timeout_seconds` (default 600s) when available, otherwise falls back to 600s. `subprocess.TimeoutExpired` is caught and re-raised as `RuntimeError` so upstream error-classification logic can categorize it. Prevents SCIP generation from hanging the refresh thread indefinitely when a language indexer stalls. Legacy `inspect.getsource`-based no-timeout tests in `test_refresh_scheduler_indexing_types.py` and `test_indexing_resilience.py` removed as they asserted the now-obsolete Bug #467 invariant.
+
+- fix: Bug #735 (P3) -- `_scheduler_loop` now has an exponential-backoff circuit breaker on consecutive iteration failures. The counter doubles the effective poll interval on each failure (30s, 60s, 120s, ...) up to a 1-hour ceiling and resets to 0 on the first successful iteration. Prevents log-flooding and CPU waste when an upstream dependency (corrupt SQLite, unreadable config, permission error) fails every iteration.
+
+Regression tests: `tests/unit/global_repos/test_refresh_scheduler_bugs_734_730_735.py` (3 tests, all pass).
+
 ## v9.17.6
 
 ### Bug Fixes

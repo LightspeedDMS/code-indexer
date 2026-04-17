@@ -522,18 +522,3 @@ class TestIndexingFailureAbortsPipeline:
             "CoW clone must NOT be called when _index_source() fails. "
             "The caller aborts before calling _create_snapshot()."
         )
-
-    def test_index_source_has_no_timeout(self, scheduler, registry, source_repo):
-        """
-        Bug #467: _index_source() no longer uses subprocess timeout.
-        Timeouts caused fail_indexing() to poison metadata, losing all
-        progress and wasting VoyageAI API credits. Indexing runs until done.
-        """
-        import inspect
-        from code_indexer.global_repos.refresh_scheduler import RefreshScheduler
-
-        source = inspect.getsource(RefreshScheduler._index_source)
-        # Verify no TimeoutExpired handler exists
-        assert "TimeoutExpired" not in source, (
-            "_index_source should not handle TimeoutExpired (Bug #467)"
-        )
