@@ -311,6 +311,14 @@ class GoldenRepoManager:
             raise ValueError(
                 f"Invalid alias '{alias}': cannot contain path traversal characters (\\)"
             )
+        # Bug #741: '-global' is a reserved internal suffix appended during global
+        # activation.  Reject it at registration time so we never produce the
+        # phantom alias '<alias>-global-global'.
+        if alias.endswith("-global"):
+            raise ValueError(
+                f"Invalid alias '{alias}': '-global' is a reserved internal suffix "
+                "and cannot be used as part of an alias name"
+            )
 
         # Validate BEFORE submitting job
         if alias in self.golden_repos:
