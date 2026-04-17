@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.10
+
+### Test Hygiene
+
+- fix: Integration test timing flake in `test_session_refresh_integration_bug726.py` — replaced `ADMIN_TIMEOUT=4s` + `ADMIN_EXPIRY_DELAY=4.5s` (0.5 s margin, inside itsdangerous integer-second rounding boundary) with `ADMIN_TIMEOUT=10s`, `USER_TIMEOUT=20s`, and named sleep constants that each give a full 1+ second margin: `ADMIN_REFRESH_DELAY=6s` (1 s past 5 s threshold), `USER_REFRESH_DELAY=12s` (2 s past 10 s threshold), `ADMIN_EXPIRY_DELAY=11s` (1 s past 10 s timeout). No mocks, no production code changes — real system exercised throughout.
+
 ## v9.17.9
 
 ### Bug Fixes

@@ -338,12 +338,17 @@ def init_session_manager(
     return _session_manager
 
 
-def require_admin_session(request: Request) -> SessionData:
+def require_admin_session(request: Request, response: Response) -> SessionData:
     """
     Dependency to require valid admin session.
 
+    Re-issues the session cookie via sliding-window refresh when more than 50 %
+    of the session lifetime has elapsed, so active admins are never logged out
+    due to session expiry while they are working (Bug #726).
+
     Args:
         request: FastAPI Request object
+        response: FastAPI Response object (used to issue refreshed cookie)
 
     Returns:
         SessionData for authenticated admin
@@ -352,7 +357,7 @@ def require_admin_session(request: Request) -> SessionData:
         HTTPException: If not authenticated or not admin
     """
     session_manager = get_session_manager()
-    session = session_manager.get_session(request)
+    session = session_manager.get_and_refresh_session(request, response)
 
     if not session:
         # Redirect to unified login with current path as redirect_to
@@ -376,12 +381,17 @@ def require_admin_session(request: Request) -> SessionData:
     return session
 
 
-def require_user_session(request: Request) -> SessionData:
+def require_user_session(request: Request, response: Response) -> SessionData:
     """
     Dependency to require valid user session (any authenticated user).
 
+    Re-issues the session cookie via sliding-window refresh when more than 50 %
+    of the session lifetime has elapsed, so active users are never logged out
+    due to session expiry while they are working (Bug #726).
+
     Args:
         request: FastAPI Request object
+        response: FastAPI Response object (used to issue refreshed cookie)
 
     Returns:
         SessionData for authenticated user
@@ -390,7 +400,7 @@ def require_user_session(request: Request) -> SessionData:
         HTTPException: If not authenticated
     """
     session_manager = get_session_manager()
-    session = session_manager.get_session(request)
+    session = session_manager.get_and_refresh_session(request, response)
 
     if not session:
         # Redirect to unified login with current path as redirect_to
