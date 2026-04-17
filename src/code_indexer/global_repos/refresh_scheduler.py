@@ -23,7 +23,7 @@ from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
-from .shared_operations import GlobalRepoOperations
+from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.utils.config_manager import ServerResourceConfig
 
@@ -801,6 +801,11 @@ class RefreshScheduler:
            of the full refresh interval
         """
         logger.debug("Refresh scheduler loop started")
+
+        # Initialize before the loop so _calculate_poll_interval() at line 893
+        # always has a bound value even when the try block raises before
+        # get_refresh_interval() is called (Bug #722 — UnboundLocalError fix).
+        refresh_interval = DEFAULT_REFRESH_INTERVAL
 
         while self._running:
             try:

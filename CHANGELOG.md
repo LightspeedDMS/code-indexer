@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.2
+
+### Bug Fixes
+
+- fix: Bug #729 -- UnboundLocalError in RefreshScheduler background thread. `_scheduler_loop` assigned `refresh_interval` inside the `try` block (line 812) but used it outside at line 898 (`_calculate_poll_interval`). If any exception fired before that assignment (e.g., `registry.list_global_repos()` raising), the `except` clause caught the error but execution fell through to the unbound variable, crashing the background thread with `UnboundLocalError: local variable 'refresh_interval' referenced before assignment`. Fixed by initializing `refresh_interval = DEFAULT_REFRESH_INTERVAL` (imported from `shared_operations`) before the `while` loop so the variable is always bound regardless of where the `try` block throws.
+
 ## v9.17.1
 
 ### Bug Fixes

@@ -1487,3 +1487,65 @@ class TestRefreshSchedulerIndexReconciliation:
                 assert repo_info["enable_temporal"] is True, (
                     "Registry should be updated at END"
                 )
+
+    @pytest.mark.slow
+    def test_scheduler_survives_exception_before_refresh_interval_assigned(
+        self, tmp_path
+    ):
+        """Regression: UnboundLocalError when exception fires before refresh_interval
+        is assigned inside the while-loop try block (line 812). Fix: initialize
+        refresh_interval = DEFAULT_REFRESH_INTERVAL before the loop. Proved by
+        asserting the loop reaches a second iteration after the first exception.
+
+        Marked slow: must wait for MAX_POLL_SECONDS (30s) between iterations.
+        """
+        import threading
+        from unittest.mock import patch
+
+        # After the first exception the outer except falls through to
+        # _calculate_poll_interval(DEFAULT_REFRESH_INTERVAL=3600) which is clamped
+        # to MAX_POLL_SECONDS=30s.  The second iteration therefore only happens after
+        # a 30s sleep.  Timeout must exceed that to observe the second call.
+        FIRST_CALL_TIMEOUT_SECONDS = 5.0
+        SECOND_CALL_TIMEOUT_SECONDS = 35.0
+
+        golden_repos_dir = tmp_path / ".code-indexer" / "golden_repos"
+        golden_repos_dir.mkdir(parents=True)
+        config_mgr = ConfigManager(tmp_path / ".code-indexer" / "config.json")
+        tracker = QueryTracker()
+        registry = GlobalRegistry(str(golden_repos_dir))
+        scheduler = RefreshScheduler(
+            golden_repos_dir=str(golden_repos_dir),
+            config_source=config_mgr,
+            query_tracker=tracker,
+            cleanup_manager=CleanupManager(tracker),
+            registry=registry,
+        )
+
+        first_call_raised = threading.Event()
+        second_call_reached = threading.Event()
+        call_count = [0]
+        original_list = registry.list_global_repos
+
+        def controlled_list():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                first_call_raised.set()
+                raise RuntimeError("Simulated registry failure on first call")
+            second_call_reached.set()
+            return original_list()
+
+        with patch.object(registry, "list_global_repos", controlled_list):
+            scheduler.start()
+            try:
+                assert first_call_raised.wait(timeout=FIRST_CALL_TIMEOUT_SECONDS), (
+                    "list_global_repos must be called within 5s"
+                )
+                reached = second_call_reached.wait(timeout=SECOND_CALL_TIMEOUT_SECONDS)
+            finally:
+                scheduler.stop()
+
+        assert reached, (
+            "Scheduler must survive the first exception and reach a second iteration; "
+            "UnboundLocalError would crash the thread and prevent the second call"
+        )
