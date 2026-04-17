@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.3
+
+### Bug Fixes
+
+- fix: Bug #731 -- SQLiteLogHandler recursive emit deadlock. `emit()` calls `DatabaseConnectionManager.get_connection()`, which can invoke `_cleanup_stale_connections()`, which logs via `logger.info()`, which re-enters `emit()` on the same thread. With the root logger as the only handler, the second `emit()` tried to acquire the root-logger lock already held by the first call, causing a deadlock that froze the background logging thread permanently. Fixed by adding a thread-local re-entry guard (`_emit_guard`): if `emit()` is already active on the current thread, the recursive call returns immediately (silent drop). The outer call always completes and the outer record is always persisted. Validated by two regression tests: one asserts no deadlock under a 5-second timeout, one asserts the inner record is silently dropped while the outer record is persisted.
+
 ## v9.17.2
 
 ### Bug Fixes

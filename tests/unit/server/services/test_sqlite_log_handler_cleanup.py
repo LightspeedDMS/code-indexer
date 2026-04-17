@@ -17,6 +17,7 @@ Uses real SQLite connections and real threads - zero mocking.
 import logging
 import sqlite3
 import threading
+from typing import Callable, List, Tuple
 import pytest
 from pathlib import Path
 
@@ -318,4 +319,167 @@ class TestEmitUsesExecuteAtomic:
         assert commit_count == 0, (
             f"emit() called conn.commit() directly {commit_count} time(s); "
             "it must use execute_atomic() instead"
+        )
+
+
+# 5 s is generous: a non-deadlocking emit completes in <100 ms on any CI machine.
+DEADLOCK_TIMEOUT_SECONDS = 5.0
+
+
+class TestReentryDeadlockRegression:
+    """
+    Regression tests for Bug #731: SQLiteLogHandler recursive emit deadlock.
+
+    Root cause: SQLiteLogHandler.emit -> DatabaseConnectionManager.get_connection
+    -> _cleanup_stale_connections -> logger.info -> SQLiteLogHandler.emit (again)
+    -> tries to acquire root logger lock already held -> DEADLOCK.
+
+    Fix (Option A): thread-local re-entry guard in emit() silently drops
+    recursive calls, preventing the deadlock without losing the outer log.
+
+    All tests use real SQLiteLogHandler, real SQLite, real threads. No mocks
+    of the handler itself.
+    """
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _make_handler_and_manager(
+        db_path: Path,
+    ) -> Tuple[logging.Handler, object]:
+        """Create a SQLiteLogHandler and its DatabaseConnectionManager."""
+        from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
+        from code_indexer.server.storage.database_manager import (
+            DatabaseConnectionManager,
+        )
+
+        handler = SQLiteLogHandler(db_path)
+        manager = DatabaseConnectionManager.get_instance(str(db_path))
+        return handler, manager
+
+    @staticmethod
+    def _read_log_messages(db_path: Path) -> List[str]:
+        """Return all `message` column values from the logs table."""
+        with sqlite3.connect(str(db_path)) as conn:
+            rows = conn.execute("SELECT message FROM logs ORDER BY id").fetchall()
+        return [r[0] for r in rows]
+
+    @staticmethod
+    def _make_cleanup_that_logs(
+        handler: logging.Handler, original_cleanup: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Return a _cleanup_stale_connections replacement that emits a log."""
+
+        def cleanup_that_logs() -> None:
+            inner = logging.LogRecord(
+                name="test.inner",
+                level=logging.INFO,
+                pathname="test_file.py",
+                lineno=2,
+                msg="Inner record — must be dropped silently",
+                args=(),
+                exc_info=None,
+            )
+            handler.emit(inner)
+            original_cleanup()
+
+        return cleanup_that_logs
+
+    # ------------------------------------------------------------------- tests
+
+    def test_emit_does_not_deadlock_on_recursive_logging(self, tmp_path: Path) -> None:
+        """
+        Bug #731 regression: emit() must not deadlock when a secondary log call
+        fires during its own execution (simulating logger.info inside
+        _cleanup_stale_connections).  A deadlock causes the worker thread to
+        never set test_completed, failing the timeout assertion.
+        """
+        from unittest.mock import patch
+
+        handler, manager = self._make_handler_and_manager(tmp_path / "deadlock_test.db")
+        recursive_attempted = threading.Event()
+        test_completed = threading.Event()
+        original_cleanup = manager._cleanup_stale_connections  # type: ignore[union-attr]
+
+        def patched_cleanup() -> None:
+            recursive_attempted.set()
+            logging.getLogger("cidx.db").info("Simulated recursive cleanup log")
+            original_cleanup()
+
+        outer = logging.LogRecord(
+            name="test.deadlock",
+            level=logging.INFO,
+            pathname="test_file.py",
+            lineno=1,
+            msg="Outer log — must not deadlock",
+            args=(),
+            exc_info=None,
+        )
+        root_logger = logging.getLogger()
+
+        def run_emit() -> None:
+            try:
+                handler.emit(outer)
+            finally:
+                test_completed.set()
+
+        with (
+            patch.object(manager, "_cleanup_stale_connections", patched_cleanup),
+            patch.object(type(manager), "_last_global_cleanup", 0.0),
+            patch.object(root_logger, "handlers", [handler]),
+            patch.object(root_logger, "level", logging.DEBUG),
+        ):
+            worker = threading.Thread(target=run_emit, daemon=True)
+            worker.start()
+            completed = test_completed.wait(timeout=DEADLOCK_TIMEOUT_SECONDS)
+
+        handler.close()
+
+        assert recursive_attempted.is_set(), (
+            "Patched cleanup was never called — test setup error"
+        )
+        assert completed, (
+            f"emit() timed out after {DEADLOCK_TIMEOUT_SECONDS}s — "
+            "DEADLOCK DETECTED (Bug #731)"
+        )
+
+    def test_recursive_emit_is_silently_dropped_not_raised(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        The re-entry guard must silently drop the inner emit() and let the outer
+        emit() complete, persisting only the outer record to the database.
+        """
+        from unittest.mock import patch
+
+        db_path = tmp_path / "reentry_drop_test.db"
+        handler, manager = self._make_handler_and_manager(db_path)
+        original_cleanup = manager._cleanup_stale_connections  # type: ignore[union-attr]
+        cleanup_fn = self._make_cleanup_that_logs(handler, original_cleanup)
+
+        outer = logging.LogRecord(
+            name="test.outer",
+            level=logging.INFO,
+            pathname="test_file.py",
+            lineno=1,
+            msg="Outer record — must be persisted",
+            args=(),
+            exc_info=None,
+        )
+
+        with (
+            patch.object(manager, "_cleanup_stale_connections", cleanup_fn),
+            patch.object(type(manager), "_last_global_cleanup", 0.0),
+        ):
+            handler.emit(outer)
+
+        handler.close()
+
+        messages = self._read_log_messages(db_path)
+        assert any("Outer record" in m for m in messages), (
+            f"Outer record was not persisted; DB contains: {messages}"
+        )
+        assert not any("Inner record" in m for m in messages), (
+            f"Inner (recursive) record must be dropped by re-entry guard; "
+            f"DB contains: {messages}"
         )

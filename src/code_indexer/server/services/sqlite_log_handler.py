@@ -12,11 +12,16 @@ Implements AC5: SQLite Log Storage Infrastructure
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
+# Thread-local storage for re-entry guard (Bug #731).
+# _emit_guard.active is True while this thread is already inside emit().
+_emit_guard = threading.local()
 
 logger = logging.getLogger(__name__)
 
@@ -169,9 +174,16 @@ class SQLiteLogHandler(logging.Handler):
         """
         Emit a log record to the SQLite database.
 
+        Re-entry guard (Bug #731): if this thread is already inside emit(),
+        silently drop the recursive call to prevent deadlocks caused by
+        DatabaseConnectionManager logging while the root-logger lock is held.
+
         Args:
             record: LogRecord instance to write to database
         """
+        if getattr(_emit_guard, "active", False):
+            return
+        _emit_guard.active = True
         try:
             # Format the message
             message = self.format(record)
@@ -280,6 +292,8 @@ class SQLiteLogHandler(logging.Handler):
             # Don't let logging failures crash the application
             # Use handleError to report the issue
             self.handleError(record)
+        finally:
+            _emit_guard.active = False
 
     def close(self) -> None:
         """Close handler. Connections are managed by DatabaseConnectionManager."""
