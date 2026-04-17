@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
+
 from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 from .dep_map_health_detector import DepMapHealthDetector
@@ -35,6 +37,9 @@ logger = logging.getLogger(__name__)
 # Constants
 SCHEDULER_POLL_INTERVAL_SECONDS = 60  # Story #193: Delta refresh polling interval
 THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
+_BACKFILL_JOB_ID_SUFFIX_LEN = (
+    8  # Story #728: hex suffix length for lifecycle_backfill job IDs
+)
 
 
 class DependencyMapService:
@@ -1976,6 +1981,214 @@ class DependencyMapService:
             domain_list = [{"name": d} for d in affected_domains]
             self._record_run_metrics(output_dir, domain_list, all_repos, 0.0, 0.0)
 
+    def _backfill_try_acquire_aggregate_job(self) -> bool:
+        """
+        Return True if this node wins the lifecycle_backfill aggregate job slot.
+
+        DuplicateJobError is the expected non-owner case. Other failures are
+        non-fatal warnings so backfill per-repo queueing still proceeds.
+        """
+        if self._job_tracker is None:
+            return False
+        from .job_tracker import DuplicateJobError
+
+        try:
+            self._job_tracker.check_operation_conflict("lifecycle_backfill")
+            return True
+        except DuplicateJobError:
+            return False
+        except Exception as exc:
+            logger.warning(
+                "lifecycle_backfill: conflict check failed (non-fatal): %s", exc
+            )
+            return False
+
+    def _backfill_get_cluster_wide_total(self, conn_manager) -> Optional[int]:
+        """
+        Count all stale candidates cluster-wide before any UPDATEs begin.
+
+        Called only by the owner node to size the aggregate job's total.
+        Returns None on failure or when conn_manager is unavailable.
+        """
+        if conn_manager is None:
+            logger.warning("lifecycle_backfill: conn_manager is None, skipping count")
+            return None
+        try:
+
+            def _count(conn):
+                return conn.execute(
+                    "SELECT COUNT(*) FROM description_refresh_tracking "
+                    "WHERE lifecycle_schema_version < ? OR lifecycle_schema_version IS NULL",
+                    (LIFECYCLE_SCHEMA_VERSION,),
+                ).fetchone()[0]
+
+            result: Optional[int] = conn_manager.execute_atomic(_count)
+            return result
+        except Exception as exc:
+            logger.warning("lifecycle_backfill: cluster-wide count failed: %s", exc)
+            return None
+
+    def _backfill_select_candidates(self, conn_manager) -> List[str]:
+        """
+        SELECT candidate aliases whose lifecycle_schema_version is stale or NULL.
+
+        Uses execute_atomic so the connection is managed and released. Returns
+        empty list when conn_manager is None or on query failure.
+        """
+        if conn_manager is None:
+            logger.warning("lifecycle_backfill: conn_manager is None, skipping SELECT")
+            return []
+        try:
+
+            def _select(conn):
+                return [
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT repo_alias FROM description_refresh_tracking "
+                        "WHERE lifecycle_schema_version < ? "
+                        "OR lifecycle_schema_version IS NULL",
+                        (LIFECYCLE_SCHEMA_VERSION,),
+                    ).fetchall()
+                ]
+
+            candidates: List[str] = conn_manager.execute_atomic(_select)
+            return candidates
+        except Exception as exc:
+            logger.warning("lifecycle_backfill: candidate SELECT failed: %s", exc)
+            return []
+
+    def _backfill_queue_candidates(self, conn_manager, candidates: List[str]) -> int:
+        """
+        Issue a guarded per-alias UPDATE for each candidate alias.
+
+        The UPDATE only succeeds when status is NOT in (queued, running, pending),
+        enforcing at-most-once queueing across concurrent cluster nodes. The sum
+        of cursor.rowcount values — not the SELECT count — is the authoritative
+        count of rows this node queued. Returns 0 when conn_manager is None.
+        """
+        if conn_manager is None:
+            return 0
+        now_utc = datetime.now(timezone.utc).isoformat()
+        queued = 0
+        for alias in candidates:
+
+            def _update(conn, _alias=alias, _now=now_utc):
+                return conn.execute(
+                    "UPDATE description_refresh_tracking "
+                    "SET status = 'pending', next_run = ? "
+                    "WHERE repo_alias = ? "
+                    "AND status NOT IN ('queued', 'running', 'pending') "
+                    "AND (lifecycle_schema_version < ? OR lifecycle_schema_version IS NULL)",
+                    (_now, _alias, LIFECYCLE_SCHEMA_VERSION),
+                )
+
+            try:
+                cursor = conn_manager.execute_atomic(_update)
+                queued += cursor.rowcount
+            except Exception as exc:
+                logger.warning(
+                    "lifecycle_backfill: UPDATE failed for %s: %s", alias, exc
+                )
+        return queued
+
+    def _backfill_register_aggregate_job(self, cluster_wide_total: int) -> None:
+        """
+        Register and start the lifecycle_backfill aggregate job with JobTracker.
+
+        Builds base_meta once and reuses it across register_job and update_status
+        to avoid duplication. No-op when job_tracker is None or total is zero.
+        All failures are absorbed as non-fatal warnings.
+        """
+        if self._job_tracker is None or cluster_wide_total == 0:
+            return
+        try:
+            job_id = (
+                f"lifecycle-backfill-{uuid.uuid4().hex[:_BACKFILL_JOB_ID_SUFFIX_LEN]}"
+            )
+            server_config = self._config_manager.load_config()
+            node_id = (
+                server_config.cluster.node_id
+                if server_config
+                and server_config.cluster
+                and server_config.cluster.node_id
+                else None
+            )
+            if node_id:
+                stage_text = (
+                    f"Queued {cluster_wide_total} for backfill "
+                    f"(owner view: ~0/{cluster_wide_total})"
+                )
+                disclaimer = (
+                    f"Queued {cluster_wide_total} for backfill. "
+                    "Progress reflects this owner node's view; "
+                    "non-owner nodes self-close independently."
+                )
+            else:
+                stage_text = f"Queued {cluster_wide_total} for backfill"
+                disclaimer = stage_text
+            base_meta = {
+                "cluster_wide_total": cluster_wide_total,
+                "processed": 0,
+                "disclaimer": disclaimer,
+                "owner_node_id": node_id,
+            }
+            self._job_tracker.register_job(
+                job_id,
+                "lifecycle_backfill",
+                username="system",
+                repo_alias=None,
+                metadata={**base_meta, "stage": "queueing"},
+            )
+            self._job_tracker.update_status(
+                job_id,
+                status="running",
+                progress=0,
+                progress_info=stage_text,
+                metadata={**base_meta, "stage": "processing"},
+            )
+        except Exception as exc:
+            logger.warning(
+                "lifecycle_backfill: JobTracker registration failed (non-fatal): %s",
+                exc,
+            )
+
+    def _queue_lifecycle_backfill_if_needed(self) -> int:
+        """
+        Detect stale lifecycle repos and queue them for refresh (Story #728 AC2/AC4/AC8).
+
+        Runs UNCONDITIONALLY on every run_delta_analysis() call — no time-based
+        gating, no sampling, no short-circuits. Every row in description_refresh_tracking
+        is examined via a cluster-safe two-step SELECT + guarded per-alias UPDATE.
+
+        Per AC8 spec: only the owner node issues the cluster-wide COUNT query (used to
+        size the aggregate job total). Non-owner nodes skip that SELECT since they do
+        not register the aggregate job. All nodes run the per-alias UPDATE loop.
+
+        Returns:
+            int: Rows this node transitioned to pending (sum of cursor.rowcount values).
+        """
+        if self._refresh_scheduler is None:
+            return 0
+        conn_manager = self._refresh_scheduler._tracking_backend._conn_manager
+        owns_aggregate = self._backfill_try_acquire_aggregate_job()
+        # AC8: only owner needs cluster-wide total; non-owner skips this SELECT.
+        cluster_wide_total = (
+            self._backfill_get_cluster_wide_total(conn_manager)
+            if owns_aggregate
+            else None
+        )
+        candidates = self._backfill_select_candidates(conn_manager)
+        this_node_queued = self._backfill_queue_candidates(conn_manager, candidates)
+        if owns_aggregate and cluster_wide_total:
+            self._backfill_register_aggregate_job(cluster_wide_total)
+        if this_node_queued > 0:
+            logger.info(
+                "lifecycle_backfill: queued %d repos (cluster_wide_total=%s)",
+                this_node_queued,
+                cluster_wide_total,
+            )
+        return this_node_queued
+
     def run_delta_analysis(
         self, job_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
@@ -1993,6 +2206,10 @@ class DependencyMapService:
         Raises:
             DuplicateJobError: If job_tracker detects a concurrent delta analysis (AC6)
         """
+        # Story #728 AC2: Backfill detection runs FIRST, UNCONDITIONALLY — before conflict
+        # checks, before the no-changes short-circuit, before any other logic.
+        lifecycle_backfill_queued = self._queue_lifecycle_backfill_if_needed()
+
         # Story #312: Conflict detection via JobTracker (AC6).
         # DuplicateJobError propagates to caller; all other tracker errors are absorbed.
         if self._job_tracker is not None:
@@ -2139,7 +2356,11 @@ class DependencyMapService:
                     error_message=None,  # Bug #437: clear stale error from orphan recovery
                 )
                 _delta_succeeded = True
-                return {"status": "skipped", "message": "No changes detected"}
+                return {
+                    "status": "skipped",
+                    "message": "No changes detected",
+                    "lifecycle_backfill_queued": lifecycle_backfill_queued,
+                }
 
             # Update tracking to running
             self._tracking_backend.update_tracking(
@@ -2181,7 +2402,11 @@ class DependencyMapService:
                 all_repos = self._get_activated_repos()
                 self._finalize_delta_tracking(config, all_repos)
                 _delta_succeeded = True
-                return {"status": "completed", "affected_domains": 0}
+                return {
+                    "status": "completed",
+                    "affected_domains": 0,
+                    "lifecycle_backfill_queued": lifecycle_backfill_queued,
+                }
 
             # Generate CLAUDE.md
             all_repos = self._get_activated_repos()

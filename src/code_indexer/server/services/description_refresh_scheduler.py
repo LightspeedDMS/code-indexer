@@ -5,6 +5,7 @@ Manages periodic description regeneration for golden repositories using
 hash-based bucket scheduling with jitter to distribute load evenly.
 """
 
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -13,14 +14,184 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
+import yaml
+
+from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
+from code_indexer.global_repos.meta_description_hook import atomic_write_description
+from code_indexer.global_repos.meta_directory_updater import _SAFE_ALIAS_PATTERN
+from code_indexer.global_repos.repo_analyzer import (
+    invoke_lifecycle_detection,
+    split_frontmatter_and_body,
+)
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
 
 logger = logging.getLogger(__name__)
+
+# Claude CLI timeout constants (Story #727).
+# NOTE: This module assumes a Unix-like host with ``script``, ``timeout``, and
+# ``claude`` available in PATH.  The ``script`` utility provides a pseudo-TTY
+# required for Claude CLI in non-interactive environments.
+_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
+_CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
+
+
+def _build_claude_command(prompt: str, analysis_model: str) -> list:
+    """
+    Build the shell command list for invoking Claude CLI via ``script``.
+
+    Wraps the Claude CLI in ``script -q -c ... <null-device>`` to provide a
+    pseudo-TTY.  Uses ``os.devnull`` for the null device path so the call
+    is portable across Unix-like platforms.
+
+    Args:
+        prompt: Prompt string to pass to Claude.
+        analysis_model: Model name (e.g. "opus", "sonnet").
+
+    Returns:
+        Command list suitable for ``subprocess.run``.
+    """
+    import os
+    import shlex
+
+    claude_cmd = (
+        f"timeout {_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS}"
+        f" claude --model {shlex.quote(analysis_model)}"
+        f" -p {shlex.quote(prompt)}"
+        f" --print --dangerously-skip-permissions"
+    )
+    return ["script", "-q", "-c", claude_cmd, os.devnull]
+
+
+def _build_claude_env() -> dict:
+    """
+    Build a sanitised copy of ``os.environ`` for Claude CLI subprocess.
+
+    Strips ``CLAUDECODE`` (prevents nested-session errors) and optionally
+    ``ANTHROPIC_API_KEY`` when ``CLAUDECODE`` is set.
+
+    Returns:
+        Dict of environment variables for the subprocess.
+    """
+    import os
+
+    keys_to_strip = {"CLAUDECODE"}
+    if "CLAUDECODE" in os.environ:
+        keys_to_strip.add("ANTHROPIC_API_KEY")
+    return {k: v for k, v in os.environ.items() if k not in keys_to_strip}
+
+
+def _normalize_claude_output(raw: str) -> str:
+    """
+    Strip terminal control sequences and normalise line endings from Claude CLI stdout.
+
+    Removes CSI, OSC and bare ESC sequences emitted by the ``script`` wrapper,
+    normalises CR/LF line endings, and trims chain-of-thought text that may
+    precede the opening ``---`` YAML frontmatter delimiter.
+
+    Args:
+        raw: Raw stdout string from the subprocess.
+
+    Returns:
+        Cleaned string ready for YAML frontmatter parsing.
+    """
+    import re
+
+    output = raw
+    # CSI sequences: ESC [ ... letter (colors, cursor, modes like [?2004l, [?25h)
+    output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
+    # OSC sequences: ESC ] ... BEL or ESC ] ... ST
+    output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
+    # Other ESC sequences (ESC followed by single char)
+    output = re.sub(r"\x1b[^[\]()]", "", output)
+    # Stray control artifacts from script command
+    output = re.sub(r"\[<u", "", output)
+    # Strip any remaining bare ESC bytes
+    output = output.replace("\x1b", "")
+    # Normalize line endings
+    output = output.replace("\r\n", "\n").replace("\r", "")
+    output = output.strip()
+    # Strip chain-of-thought text before YAML frontmatter
+    frontmatter_match = re.search(r"^---\s*$", output, re.MULTILINE)
+    if frontmatter_match and frontmatter_match.start() > 0:
+        output = output[frontmatter_match.start() :]
+    return output
+
+
+def invoke_claude_cli(
+    repo_path: str,
+    prompt: str,
+    cli_manager=None,
+    analysis_model: str = "opus",
+) -> tuple:
+    """
+    Module-level Claude CLI invocation, patchable by unit tests.
+
+    Validates inputs, optionally syncs the API key via *cli_manager*, builds
+    the subprocess command via :func:`_build_claude_command`, runs it, and
+    normalises the output via :func:`_normalize_claude_output`.
+
+    Args:
+        repo_path: Absolute path to the repository (subprocess cwd).
+        prompt: Prompt string sent to Claude CLI.
+        cli_manager: Optional ClaudeCliManager for API-key sync before call.
+        analysis_model: Claude model name (default "opus").
+
+    Returns:
+        Tuple of (success: bool, output: str).
+    """
+    import subprocess
+
+    if not repo_path:
+        error_msg = "invoke_claude_cli: repo_path must not be empty"
+        logger.error(error_msg)
+        return False, error_msg
+    if not prompt:
+        error_msg = "invoke_claude_cli: prompt must not be empty"
+        logger.error(error_msg)
+        return False, error_msg
+    if not analysis_model:
+        error_msg = "invoke_claude_cli: analysis_model must not be empty"
+        logger.error(error_msg)
+        return False, error_msg
+
+    if cli_manager is not None:
+        try:
+            cli_manager.sync_api_key()
+        except Exception as sync_exc:
+            logger.warning("invoke_claude_cli: API key sync failed: %s", sync_exc)
+
+    try:
+        result = subprocess.run(
+            _build_claude_command(prompt, analysis_model),
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
+            env=_build_claude_env(),
+        )
+    except subprocess.TimeoutExpired:
+        error_msg = f"Claude CLI timed out after {_CLAUDE_CLI_HARD_TIMEOUT_SECONDS}s"
+        logger.warning(error_msg)
+        return False, error_msg
+    except Exception as exc:
+        error_msg = f"Unexpected error during Claude CLI execution: {exc}"
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg
+
+    if result.returncode != 0:
+        error_msg = (
+            f"Claude CLI returned non-zero: {result.returncode},"
+            f" stderr: {result.stderr}"
+        )
+        logger.warning(error_msg)
+        return False, error_msg
+
+    return True, _normalize_claude_output(result.stdout)
 
 
 class DescriptionRefreshScheduler:
@@ -39,6 +210,7 @@ class DescriptionRefreshScheduler:
         meta_dir: Optional[Path] = None,
         analysis_model: str = "opus",
         job_tracker=None,
+        mcp_registration_service=None,
     ) -> None:
         """
         Initialize the scheduler.
@@ -50,6 +222,7 @@ class DescriptionRefreshScheduler:
             meta_dir: Path to cidx-meta directory (for reading existing .md files)
             analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
             job_tracker: Optional JobTracker instance for unified job tracking (Story #313)
+            mcp_registration_service: Optional MCPSelfRegistrationService instance (Story #727)
         """
         self._db_path = db_path
         self._config_manager = config_manager
@@ -57,10 +230,27 @@ class DescriptionRefreshScheduler:
         self._meta_dir = meta_dir
         self._analysis_model = analysis_model
         self._job_tracker = job_tracker
+        self._mcp_registration_service = mcp_registration_service
         self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
         self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        # Story #728 AC5: Bounded thread pool sized by max_concurrent_claude_cli config.
+        # Prevents mass backfill from spawning N unbounded concurrent Claude CLI processes.
+        # Canonical default comes from ClaudeIntegrationConfig to avoid duplication.
+        from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
+
+        _default_max_workers = ClaudeIntegrationConfig().max_concurrent_claude_cli
+        config = config_manager.load_config()
+        _configured = (
+            config.claude_integration_config.max_concurrent_claude_cli
+            if config and config.claude_integration_config
+            else _default_max_workers
+        )
+        # Clamp to >= 1: ThreadPoolExecutor raises ValueError for 0 or negative values.
+        max_workers = max(1, _configured)
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
     def start(self) -> None:
         """Start daemon thread if enabled in config."""
@@ -95,6 +285,10 @@ class DescriptionRefreshScheduler:
         """Stop daemon thread."""
         logger.info("Stopping description refresh scheduler")
         self._shutdown_event.set()
+        # Story #728 AC5b: Drain queued tasks before shutdown so no refresh leaks
+        # into the next start cycle.  Must be called AFTER _shutdown_event.set()
+        # so any new submission guards in _run_loop_single_pass see the event first.
+        self._executor.shutdown(wait=True)
 
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5.0)
@@ -414,12 +608,10 @@ class DescriptionRefreshScheduler:
                         )
                         tracked_job_id = None
 
-                # Invoke Claude CLI directly with the refresh prompt (Finding N2)
-                # Run in background thread to avoid blocking scheduler loop
+                # Run two-phase task in background thread to avoid blocking scheduler loop
                 def refresh_task(
                     alias=alias,
                     clone_path=clone_path,
-                    prompt=prompt,
                     job_id=tracked_job_id,
                 ):
                     # Story #313 AC7: Transition to "running" when thread starts
@@ -430,18 +622,46 @@ class DescriptionRefreshScheduler:
                             logger.debug(
                                 f"Non-fatal: Failed to update job {job_id} to running: {e}"
                             )
-                    success, result_str = self._invoke_claude_cli(clone_path, prompt)
-                    if success:
-                        # Update .md file with refreshed content
-                        self._update_description_file(alias, result_str)
-                    # Call completion callback with job_id for tracker update
-                    result_dict = {"error": result_str} if not success else None
+                    success = True
+                    error_dict = None
+                    try:
+                        # AC5 Story #727: Phase 1 + Phase 2 lifecycle detection run
+                        # unconditionally through _run_two_phase_task.
+                        self._run_two_phase_task(alias, clone_path)
+                    except Exception as e:
+                        logger.error(
+                            f"Two-phase refresh failed for {alias}: {e}", exc_info=True
+                        )
+                        success = False
+                        error_dict = {"error": str(e)}
                     self.on_refresh_complete(
-                        alias, clone_path, success, result_dict, job_id=job_id
+                        alias, clone_path, success, error_dict, job_id=job_id
                     )
 
-                threading.Thread(target=refresh_task, daemon=True).start()
-                logger.debug(f"Spawned refresh task for {alias}")
+                # Story #728 AC5: Use bounded executor instead of unbounded threading.Thread.
+                # Guard against submission after shutdown to prevent tasks leaking
+                # into a draining executor after stop() has been called.
+                if not self._shutdown_event.is_set():
+                    future = self._executor.submit(refresh_task)
+
+                    def _log_future_exception(
+                        f: concurrent.futures.Future, _alias: str = alias
+                    ) -> None:
+                        exc = f.exception()
+                        if exc is not None:
+                            logger.error(
+                                "Unhandled exception in refresh task for %s: %s",
+                                _alias,
+                                exc,
+                                exc_info=exc,
+                            )
+
+                    future.add_done_callback(_log_future_exception)
+                    logger.debug(f"Submitted refresh task for {alias}")
+                else:
+                    logger.debug(
+                        f"Skipping refresh task for {alias}: shutdown in progress"
+                    )
 
             else:
                 logger.debug(f"ClaudeCliManager not available, skipping {alias}")
@@ -545,6 +765,10 @@ class DescriptionRefreshScheduler:
         """
         Invoke Claude CLI with the given prompt.
 
+        Delegates to the module-level :func:`invoke_claude_cli` helper for the
+        subprocess mechanics, then validates the returned output via
+        :meth:`_validate_cli_output`.
+
         Args:
             repo_path: Path to repository
             prompt: Prompt to send to Claude
@@ -552,84 +776,25 @@ class DescriptionRefreshScheduler:
         Returns:
             Tuple of (success: bool, result: str) where result is the output or error message
         """
-        import os
-        import re
-        import shlex
-        import subprocess
+        success, output = invoke_claude_cli(
+            repo_path=repo_path,
+            prompt=prompt,
+            cli_manager=self._claude_cli_manager,
+            analysis_model=self._analysis_model,
+        )
+        if not success:
+            return False, output
 
-        try:
-            # Sync API key before invocation (if ClaudeCliManager available)
-            if self._claude_cli_manager:
-                try:
-                    self._claude_cli_manager.sync_api_key()
-                except Exception as e:
-                    logger.warning(f"API key sync failed: {e}")
-                    # Continue anyway - sync failure shouldn't block analysis
-
-            # Use script to provide pseudo-TTY (required for Claude CLI in non-interactive environments)
-            claude_cmd = f"timeout 90 claude --model {shlex.quote(self._analysis_model)} -p {shlex.quote(prompt)} --print --dangerously-skip-permissions"
-            full_cmd = ["script", "-q", "-c", claude_cmd, "/dev/null"]
-
-            result = subprocess.run(
-                full_cmd,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env={
-                    k: v
-                    for k, v in os.environ.items()
-                    if k
-                    not in (
-                        ("CLAUDECODE", "ANTHROPIC_API_KEY")
-                        if "CLAUDECODE" in os.environ
-                        else ("CLAUDECODE",)
-                    )
-                },
+        # Validate output quality (detect error messages masquerading as content)
+        if not self._validate_cli_output(output):
+            error_msg = (
+                f"Claude CLI output appears to be an error message"
+                f" (length={len(output)}): {output[:200]}"
             )
-
-            if result.returncode != 0:
-                error_msg = f"Claude CLI returned non-zero: {result.returncode}, stderr: {result.stderr}"
-                logger.warning(error_msg)
-                return False, error_msg
-
-            # Clean output (remove ALL terminal control sequences)
-            output = result.stdout
-            # CSI sequences: ESC [ ... letter (colors, cursor, modes like [?2004l, [?25h)
-            output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
-            # OSC sequences: ESC ] ... BEL or ESC ] ... ST
-            output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
-            # Other ESC sequences (ESC followed by single char)
-            output = re.sub(r"\x1b[^[\]()]", "", output)
-            # Stray control artifacts from script command
-            output = re.sub(r"\[<u", "", output)
-            # Strip any remaining bare ESC bytes not part of recognized sequences
-            output = output.replace("\x1b", "")
-            # Normalize line endings
-            output = output.replace("\r\n", "\n").replace("\r", "")
-            output = output.strip()
-            # Strip chain-of-thought text before YAML frontmatter
-            # Claude may emit reasoning text before the actual description
-            frontmatter_match = re.search(r"^---\s*$", output, re.MULTILINE)
-            if frontmatter_match and frontmatter_match.start() > 0:
-                output = output[frontmatter_match.start() :]
-
-            # Validate output quality (detect error messages masquerading as content)
-            if not self._validate_cli_output(output):
-                error_msg = f"Claude CLI output appears to be an error message (length={len(output)}): {output[:200]}"
-                logger.warning(error_msg)
-                return False, error_msg
-
-            return True, output
-
-        except subprocess.TimeoutExpired:
-            error_msg = "Claude CLI timed out after 120s"
             logger.warning(error_msg)
             return False, error_msg
-        except Exception as e:
-            error_msg = f"Unexpected error during Claude CLI execution: {e}"
-            logger.error(error_msg, exc_info=True)
-            return False, error_msg
+
+        return True, output
 
     def _validate_cli_output(self, output: str) -> bool:
         """
@@ -710,6 +875,246 @@ class DescriptionRefreshScheduler:
                 f"Failed to update description file for {repo_alias}: {e}",
                 exc_info=True,
             )
+
+    def _run_phase1(
+        self, alias: str, clone_path: str
+    ) -> Optional[Tuple[Dict[str, Any], str]]:
+        """
+        Execute Phase 1: build a refresh prompt and invoke Claude CLI.
+
+        Args:
+            alias: Repository alias (used by _get_refresh_prompt).
+            clone_path: Absolute path to the repository clone (subprocess cwd).
+
+        Returns:
+            Tuple of (frontmatter dict, body str) on success, or None on any
+            failure (missing prompt, CLI error).
+        """
+        prompt = self._get_refresh_prompt(alias, clone_path)
+        if prompt is None:
+            return None
+        success, phase1_output = invoke_claude_cli(
+            repo_path=clone_path,
+            prompt=prompt,
+            cli_manager=self._claude_cli_manager,
+            analysis_model=self._analysis_model,
+        )
+        if not success:
+            logger.warning("_run_phase1: Phase 1 CLI call failed for %s", alias)
+            return None
+        result: tuple = split_frontmatter_and_body(phase1_output)
+        return result
+
+    def _run_phase2_merge_write(
+        self,
+        alias: str,
+        clone_path: str,
+        frontmatter: Dict[str, Any],
+        body: str,
+    ) -> str:
+        """
+        Execute Phase 2 lifecycle detection, merge into *frontmatter*, and write.
+
+        Calls invoke_lifecycle_detection, loads the prior lifecycle block via
+        _load_prior_lifecycle, merges via _merge_lifecycle_result, serialises
+        via _serialize_description, and writes atomically via
+        atomic_write_description.
+
+        Args:
+            alias: Repository alias (used for file path and prior lifecycle lookup).
+            clone_path: Absolute path to the repository clone (Phase 2 cwd).
+            frontmatter: Phase-1 frontmatter dict to be updated in place.
+            body: Markdown body from Phase 1 output.
+
+        Returns:
+            phase2_outcome: One of "success", "failed_preserved_prior",
+            or "failed_degraded_to_unknown" indicating how the lifecycle block
+            was resolved.  Used by the caller to decide whether to self-close
+            the backfill tracking record (Story #728 AC3).
+        """
+        phase2_result = invoke_lifecycle_detection(
+            clone_path, cli_manager=self._claude_cli_manager
+        )
+        prior_lifecycle, prior_schema_version = self._load_prior_lifecycle(alias)
+
+        # Determine outcome before mutating frontmatter
+        if phase2_result is not None and "lifecycle" in phase2_result:
+            phase2_outcome = "success"
+        elif prior_lifecycle is not None:
+            phase2_outcome = "failed_preserved_prior"
+        else:
+            phase2_outcome = "failed_degraded_to_unknown"
+
+        frontmatter = self._merge_lifecycle_result(
+            frontmatter, phase2_result, prior_lifecycle, prior_schema_version
+        )
+        md_file = self._meta_dir / f"{alias}.md"  # type: ignore[operator]
+        atomic_write_description(
+            md_file, self._serialize_description(frontmatter, body)
+        )
+        return phase2_outcome
+
+    def _load_prior_lifecycle(self, alias: str) -> tuple:
+        """
+        Read the existing .md file for *alias* and extract lifecycle metadata.
+
+        Validates *alias* against _SAFE_ALIAS_PATTERN before constructing the
+        filesystem path to prevent path traversal.
+
+        Returns:
+            Tuple of (prior_lifecycle, prior_schema_version); each element is
+            None when the file does not exist or contains no lifecycle block.
+        """
+        if not _SAFE_ALIAS_PATTERN.match(alias):
+            logger.warning("_load_prior_lifecycle: unsafe alias %r rejected", alias)
+            return None, None
+        if not self._meta_dir:
+            return None, None
+        md_file = self._meta_dir / f"{alias}.md"
+        if not md_file.exists():
+            return None, None
+        try:
+            prior_fm, _ = split_frontmatter_and_body(
+                md_file.read_text(encoding="utf-8")
+            )
+            return prior_fm.get("lifecycle"), prior_fm.get("lifecycle_schema_version")
+        except Exception as exc:
+            logger.warning(
+                "_load_prior_lifecycle: failed to read prior .md for %s: %s",
+                alias,
+                exc,
+            )
+            return None, None
+
+    def _merge_lifecycle_result(
+        self,
+        frontmatter: Dict[str, Any],
+        phase2_result: Optional[Dict[str, Any]],
+        prior_lifecycle: Optional[Dict[str, Any]],
+        prior_schema_version: Optional[int],
+    ) -> Dict[str, Any]:
+        """
+        Merge Phase-2 lifecycle detection result into *frontmatter*.
+
+        Rules:
+        - Phase 2 succeeded  → use new lifecycle block; set LIFECYCLE_SCHEMA_VERSION
+        - Phase 2 failed + prior exists  → preserve prior block and schema version
+        - Phase 2 failed + no prior  → set ``confidence: unknown`` fallback
+
+        Returns:
+            The updated *frontmatter* dict (mutated in place).
+        """
+        if phase2_result is not None and "lifecycle" in phase2_result:
+            frontmatter["lifecycle"] = phase2_result["lifecycle"]
+            frontmatter["lifecycle_schema_version"] = LIFECYCLE_SCHEMA_VERSION
+        elif prior_lifecycle is not None:
+            frontmatter["lifecycle"] = prior_lifecycle
+            if prior_schema_version is not None:
+                frontmatter["lifecycle_schema_version"] = prior_schema_version
+        else:
+            frontmatter["lifecycle"] = {"confidence": "unknown"}
+        return frontmatter
+
+    @staticmethod
+    def _serialize_description(frontmatter: Dict[str, Any], body: str) -> str:
+        """
+        Serialise *frontmatter* dict + *body* into a YAML-frontmatter markdown string.
+
+        Returns:
+            String of the form ``---\\n<yaml>---\\n<body>``.
+        """
+        return (
+            f"---\n"
+            f"{yaml.safe_dump(frontmatter, default_flow_style=False, allow_unicode=True)}"
+            f"---\n"
+            f"{body}"
+        )
+
+    def _self_close_backfill(self, alias: str) -> None:
+        """
+        Update lifecycle_schema_version in description_refresh_tracking after
+        a successful Phase 2 refresh (Story #728 AC3 self-close).
+
+        Uses a guarded UPDATE (WHERE lifecycle_schema_version < LIFECYCLE_SCHEMA_VERSION)
+        to make the operation idempotent — re-running on a row already at the
+        current version is a no-op.
+
+        Args:
+            alias: Repository alias whose tracking row to update.
+        """
+        try:
+
+            def _update(conn) -> None:
+                conn.execute(
+                    "UPDATE description_refresh_tracking "
+                    "SET lifecycle_schema_version = ? "
+                    "WHERE repo_alias = ? "
+                    "AND lifecycle_schema_version < ?",
+                    (LIFECYCLE_SCHEMA_VERSION, alias, LIFECYCLE_SCHEMA_VERSION),
+                )
+
+            self._tracking_backend._conn_manager.execute_atomic(_update)
+            logger.debug(
+                "_self_close_backfill: set lifecycle_schema_version=%d for %s",
+                LIFECYCLE_SCHEMA_VERSION,
+                alias,
+            )
+        except Exception as exc:
+            logger.warning(
+                "_self_close_backfill: failed to update tracking for %s: %s",
+                alias,
+                exc,
+            )
+
+    def _run_two_phase_task(self, alias: str, clone_path: str) -> None:
+        """
+        Orchestrate the two-phase description refresh for one repository.
+
+        Validates *alias* and *meta_dir*, then delegates to helpers:
+        1. _run_phase1  — Claude CLI Phase 1
+        2. _mcp_registration_service.ensure_registered (or warning when absent)
+        3. _run_phase2_merge_write  — lifecycle detection, merge, atomic write
+        4. _self_close_backfill (Story #728 AC3) — update lifecycle_schema_version
+           in DB on success so the backfill scheduler does not re-queue this repo.
+
+        Returns early without writing if validation fails or Phase 1 fails.
+
+        Args:
+            alias: Repository alias (validated before any path construction).
+            clone_path: Absolute path to the repository clone.
+        """
+        if not _SAFE_ALIAS_PATTERN.match(alias):
+            logger.warning("_run_two_phase_task: unsafe alias %r rejected", alias)
+            return
+        if not self._meta_dir:
+            logger.warning("_run_two_phase_task: meta_dir not set, skipping %s", alias)
+            return
+
+        phase1 = self._run_phase1(alias, clone_path)
+        if phase1 is None:
+            return
+
+        frontmatter, body = phase1
+
+        if self._mcp_registration_service is not None:
+            self._mcp_registration_service.ensure_registered()
+        else:
+            logger.warning(
+                "_run_two_phase_task: MCPSelfRegistrationService not configured"
+                " for repo %s; skipping ensure_registered before Phase 2",
+                alias,
+            )
+
+        phase2_outcome = self._run_phase2_merge_write(
+            alias, clone_path, frontmatter, body
+        )
+
+        # Story #728 AC3: Self-close — update lifecycle_schema_version in DB
+        # when Phase 2 wrote a real lifecycle block (outcome == "success").
+        # Failure outcomes (prior preserved or degraded) must NOT advance the
+        # version so the backfill scheduler retries on the next cycle.
+        if phase2_outcome == "success":
+            self._self_close_backfill(alias)
 
     def close(self) -> None:
         """Clean up resources."""

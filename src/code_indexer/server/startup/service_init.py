@@ -528,6 +528,8 @@ def initialize_services() -> Dict[str, Any]:
         mcp_credential_manager=mcp_credential_manager,
     )
 
+    golden_repo_manager.set_mcp_registration_service(mcp_registration_service)
+
     return {
         "jwt_manager": jwt_manager,
         "user_manager": user_manager,

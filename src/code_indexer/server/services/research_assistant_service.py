@@ -15,7 +15,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TypedDict
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
@@ -23,6 +23,17 @@ import bleach  # type: ignore[import-untyped]
 import markdown  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
+
+
+class _PermissionsDetail(TypedDict):
+    allow: List[str]
+    deny: List[str]
+
+
+class PermissionSettings(TypedDict):
+    """Typed structure for Claude CLI --settings permission_settings dict."""
+
+    permissions: _PermissionsDetail
 
 
 # AC5: Security Guardrails Constant (fallback when prompt template file is missing).
@@ -1161,6 +1172,138 @@ class ResearchAssistantService:
             job = self._jobs.get(job_id)
             return job.get("session_id") if job else None
 
+    def _bash_deny_rules(self) -> List[str]:
+        """
+        Return Bash deny rules for Claude CLI permission enforcement.
+
+        Story #738: curl, destructive-FS (rm, mv, cp, mkdir, rmdir, touch, chmod,
+        chown, ln), and kill/pkill are removed from the deny list to grant remediation
+        authority. killall remains denied (conservative default). All other hard-deny
+        categories (privilege escalation, interpreters, shell escapes, package managers,
+        service management, git writes, disk/mount, persistence) are retained.
+        """
+        return [
+            # Network — exfiltration/lateral movement
+            # NOTE: curl removed by Story #738 (localhost-scope enforced via prompt)
+            "Bash(wget *)",
+            "Bash(ssh *)",
+            "Bash(scp *)",
+            "Bash(nc *)",
+            "Bash(ncat *)",
+            "Bash(nmap *)",
+            "Bash(netcat *)",
+            "Bash(socat *)",
+            "Bash(telnet *)",
+            "Bash(ftp *)",
+            "Bash(sftp *)",
+            "Bash(rsync *)",
+            # Scripting interpreters — arbitrary code execution
+            "Bash(python3 *)",
+            "Bash(python *)",
+            "Bash(perl *)",
+            "Bash(ruby *)",
+            "Bash(node *)",
+            "Bash(php *)",
+            "Bash(lua *)",
+            # Shell escape hatches
+            "Bash(bash *)",
+            "Bash(sh *)",
+            "Bash(zsh *)",
+            "Bash(exec *)",
+            "Bash(eval *)",
+            # Command multipliers
+            "Bash(xargs *)",
+            "Bash(find *)",
+            # Privilege escalation
+            "Bash(sudo *)",
+            "Bash(su *)",
+            "Bash(doas *)",
+            # NOTE: Destructive FS (rm, mv, cp, mkdir, rmdir, touch, chmod, chown, ln)
+            # removed by Story #738 for remediation authority.
+            # Package management
+            "Bash(apt *)",
+            "Bash(apt-get *)",
+            "Bash(dnf *)",
+            "Bash(yum *)",
+            "Bash(pip *)",
+            "Bash(pip3 *)",
+            "Bash(npm *)",
+            "Bash(gem *)",
+            # Service management — restart cidx-server allowed via specific allow rule;
+            # all other systemctl operations remain denied.
+            "Bash(systemctl stop *)",
+            "Bash(systemctl start *)",
+            "Bash(systemctl enable *)",
+            "Bash(systemctl disable *)",
+            "Bash(systemctl reload *)",
+            "Bash(service *)",
+            # Git write operations
+            "Bash(git push *)",
+            "Bash(git commit *)",
+            "Bash(git checkout *)",
+            "Bash(git reset *)",
+            "Bash(git rebase *)",
+            "Bash(git merge *)",
+            "Bash(git stash *)",
+            "Bash(git clean *)",
+            "Bash(git restore *)",
+            # Redirection to file (exfiltration via file)
+            "Bash(tee *)",
+            # Process control — kill and pkill unblocked by Story #738;
+            # killall remains denied (conservative default).
+            "Bash(killall *)",
+            # Disk/mount
+            "Bash(mount *)",
+            "Bash(umount *)",
+            "Bash(mkfs *)",
+            "Bash(fdisk *)",
+            # Cron/scheduling (persistence)
+            "Bash(crontab *)",
+            "Bash(at *)",
+        ]
+
+    def _allow_rules(
+        self, cidx_meta_path: str, cleanup_script_rule: Optional[str]
+    ) -> List[str]:
+        """
+        Return allow rules for Claude CLI permission enforcement.
+
+        Story #554: scoped Write/Edit for cidx-meta.
+        Story #738: adds specific allow for self-restart of cidx-server.
+        """
+        rules: List[str] = [
+            "Read",
+            "Glob",
+            "Grep",
+            "TodoWrite",
+            f"Write({cidx_meta_path}/**)",
+            f"Edit({cidx_meta_path}/**)",
+            # Story #738: specific allow for self-restart of cidx-server systemd unit.
+            "Bash(systemctl restart cidx-server)",
+        ]
+        if cleanup_script_rule is not None:
+            rules.append(cleanup_script_rule)
+        return rules
+
+    def _build_permission_settings(
+        self,
+        cidx_meta_path: str,
+        cleanup_script_rule: Optional[str],
+    ) -> PermissionSettings:
+        """
+        Build the Claude CLI permission settings dict (Story #554 + Story #738).
+
+        Composes _bash_deny_rules and _allow_rules into the PermissionSettings
+        structure consumed by _json.dumps() for the --settings CLI flag.
+        """
+        tool_level_deny: List[str] = ["Write", "Edit", "WebFetch", "WebSearch"]
+        return {
+            "permissions": {
+                "allow": self._allow_rules(cidx_meta_path, cleanup_script_rule),
+                "deny": tool_level_deny + self._bash_deny_rules(),
+            }
+        }
+
     def _run_claude_background(
         self, job_id: str, session_id: str, claude_prompt: str, is_first_prompt: bool
     ) -> None:
@@ -1248,140 +1391,13 @@ class ResearchAssistantService:
                 )
                 cleanup_script_rule = None
 
-            # Story #554: Build permission settings JSON for CLI-level enforcement.
-            #
-            # CRITICAL: With --dangerously-skip-permissions, "allow" rules only control
-            # whether a prompt is shown (irrelevant since we skip prompts). Only "deny"
-            # rules actually BLOCK execution. Therefore, security enforcement MUST use
-            # deny rules for all dangerous commands.
-            #
-            # Strategy:
-            # - allow: Write/Edit scoped to cidx-meta (overrides general Write/Edit deny)
-            # - deny: All dangerous Bash commands + unscoped Write/Edit/WebFetch/WebSearch
-            #
-            # Claude Code's Bash rules are shell-operator-aware:
-            # `Bash(cmd *)` blocks `cmd && blocked` and `cmd | blocked`.
+            # Story #554 + Story #738: Build permission settings via helper.
+            # Story #554: scoped Write/Edit cidx-meta; Story #738: remediation authority.
             import json as _json
 
-            # Deny rules for dangerous Bash commands — these are ENFORCED even with
-            # --dangerously-skip-permissions. Any command not denied is allowed.
-            bash_deny_rules = [
-                # Network tools — prevent data exfiltration and lateral movement
-                "Bash(curl *)",
-                "Bash(wget *)",
-                "Bash(ssh *)",
-                "Bash(scp *)",
-                "Bash(nc *)",
-                "Bash(ncat *)",
-                "Bash(nmap *)",
-                "Bash(netcat *)",
-                "Bash(socat *)",
-                "Bash(telnet *)",
-                "Bash(ftp *)",
-                "Bash(sftp *)",
-                "Bash(rsync *)",
-                # Scripting interpreters — prevent arbitrary code execution
-                "Bash(python3 *)",
-                "Bash(python *)",
-                "Bash(perl *)",
-                "Bash(ruby *)",
-                "Bash(node *)",
-                "Bash(php *)",
-                "Bash(lua *)",
-                # Shell escape hatches
-                "Bash(bash *)",
-                "Bash(sh *)",
-                "Bash(zsh *)",
-                "Bash(exec *)",
-                "Bash(eval *)",
-                # Command multipliers — can execute any blocked command
-                "Bash(xargs *)",
-                "Bash(find *)",  # find -exec allows arbitrary command execution
-                # Privilege escalation
-                "Bash(sudo *)",
-                "Bash(su *)",
-                "Bash(doas *)",
-                # Destructive file operations
-                "Bash(rm *)",
-                "Bash(mv *)",
-                "Bash(cp *)",
-                "Bash(chmod *)",
-                "Bash(chown *)",
-                "Bash(chgrp *)",
-                "Bash(mkdir *)",
-                "Bash(rmdir *)",
-                "Bash(touch *)",
-                "Bash(ln *)",
-                "Bash(install *)",
-                # Package management
-                "Bash(apt *)",
-                "Bash(apt-get *)",
-                "Bash(dnf *)",
-                "Bash(yum *)",
-                "Bash(pip *)",
-                "Bash(pip3 *)",
-                "Bash(npm *)",
-                "Bash(gem *)",
-                # Service management (except status which is read-only)
-                "Bash(systemctl restart *)",
-                "Bash(systemctl stop *)",
-                "Bash(systemctl start *)",
-                "Bash(systemctl enable *)",
-                "Bash(systemctl disable *)",
-                "Bash(systemctl reload *)",
-                "Bash(service *)",
-                # Git write operations
-                "Bash(git push *)",
-                "Bash(git commit *)",
-                "Bash(git checkout *)",
-                "Bash(git reset *)",
-                "Bash(git rebase *)",
-                "Bash(git merge *)",
-                "Bash(git stash *)",
-                "Bash(git clean *)",
-                "Bash(git restore *)",
-                # Redirection/pipe to file (data exfiltration via file)
-                "Bash(tee *)",
-                # Process control
-                "Bash(kill *)",
-                "Bash(killall *)",
-                "Bash(pkill *)",
-                # Disk/mount operations
-                "Bash(mount *)",
-                "Bash(umount *)",
-                "Bash(mkfs *)",
-                "Bash(fdisk *)",
-                # Cron/scheduling (persistence mechanism)
-                "Bash(crontab *)",
-                "Bash(at *)",
-            ]
-
-            # Allow rules: cidx-meta Write/Edit (overrides general deny),
-            # plus the cleanup script if available
-            allow_rules = [
-                "Read",
-                "Glob",
-                "Grep",
-                "TodoWrite",
-                f"Write({cidx_meta_path}/**)",
-                f"Edit({cidx_meta_path}/**)",
-            ]
-            if cleanup_script_rule is not None:
-                allow_rules.append(cleanup_script_rule)
-
-            permission_settings = {
-                "permissions": {
-                    "allow": allow_rules,
-                    "deny": [
-                        # Tool-level denies
-                        "Write",
-                        "Edit",
-                        "WebFetch",
-                        "WebSearch",
-                    ]
-                    + bash_deny_rules,
-                }
-            }
+            permission_settings = self._build_permission_settings(
+                cidx_meta_path, cleanup_script_rule
+            )
 
             # Build base command
             base_cmd = [

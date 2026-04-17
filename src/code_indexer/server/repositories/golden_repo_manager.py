@@ -181,6 +181,7 @@ class GoldenRepoManager:
             self._sqlite_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._sqlite_backend.ensure_table_exists()
         self._load_metadata_from_sqlite()
+        self._mcp_registration_service = None
 
         # One-time migration from metadata.json to SQLite (Bug #176)
         metadata_file = os.path.join(self.golden_repos_dir, "metadata.json")
@@ -236,6 +237,10 @@ class GoldenRepoManager:
                     )
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logging.warning(f"Could not migrate metadata.json: {e}")
+
+    def set_mcp_registration_service(self, service) -> None:
+        """Set the MCPSelfRegistrationService for Phase 2 lifecycle detection."""
+        self._mcp_registration_service = service
 
     def _load_metadata_from_sqlite(self) -> None:
         """Load golden repository metadata from SQLite backend.
@@ -325,7 +330,9 @@ class GoldenRepoManager:
             nonlocal default_branch
             try:
                 # Clone repository
-                clone_path = self._clone_repository(repo_url, alias, default_branch)
+                clone_path = self._clone_repository(
+                    repo_url, alias, default_branch or ""
+                )
 
                 # Bug #699: When no branch was specified, resolve the actual
                 # checked-out branch so metadata always stores a concrete value
@@ -423,6 +430,7 @@ class GoldenRepoManager:
                         repo_url=repo_url,
                         clone_path=clone_path,
                         golden_repos_dir=self.golden_repos_dir,
+                        mcp_registration_service=self._mcp_registration_service,
                     )
                 except Exception as hook_error:
                     # Log error but don't fail the golden repo registration
@@ -631,6 +639,7 @@ class GoldenRepoManager:
                     repo_url=f"local://{alias}",
                     clone_path=str(folder_path),
                     golden_repos_dir=self.golden_repos_dir,
+                    mcp_registration_service=self._mcp_registration_service,
                 )
             except Exception as hook_error:
                 logging.error(

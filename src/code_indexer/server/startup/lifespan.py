@@ -741,6 +741,7 @@ def make_lifespan(
                     else "opus"
                 ),
                 job_tracker=job_tracker,
+                mcp_registration_service=mcp_registration_service,
             )
 
             # Inject into meta_description_hook for tracking on repo add/remove

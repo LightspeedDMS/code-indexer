@@ -7,11 +7,20 @@ meta directory management code.
 """
 
 import logging
+import os
+import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
+
+from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
+from code_indexer.global_repos.repo_analyzer import (
+    RepoAnalyzer,
+    invoke_lifecycle_detection,
+)
 from code_indexer.server.services.claude_cli_manager import (
     get_claude_cli_manager,
 )
@@ -207,11 +216,65 @@ def set_debouncer(debouncer: Optional["CidxMetaRefreshDebouncer"]) -> None:
     _debouncer = debouncer
 
 
+def atomic_write_description(
+    target_path: Path,
+    content: str,
+    refresh_scheduler: Optional[Any] = None,
+) -> None:
+    """
+    Write content to target_path atomically via tempfile + os.replace.
+
+    Creates a temporary file in the same directory as target_path (same
+    filesystem), writes all content, then swaps atomically.  If
+    refresh_scheduler is provided, acquires the cidx-meta write lock
+    before the write and releases it in a finally block.  Lock acquisition
+    failure propagates to the caller.
+
+    Args:
+        target_path: Destination Path object.
+        content: Text content to write (UTF-8).
+        refresh_scheduler: Optional scheduler exposing acquire_write_lock /
+            release_write_lock.  Skipped when None.
+
+    Raises:
+        Any exception from acquire_write_lock, file write, or os.replace.
+    """
+    lock_acquired = False
+    if refresh_scheduler is not None:
+        refresh_scheduler.acquire_write_lock("cidx-meta", owner_name="lifecycle_writer")
+        lock_acquired = True
+
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=str(target_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            os.replace(tmp_path, str(target_path))
+        except Exception:
+            # Best-effort cleanup: remove the temp file so it does not linger.
+            # A failure here is non-fatal; the original exception is the real error.
+            try:
+                os.unlink(tmp_path)
+            except OSError as cleanup_exc:
+                logger.debug(
+                    "atomic_write_description: temp file cleanup failed "
+                    "(non-fatal, original exception will propagate): %s",
+                    cleanup_exc,
+                )
+            raise
+    finally:
+        if lock_acquired and refresh_scheduler is not None:
+            refresh_scheduler.release_write_lock(
+                "cidx-meta", owner_name="lifecycle_writer"
+            )
+
+
 def on_repo_added(
     repo_name: str,
     repo_url: str,
     clone_path: str,
     golden_repos_dir: str,
+    mcp_registration_service: Optional[Any] = None,
 ) -> None:
     """
     Hook called after a golden repository is successfully added.
@@ -293,12 +356,20 @@ def on_repo_added(
         _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
 
     else:
-        # Generate .md file using Claude CLI
+        # Generate .md file using Claude CLI (two-phase: Phase 1 + Phase 2 lifecycle)
         try:
-            md_content = _generate_repo_description(repo_name, repo_url, clone_path)
+            md_content, phase2_outcome = _generate_repo_description(
+                repo_name,
+                repo_url,
+                clone_path,
+                mcp_registration_service=mcp_registration_service,
+            )
             md_file = cidx_meta_path / f"{repo_name}.md"
-            md_file.write_text(md_content)
-            logger.info(f"Created meta description file: {md_file}")
+            atomic_write_description(md_file, md_content)
+            logger.info(
+                f"Created meta description file: {md_file} "
+                f"(phase2_outcome={phase2_outcome})"
+            )
 
         except Exception as e:
             logger.error(
@@ -472,64 +543,87 @@ def _create_readme_fallback(
         return None
 
 
-def _generate_repo_description(repo_name: str, repo_url: str, clone_path: str) -> str:
+def _generate_repo_description(
+    repo_name: str,
+    repo_url: str,
+    clone_path: str,
+    mcp_registration_service: Optional[Any] = None,
+) -> tuple:
     """
-    Generate .md file content for a repository using RepoAnalyzer.
+    Generate .md file content for a repository using two-phase analysis.
+
+    Phase 1: RepoAnalyzer extracts technologies, purpose, summary, features,
+             and use cases.  Builds a frontmatter dict and markdown body.
+
+    Phase 2: invoke_lifecycle_detection runs lifecycle detection via Claude
+             CLI and returns a parsed dict (or None on failure).  The result
+             is merged into the frontmatter dict before serialisation.
 
     Args:
         repo_name: Repository name/alias
         repo_url: Repository URL
         clone_path: Path to cloned repository
+        mcp_registration_service: Optional MCPSelfRegistrationService; when
+            not None, ensure_registered() is called before Phase 2.
 
     Returns:
-        Markdown content for .md file with rich metadata from Claude analysis
+        Tuple of (content_str, phase2_outcome) where phase2_outcome is one
+        of "success" | "failed_degraded_to_unknown".
     """
-    from datetime import datetime, timezone
-
-    from .repo_analyzer import RepoAnalyzer
-
     now = datetime.now(timezone.utc).isoformat()
 
-    # Use RepoAnalyzer for rich metadata extraction (uses Claude SDK if available)
+    # --- MCP registration (before Phase 2) ---
+    if mcp_registration_service is not None:
+        mcp_registration_service.ensure_registered()
+    else:
+        logger.warning(
+            "MCPSelfRegistrationService not wired; skipping ensure_registered(). "
+            "Phase 2 MCP access not guaranteed."
+        )
+
+    # --- Phase 1: extract repo info ---
     analyzer = RepoAnalyzer(clone_path)
     info = analyzer.extract_info()
 
-    # Build YAML frontmatter with rich metadata
-    tech_list = (
-        "\n".join(f"  - {tech}" for tech in info.technologies)
-        if info.technologies
-        else "  []"
-    )
+    frontmatter_dict: dict = {
+        "name": repo_name,
+        "url": repo_url,
+        "technologies": list(info.technologies),
+        "purpose": info.purpose,
+        "last_analyzed": now,
+    }
 
-    frontmatter = f"""---
-name: {repo_name}
-url: {repo_url}
-technologies:
-{tech_list}
-purpose: {info.purpose}
-last_analyzed: {now}
----
-"""
-
-    # Build body with summary and details
-    body = f"""
-# {repo_name}
-
-{info.summary}
-
-**Repository URL**: {repo_url}
-"""
-
-    # Add features section if available
+    # Build markdown body
+    body = f"\n# {repo_name}\n\n{info.summary}\n\n**Repository URL**: {repo_url}\n"
     if info.features:
         body += "\n## Features\n\n"
         for feat in info.features[:10]:
             body += f"- {feat}\n"
-
-    # Add use cases section if available
     if info.use_cases:
         body += "\n## Use Cases\n\n"
         for uc in info.use_cases[:5]:
             body += f"- {uc}\n"
 
-    return frontmatter + body
+    # --- Phase 2: lifecycle detection ---
+    lifecycle_result = invoke_lifecycle_detection(clone_path)
+
+    frontmatter_dict["lifecycle_schema_version"] = LIFECYCLE_SCHEMA_VERSION
+    if lifecycle_result is not None:
+        frontmatter_dict["lifecycle"] = lifecycle_result["lifecycle"]
+        phase2_outcome = "success"
+    else:
+        frontmatter_dict["lifecycle"] = {
+            "branches_to_env": {},
+            "detected_sources": [],
+            "confidence": "unknown",
+            "claude_notes": "Phase 2 lifecycle detection did not return a result.",
+        }
+        phase2_outcome = "failed_degraded_to_unknown"
+
+    # --- Serialize ---
+    fm_text = yaml.safe_dump(
+        frontmatter_dict, default_flow_style=False, sort_keys=False
+    )
+    content = "---\n" + fm_text + "---\n" + body
+
+    return content, phase2_outcome

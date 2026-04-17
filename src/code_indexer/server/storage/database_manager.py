@@ -697,6 +697,8 @@ class DatabaseSchema:
             self._migrate_oidc_state_tokens_table(conn)
             # Bug #583: Token blacklist (migration for existing DBs)
             self._migrate_token_blacklist_table(conn)
+            # Story #728: lifecycle_schema_version column for backfill detection
+            self._migrate_description_refresh_lifecycle_version(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -1083,6 +1085,31 @@ class DatabaseSchema:
         conn.execute(self.CREATE_TOKEN_BLACKLIST_TABLE)
         conn.commit()
         logger.debug("Ensured token_blacklist table exists")
+
+    def _migrate_description_refresh_lifecycle_version(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Add lifecycle_schema_version column to description_refresh_tracking (Story #728).
+
+        Tracks which lifecycle metadata schema version each repo's .md file was generated
+        with.  Used by the backfill scheduler to detect repos that need re-generation.
+
+        Idempotent: checks PRAGMA table_info before issuing ALTER TABLE so re-running
+        on a database that already has the column is a no-op.
+        """
+        cursor = conn.execute("PRAGMA table_info(description_refresh_tracking)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "lifecycle_schema_version" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE description_refresh_tracking "
+                "ADD COLUMN lifecycle_schema_version INTEGER DEFAULT 0"
+            )
+            conn.commit()
+            logger.info(
+                "Migrated description_refresh_tracking schema: "
+                "added lifecycle_schema_version column (Story #728)"
+            )
 
 
 class DatabaseConnectionManager:

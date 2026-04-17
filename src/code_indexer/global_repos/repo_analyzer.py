@@ -17,12 +17,275 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+import yaml
 
 if TYPE_CHECKING:
     from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
 logger = logging.getLogger(__name__)
+
+# Phase 2 lifecycle detection timeouts (spec-mandated values per Story #727 AC).
+# shell timeout: inner `timeout` command budget; outer timeout: Python subprocess.run cap.
+_PHASE2_SHELL_TIMEOUT = 180
+_PHASE2_OUTER_TIMEOUT = 240
+
+
+def split_frontmatter_and_body(content: str) -> Tuple[Dict[str, Any], str]:
+    """
+    Split YAML frontmatter from markdown body.
+
+    Expects content that may start with ``---`` followed by YAML and a
+    closing ``---`` delimiter.  If no opening delimiter is found, or the
+    closing delimiter is absent, returns an empty dict paired with the
+    original content unchanged.
+
+    Args:
+        content: Raw file content, possibly starting with a ``---`` block.
+
+    Returns:
+        Tuple of (frontmatter_dict, body) where frontmatter_dict is the
+        parsed YAML mapping and body is everything after the closing ``---``
+        line. When no valid frontmatter is found both elements reflect the
+        original content: ({}, content).
+    """
+    if not content.startswith("---"):
+        logger.debug(
+            "split_frontmatter_and_body: content has no opening '---' delimiter"
+        )
+        return {}, content
+
+    # Find the closing delimiter (search starting after the opening "---")
+    close_pos = content.find("---", 3)
+    if close_pos == -1:
+        logger.debug("split_frontmatter_and_body: no closing '---' delimiter found")
+        return {}, content
+
+    yaml_text = content[3:close_pos].strip()
+    body = content[close_pos + 3 :]
+    # Strip the newline immediately after the closing ---
+    if body.startswith("\n"):
+        body = body[1:]
+
+    try:
+        parsed = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as exc:
+        logger.warning(
+            "split_frontmatter_and_body: failed to parse frontmatter YAML: %s", exc
+        )
+        return {}, content
+
+    if not isinstance(parsed, dict):
+        logger.debug(
+            "split_frontmatter_and_body: frontmatter parsed to %s, expected dict",
+            type(parsed).__name__,
+        )
+        return {}, content
+
+    return parsed, body
+
+
+def invoke_lifecycle_detection(
+    repo_path: str,
+    cli_manager: Optional["ClaudeCliManager"] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Run Phase 2 lifecycle detection via Claude CLI.
+
+    Loads the ``lifecycle_detection`` prompt template, invokes Claude CLI
+    inside *repo_path* with Phase 2 timeouts (shell=180 s, outer=240 s),
+    and parses the raw stdout as YAML.  Returns the parsed dict only when
+    the output is valid YAML **and** contains a ``lifecycle`` key.
+
+    Args:
+        repo_path: Absolute path to the repository to analyse.
+        cli_manager: Reserved for future ClaudeCliManager integration
+            (API key sync, CLI availability checks). Currently unused;
+            the call always invokes ``invoke_claude_cli`` directly.
+
+    Returns:
+        Parsed YAML dict on success, ``None`` on any failure (timeout,
+        non-zero exit, malformed YAML, missing ``lifecycle`` key, empty
+        output).
+    """
+    from code_indexer.global_repos.prompts import get_prompt
+
+    try:
+        prompt = get_prompt("lifecycle_detection")
+    except (FileNotFoundError, ValueError) as exc:
+        logger.warning("invoke_lifecycle_detection: failed to load prompt: %s", exc)
+        return None
+
+    success, output = invoke_claude_cli(
+        repo_path,
+        prompt,
+        _PHASE2_SHELL_TIMEOUT,
+        _PHASE2_OUTER_TIMEOUT,
+    )
+
+    if not success:
+        logger.warning(
+            "invoke_lifecycle_detection: CLI invocation failed for %s: %s",
+            repo_path,
+            output,
+        )
+        return None
+
+    if not output:
+        logger.warning(
+            "invoke_lifecycle_detection: CLI returned empty output for %s", repo_path
+        )
+        return None
+
+    try:
+        parsed = yaml.safe_load(output)
+    except yaml.YAMLError as exc:
+        logger.warning(
+            "invoke_lifecycle_detection: failed to parse YAML from CLI output: %s", exc
+        )
+        return None
+
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "invoke_lifecycle_detection: YAML parsed to %s, expected dict",
+            type(parsed).__name__,
+        )
+        return None
+
+    if "lifecycle" not in parsed:
+        logger.warning(
+            "invoke_lifecycle_detection: parsed YAML missing required 'lifecycle' key; "
+            "keys present: %s",
+            list(parsed.keys()),
+        )
+        return None
+
+    return parsed
+
+
+# Portable null device for the `script` pseudo-TTY wrapper.
+# `script -q -c <cmd> <null>` discards the typescript; os.devnull is "/dev/null"
+# on Unix and "nul" on Windows. Claude CLI itself requires Unix, but using
+# os.devnull avoids hard-coding the path.
+_SCRIPT_NULL_DEVICE = os.devnull
+
+
+def _clean_claude_output(output: str) -> str:
+    """
+    Remove all terminal control sequences from Claude CLI stdout.
+
+    Applies the cleaning sequence used by description_refresh_scheduler.py
+    (lines 596-610) to strip CSI, OSC, ESC, script artifacts, and
+    normalize line endings.
+    """
+    # CSI sequences: ESC [ ... letter (colors, cursor, modes)
+    output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
+    # OSC sequences: ESC ] ... BEL or ST
+    output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
+    # Other ESC sequences (ESC followed by a single char)
+    output = re.sub(r"\x1b[^[\]()]", "", output)
+    # Stray [<u artifacts from the script command
+    output = re.sub(r"\[<u", "", output)
+    # Strip remaining bare ESC bytes
+    output = output.replace("\x1b", "")
+    # Normalize line endings, then strip surrounding whitespace
+    output = output.replace("\r\n", "\n").replace("\r", "")
+    return output.strip()
+
+
+def invoke_claude_cli(
+    repo_path: str,
+    prompt: str,
+    shell_timeout_seconds: int,
+    outer_timeout_seconds: int,
+) -> tuple:
+    """
+    Shared parameterized subprocess wrapper for Claude CLI invocations.
+
+    Consolidates the duplicated subprocess invocation pattern from
+    description_refresh_scheduler._invoke_claude_cli and
+    RepoAnalyzer._extract_info_with_claude into one implementation.
+
+    Uses ``script -q -c ... <null>`` for pseudo-TTY in non-interactive
+    environments, filters the subprocess environment to prevent inheriting
+    parent agentic context, and delegates output cleaning to
+    ``_clean_claude_output``.
+
+    Args:
+        repo_path: Non-empty working directory path for the subprocess (cwd).
+        prompt: Non-empty prompt string to pass to ``claude -p``.
+        shell_timeout_seconds: Positive int (not bool); inner ``timeout`` shell value (s).
+        outer_timeout_seconds: Positive int (not bool) > shell_timeout_seconds;
+            Python subprocess.run timeout. Typically shell_timeout + 60.
+
+    Returns:
+        Tuple of (success: bool, result: str).
+        On success: (True, cleaned_stdout).
+        On failure: (False, error_message).
+
+    Raises:
+        ValueError: If any parameter fails validation.
+    """
+    if not isinstance(repo_path, str) or not repo_path.strip():
+        raise ValueError(f"repo_path must be a non-empty string, got {repo_path!r}")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError(f"prompt must be a non-empty string, got {prompt!r}")
+    if type(shell_timeout_seconds) is not int or shell_timeout_seconds <= 0:
+        raise ValueError(
+            f"shell_timeout_seconds must be a positive int, got {shell_timeout_seconds!r}"
+        )
+    if type(outer_timeout_seconds) is not int or outer_timeout_seconds <= 0:
+        raise ValueError(
+            f"outer_timeout_seconds must be a positive int, got {outer_timeout_seconds!r}"
+        )
+    if outer_timeout_seconds <= shell_timeout_seconds:
+        raise ValueError(
+            f"outer_timeout_seconds ({outer_timeout_seconds}) must exceed "
+            f"shell_timeout_seconds ({shell_timeout_seconds})"
+        )
+
+    try:
+        claude_cmd = (
+            f"timeout {shell_timeout_seconds} claude "
+            f"-p {shlex.quote(prompt)} --print --dangerously-skip-permissions"
+        )
+        full_cmd = ["script", "-q", "-c", claude_cmd, _SCRIPT_NULL_DEVICE]
+
+        # Filter env: always drop CLAUDECODE; also drop ANTHROPIC_API_KEY when
+        # CLAUDECODE is present to prevent inheriting parent agentic context.
+        keys_to_drop = {"CLAUDECODE"}
+        if "CLAUDECODE" in os.environ:
+            keys_to_drop.add("ANTHROPIC_API_KEY")
+        filtered_env = {k: v for k, v in os.environ.items() if k not in keys_to_drop}
+
+        result = subprocess.run(
+            full_cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=outer_timeout_seconds,
+            env=filtered_env,
+        )
+
+        if result.returncode != 0:
+            error_msg = (
+                f"Claude CLI returned non-zero: {result.returncode}, "
+                f"stderr: {result.stderr}"
+            )
+            logger.warning(error_msg)
+            return False, error_msg
+
+        return True, _clean_claude_output(result.stdout)
+
+    except subprocess.TimeoutExpired:
+        error_msg = f"Claude CLI timed out after {outer_timeout_seconds}s"
+        logger.warning(error_msg)
+        return False, error_msg
+    except Exception as exc:
+        error_msg = f"Unexpected error during Claude CLI execution: {exc}"
+        logger.error(error_msg, exc_info=True)
+        return False, error_msg
 
 
 @dataclass
