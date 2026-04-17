@@ -19,10 +19,6 @@ from typing import Any, Dict, Optional
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
-# Thread-local storage for re-entry guard (Bug #731).
-# _emit_guard.active is True while this thread is already inside emit().
-_emit_guard = threading.local()
-
 logger = logging.getLogger(__name__)
 
 
@@ -64,6 +60,12 @@ class SQLiteLogHandler(logging.Handler):
                 emit() calls delegate to this backend from the start.
         """
         super().__init__()
+        # Per-instance thread-local re-entry guard (Bug #731 secondary defence).
+        # Instance-owned so that multiple SQLiteLogHandler instances installed at
+        # the root logger do not share guard state and accidentally suppress each
+        # other's recursive emit() calls.  self._emit_guard.active is True while
+        # this thread is already inside this handler's emit().
+        self._emit_guard = threading.local()
         self.db_path = Path(db_path)
 
         # Optional LogsBackend for delegated writes (Story #500 AC4, Story #526).
@@ -181,9 +183,9 @@ class SQLiteLogHandler(logging.Handler):
         Args:
             record: LogRecord instance to write to database
         """
-        if getattr(_emit_guard, "active", False):
+        if getattr(self._emit_guard, "active", False):
             return
-        _emit_guard.active = True
+        self._emit_guard.active = True
         try:
             # Format the message
             message = self.format(record)
@@ -293,7 +295,7 @@ class SQLiteLogHandler(logging.Handler):
             # Use handleError to report the issue
             self.handleError(record)
         finally:
-            _emit_guard.active = False
+            self._emit_guard.active = False
 
     def close(self) -> None:
         """Close handler. Connections are managed by DatabaseConnectionManager."""

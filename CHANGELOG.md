@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.4
+
+### Bug Fixes
+
+- fix: Bug #731 (strengthened) -- DatabaseConnectionManager._lock changed from threading.Lock to threading.RLock (primary fix). Plain Lock is not re-entrant: if `_cleanup_stale_connections()` logs while holding `_lock`, and SQLiteLogHandler.emit() calls `get_connection()` which tries to re-acquire `_lock` on the same thread, a plain Lock deadlocks. RLock allows same-thread re-acquisition, eliminating the root cause. Validated by `TestDatabaseManagerRLockFix`: asserts isinstance(_lock, RLock) and confirms cleanup-logging path completes within 5s timeout with SQLiteLogHandler at root logger.
+
+- fix: Bug #731 (defence-in-depth) -- SQLiteLogHandler._emit_guard confirmed as per-instance threading.local (not module-level). Instance-owned so multiple SQLiteLogHandler instances installed at the root logger do not share guard state and cannot accidentally suppress each other's legitimate emit() calls. Pattern matches Codex review recommendations.
+
+- fix: Bug #731 sibling risk (Part C, Codex review finding) -- OTELLogHandler gains per-instance threading.local re-entry guard (_emit_guard). get_trace_context() calls logger.debug() on exception; if OTELLogHandler is the root handler that debug call re-enters emit() on the same thread, causing infinite recursion. Guard silently drops recursive calls. Validated by TestOTELLogHandlerReentryGuard: structural check (isinstance _emit_guard threading.local) and no-deadlock check under 5s timeout with patched get_trace_context raising RuntimeError.
+
 ## v9.17.3
 
 ### Bug Fixes

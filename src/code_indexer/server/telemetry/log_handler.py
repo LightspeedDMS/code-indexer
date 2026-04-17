@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,10 @@ class OTELLogHandler(logging.Handler):
     context is injected into all log records processed by it.
 
     The handler uses OTELLogFormatter by default if no formatter is set.
+
+    Re-entry guard (Bug #731 sibling risk): get_trace_context() may call
+    logger.debug() on exception, which re-enters emit() on the same thread.
+    A per-instance threading.local() guard silently drops recursive calls.
     """
 
     def __init__(
@@ -147,6 +152,11 @@ class OTELLogHandler(logging.Handler):
             formatter: Optional formatter (defaults to OTELLogFormatter)
         """
         super().__init__(level)
+        # Per-instance thread-local re-entry guard (Bug #731 sibling risk).
+        # Instance-owned so multiple OTELLogHandler instances do not share
+        # guard state. self._emit_guard.active is True while this thread
+        # is already inside this handler's emit().
+        self._emit_guard = threading.local()
 
         if formatter is None:
             # Default format includes trace context
@@ -163,12 +173,19 @@ class OTELLogHandler(logging.Handler):
         """
         Emit a log record with trace context.
 
+        Re-entry guard: if this thread is already inside emit(), silently drop
+        the recursive call to prevent infinite recursion caused by
+        get_trace_context() calling logger.debug() on exception.
+
         This handler injects trace context but doesn't output directly.
         It's designed to be used with a formatter that includes trace fields.
 
         Args:
             record: Log record to emit
         """
+        if getattr(self._emit_guard, "active", False):
+            return
+        self._emit_guard.active = True
         try:
             # Ensure trace context is in record
             if not hasattr(record, "trace_id"):
@@ -183,3 +200,5 @@ class OTELLogHandler(logging.Handler):
 
         except Exception:
             self.handleError(record)
+        finally:
+            self._emit_guard.active = False

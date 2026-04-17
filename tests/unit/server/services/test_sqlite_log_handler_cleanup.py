@@ -17,7 +17,7 @@ Uses real SQLite connections and real threads - zero mocking.
 import logging
 import sqlite3
 import threading
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Union
 import pytest
 from pathlib import Path
 
@@ -482,4 +482,184 @@ class TestReentryDeadlockRegression:
         assert not any("Inner record" in m for m in messages), (
             f"Inner (recursive) record must be dropped by re-entry guard; "
             f"DB contains: {messages}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Part D: Real lock-contention deadlock reproduction (Codex review finding)
+# ---------------------------------------------------------------------------
+
+# Generous timeout: a non-deadlocking operation completes in <100 ms on CI.
+LOCK_DEADLOCK_TIMEOUT_SECONDS = 5.0
+
+# Time allowed for the daemon thread to signal it has acquired the outer lock.
+LOCK_ACQUIRE_SIGNAL_TIMEOUT_SECONDS = 1.0
+
+# Sentinel thread ID guaranteed to be dead: far above any realistic OS TID.
+FAKE_STALE_THREAD_ID = 999_999_999
+
+
+def _does_lock_deadlock_on_reentry(
+    lock: Union[threading.Lock, threading.RLock],  # type: ignore[type-arg]
+) -> bool:
+    """
+    Return True if the lock deadlocks when the same thread tries to re-acquire
+    it while already holding it.
+
+    Both threading.Lock and threading.RLock are accepted: they share the
+    context-manager protocol (__enter__/__exit__) at runtime even though the
+    type stubs treat them as separate types.
+
+    Raises AssertionError if the worker thread never acquired the outer lock
+    (indicates a test-setup problem rather than a re-entry deadlock).
+
+    A daemon thread is used so the test process is never permanently blocked.
+    """
+    acquired_outer = threading.Event()
+    completed = threading.Event()
+
+    def _run() -> None:
+        with lock:  # type: ignore[union-attr]
+            acquired_outer.set()
+            # Same thread tries to re-acquire.
+            # Plain Lock: blocks forever (deadlock detected by timeout).
+            # RLock: succeeds immediately (re-entrant by design).
+            with lock:  # type: ignore[union-attr]
+                pass
+        completed.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    outer_acquired = acquired_outer.wait(timeout=LOCK_ACQUIRE_SIGNAL_TIMEOUT_SECONDS)
+    assert outer_acquired, (
+        "Worker thread failed to acquire the outer lock within "
+        f"{LOCK_ACQUIRE_SIGNAL_TIMEOUT_SECONDS}s — test-setup failure, "
+        "not a re-entry deadlock."
+    )
+    return not completed.wait(timeout=LOCK_DEADLOCK_TIMEOUT_SECONDS)
+
+
+class TestLockReentryBaseline:
+    """
+    Baseline tests proving that plain threading.Lock deadlocks on same-thread
+    re-acquisition while threading.RLock does not.
+
+    These tests underpin the primary Bug #731 fix: changing
+    DatabaseConnectionManager._lock from Lock to RLock.
+    """
+
+    def test_plain_lock_deadlocks_on_same_thread_reentry(self) -> None:
+        """
+        Plain threading.Lock is NOT re-entrant.  A thread holding it that tries
+        to acquire it again blocks forever (detected by the watchdog timeout).
+        Validates the deadlock hazard that the RLock fix resolves.
+        """
+        plain_lock = threading.Lock()
+        assert _does_lock_deadlock_on_reentry(plain_lock), (
+            "Expected plain threading.Lock to deadlock on same-thread "
+            "re-acquisition but it completed — test environment anomaly."
+        )
+
+    def test_rlock_allows_same_thread_reentry(self) -> None:
+        """
+        threading.RLock IS re-entrant.  Same-thread re-acquisition succeeds
+        immediately without blocking.  Validates RLock as the correct fix.
+        """
+        rlock = threading.RLock()
+        assert not _does_lock_deadlock_on_reentry(rlock), (
+            "threading.RLock should allow same-thread re-acquisition without "
+            "deadlock but it timed out — unexpected behaviour."
+        )
+
+
+class TestDatabaseManagerRLockFix:
+    """
+    Regression tests proving that DatabaseConnectionManager uses threading.RLock
+    (the primary Bug #731 fix) and that the cleanup-logging path does not deadlock.
+    """
+
+    def test_database_manager_uses_rlock(self, tmp_path: Path) -> None:
+        """
+        Production invariant: DatabaseConnectionManager._lock must be RLock.
+        Fails immediately if someone reverts the fix to threading.Lock.
+        """
+        from code_indexer.server.storage.database_manager import (
+            DatabaseConnectionManager,
+        )
+
+        manager = DatabaseConnectionManager.get_instance(
+            str(tmp_path / "rlock_check.db")
+        )
+        rlock_type = type(threading.RLock())
+        assert isinstance(manager._lock, rlock_type), (
+            f"DatabaseConnectionManager._lock must be threading.RLock, "
+            f"got {type(manager._lock).__name__}. "
+            "Reverting to plain Lock reintroduces the Bug #731 deadlock."
+        )
+
+    def test_cleanup_logging_does_not_deadlock_with_rlock(self, tmp_path: Path) -> None:
+        """
+        Full integration: _cleanup_stale_connections() holds self._lock and logs
+        via logger.info.  With SQLiteLogHandler at root and no prior thread-local
+        connection in the cleanup thread, a plain Lock would deadlock; RLock must
+        complete within LOCK_DEADLOCK_TIMEOUT_SECONDS.
+
+        Setup: install SQLiteLogHandler at root, inject FAKE_STALE_THREAD_ID into
+        _connections, call _cleanup_stale_connections() from a fresh thread (no
+        prior _local.connection).
+        """
+        from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
+        from code_indexer.server.storage.database_manager import (
+            DatabaseConnectionManager,
+        )
+
+        db_path = tmp_path / "cleanup_deadlock_test.db"
+        handler = SQLiteLogHandler(db_path)
+        manager = DatabaseConnectionManager.get_instance(str(db_path))
+
+        root_logger = logging.getLogger()
+        original_handlers = root_logger.handlers[:]
+        original_level = root_logger.level
+
+        completed = threading.Event()
+        error_holder: List[Exception] = []
+
+        try:
+            root_logger.setLevel(logging.DEBUG)
+            root_logger.handlers = [handler]
+
+            # Ensure manager has a real connection (main thread), then inject a
+            # fake stale TID so _cleanup_stale_connections emits logger.info.
+            manager.get_connection()
+            manager._connections[FAKE_STALE_THREAD_ID] = manager.get_connection()
+
+            def run_cleanup_on_fresh_thread() -> None:
+                """
+                Fresh thread: no _local.connection yet.  If _lock is plain Lock,
+                the re-entry from emit() -> get_connection() -> `with self._lock:`
+                deadlocks.  With RLock it completes immediately.
+                """
+                try:
+                    manager._cleanup_stale_connections()
+                except Exception as exc:
+                    error_holder.append(exc)
+                finally:
+                    completed.set()
+
+            worker = threading.Thread(target=run_cleanup_on_fresh_thread, daemon=True)
+            worker.start()
+            finished = completed.wait(timeout=LOCK_DEADLOCK_TIMEOUT_SECONDS)
+        finally:
+            root_logger.handlers = original_handlers
+            root_logger.level = original_level
+            handler.close()
+
+        assert finished, (
+            f"_cleanup_stale_connections() timed out after "
+            f"{LOCK_DEADLOCK_TIMEOUT_SECONDS}s — DEADLOCK DETECTED. "
+            "DatabaseConnectionManager._lock must be threading.RLock "
+            "(Bug #731 primary fix)."
+        )
+        assert not error_holder, (
+            f"Unexpected exception in cleanup thread: {error_holder}"
         )

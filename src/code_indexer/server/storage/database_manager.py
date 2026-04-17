@@ -1167,7 +1167,15 @@ class DatabaseConnectionManager:
         self.db_path = db_path
         self._local = threading.local()
         self._connections: Dict[int, sqlite3.Connection] = {}
-        self._lock = threading.Lock()
+        # RLock (re-entrant) is required: _cleanup_stale_connections() holds
+        # self._lock while logging (logger.warning / logger.info at lines 1191,
+        # 1197).  If SQLiteLogHandler is at the root logger, those log calls
+        # re-enter emit() -> execute_atomic() -> get_connection(), which tries
+        # `with self._lock:` on a thread that has no prior connection.  A plain
+        # threading.Lock would deadlock (same thread, non-re-entrant).
+        # RLock allows the same thread to re-acquire without blocking.
+        # Bug #731 primary fix.
+        self._lock = threading.RLock()
         self._last_cleanup: float = 0.0
         self.CLEANUP_INTERVAL: float = 60.0
 
