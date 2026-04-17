@@ -19,13 +19,15 @@ from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
 from .git_pull_updater import GitPullUpdater
+from .meta_directory_updater import MetaDirectoryUpdater
+from .update_strategy import UpdateStrategy
 from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.utils.config_manager import ServerResourceConfig
 
 if TYPE_CHECKING:
-    from code_indexer.server.utils.config_manager import ServerResourceConfig
     from code_indexer.server.repositories.background_jobs import BackgroundJobManager
 
 logger = logging.getLogger(__name__)
@@ -1002,8 +1004,12 @@ class RefreshScheduler:
                         "message": "Repo not in registry, skipped",
                     }
 
-                # Determine if this is a local (non-git) repo
+                # Determine repo type from repo_url.
+                # repo_url=None  → meta-directory (cidx-meta), uses MetaDirectoryUpdater
+                # repo_url starts with "local://" → local filesystem repo
+                # anything else → remote git repo, uses GitPullUpdater
                 repo_url = repo_info.get("repo_url", "")
+                is_meta_repo = repo_url is None
                 is_local_repo = repo_url.startswith("local://") if repo_url else False
 
                 # Story #236 Fix 2: Always derive master path from golden_repos_dir / repo_name.
@@ -1087,10 +1093,16 @@ class RefreshScheduler:
                             "message": "Skipped, write lock held",
                         }
 
-                    # Story #236 Fix 2: Always git pull into the master golden repo, never into
-                    # a versioned snapshot. current_target may be a .versioned/ path after first
-                    # refresh, but git pull must always operate on the canonical master.
-                    updater = GitPullUpdater(master_path)
+                    # Meta-directories (repo_url=None) use MetaDirectoryUpdater instead of
+                    # GitPullUpdater — they sync description files, not git history.
+                    updater: UpdateStrategy
+                    if is_meta_repo:
+                        updater = MetaDirectoryUpdater(master_path, self.registry)
+                    else:
+                        # Story #236 Fix 2: Always git pull into the master golden repo, never into
+                        # a versioned snapshot. current_target may be a .versioned/ path after first
+                        # refresh, but git pull must always operate on the canonical master.
+                        updater = GitPullUpdater(master_path)
 
                     # Bug #469 Fix 1: Verify base clone is on expected default_branch before
                     # pulling.  If the clone was switched to a wrong branch by any previous
@@ -1566,17 +1578,13 @@ class RefreshScheduler:
         Raises:
             RuntimeError: If any step fails (with cleanup of partial artifacts)
         """
-        # Get timeouts from resource config or use defaults
-        cow_timeout = 600  # Default: 10 minutes
-        git_update_timeout = 300  # Default: 5 minutes
-        git_restore_timeout = 300  # Default: 5 minutes
-        cidx_fix_timeout = 60  # Default: 1 minute
-
-        if self.resource_config:
-            cow_timeout = self.resource_config.cow_clone_timeout
-            git_update_timeout = self.resource_config.git_update_index_timeout
-            git_restore_timeout = self.resource_config.git_restore_timeout
-            cidx_fix_timeout = self.resource_config.cidx_fix_config_timeout
+        # Use resource_config defaults when none supplied — ServerResourceConfig
+        # is the single source of truth for both default and operator-tuned values.
+        cfg = self.resource_config or ServerResourceConfig()
+        cow_timeout = cfg.cow_clone_timeout
+        git_update_timeout = cfg.git_update_index_timeout
+        git_restore_timeout = cfg.git_restore_timeout
+        cidx_fix_timeout = cfg.cidx_fix_config_timeout
 
         # Generate version timestamp (use time.time() for correct UTC epoch;
         # datetime.utcnow().timestamp() is wrong on non-UTC servers due to

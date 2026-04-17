@@ -30,9 +30,14 @@ class UpdateStrategy(ABC):
         pass
 
     @abstractmethod
-    def update(self) -> None:
+    def update(self, force_reset: bool = False) -> None:
         """
         Update the repository to latest version.
+
+        Args:
+            force_reset: When True, skip normal update logic and force-reset to
+                remote branch state.  Implementations that have no git state may
+                ignore this parameter.
 
         Raises:
             RuntimeError: If update operation fails

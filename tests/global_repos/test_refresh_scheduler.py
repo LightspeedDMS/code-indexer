@@ -113,6 +113,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         # Mock updater
@@ -160,6 +161,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         with patch(
@@ -206,6 +208,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         with patch(
@@ -215,9 +218,19 @@ class TestRefreshScheduler:
             mock_updater.has_changes.return_value = True  # Changes detected
             mock_updater_cls.return_value = mock_updater
 
-            with patch.object(scheduler, "_create_new_index") as mock_create_index:
-                mock_create_index.return_value = str(tmp_path / "v_new")
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and cmd[0] == "cp":
+                    dest = Path(cmd[-1])
+                    index_dir = dest / ".code-indexer" / "index"
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                return MagicMock(returncode=0, stdout="", stderr="")
 
+            with (
+                patch("subprocess.run", side_effect=fake_subprocess_run),
+                patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+                ),
+            ):
                 scheduler.refresh_repo("test-repo-global")
 
                 # Verify update was called
@@ -255,6 +268,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         with patch(
@@ -265,14 +279,37 @@ class TestRefreshScheduler:
             mock_updater.get_source_path.return_value = str(repo_dir)
             mock_updater_cls.return_value = mock_updater
 
-            with patch.object(scheduler, "_create_new_index") as mock_create_index:
-                new_index_path = str(tmp_path / "v_1234567890")
-                mock_create_index.return_value = new_index_path
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and cmd[0] == "cp":
+                    dest = Path(cmd[-1])
+                    index_dir = dest / ".code-indexer" / "index"
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                return MagicMock(returncode=0, stdout="", stderr="")
 
+            with (
+                patch("subprocess.run", side_effect=fake_subprocess_run),
+                patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+                ),
+            ):
                 scheduler.refresh_repo("test-repo-global")
 
-                # Verify _create_new_index was called
-                mock_create_index.assert_called_once()
+                # Verify a timestamped versioned child directory was created with index
+                versioned_base = scheduler.golden_repos_dir / ".versioned" / "test-repo"
+                assert versioned_base.exists(), (
+                    "Versioned base directory should have been created"
+                )
+                version_dirs = [
+                    d
+                    for d in versioned_base.iterdir()
+                    if d.is_dir() and d.name.startswith("v_")
+                ]
+                assert len(version_dirs) == 1, (
+                    "Exactly one versioned snapshot directory should have been created"
+                )
+                assert (version_dirs[0] / ".code-indexer" / "index").exists(), (
+                    "Versioned snapshot should contain .code-indexer/index"
+                )
 
     def test_refresh_swaps_alias_after_indexing(self, tmp_path):
         """
@@ -304,6 +341,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         with patch(
@@ -314,28 +352,47 @@ class TestRefreshScheduler:
             mock_updater.get_source_path.return_value = str(repo_dir)
             mock_updater_cls.return_value = mock_updater
 
-            new_index = str(tmp_path / "v_new")
-            with patch.object(scheduler, "_create_new_index") as mock_create_index:
-                mock_create_index.return_value = new_index
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and cmd[0] == "cp":
+                    dest = Path(cmd[-1])
+                    index_dir = dest / ".code-indexer" / "index"
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                return MagicMock(returncode=0, stdout="", stderr="")
 
+            with (
+                patch("subprocess.run", side_effect=fake_subprocess_run),
+                patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+                ),
+            ):
                 scheduler.refresh_repo("test-repo-global")
 
-                # Verify alias was swapped
+                # Verify alias was swapped to a new versioned path
                 current_target = alias_mgr.read_alias("test-repo-global")
-                assert current_target == new_index
+                assert current_target != old_index, (
+                    "Alias should point to new index after swap"
+                )
+                assert "v_" in current_target, (
+                    "New alias target should be a versioned path"
+                )
 
     def test_refresh_schedules_cleanup_of_old_index(self, tmp_path):
         """
         Test that refresh schedules cleanup of old index after swap.
 
-        AC3: Old index scheduled for cleanup
+        AC3: Old index scheduled for cleanup.
+        The scheduler only schedules cleanup for versioned snapshots (paths containing
+        ".versioned"), never for the master golden repo.
         """
         golden_repos_dir = tmp_path / ".code-indexer" / "golden_repos"
         golden_repos_dir.mkdir(parents=True)
 
         repo_dir = golden_repos_dir / "test-repo"
         repo_dir.mkdir()
-        old_index = str(repo_dir / "v_old")
+        # Use a .versioned path so the scheduler's cleanup guard allows scheduling it
+        old_index = str(
+            golden_repos_dir / ".versioned" / "test-repo" / "v_old_snapshot"
+        )
 
         alias_mgr = AliasManager(str(golden_repos_dir / "aliases"))
         registry = GlobalRegistry(str(golden_repos_dir))
@@ -354,6 +411,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         with patch(
@@ -364,10 +422,19 @@ class TestRefreshScheduler:
             mock_updater.get_source_path.return_value = str(repo_dir)
             mock_updater_cls.return_value = mock_updater
 
-            new_index = str(tmp_path / "v_new")
-            with patch.object(scheduler, "_create_new_index") as mock_create_index:
-                mock_create_index.return_value = new_index
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and cmd[0] == "cp":
+                    dest = Path(cmd[-1])
+                    index_dir = dest / ".code-indexer" / "index"
+                    index_dir.mkdir(parents=True, exist_ok=True)
+                return MagicMock(returncode=0, stdout="", stderr="")
 
+            with (
+                patch("subprocess.run", side_effect=fake_subprocess_run),
+                patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+                ),
+            ):
                 scheduler.refresh_repo("test-repo-global")
 
                 # Verify old index is in cleanup queue
@@ -408,6 +475,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         with patch(
@@ -417,14 +485,15 @@ class TestRefreshScheduler:
             mock_updater.has_changes.side_effect = RuntimeError("Network error")
             mock_updater_cls.return_value = mock_updater
 
-            # Refresh should not raise exception
-            scheduler.refresh_repo("test-repo-global")
+            # Refresh raises RuntimeError (Bug #84: BackgroundJobManager needs exceptions)
+            with pytest.raises(RuntimeError, match="Refresh failed"):
+                scheduler.refresh_repo("test-repo-global")
 
             # Verify error was logged
             assert "Refresh failed" in caplog.text
             assert "test-repo-global" in caplog.text
 
-            # Verify alias unchanged
+            # Verify alias unchanged (failure left old index in place)
             current_target = alias_mgr.read_alias("test-repo-global")
             assert current_target == old_index
 
@@ -517,6 +586,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         # Mock MetaDirectoryUpdater
@@ -576,6 +646,7 @@ class TestRefreshScheduler:
             config_source=config_mgr,
             query_tracker=tracker,
             cleanup_manager=cleanup_mgr,
+            registry=registry,
         )
 
         # Mock GitPullUpdater
@@ -1044,22 +1115,22 @@ class TestRefreshSchedulerIndexReconciliation:
             registry=registry,  # Inject registry
         )
 
-        # Mock subprocess.run to avoid actual cidx commands
-        with patch("subprocess.run") as mock_run:
+        # Mock subprocess.run (used by SCIP and _create_snapshot) and
+        # run_with_popen_progress (used by semantic/temporal indexing steps).
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+            ),
+        ):
 
             def mock_subprocess(*args, **kwargs):
-                # Create .code-indexer/index directory when cidx index is called
-                # This satisfies the validation check in _create_new_index
+                # Create .code-indexer/index directory when cp is called (CoW clone)
+                # This satisfies the validation check in _create_snapshot
                 command = args[0] if args else kwargs.get("args", [])
-                cwd = kwargs.get("cwd")
-                if (
-                    cwd
-                    and "cidx" in command
-                    and "index" in command
-                    and "scip" not in command
-                ):
-                    # This is "cidx index" command - create the index directory
-                    index_dir = Path(cwd) / ".code-indexer" / "index"
+                if isinstance(command, list) and command and command[0] == "cp":
+                    dest = Path(command[-1])
+                    index_dir = dest / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
                 return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -1070,18 +1141,19 @@ class TestRefreshSchedulerIndexReconciliation:
                 alias_name="test-repo-global", source_path=str(repo_dir)
             )
 
-            # Verify: cidx scip generate was called
+            # Verify: cidx scip generate was called via subprocess.run
             scip_calls = [
-                call
-                for call in mock_run.call_args_list
-                if len(call[0]) > 0
-                and isinstance(call[0][0], list)
-                and len(call[0][0]) > 0
-                and call[0][0][0] == "cidx"
-                and "scip" in call[0][0]
+                c
+                for c in mock_run.call_args_list
+                if len(c[0]) > 0
+                and isinstance(c[0][0], list)
+                and len(c[0][0]) >= 3
+                and c[0][0][0] == "cidx"
+                and "scip" in c[0][0]
             ]
             assert len(scip_calls) > 0, (
-                f"cidx scip generate should be called when enable_scip=True. All calls: {[call[0][0] for call in mock_run.call_args_list if len(call[0]) > 0]}"
+                f"cidx scip generate should be called when enable_scip=True. "
+                f"All subprocess.run calls: {[c[0][0] for c in mock_run.call_args_list if len(c[0]) > 0]}"
             )
 
             # Verify the scip command was: ["cidx", "scip", "generate"]
@@ -1127,22 +1199,20 @@ class TestRefreshSchedulerIndexReconciliation:
             registry=registry,  # Inject registry
         )
 
-        # Mock subprocess.run to avoid actual cidx commands
-        with patch("subprocess.run") as mock_run:
+        # Mock subprocess.run (used by SCIP and _create_snapshot) and
+        # run_with_popen_progress (used by semantic/temporal indexing steps).
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+            ),
+        ):
 
             def mock_subprocess(*args, **kwargs):
-                # Create .code-indexer/index directory when cidx index is called
-                # This satisfies the validation check in _create_new_index
                 command = args[0] if args else kwargs.get("args", [])
-                cwd = kwargs.get("cwd")
-                if (
-                    cwd
-                    and "cidx" in command
-                    and "index" in command
-                    and "scip" not in command
-                ):
-                    # This is "cidx index" command - create the index directory
-                    index_dir = Path(cwd) / ".code-indexer" / "index"
+                if isinstance(command, list) and command and command[0] == "cp":
+                    dest = Path(command[-1])
+                    index_dir = dest / ".code-indexer" / "index"
                     index_dir.mkdir(parents=True, exist_ok=True)
                 return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -1153,95 +1223,18 @@ class TestRefreshSchedulerIndexReconciliation:
                 alias_name="test-repo-global", source_path=str(repo_dir)
             )
 
-            # Verify: cidx scip generate was NOT called
+            # Verify: cidx scip generate was NOT called via subprocess.run
             scip_calls = [
-                call
-                for call in mock_run.call_args_list
-                if len(call[0]) > 0
-                and isinstance(call[0][0], list)
-                and len(call[0][0]) > 0
-                and call[0][0][0] == "cidx"
-                and "scip" in call[0][0]
+                c
+                for c in mock_run.call_args_list
+                if len(c[0]) > 0
+                and isinstance(c[0][0], list)
+                and len(c[0][0]) >= 3
+                and c[0][0][0] == "cidx"
+                and "scip" in c[0][0]
             ]
             assert len(scip_calls) == 0, (
                 "cidx scip generate should NOT be called when enable_scip=False"
-            )
-
-    def test_refresh_uses_configured_scip_timeout(self, tmp_path) -> None:
-        """AC4: _create_new_index should use cidx_scip_generate_timeout from ServerResourceConfig."""
-        # Setup: Golden repo with enable_scip=True and custom timeout
-        golden_repos_dir = tmp_path / ".code-indexer" / "golden_repos"
-        golden_repos_dir.mkdir(parents=True)
-
-        repo_dir = golden_repos_dir / "test-repo"
-        repo_dir.mkdir()
-        (repo_dir / ".git").mkdir()
-
-        alias_mgr = AliasManager(str(golden_repos_dir / "aliases"))
-        registry = GlobalRegistry(str(golden_repos_dir))
-
-        alias_mgr.create_alias("test-repo-global", str(repo_dir))
-        registry.register_global_repo(
-            "test-repo",
-            "test-repo-global",
-            "https://github.com/test/repo",
-            str(repo_dir),
-            enable_temporal=False,
-            enable_scip=True,  # SCIP enabled
-        )
-
-        config_mgr = ConfigManager(tmp_path / ".code-indexer" / "config.json")
-        tracker = QueryTracker()
-        cleanup_mgr = CleanupManager(tracker)
-
-        # Create custom resource config with specific SCIP timeout
-        from code_indexer.server.utils.config_manager import ServerResourceConfig
-
-        custom_resource_config = ServerResourceConfig()
-        custom_resource_config.cidx_scip_generate_timeout = 3000  # 50 minutes
-
-        scheduler = RefreshScheduler(
-            golden_repos_dir=str(golden_repos_dir),
-            config_source=config_mgr,
-            query_tracker=tracker,
-            cleanup_manager=cleanup_mgr,
-            registry=registry,  # Inject registry
-            resource_config=custom_resource_config,  # Inject custom config
-        )
-
-        # Mock subprocess.run to capture timeout parameter
-        captured_timeouts = []
-
-        with patch("subprocess.run") as mock_run:
-
-            def mock_subprocess(*args, **kwargs):
-                # Capture timeout for SCIP commands
-                command = args[0] if args else kwargs.get("args", [])
-                if isinstance(command, list) and "scip" in command:
-                    captured_timeouts.append(kwargs.get("timeout"))
-                # Create .code-indexer/index directory when cidx index is called
-                cwd = kwargs.get("cwd")
-                if (
-                    cwd
-                    and "cidx" in command
-                    and "index" in command
-                    and "scip" not in command
-                ):
-                    index_dir = Path(cwd) / ".code-indexer" / "index"
-                    index_dir.mkdir(parents=True, exist_ok=True)
-                return MagicMock(returncode=0, stdout="", stderr="")
-
-            mock_run.side_effect = mock_subprocess
-
-            # Execute: Create new index
-            _index_path = scheduler._create_new_index(
-                alias_name="test-repo-global", source_path=str(repo_dir)
-            )
-
-            # Verify: SCIP command used custom timeout
-            assert len(captured_timeouts) == 1, "Should have captured one SCIP timeout"
-            assert captured_timeouts[0] == 3000, (
-                f"Expected timeout=3000, got {captured_timeouts[0]}"
             )
 
     def test_refresh_scip_failure_raises_runtime_error(self, tmp_path) -> None:
@@ -1283,24 +1276,27 @@ class TestRefreshSchedulerIndexReconciliation:
             registry=registry,  # Inject registry
         )
 
-        # Mock subprocess.run to simulate SCIP failure
-        with patch("subprocess.run") as mock_run:
+        # Mock run_with_popen_progress (semantic step) to succeed, and
+        # subprocess.run to fail on SCIP command (simulating SCIP indexer error).
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+            ),
+        ):
 
             def mock_subprocess(*args, **kwargs):
-                # First calls succeed (cp, git, cidx index)
-                # SCIP call fails
                 command = args[0] if args else kwargs.get("args", [])
-                if "scip" in command:
+                if isinstance(command, list) and "scip" in command:
                     raise subprocess.CalledProcessError(
                         1, command, stderr="SCIP indexer failed: invalid syntax"
                     )
-                # Other calls succeed
                 return MagicMock(returncode=0, stdout="", stderr="")
 
             mock_run.side_effect = mock_subprocess
 
             # Execute & Verify: Should raise RuntimeError when SCIP generation fails
-            with pytest.raises(RuntimeError, match="SCIP indexing failed"):
+            with pytest.raises(RuntimeError, match="SCIP indexing on source failed"):
                 scheduler._create_new_index(
                     alias_name="test-repo-invalid-global",
                     source_path=str(repo_dir),
@@ -1437,18 +1433,7 @@ class TestRefreshSchedulerIndexReconciliation:
             scheduler, "_reconcile_registry_with_filesystem", mock_reconcile
         )
 
-        # Create a new index path with temporal directory to simulate refresh creating it
-        new_index_path = tmp_path / ".versioned" / "test-repo" / "v_12345"
-        new_index_path.mkdir(parents=True)
-        new_code_indexer = new_index_path / ".code-indexer"
-        new_code_indexer.mkdir()
-        new_index_dir = new_code_indexer / "index"
-        new_index_dir.mkdir()
-        # Create temporal directory in new index to simulate it was created during refresh
-        temporal_dir = new_index_dir / "code-indexer-temporal"
-        temporal_dir.mkdir()
-
-        # Mock GitPullUpdater and _create_new_index
+        # Mock GitPullUpdater (external git collaborator) and subprocess + popen runners
         with patch(
             "code_indexer.global_repos.refresh_scheduler.GitPullUpdater"
         ) as mock_updater_cls:
@@ -1459,9 +1444,23 @@ class TestRefreshSchedulerIndexReconciliation:
             mock_updater.get_source_path.return_value = str(repo_dir)
             mock_updater_cls.return_value = mock_updater
 
-            # Mock _create_new_index to return path with temporal
-            with patch.object(
-                scheduler, "_create_new_index", return_value=str(new_index_path)
+            def fake_subprocess_run(cmd, *args, **kwargs):
+                # When cp clones the source to a versioned snapshot, create the
+                # .code-indexer/index and temporal dirs in the dest so END
+                # reconciliation detects temporal=True.
+                if isinstance(cmd, list) and cmd and cmd[0] == "cp":
+                    dest = Path(cmd[-1])
+                    temporal_dir = (
+                        dest / ".code-indexer" / "index" / "code-indexer-temporal"
+                    )
+                    temporal_dir.mkdir(parents=True, exist_ok=True)
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            with (
+                patch("subprocess.run", side_effect=fake_subprocess_run),
+                patch(
+                    "code_indexer.services.progress_subprocess_runner.run_with_popen_progress"
+                ),
             ):
                 # Execute: Run refresh (will call reconcile at START and END)
                 scheduler._execute_refresh("test-repo-global")
@@ -1471,16 +1470,16 @@ class TestRefreshSchedulerIndexReconciliation:
                     "Should call reconciliation at START+END"
                 )
 
-                # Verify START call detected no temporal (from repo_dir)
+                # Verify START call used test-repo-global alias
                 first_call = reconciliation_calls[0]
                 assert first_call[1] == "test-repo-global"
 
-                # Verify END call detected temporal (from new_index_path)
+                # Verify END call detected temporal (from snapshot with temporal dir)
                 last_call = reconciliation_calls[-1]
                 assert last_call[0] == "reconcile"
                 assert last_call[1] == "test-repo-global"
                 assert last_call[2]["temporal"] is True, (
-                    "Should detect temporal present at END (from new index)"
+                    "Should detect temporal present at END (from new index snapshot)"
                 )
 
                 # Verify: Registry updated to match filesystem (temporal enabled)

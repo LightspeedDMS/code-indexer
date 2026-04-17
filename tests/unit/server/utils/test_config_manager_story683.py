@@ -201,14 +201,13 @@ class TestAC5:
         assert "job_queue" not in config
 
 
-# Dead fields removed in AC7
-_DEAD_RESOURCE_FIELDS = (
-    "git_update_index_timeout",
-    "git_restore_timeout",
-    "cidx_scip_generate_timeout",
-)
+# Only cidx_scip_generate_timeout was truly removed in AC7 (uses ScipConfig instead).
+# git_update_index_timeout and git_restore_timeout were restored because they ARE wired
+# in refresh_scheduler.py _create_snapshot() — operators who tune these in config.json
+# must not have their values silently discarded.
+_DEAD_RESOURCE_FIELDS = ("cidx_scip_generate_timeout",)
 
-# Genuinely-wired fields that must remain after AC7
+# Genuinely-wired fields that must remain — includes the two restored fields
 _LIVE_RESOURCE_FIELDS = (
     "git_init_conflict_timeout",
     "git_service_conflict_timeout",
@@ -218,50 +217,72 @@ _LIVE_RESOURCE_FIELDS = (
     "git_untracked_file_timeout",
     "cow_clone_timeout",
     "cidx_fix_config_timeout",
+    # Restored: these ARE wired in refresh_scheduler._create_snapshot()
+    "git_update_index_timeout",
+    "git_restore_timeout",
 )
 
 
 class TestAC7DeadFieldsRemoved:
-    """AC7.1: Three dead ServerResourceConfig fields deleted from the dataclass."""
+    """AC7.1: Only cidx_scip_generate_timeout is dead; the two git timeouts are restored."""
 
-    def test_git_update_index_timeout_absent(self, default_config):
-        """ServerResourceConfig must not have git_update_index_timeout."""
-        assert not hasattr(default_config.resource_config, "git_update_index_timeout")
+    def test_git_update_index_timeout_present(self, default_config):
+        """ServerResourceConfig MUST have git_update_index_timeout (wired in refresh_scheduler)."""
+        assert hasattr(default_config.resource_config, "git_update_index_timeout")
+        assert default_config.resource_config.git_update_index_timeout == 300
 
-    def test_git_restore_timeout_absent(self, default_config):
-        """ServerResourceConfig must not have git_restore_timeout."""
-        assert not hasattr(default_config.resource_config, "git_restore_timeout")
+    def test_git_restore_timeout_present(self, default_config):
+        """ServerResourceConfig MUST have git_restore_timeout (wired in refresh_scheduler)."""
+        assert hasattr(default_config.resource_config, "git_restore_timeout")
+        assert default_config.resource_config.git_restore_timeout == 300
 
     def test_cidx_scip_generate_timeout_absent(self, default_config):
-        """ServerResourceConfig must not have cidx_scip_generate_timeout."""
+        """ServerResourceConfig must not have cidx_scip_generate_timeout (uses ScipConfig)."""
         assert not hasattr(default_config.resource_config, "cidx_scip_generate_timeout")
 
 
 class TestAC7LoaderGuards:
-    """AC7.1: Loader pops the 3 dead resource_config fields from legacy saved data."""
+    """AC7.1: Loader pops only the truly-dead resource_config field (cidx_scip_generate_timeout)."""
 
-    def test_strips_all_three_dead_fields(self, tmp_path):
-        """Loader must strip all 3 dead fields injected into resource_config."""
+    def test_strips_cidx_scip_generate_timeout(self, tmp_path):
+        """Loader must strip cidx_scip_generate_timeout injected into resource_config."""
         loaded = _mutate_and_reload(
             tmp_path,
             lambda raw: raw["resource_config"].update(
-                {
-                    "git_update_index_timeout": 999,
-                    "git_restore_timeout": 999,
-                    "cidx_scip_generate_timeout": 999,
-                }
+                {"cidx_scip_generate_timeout": 999}
             ),
         )
         assert loaded is not None
-        for field in _DEAD_RESOURCE_FIELDS:
-            assert not hasattr(loaded.resource_config, field)
+        assert not hasattr(loaded.resource_config, "cidx_scip_generate_timeout")
 
-    def test_live_fields_retained_after_strip(self, tmp_path):
-        """All 8 genuinely-wired resource_config fields must survive the load."""
+    def test_git_update_index_timeout_accepted_from_config(self, tmp_path):
+        """Loader must accept git_update_index_timeout from config (it is a real field)."""
         loaded = _mutate_and_reload(
             tmp_path,
             lambda raw: raw["resource_config"].update(
-                {"git_update_index_timeout": 999}
+                {"git_update_index_timeout": 1800}
+            ),
+        )
+        assert loaded is not None
+        assert hasattr(loaded.resource_config, "git_update_index_timeout")
+        assert loaded.resource_config.git_update_index_timeout == 1800
+
+    def test_git_restore_timeout_accepted_from_config(self, tmp_path):
+        """Loader must accept git_restore_timeout from config (it is a real field)."""
+        loaded = _mutate_and_reload(
+            tmp_path,
+            lambda raw: raw["resource_config"].update({"git_restore_timeout": 600}),
+        )
+        assert loaded is not None
+        assert hasattr(loaded.resource_config, "git_restore_timeout")
+        assert loaded.resource_config.git_restore_timeout == 600
+
+    def test_live_fields_retained_after_strip(self, tmp_path):
+        """All 10 genuinely-wired resource_config fields must survive the load."""
+        loaded = _mutate_and_reload(
+            tmp_path,
+            lambda raw: raw["resource_config"].update(
+                {"cidx_scip_generate_timeout": 999}
             ),
         )
         for field in _LIVE_RESOURCE_FIELDS:

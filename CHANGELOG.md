@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.17.1
+
+### Bug Fixes
+
+- fix: ServerResourceConfig regression -- global_repo_refresh jobs (including critical cidx-meta-global) crashed with `AttributeError: 'ServerResourceConfig' object has no attribute 'git_update_index_timeout'`. Story #683 incorrectly removed `git_update_index_timeout` and `git_restore_timeout` from ServerResourceConfig as "dead" code, but `refresh_scheduler._create_snapshot()` actively wired them and operators could tune them via config.json. Restored both attributes as real dataclass fields (default 300s), removed the loader `.pop()` calls that silently stripped operator-tuned values, and re-wired the reads in `_create_snapshot()` using the `cfg = self.resource_config or ServerResourceConfig()` single-source-of-truth pattern. Deleted dead test for truly-removed `cidx_scip_generate_timeout`. Fix validated via codex code review, full unit/regression test suites, and direct Python E2E exercising real subprocess/filesystem/git against the live `_create_snapshot()` method.
+
+### Bugs Filed During This Cycle (Unrelated Follow-ups)
+
+- Bug #729 (P1): UnboundLocalError on `refresh_interval` in RefreshScheduler background thread (refresh_scheduler.py:898)
+- Bug #730 (P2): `cidx scip generate` subprocess invoked without timeout in `_index_source()` despite `ScipConfig.scip_generation_timeout_seconds` existing
+- Bug #731 (P0): CIDX server logging deadlock -- recursive `SQLiteLogHandler.emit` via `database_manager._cleanup_stale_connections` freezes async jobs, HTTP handlers, and graceful shutdown
+- Bug #732 (P0): SQLite `logs` table never created -- breaks mandated post-E2E log audit and amplifies Bug #731
+
 ## v9.17.0
 
 ### Features

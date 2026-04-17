@@ -99,10 +99,11 @@ class ServerResourceConfig:
 
     # Refresh scheduler timeouts (in seconds)
     cow_clone_timeout: int = 600  # 10 minutes for CoW clone of large repos (11GB)
-    # Story #683 AC7: git_update_index_timeout, git_restore_timeout, and
-    # cidx_scip_generate_timeout removed — NOT wired in activated_repo_manager.py
-    # (hardcoded 60s) or SCIP generate (uses ScipConfig.scip_generation_timeout_seconds).
+    git_update_index_timeout: int = 300  # 5 minutes for git update-index during refresh
+    git_restore_timeout: int = 300  # 5 minutes for git restore during refresh
     cidx_fix_config_timeout: int = 60  # 1 minute for cidx fix-config
+    # Story #683 AC7: cidx_scip_generate_timeout removed — SCIP generate uses
+    # ScipConfig.scip_generation_timeout_seconds (see scip_config in ServerConfig).
 
     # HNSW index configuration (Story #588)
     hnsw_max_elements: int = 1000000  # Maximum HNSW index elements
@@ -1190,9 +1191,7 @@ class ServerConfigManager:
         ):
             # Bug #467: Remove obsolete cidx_index_timeout (indexing no longer has timeout)
             config_dict["resource_config"].pop("cidx_index_timeout", None)
-            # Story #683 AC7: Remove 3 dead fields (not wired in activated_repo_manager.py)
-            config_dict["resource_config"].pop("git_update_index_timeout", None)
-            config_dict["resource_config"].pop("git_restore_timeout", None)
+            # Story #683 AC7: Remove cidx_scip_generate_timeout (uses ScipConfig instead)
             config_dict["resource_config"].pop("cidx_scip_generate_timeout", None)
             config_dict["resource_config"] = ServerResourceConfig(
                 **config_dict["resource_config"]
