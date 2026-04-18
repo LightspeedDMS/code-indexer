@@ -6,35 +6,33 @@ efb22806, just on the CLI side. Every sync client method call was wrapped in
 asyncio.run(), which crashes with 'a coroutine was expected, got {...}' because sync
 methods return dicts/lists, not coroutines.
 
-These tests enforce that no CLI file uses asyncio.run() to wrap sync API client method
-calls. The approach: parse AST of each CLI file, track which local variables are
-assigned from known sync client constructors, then assert that asyncio.run() is never
-called with a method call on any of those variables.
+Codex review rd3 (Bug #749 gap closure) found additional crash sites:
+  - cli.py:9664 — asyncio.run(auth_client.change_password(...))
+  - cli.py:13474, 13587, 13683 — `async with JobsAPIClient(...)` on a sync client
+    (JobsAPIClient inherits only sync __enter__/__exit__ from CIDXRemoteAPIClient)
+
+Two violation rules are enforced across ALL cli*.py files:
+  "asyncio_run"  — asyncio.run() wrapping a sync client method call
+  "async_with"   — `async with` on a sync client (inline constructor or variable-bound)
+
+Detection is scope-safe: nested function definitions are not descended into when
+collecting variable bindings, preventing inner-function assignments from polluting
+outer scope analysis. Variable-bound async-with detection uses _build_parent_map()
+to find the actual enclosing function, so only that function's sync-client vars are
+checked (no cross-function false positives).
 """
 
 from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import List, Set, Tuple, Union
+from typing import Dict, Generator, List, Literal, Optional, Set, Tuple
 
 import pytest
 
 
-# Root of the code_indexer package
 PACKAGE_ROOT = Path(__file__).parent.parent.parent.parent / "src" / "code_indexer"
 
-# CLI files that previously contained asyncio.run(client.method(...)) violations.
-# These are the exact files from the Bug #749 follow-up audit.
-CLI_FILES_WITH_FIXED_SYNC_CLIENT_CALLS = [
-    "cli_git.py",
-    "cli_cicd.py",
-    "cli_keys.py",
-    "cli_files.py",
-    "cli_index.py",
-]
-
-# Sync API client class names (confirmed sync via httpx.Client — never async def).
 _SYNC_CLIENT_CLASSES = frozenset(
     {
         "GitAPIClient",
@@ -42,152 +40,230 @@ _SYNC_CLIENT_CLASSES = frozenset(
         "SSHAPIClient",
         "FileAPIClient",
         "IndexAPIClient",
+        "AuthAPIClient",
+        "JobsAPIClient",
+        "AdminAPIClient",
+        "GroupAPIClient",
+        "CredentialAPIClient",
+        "SCIPAPIClient",
+        "ReposAPIClient",
+        "SyncReposAPIClient",
+        "RepositoryLinkingClient",
+        "RemoteQueryClient",
+        "CIDXRemoteAPIClient",
     }
 )
 
-# Union type for both function node kinds
-_AnyFuncNode = Union[ast.FunctionDef, ast.AsyncFunctionDef]
+# Factory functions returning a sync client (e.g. `auth_client = create_auth_client(...)`).
+_FACTORY_FUNCTIONS: Dict[str, str] = {"create_auth_client": "AuthAPIClient"}
+
+_Rule = Literal["asyncio_run", "async_with"]
+
+# Typed constant — avoids cast() when building the parametrize matrix.
+_RULES: Tuple[_Rule, ...] = ("asyncio_run", "async_with")
+
+_ORIGINAL_FIXED_FILES = [
+    "cli_git.py",
+    "cli_cicd.py",
+    "cli_keys.py",
+    "cli_files.py",
+    "cli_index.py",
+]
+_ALL_CLI_FILES = sorted(p.name for p in PACKAGE_ROOT.glob("cli*.py"))
 
 
-def _collect_sync_client_vars(func_node: _AnyFuncNode) -> Set[str]:
-    """Return variable names assigned from known sync client constructors in func_node.
+# ---------------------------------------------------------------------------
+# AST helpers
+# ---------------------------------------------------------------------------
 
-    Scans all assignment statements of the form:
-        name = SomeClass(...)
-    where SomeClass is in _SYNC_CLIENT_CLASSES.
-    """
+
+def _iter_direct_nodes(node: ast.AST) -> Generator[ast.AST, None, None]:
+    """Yield descendant nodes without crossing nested function/class scope boundaries."""
+    for child in ast.iter_child_nodes(node):
+        yield child
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield from _iter_direct_nodes(child)
+
+
+def _build_parent_map(tree: ast.AST) -> Dict[int, ast.AST]:
+    """Return a mapping from id(child_node) -> parent_node for every node in tree."""
+    result: Dict[int, ast.AST] = {}
+    for p_node in ast.walk(tree):
+        for child in ast.iter_child_nodes(p_node):
+            result[id(child)] = p_node
+    return result
+
+
+def _collect_sync_client_vars(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> Set[str]:
+    """Return names bound to sync client constructors/factories within func_node's direct scope."""
     bound: Set[str] = set()
-    for node in ast.walk(func_node):
-        if not isinstance(node, ast.Assign):
+    for node in _iter_direct_nodes(func_node):
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+        ):
             continue
-        # Only single-target simple assignments: var = Expr
-        if len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if not isinstance(target, ast.Name):
-            continue
-        value = node.value
-        # Match: var = SomeClient(...) or var = module.SomeClient(...)
-        if isinstance(value, ast.Call):
-            ctor = value.func
-            if isinstance(ctor, ast.Name) and ctor.id in _SYNC_CLIENT_CLASSES:
-                bound.add(target.id)
-            elif isinstance(ctor, ast.Attribute) and ctor.attr in _SYNC_CLIENT_CLASSES:
-                bound.add(target.id)
+        func = node.value.func
+        name = (
+            func.id
+            if isinstance(func, ast.Name)
+            else (func.attr if isinstance(func, ast.Attribute) else None)
+        )
+        if name and (name in _SYNC_CLIENT_CLASSES or name in _FACTORY_FUNCTIONS):
+            bound.add(node.targets[0].id)
     return bound
 
 
-def _find_asyncio_run_of_sync_client(source_path: Path) -> List[Tuple[int, str]]:
-    """Parse source and find asyncio.run() calls wrapping sync client method calls.
+def _find_violations(source_path: Path, rule: _Rule) -> List[Tuple[int, str]]:
+    """Return (lineno, snippet) pairs for every violation of rule in source_path.
 
-    Strategy: for each function in the file, collect variables bound to sync client
-    constructors, then search for asyncio.run(<var>.method(...)) where <var> is one
-    of those bound names.
-
-    Returns list of (line_number, code_snippet) for each violation.
+    asyncio_run: asyncio.run(<sync_var>.method(...)) in any function scope.
+    async_with:  `async with <sync_client>` — inline constructor or variable-bound.
+                 Variable-bound check uses _build_parent_map() to find the exact
+                 enclosing function, so only that function's sync vars are tested.
     """
     source = source_path.read_text()
     tree = ast.parse(source, filename=str(source_path))
-    source_lines = source.splitlines()
-
+    lines = source.splitlines()
     violations: List[Tuple[int, str]] = []
 
-    # Collect functions at all nesting levels
-    for func_node in ast.walk(tree):
-        if not isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-
-        sync_client_vars = _collect_sync_client_vars(func_node)
-        if not sync_client_vars:
-            continue
-
-        # Search this function's body for asyncio.run(client_var.method(...))
-        for node in ast.walk(func_node):
-            if not isinstance(node, ast.Call):
+    if rule == "asyncio_run":
+        for func_node in ast.walk(tree):
+            if not isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-
-            # Must be asyncio.run(...)
-            func = node.func
-            if not (
-                isinstance(func, ast.Attribute)
-                and func.attr == "run"
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "asyncio"
-            ):
+            sync_vars = _collect_sync_client_vars(func_node)
+            if not sync_vars:
                 continue
+            for node in _iter_direct_nodes(func_node):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "run"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "asyncio"
+                    and node.args
+                    and isinstance(node.args[0], ast.Call)
+                    and isinstance(node.args[0].func, ast.Attribute)
+                    and isinstance(node.args[0].func.value, ast.Name)
+                    and node.args[0].func.value.id in sync_vars
+                ):
+                    continue
+                violations.append((node.lineno, lines[node.lineno - 1].strip()))
 
-            if not node.args:
-                continue
+    else:  # async_with
+        parent_map = _build_parent_map(tree)
 
-            arg = node.args[0]
+        def _enclosing_func(
+            node: ast.AST,
+        ) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+            cur: Optional[ast.AST] = parent_map.get(id(node))
+            while cur is not None:
+                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return cur
+                cur = parent_map.get(id(cur))
+            return None
 
-            # Argument must be a method call: bound_var.some_method(...)
-            if not isinstance(arg, ast.Call):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncWith):
                 continue
-            if not isinstance(arg.func, ast.Attribute):
-                continue
-            if not isinstance(arg.func.value, ast.Name):
-                continue
-
-            obj_name = arg.func.value.id
-            if obj_name in sync_client_vars:
-                line_no = node.lineno
-                snippet = source_lines[line_no - 1].strip()
-                violations.append((line_no, snippet))
+            for item in node.items:
+                ctx = item.context_expr
+                violated = False
+                if isinstance(ctx, ast.Call):
+                    ctor = ctx.func
+                    name = (
+                        ctor.id
+                        if isinstance(ctor, ast.Name)
+                        else (ctor.attr if isinstance(ctor, ast.Attribute) else None)
+                    )
+                    violated = bool(name and name in _SYNC_CLIENT_CLASSES)
+                elif isinstance(ctx, ast.Name):
+                    enc = _enclosing_func(node)
+                    if enc is not None:
+                        violated = ctx.id in _collect_sync_client_vars(enc)
+                if violated:
+                    violations.append((node.lineno, lines[node.lineno - 1].strip()))
+                    break  # one report per AsyncWith node
 
     return violations
 
 
-def _count_asyncio_imports_ast(source_path: Path) -> int:
-    """Count 'import asyncio' statements via AST (both top-level and inline)."""
-    source = source_path.read_text()
-    tree = ast.parse(source, filename=str(source_path))
-    count = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "asyncio":
-                    count += 1
-    return count
+# ---------------------------------------------------------------------------
+# Shared assertion helper
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("cli_filename", CLI_FILES_WITH_FIXED_SYNC_CLIENT_CALLS)
-def test_no_asyncio_run_wrapping_sync_client_calls(cli_filename: str) -> None:
-    """Assert that no sync API client method call is wrapped in asyncio.run().
-
-    After Bug #749 follow-up fix, all asyncio.run(client.method(...)) patterns
-    must be removed from the affected CLI files. Direct calls (result = client.method(...))
-    are the correct pattern.
-
-    Detection strategy: track AST assignments from known sync client constructors,
-    then flag asyncio.run() calls on those bound variables.
-    """
-    cli_path = PACKAGE_ROOT / cli_filename
+def _assert_clean(cli_path: Path, rule: _Rule, label: str) -> None:
     assert cli_path.exists(), f"CLI file not found: {cli_path}"
-
-    violations = _find_asyncio_run_of_sync_client(cli_path)
-
+    violations = _find_violations(cli_path, rule)
+    rule_desc = (
+        "asyncio.run(client.*) — sync method must be called directly"
+        if rule == "asyncio_run"
+        else "`async with SyncClient` — use `with` for sync context managers"
+    )
     assert violations == [], (
-        f"Bug #749: Found {len(violations)} asyncio.run(client.*) call(s) in {cli_filename}. "
-        f"Sync client methods must be called directly without asyncio.run().\n"
-        f"Violations:\n"
-        + "\n".join(f"  Line {ln}: {snippet}" for ln, snippet in violations)
+        f"Bug #749 [{label}] {cli_path.name}: {len(violations)} violation(s) of rule '{rule}'.\n"
+        f"Rule: {rule_desc}\n" + "\n".join(f"  Line {ln}: {s}" for ln, s in violations)
     )
 
 
-@pytest.mark.parametrize("cli_filename", CLI_FILES_WITH_FIXED_SYNC_CLIENT_CALLS)
-def test_no_asyncio_import_in_cli_files_after_fix(cli_filename: str) -> None:
-    """After fix, CLI files with only sync client calls must not import asyncio.
+# ---------------------------------------------------------------------------
+# Original Bug #749 follow-up: 5 files — asyncio_run rule + dead-import check
+# ---------------------------------------------------------------------------
 
-    When every asyncio.run() call on a sync client is removed, the 'import asyncio'
-    inside each function body becomes dead code. This AST-based check enforces removal.
+
+@pytest.mark.parametrize("cli_filename", _ORIGINAL_FIXED_FILES)
+def test_rule_original_files(cli_filename: str) -> None:
+    """Original-fixed CLI files must have no asyncio.run(client.*) violations.
+
+    Also checks that the 'import asyncio' dead code was removed after the fix:
+    once asyncio.run() calls are gone, the import itself becomes dead code.
     """
     cli_path = PACKAGE_ROOT / cli_filename
-    assert cli_path.exists(), f"CLI file not found: {cli_path}"
+    _assert_clean(cli_path, "asyncio_run", "follow-up")
 
-    count = _count_asyncio_imports_ast(cli_path)
-
-    assert count == 0, (
-        f"{cli_filename} still has {count} 'import asyncio' statement(s). "
-        f"After removing all asyncio.run(client.*) calls, these imports are dead code."
+    source = cli_path.read_text()
+    tree = ast.parse(source, filename=str(cli_path))
+    dead_imports = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "asyncio"
     )
+    assert dead_imports == 0, (
+        f"{cli_filename} still has {dead_imports} 'import asyncio' statement(s) — dead code."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug #749 rd3 gap regressions: change_password (gap 1) + jobs (gap 2)
+# ---------------------------------------------------------------------------
+
+
+def test_gap1_change_password_not_wrapped_in_asyncio_run() -> None:
+    """Gap 1: auth_client.change_password() must not be wrapped in asyncio.run()."""
+    _assert_clean(PACKAGE_ROOT / "cli.py", "asyncio_run", "gap-1 change-password")
+
+
+def test_gap2_jobs_client_not_used_with_async_with() -> None:
+    """Gap 2: JobsAPIClient must not be used as `async with` (sync CM only)."""
+    _assert_clean(PACKAGE_ROOT / "cli.py", "async_with", "gap-2 jobs-commands")
+
+
+# ---------------------------------------------------------------------------
+# Comprehensive forward guard: ALL cli*.py files, both rules
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cli_filename,rule",
+    [(f, r) for f in _ALL_CLI_FILES for r in _RULES],
+)
+def test_rule_all_cli_files(cli_filename: str, rule: _Rule) -> None:
+    """Comprehensive guard: no cli*.py file violates either sync-client usage rule."""
+    _assert_clean(PACKAGE_ROOT / cli_filename, rule, "comprehensive")

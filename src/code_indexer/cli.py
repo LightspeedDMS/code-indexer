@@ -9661,11 +9661,7 @@ def auth_change_password(ctx):
         # Create auth client and change password
         auth_client = create_auth_client(server_url, project_root)
         with console.status("🔒 Changing password..."):
-            asyncio.run(
-                auth_client.change_password(  # type: ignore[arg-type]
-                    current_password.strip(), new_password.strip()
-                )
-            )
+            auth_client.change_password(current_password.strip(), new_password.strip())
 
         console.print("✅ Password changed successfully", style="green")
         console.print("🔐 Credentials updated securely", style="cyan")
@@ -13415,7 +13411,6 @@ def list_jobs(ctx, status: Optional[str], limit: int):
       cidx jobs list --status running  # Show only running jobs
       cidx jobs list --limit 20        # Show up to 20 jobs
     """
-    import asyncio
     from pathlib import Path
     from .api_clients.jobs_client import JobsAPIClient
     from .remote.credential_manager import load_encrypted_credentials
@@ -13470,8 +13465,8 @@ def list_jobs(ctx, status: Optional[str], limit: int):
             sys.exit(1)
 
         # Create jobs client and list jobs
-        async def _list_jobs():
-            async with JobsAPIClient(  # type: ignore[attr-defined]
+        def _list_jobs():
+            with JobsAPIClient(  # type: ignore[attr-defined]  # local import; mypy can't resolve
                 server_url=server_url,
                 credentials=credentials,
                 project_root=project_root,
@@ -13482,8 +13477,7 @@ def list_jobs(ctx, status: Optional[str], limit: int):
                 )
                 return jobs_response
 
-        # Run async function
-        jobs_response = asyncio.run(_list_jobs())
+        jobs_response = _list_jobs()
 
         # Display results
         _display_jobs_table(jobs_response, status)
@@ -13514,7 +13508,6 @@ def cancel_job(ctx, job_id: str, force: bool):
       cidx jobs cancel job-123-abc            # Cancel with confirmation
       cidx jobs cancel job-456-def --force    # Cancel without confirmation
     """
-    import asyncio
     from pathlib import Path
     from .api_clients.jobs_client import JobsAPIClient
     from .remote.credential_manager import load_encrypted_credentials
@@ -13583,8 +13576,8 @@ def cancel_job(ctx, job_id: str, force: bool):
                 return
 
         # Cancel the job
-        async def _cancel_job():
-            async with JobsAPIClient(  # type: ignore[attr-defined]
+        def _cancel_job():
+            with JobsAPIClient(  # type: ignore[attr-defined]  # local import; mypy can't resolve
                 server_url=server_url,
                 credentials=credentials,
                 project_root=project_root,
@@ -13592,8 +13585,7 @@ def cancel_job(ctx, job_id: str, force: bool):
                 result = client.cancel_job(job_id)
                 return result
 
-        # Run async function
-        result = asyncio.run(_cancel_job())
+        result = _cancel_job()
 
         # Display success
         console.print(f"✅ Job {job_id} cancelled successfully", style="green")
@@ -13624,7 +13616,6 @@ def job_status(ctx, job_id: str):
     EXAMPLES:
       cidx jobs status job-123-abc     # Show detailed job status
     """
-    import asyncio
     from pathlib import Path
     from .api_clients.jobs_client import JobsAPIClient
     from .remote.credential_manager import load_encrypted_credentials
@@ -13679,8 +13670,8 @@ def job_status(ctx, job_id: str):
             sys.exit(1)
 
         # Get job status
-        async def _get_job_status():
-            async with JobsAPIClient(  # type: ignore[attr-defined]
+        def _get_job_status():
+            with JobsAPIClient(  # type: ignore[attr-defined]  # local import; mypy can't resolve
                 server_url=server_url,
                 credentials=credentials,
                 project_root=project_root,
@@ -13688,8 +13679,7 @@ def job_status(ctx, job_id: str):
                 status = client.get_job_status(job_id)
                 return status
 
-        # Run async function
-        job_data = asyncio.run(_get_job_status())
+        job_data = _get_job_status()
 
         # Display detailed status
         _display_job_details(job_data)
