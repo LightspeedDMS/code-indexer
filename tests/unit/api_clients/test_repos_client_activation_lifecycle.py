@@ -166,6 +166,48 @@ class TestRepositoryActivationAPI:
             assert exc_info.value.status_code == 500
 
 
+    def test_activate_repository_200_idempotent_already_activated(
+        self, repos_client, httpx_mock
+    ):
+        """Test that activate_repository returns the full response dict on HTTP 200.
+
+        HTTP 200 is the idempotent response when the repo is already activated
+        or an activation job is already in progress. The client must treat 200
+        as success so the CLI does not exit with error on re-activation.
+
+        Uses httpx_mock (pytest-httpx) to intercept at the real HTTP transport
+        boundary without patching internal SUT methods.
+        """
+        expected = {
+            "job_id": "",
+            "message": "Repository 'markupsafe' already activated for user 'admin'",
+        }
+
+        # Mock auth login call (first request to get a JWT token)
+        httpx_mock.add_response(
+            method="POST",
+            url="https://test-server.com/auth/login",
+            json={"access_token": "fake-jwt-token-for-test"},
+            status_code=200,
+        )
+
+        # Mock the activate call returning idempotent 200
+        httpx_mock.add_response(
+            method="POST",
+            url="https://test-server.com/api/repos/activate",
+            json=expected,
+            status_code=200,
+        )
+
+        result = repos_client.activate_repository(
+            golden_alias="markupsafe", user_alias="markupsafe"
+        )
+
+        assert result == expected, (
+            f"Expected full response dict for idempotent 200, got: {result}"
+        )
+
+
 class TestRepositoryDeactivationAPI:
     """Test repository deactivation API client methods."""
 

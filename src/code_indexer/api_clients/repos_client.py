@@ -306,7 +306,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             "POST", "/api/repos/activate", json=request_data
         )
 
-        if response.status_code == 202:  # Accepted for async operation
+        if response.status_code in (200, 202):  # 202 = new job; 200 = idempotent
             try:
                 result: Dict[str, Any] = response.json()
                 return result

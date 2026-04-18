@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 
 from ..repositories.activated_repo_manager import ActivatedRepoError  # noqa: E402
+from ..repositories.background_jobs import DuplicateJobError  # noqa: E402
 from ..repositories.repository_listing_manager import (
     RepositoryListingError,
 )  # noqa: E402
@@ -45,6 +46,7 @@ from fastapi import (
     Depends,
     Query,
 )
+from fastapi.responses import JSONResponse
 
 from ..models.auth import MessageResponse
 from ..models.repos import (
@@ -193,6 +195,21 @@ def register_repo_routes(
                     message=f"Repository '{user_alias_str}' activation started for user '{current_user.username}'",
                 )
 
+        except DuplicateJobError as e:
+            # Idempotent: same user/alias activation already in progress.
+            # Return 200 with the existing job_id so the caller can poll.
+            # JSONResponse is used to override the route decorator's default 202.
+            inflight_alias: str = request.user_alias or request.golden_repo_alias
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "job_id": e.existing_job_id,
+                    "message": (
+                        f"Repository '{inflight_alias}' activation already in progress "
+                        f"for user '{current_user.username}'"
+                    ),
+                },
+            )
         except ActivatedRepoError as e:
             error_msg = str(e)
 
@@ -212,37 +229,21 @@ def register_repo_routes(
                     detail=detail,
                 )
             elif "already activated" in error_msg:
-                # Provide conflict resolution guidance
+                # Idempotent: same user/alias already activated (job completed).
+                # Return 200 with job_id="" sentinel (no pending job to poll).
+                # JSONResponse is used to override the route decorator's default 202.
                 user_alias_conflict: str = (
                     request.user_alias or request.golden_repo_alias or "repository"
                 )
-                conflict_detail: Dict[str, Any] = {
-                    "error": error_msg,
-                    "conflict_resolution": {
-                        "options": [
-                            {
-                                "action": "switch_branch",
-                                "description": f"Switch to different branch in existing repository '{user_alias_conflict}'",
-                                "endpoint": f"PUT /api/repos/{user_alias_conflict}/branch",
-                            },
-                            {
-                                "action": "use_different_alias",
-                                "description": "Choose a different user_alias for this activation",
-                                "example": f"{user_alias_conflict}_v2",
-                            },
-                            {
-                                "action": "deactivate_first",
-                                "description": f"Deactivate existing repository '{user_alias_conflict}' before reactivating",
-                                "endpoint": f"DELETE /api/repos/{user_alias_conflict}",
-                            },
-                        ]
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "job_id": "",
+                        "message": (
+                            f"Repository '{user_alias_conflict}' already activated "
+                            f"for user '{current_user.username}'"
+                        ),
                     },
-                    "guidance": "Repository conflicts occur when trying to activate a repository with an alias that's already in use",
-                }
-
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=conflict_detail,
                 )
             else:
                 # Generic bad request with troubleshooting guidance
