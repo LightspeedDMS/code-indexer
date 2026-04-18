@@ -3105,7 +3105,8 @@ Rules:
             "--model",
             self.analysis_model,
             "--max-turns",
-            "1",
+            str(claude_integration_config.dependency_map_delta_max_turns),
+            "--dangerously-skip-permissions",
         ]
         try:
             completed = self._run_with_semaphore(

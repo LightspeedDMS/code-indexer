@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.18.2
+
+### Bug Fixes
+
+- fix(#724): Story #724 verification pass Claude CLI invocation was failing with exit code 1 on every call because the command array was missing `--dangerously-skip-permissions` and was using a hardcoded `--max-turns 1` that's too low for real verification. Discovered during staging E2E — every verification invocation exited 1 with empty stderr, causing the fallback path to fire on every call (preserving the original document but producing no verification benefit). Fixed: now uses `--max-turns {dependency_map_delta_max_turns}` (default 30, same as delta merge) AND includes `--dangerously-skip-permissions`. Added three regression tests (`TestVerificationCliArgs`) asserting exact cmd construction — previous tests mocked subprocess.run without inspecting the cmd array and therefore could not catch this class of bug.
+
 ## v9.18.1
 
 ### Bug Fixes

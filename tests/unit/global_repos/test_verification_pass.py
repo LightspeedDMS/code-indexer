@@ -512,3 +512,112 @@ class TestInvokePublicContractFallback(TestCase):
         self.assertIsNone(result.fallback_reason)
         self.assertNotEqual(result.verified_document, original)
         self.assertEqual(result.verified_document, corrected)
+
+
+import pytest  # noqa: E402 — placed after unittest imports for test discovery
+
+
+def _make_success_envelope() -> str:
+    """Return a Claude CLI --output-format json success envelope with empty verification."""
+    return json.dumps(
+        {
+            "type": "result",
+            "is_error": False,
+            "result": json.dumps(
+                {
+                    "corrected_document": "OK",
+                    "evidence": [],
+                    "counts": {
+                        "verified": 0,
+                        "corrected": 0,
+                        "removed": 0,
+                        "added": 0,
+                    },
+                }
+            ),
+        }
+    )
+
+
+class TestVerificationCliArgs:
+    """Story #724 bug caught on staging E2E: verification Claude CLI call was
+    missing --dangerously-skip-permissions, causing exit 1 in tool-use mode.
+
+    Fixtures: ``verification_analyzer``, ``default_cfg``, ``patched_subprocess``.
+    Tests mutate ``default_cfg`` before calling ``_invoke`` when a non-default
+    config value is needed; otherwise they call ``_invoke`` directly.
+    """
+
+    @pytest.fixture()
+    def verification_analyzer(self, tmp_path):
+        """Minimally configured DependencyMapAnalyzer for CLI-args tests."""
+        return _make_analyzer_for_public_contract(tmp_path)
+
+    @pytest.fixture()
+    def default_cfg(self):
+        """Default mock ClaudeIntegrationConfig with delta_max_turns=30."""
+        cfg = MagicMock()
+        cfg.max_concurrent_claude_cli = 2
+        cfg.fact_check_timeout_seconds = 60
+        cfg.dependency_map_delta_max_turns = 30
+        return cfg
+
+    @pytest.fixture()
+    def patched_subprocess(self, monkeypatch):
+        """Install a fake subprocess.run that returns a success envelope.
+
+        Returns a dict that is populated with ``{"cmd": [...]}`` on first call.
+        """
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=_make_success_envelope(),
+                stderr="",
+            )
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+        return captured
+
+    def _invoke(self, analyzer, cfg, captured) -> list:
+        """Call invoke_verification_pass and return the captured cmd list."""
+        analyzer.invoke_verification_pass(
+            document_content="orig",
+            repo_list=[],
+            discovery_mode=False,
+            claude_integration_config=cfg,
+        )
+        return captured["cmd"]
+
+    def test_cmd_includes_dangerously_skip_permissions(
+        self, verification_analyzer, default_cfg, patched_subprocess
+    ):
+        """The verification cmd list must include --dangerously-skip-permissions
+        because tool-use mode (max-turns > 0) requires it in a non-interactive context."""
+        cmd = self._invoke(verification_analyzer, default_cfg, patched_subprocess)
+        assert "--dangerously-skip-permissions" in cmd, (
+            f"verification cmd must include --dangerously-skip-permissions; got {cmd}"
+        )
+
+    def test_cmd_max_turns_comes_from_config(
+        self, verification_analyzer, default_cfg, patched_subprocess
+    ):
+        """The --max-turns value must come from dependency_map_delta_max_turns
+        (default 30), not a hardcoded value like 1. Uses sentinel value 42."""
+        default_cfg.dependency_map_delta_max_turns = 42
+        cmd = self._invoke(verification_analyzer, default_cfg, patched_subprocess)
+        assert "--max-turns" in cmd, f"cmd missing --max-turns: {cmd}"
+        idx = cmd.index("--max-turns")
+        assert cmd[idx + 1] == "42", f"expected --max-turns 42, got {cmd[idx + 1]}"
+
+    def test_cmd_uses_output_format_json(
+        self, verification_analyzer, default_cfg, patched_subprocess
+    ):
+        """Output-format json must be present (AC2 two-layer parse depends on it)."""
+        cmd = self._invoke(verification_analyzer, default_cfg, patched_subprocess)
+        assert "--output-format" in cmd
+        idx = cmd.index("--output-format")
+        assert cmd[idx + 1] == "json"
