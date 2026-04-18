@@ -58,12 +58,23 @@ def run_async(coro):
     1. In normal CLI usage (no event loop running)
     2. In test environments (event loop already running)
 
+    Bug #749: Tolerates being called with an already-resolved sync value
+    (dict, list, etc.). The CLI wraps both async and sync API-client method
+    calls in run_async(); sync methods (httpx.Client-based, thread-pool-safe)
+    return plain results rather than coroutines. When the input isn't a
+    coroutine, return it verbatim instead of crashing with
+    "a coroutine was expected".
+
     Args:
-        coro: The coroutine to run
+        coro: A coroutine OR an already-computed sync result
 
     Returns:
-        The result of the coroutine
+        The result of the coroutine, or the sync value unchanged
     """
+    # Bug #749: pass-through for sync results (non-coroutine inputs)
+    if not asyncio.iscoroutine(coro):
+        return coro
+
     try:
         # Try to get the current event loop
         asyncio.get_running_loop()
