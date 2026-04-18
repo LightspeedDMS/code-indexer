@@ -259,21 +259,25 @@ setting = config.some_setting
 
 **NEVER** run fast-automation.sh iteratively. Wastes hours.
 
-**Two test suites, both must pass**:
+**Three test suites — all must pass before the work is done**:
 
 | Suite | Scope | When Required | Time |
 |-------|-------|---------------|------|
 | `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~6-7 min |
 | `server-fast-automation.sh` | Server: MCP, REST, services, auth, storage backends | When touching `src/code_indexer/server/` | ~10-15 min |
+| `e2e-automation.sh` | Full 4-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote (live subprocess) | **Final regression gate — ALL completed work** | ~30-60 min |
 
 **CRITICAL**: `fast-automation.sh` does NOT run server tests (it ignores `tests/unit/server/` entirely — 10,000+ tests skipped). If you touch server code and only run fast-automation, you have NOT tested your changes. You MUST also run `server-fast-automation.sh`.
+
+**CRITICAL — E2E final gate**: Unit-level fast-automation suites catch regressions in isolated modules; they do not prove the whole system still works end-to-end. `e2e-automation.sh` (Epic #700) is the **final regression gate** and must run clean before any task is reported complete. It exercises the real CLI subprocess, real FastAPI server, real VoyageAI embeddings, real golden-repo registration — no mocks. If it surfaces new failures, you are NOT done; treat them like any other workflow failure (root-cause → fix → re-run).
 
 **Hierarchy**:
 1. **Targeted tests** (seconds): `pytest tests/unit/.../test_X*.py -v --tb=short`
 2. **Manual testing**: Verify feature works E2E
-3. **fast-automation.sh** (final gate for CLI/core): Must pass, zero failures
-4. **server-fast-automation.sh** (final gate for server): Must pass when server code touched, zero failures
-5. Both must pass before marking work as done
+3. **fast-automation.sh** (CLI/core gate): Must pass, zero failures
+4. **server-fast-automation.sh** (server gate): Must pass when server code touched, zero failures
+5. **e2e-automation.sh** (final regression gate): Must pass for ANY completed work — zero failures, no skips introduced by your change
+6. All applicable gates must pass before marking work as done
 
 **Examples**:
 | File Changed | Run First | Final Gate |
@@ -284,9 +288,43 @@ setting = config.some_setting
 | `lifespan.py` | `pytest tests/unit/server/` (targeted) | server-fast-automation.sh |
 | `background_jobs.py` | `pytest tests/unit/server/repositories/test_background*` | server-fast-automation.sh |
 
-**Times**: Targeted=seconds, fast-automation=6-7min, server-fast-automation=10-15min
+**Times**: Targeted=seconds, fast-automation=6-7min, server-fast-automation=10-15min, e2e-automation=30-60min
 
-*Recorded 2026-01-27, Updated 2026-03-26*
+### e2e-automation.sh — Final Regression Gate (Epic #700)
+
+**Purpose**: End-to-end validation of the full CIDX stack across all 4 operational modes. Unit suites prove modules work in isolation; this suite proves the system works as a whole.
+
+**Execution**:
+```bash
+# Full run (all 4 phases sequentially)
+./e2e-automation.sh
+
+# Single phase for faster iteration when debugging
+./e2e-automation.sh --phase 1   # CLI standalone
+./e2e-automation.sh --phase 2   # CLI daemon
+./e2e-automation.sh --phase 3   # Server in-process (FastAPI TestClient)
+./e2e-automation.sh --phase 4   # CLI remote (live uvicorn subprocess)
+```
+
+**Configuration**: Credentials (`E2E_ADMIN_USER`, `E2E_ADMIN_PASS`) and `E2E_VOYAGE_API_KEY` come from `.e2e-automation` (gitignored) or environment. Script exits immediately if admin credentials missing. Non-sensitive defaults (ports, seed cache dir) baked into the script — override via `.e2e-automation` if needed.
+
+**When required**:
+- ANY task that modifies production code (CLI, core, server, clients, storage, MCP, REST)
+- Before reporting work as complete regardless of which fast-automation gates passed
+- Pure doc/config edits that don't touch runtime behavior may waive this with explicit user approval
+- Epic/story completion — non-negotiable
+
+**Outcomes**:
+| Outcome | Action |
+|---------|--------|
+| SUCCESS (all 4 phases, 0 failures, no new skips) | Done — report completion |
+| FAILURES attributable to your change | Root-cause → fix → re-run (never "looks flaky, moving on") |
+| FAILURES pre-existing (verify via baseline on origin) | Document in session notes, file bug if new, continue |
+| NEW skips introduced by your change | Treat as failure — fix the test or the underlying gap |
+
+**Never skip** because "fast-automation is green." Unit-green + E2E-red = broken system masquerading as working.
+
+*Recorded 2026-01-27, Updated 2026-03-26, Updated 2026-04-18 (Epic #700 E2E suite added as final regression gate)*
 
 ---
 
