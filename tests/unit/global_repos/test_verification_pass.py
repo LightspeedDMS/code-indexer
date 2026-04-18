@@ -227,21 +227,6 @@ class TestRetryPostconditionFail(_VerifBase):
         logs = self._run_with_logs(temp_file, fake_run)
         self.assertEqual(self._warning_count(logs), 1)
 
-    def test_mtime_unchanged_first_then_success(self) -> None:
-        """Attempt 1 emits sentinel but doesn't touch file; attempt 2 edits; 1 WARNING."""
-        temp_file = self._make_temp_file("post_mtime.md", "# Domain\n\nOriginal.\n")
-        call_count = [0]
-
-        def fake_run(cmd, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return self._ok()  # sentinel present but file NOT modified
-            temp_file.write_text("# Domain\n\nEdited.\n")
-            return self._ok()
-
-        logs = self._run_with_logs(temp_file, fake_run)
-        self.assertEqual(self._warning_count(logs), 1)
-
     def test_empty_file_first_then_success(self) -> None:
         """Attempt 1 leaves the file empty/whitespace-only; attempt 2 writes real content; exactly 1 WARNING."""
         temp_file = self._make_temp_file("post_empty.md", "# Domain\n\nOriginal.\n")
@@ -250,8 +235,7 @@ class TestRetryPostconditionFail(_VerifBase):
         def fake_run(cmd, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                # Attempt 1: sentinel present, content CHANGED (to whitespace-only)
-                # This satisfies "content_unchanged" check but fails "empty_file" check
+                # Attempt 1: sentinel present, file written as whitespace-only — fails "empty_file" check
                 temp_file.write_text("   \n\n\n", encoding="utf-8")
                 return self._ok()
             # Attempt 2: real edit

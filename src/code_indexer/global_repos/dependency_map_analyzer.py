@@ -2964,10 +2964,11 @@ Rules:
         made; the file is re-seeded from original content before each attempt so a
         partial edit by attempt 1 cannot corrupt attempt 2.
 
-        Postconditions checked after each subprocess call (spec Architecture §h):
-          - stdout contains "FILE_EDIT_COMPLETE" sentinel
-          - file mtime changed (Claude actually edited the file)
-          - file content is non-empty after edits
+        Postconditions checked after each subprocess call:
+          1. subprocess.TimeoutExpired — caught, triggers retry
+          2. subprocess.CalledProcessError — caught, triggers retry
+          3. stdout does not end with "FILE_EDIT_COMPLETE" as last non-empty line
+          4. temp file is empty or whitespace-only after subprocess return
 
         Raises:
             VerificationFailed: If both attempts fail any postcondition check.
@@ -2986,7 +2987,7 @@ Rules:
         for attempt in (1, 2):
             document_path.write_text(original_content, encoding="utf-8")
             failure = self._run_verification_attempt(
-                document_path, prompt, config, attempt, original_content
+                document_path, prompt, config, attempt
             )
             if failure is None:
                 duration_ms = int(round((time.monotonic() - started) * 1000))
@@ -3019,7 +3020,6 @@ Rules:
         prompt: str,
         config: Any,  # duck-typed; avoids circular import of ClaudeIntegrationConfig
         attempt: int,
-        original_content: str,
     ) -> Optional[str]:
         """Execute one verification subprocess and check all postconditions.
 
@@ -3042,22 +3042,25 @@ Rules:
             )
             return "cli_error"
 
-        return self._check_verification_postconditions(
-            document_path, stdout, original_content, attempt
-        )
+        return self._check_verification_postconditions(document_path, stdout, attempt)
 
     def _check_verification_postconditions(
         self,
         document_path: Path,
         stdout: str,
-        original_content: str,
         attempt: int,
     ) -> Optional[str]:
         """Check all postconditions after a verification subprocess returns.
 
         Returns None on success (all checks pass). Returns a reason string
-        (e.g., "content_unchanged", "empty_file", "missing_sentinel") on failure.
+        (e.g., "empty_file", "missing_sentinel") on failure.
         Failure reason strings are used for WARNING log messages.
+
+        Postconditions checked (4 total):
+          1. subprocess.TimeoutExpired — handled by caller before this function
+          2. subprocess.CalledProcessError — handled by caller before this function
+          3. FILE_EDIT_COMPLETE not the last non-empty line of stdout
+          4. temp file is empty or whitespace-only after subprocess return
         """
         # Sentinel must be the last non-empty line, not merely present as substring
         non_empty_lines = [
@@ -3077,13 +3080,6 @@ Rules:
                 "invoke_verification_pass: attempt %d could not read file", attempt
             )
             return "file_missing"
-
-        if current_content == original_content:
-            logger.warning(
-                "invoke_verification_pass: attempt %d did not edit file (content unchanged)",
-                attempt,
-            )
-            return "content_unchanged"
 
         if not current_content.strip():
             logger.warning(

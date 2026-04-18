@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.19.1
+
+### Bug Fixes
+
+- fix(#724): Removed the "content unchanged" postcondition from the verification-pass retry loop. Discovered during staging E2E: when Claude verified a domain document and found every claim correct, it printed `FILE_EDIT_COMPLETE` without editing — the content-unchanged check then treated this legitimate success as a retry-triggering failure, leading to spurious `VerificationFailed` on well-formed documents. The remaining 4 postconditions (subprocess timeout / non-zero exit / missing sentinel on last non-empty line / empty file) are sufficient proof Claude completed its work.
+
 ## v9.19.0
 
 ### Story #724 v2 — Post-Generation Verification Pass: file-edit contract, no fallbacks
