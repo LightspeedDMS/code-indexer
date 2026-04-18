@@ -86,7 +86,6 @@ def github_list(
     json_output: bool,
 ):
     """List GitHub Actions workflow runs for OWNER/REPO."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
@@ -109,9 +108,7 @@ def github_list(
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(  # type: ignore[var-annotated]
-            client.github_list_runs(owner, repo, status, branch, limit)  # type: ignore[arg-type]
-        )
+        result = client.github_list_runs(owner, repo, status, branch, limit)
 
         if json_output:
             console.print(format_json_success(result))
@@ -160,7 +157,6 @@ def github_list(
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def github_show(repository: str, run_id: int, json_output: bool):
     """Show details of a GitHub Actions workflow run."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
@@ -182,7 +178,7 @@ def github_show(repository: str, run_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_get_run(owner, repo, run_id))  # type: ignore[arg-type, var-annotated]
+        result = client.github_get_run(owner, repo, run_id)
 
         if json_output:
             console.print(format_json_success(result))
@@ -226,7 +222,6 @@ def github_show(repository: str, run_id: int, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def github_logs(repository: str, run_id: int, query: Optional[str], json_output: bool):
     """Search logs for a GitHub Actions workflow run."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
@@ -248,7 +243,7 @@ def github_logs(repository: str, run_id: int, query: Optional[str], json_output:
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_search_logs(owner, repo, run_id, query))  # type: ignore[arg-type, var-annotated]
+        result = client.github_search_logs(owner, repo, run_id, query)
 
         if json_output:
             console.print(format_json_success(result))
@@ -278,7 +273,6 @@ def github_logs(repository: str, run_id: int, query: Optional[str], json_output:
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def github_job_logs(repository: str, job_id: int, json_output: bool):
     """Get complete logs for a specific GitHub Actions job."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
@@ -300,7 +294,7 @@ def github_job_logs(repository: str, job_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_get_job_logs(owner, repo, job_id))  # type: ignore[arg-type, var-annotated]
+        result = client.github_get_job_logs(owner, repo, job_id)
 
         if json_output:
             console.print(format_json_success(result))
@@ -321,7 +315,6 @@ def github_job_logs(repository: str, job_id: int, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def github_retry(repository: str, run_id: int, json_output: bool):
     """Retry a failed GitHub Actions workflow run."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
@@ -343,7 +336,7 @@ def github_retry(repository: str, run_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_retry_run(owner, repo, run_id))  # type: ignore[arg-type, var-annotated]
+        result = client.github_retry_run(owner, repo, run_id)
 
         if json_output:
             console.print(format_json_success(result))
@@ -360,7 +353,6 @@ def github_retry(repository: str, run_id: int, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def github_cancel(repository: str, run_id: int, json_output: bool):
     """Cancel a running or queued GitHub Actions workflow run."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
@@ -382,7 +374,7 @@ def github_cancel(repository: str, run_id: int, json_output: bool):
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.github_cancel_run(owner, repo, run_id))  # type: ignore[arg-type, var-annotated]
+        result = client.github_cancel_run(owner, repo, run_id)
 
         if json_output:
             console.print(format_json_success(result))
@@ -417,16 +409,13 @@ def gitlab_list(
     json_output: bool,
 ):
     """List GitLab CI pipelines for PROJECT_ID."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(  # type: ignore[var-annotated]
-            client.gitlab_list_pipelines(project_id, status, ref, limit)  # type: ignore[arg-type]
-        )
+        result = client.gitlab_list_pipelines(project_id, status, ref, limit)
 
         if json_output:
             console.print(format_json_success(result))
@@ -475,14 +464,13 @@ def gitlab_list(
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def gitlab_show(project_id: str, pipeline_id: int, json_output: bool):
     """Show details of a GitLab CI pipeline."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_get_pipeline(project_id, pipeline_id))  # type: ignore[arg-type, var-annotated]
+        result = client.gitlab_get_pipeline(project_id, pipeline_id)
 
         if json_output:
             console.print(format_json_success(result))
@@ -523,14 +511,13 @@ def gitlab_logs(
     project_id: str, pipeline_id: int, query: Optional[str], json_output: bool
 ):
     """Search logs for a GitLab CI pipeline."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_search_logs(project_id, pipeline_id, query))  # type: ignore[arg-type, var-annotated]
+        result = client.gitlab_search_logs(project_id, pipeline_id, query)
 
         if json_output:
             console.print(format_json_success(result))
@@ -559,14 +546,13 @@ def gitlab_logs(
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def gitlab_job_logs(project_id: str, job_id: int, json_output: bool):
     """Get complete logs for a specific GitLab CI job."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.gitlab_get_job_logs(project_id, job_id))  # type: ignore[arg-type, var-annotated]
+        result = client.gitlab_get_job_logs(project_id, job_id)
 
         if json_output:
             console.print(format_json_success(result))
@@ -587,14 +573,13 @@ def gitlab_job_logs(project_id: str, job_id: int, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def gitlab_retry(project_id: str, pipeline_id: int, json_output: bool):
     """Retry a failed GitLab CI pipeline."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        asyncio.run(client.gitlab_retry_pipeline(project_id, pipeline_id))  # type: ignore[arg-type]
+        client.gitlab_retry_pipeline(project_id, pipeline_id)
 
         if json_output:
             console.print(
@@ -615,14 +600,13 @@ def gitlab_retry(project_id: str, pipeline_id: int, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def gitlab_cancel(project_id: str, pipeline_id: int, json_output: bool):
     """Cancel a running or pending GitLab CI pipeline."""
-    import asyncio
     from .api_clients.cicd_client import CICDAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_cicd()
         client = CICDAPIClient(config["server_url"], config["credentials"])
-        asyncio.run(client.gitlab_cancel_pipeline(project_id, pipeline_id))  # type: ignore[arg-type]
+        client.gitlab_cancel_pipeline(project_id, pipeline_id)
 
         if json_output:
             console.print(

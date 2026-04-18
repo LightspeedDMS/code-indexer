@@ -60,14 +60,13 @@ def git_group():
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_status(repository: str, json_output: bool):
     """Show working tree status."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.status(repository))  # type: ignore[arg-type, var-annotated]
+        result = client.status(repository)
 
         if json_output:
             console.print(format_json_success(result))
@@ -110,16 +109,13 @@ def git_commit(
     json_output: bool,
 ):
     """Create a commit with staged changes."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(  # type: ignore[var-annotated]
-            client.commit(repository, message, author_name, author_email)  # type: ignore[arg-type]
-        )
+        result = client.commit(repository, message, author_name, author_email)
 
         if json_output:
             console.print(format_json_success(result))
@@ -158,7 +154,6 @@ def git_reset(
 
     WARNING: --mode hard is destructive and requires --confirm flag.
     """
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success, format_json_error
 
@@ -174,7 +169,7 @@ def git_reset(
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.reset(repository, mode, commit_ref))  # type: ignore[arg-type, var-annotated]
+        result = client.reset(repository, mode, commit_ref)
 
         if json_output:
             console.print(format_json_success(result))
@@ -201,14 +196,13 @@ def git_diff(
     json_output: bool,
 ):
     """Show changes between commits, commit and working tree, etc."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.diff(repository, path, staged, commit))  # type: ignore[arg-type, var-annotated]
+        result = client.diff(repository, path, staged, commit)
 
         if json_output:
             console.print(format_json_success(result))
@@ -237,14 +231,13 @@ def git_log(
     json_output: bool,
 ):
     """Show commit history."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.log(repository, limit, author, path))  # type: ignore[arg-type, var-annotated]
+        result = client.log(repository, limit, author, path)
 
         if json_output:
             console.print(format_json_success(result))
@@ -277,14 +270,13 @@ def git_show(
     json_output: bool,
 ):
     """Show details of a specific commit."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.show_commit(repository, commit_hash, include_diff))  # type: ignore[arg-type, var-annotated]
+        result = client.show_commit(repository, commit_hash, include_diff)
 
         if json_output:
             console.print(format_json_success(result))
@@ -308,14 +300,13 @@ def git_show(
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_stage(files: tuple, repository: str, json_output: bool):
     """Stage files for commit."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.stage(repository, list(files)))  # type: ignore[arg-type, var-annotated]
+        result = client.stage(repository, list(files))
 
         if json_output:
             console.print(format_json_success(result))
@@ -334,14 +325,13 @@ def git_stage(files: tuple, repository: str, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_unstage(files: tuple, repository: str, json_output: bool):
     """Unstage files from the index."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.unstage(repository, list(files)))  # type: ignore[arg-type, var-annotated]
+        result = client.unstage(repository, list(files))
 
         if json_output:
             console.print(format_json_success(result))
@@ -361,14 +351,13 @@ def git_unstage(files: tuple, repository: str, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_push(repository: str, remote: str, branch: Optional[str], json_output: bool):
     """Push commits to remote repository."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.push(repository, remote, branch))  # type: ignore[arg-type, var-annotated]
+        result = client.push(repository, remote, branch)
 
         if json_output:
             console.print(format_json_success(result))
@@ -387,14 +376,13 @@ def git_push(repository: str, remote: str, branch: Optional[str], json_output: b
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_pull(repository: str, remote: str, branch: Optional[str], json_output: bool):
     """Pull changes from remote repository."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.pull(repository, remote, branch))  # type: ignore[arg-type, var-annotated]
+        result = client.pull(repository, remote, branch)
 
         if json_output:
             console.print(format_json_success(result))
@@ -412,14 +400,13 @@ def git_pull(repository: str, remote: str, branch: Optional[str], json_output: b
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_fetch(repository: str, remote: str, json_output: bool):
     """Fetch changes from remote without merging."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.fetch(repository, remote))  # type: ignore[arg-type, var-annotated]
+        result = client.fetch(repository, remote)
 
         if json_output:
             console.print(format_json_success(result))
@@ -441,7 +428,6 @@ def git_clean(repository: str, confirm: bool, json_output: bool):
 
     WARNING: This is destructive and requires --confirm flag.
     """
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success, format_json_error
 
@@ -456,7 +442,7 @@ def git_clean(repository: str, confirm: bool, json_output: bool):
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.clean(repository))  # type: ignore[arg-type, var-annotated]
+        result = client.clean(repository)
 
         if json_output:
             console.print(format_json_success(result))
@@ -478,14 +464,13 @@ def git_clean(repository: str, confirm: bool, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_merge_abort(repository: str, json_output: bool):
     """Abort a merge in progress."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.merge_abort(repository))  # type: ignore[arg-type, var-annotated]
+        result = client.merge_abort(repository)
 
         if json_output:
             console.print(format_json_success(result))
@@ -502,14 +487,13 @@ def git_merge_abort(repository: str, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_checkout_file(file: str, repository: str, json_output: bool):
     """Checkout a file from HEAD, discarding local changes."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.checkout_file(repository, file))  # type: ignore[arg-type, var-annotated]
+        result = client.checkout_file(repository, file)
 
         if json_output:
             console.print(format_json_success(result))
@@ -525,14 +509,13 @@ def git_checkout_file(file: str, repository: str, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_branches(repository: str, json_output: bool):
     """List all branches."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branches(repository))  # type: ignore[arg-type, var-annotated]
+        result = client.branches(repository)
 
         if json_output:
             console.print(format_json_success(result))
@@ -561,14 +544,13 @@ def git_branch_create(
     json_output: bool,
 ):
     """Create a new branch."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branch_create(repository, name, start_point))  # type: ignore[arg-type, var-annotated]
+        result = client.branch_create(repository, name, start_point)
 
         if json_output:
             console.print(format_json_success(result))
@@ -587,14 +569,13 @@ def git_branch_create(
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_branch_switch(name: str, repository: str, json_output: bool):
     """Switch to a branch."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branch_switch(repository, name))  # type: ignore[arg-type, var-annotated]
+        result = client.branch_switch(repository, name)
 
         if json_output:
             console.print(format_json_success(result))
@@ -617,7 +598,6 @@ def git_branch_delete(name: str, repository: str, confirm: bool, json_output: bo
 
     WARNING: This is destructive and requires --confirm flag.
     """
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success, format_json_error
 
@@ -632,7 +612,7 @@ def git_branch_delete(name: str, repository: str, confirm: bool, json_output: bo
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.branch_delete(repository, name))  # type: ignore[arg-type, var-annotated]
+        result = client.branch_delete(repository, name)
 
         if json_output:
             console.print(format_json_success(result))
@@ -649,14 +629,13 @@ def git_branch_delete(name: str, repository: str, confirm: bool, json_output: bo
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_blame(file: str, repository: str, json_output: bool):
     """Show what revision and author last modified each line of a file."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.blame(repository, file))  # type: ignore[arg-type, var-annotated]
+        result = client.blame(repository, file)
 
         if json_output:
             console.print(format_json_success(result))
@@ -682,14 +661,13 @@ def git_blame(file: str, repository: str, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_file_history(file: str, repository: str, limit: int, json_output: bool):
     """Show commit history for a specific file."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.file_history(repository, file, limit))  # type: ignore[arg-type, var-annotated]
+        result = client.file_history(repository, file, limit)
 
         if json_output:
             console.print(format_json_success(result))
@@ -718,14 +696,13 @@ def git_file_history(file: str, repository: str, limit: int, json_output: bool):
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_search_commits(query: str, repository: str, limit: int, json_output: bool):
     """Search commits by message content."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.search_commits(repository, query, limit))  # type: ignore[arg-type, var-annotated]
+        result = client.search_commits(repository, query, limit)
 
         if json_output:
             console.print(format_json_success(result))
@@ -754,14 +731,13 @@ def git_search_commits(query: str, repository: str, limit: int, json_output: boo
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_search_diffs(pattern: str, repository: str, limit: int, json_output: bool):
     """Search for a pattern in diff content."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.search_diffs(repository, pattern, limit))  # type: ignore[arg-type, var-annotated]
+        result = client.search_diffs(repository, pattern, limit)
 
         if json_output:
             console.print(format_json_success(result))
@@ -790,14 +766,13 @@ def git_search_diffs(pattern: str, repository: str, limit: int, json_output: boo
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def git_cat(file: str, repository: str, revision: Optional[str], json_output: bool):
     """Show file content at a specific revision."""
-    import asyncio
     from .api_clients.git_client import GitAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_git()
         client = GitAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.cat_file(repository, file, revision))  # type: ignore[arg-type, var-annotated]
+        result = client.cat_file(repository, file, revision)
 
         if json_output:
             console.print(format_json_success(result))

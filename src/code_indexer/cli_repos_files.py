@@ -1,44 +1,79 @@
 """Repository file browsing helper functions for CLI."""
 
 from pathlib import Path
-import asyncio
 import click
 from code_indexer.api_clients.repos_client import ReposAPIClient
 
 
-async def get_repo_id_from_alias(user_alias: str, project_root: Path) -> str:
-    """Get repository ID from user alias (async version for internal use)."""
+def _lookup_alias(client: ReposAPIClient, user_alias: str) -> str:
+    """Look up user_alias in the list of activated repositories.
+
+    Calls the sync ReposAPIClient directly. The caller is responsible for
+    constructing the client and for calling client.close() afterwards.
+
+    Args:
+        client: Constructed ReposAPIClient (must not be None).
+        user_alias: Alias to look up (must be a non-empty string).
+
+    Returns:
+        user_alias if found.
+
+    Raises:
+        ValueError: If user_alias is empty/None, or if the alias is not found.
+    """
+    if not user_alias:
+        raise ValueError("user_alias must be a non-empty string")
+    repos = client.list_activated_repositories()
+    for repo in repos:
+        if repo.alias == user_alias:
+            return user_alias
+    raise ValueError(f"Repository '{user_alias}' not found")
+
+
+def get_repo_id_from_alias(user_alias: str, project_root: Path) -> str:
+    """Get repository ID from user alias.
+
+    Args:
+        user_alias: Alias to look up (non-empty).
+        project_root: Project root path (must not be None).
+
+    Raises:
+        ValueError: If project_root is None or alias not found.
+    """
+    if project_root is None:
+        raise ValueError("project_root must not be None")
     client = ReposAPIClient(server_url="", credentials={}, project_root=project_root)
     try:
-        repos = await client.list_activated_repositories()
-        for repo in repos:
-            if repo.alias == user_alias:
-                return user_alias
-        raise ValueError(f"Repository '{user_alias}' not found")
+        return _lookup_alias(client, user_alias)
     finally:
-        await client.close()
+        client.close()
 
 
 def get_repo_id_from_alias_sync(
     server_url: str, credentials: dict, user_alias: str, project_root: Path
 ) -> str:
-    """Get repository ID from user alias (synchronous version for CLI commands)."""
+    """Get repository ID from user alias (synchronous version for CLI commands).
 
-    async def fetch() -> str:
-        client = ReposAPIClient(
-            server_url=server_url, credentials=credentials, project_root=project_root
-        )
-        try:
-            repos = await client.list_activated_repositories()
-            for repo in repos:
-                if repo.alias == user_alias:
-                    return user_alias
-            raise ValueError(f"Repository '{user_alias}' not found")
-        finally:
-            await client.close()
+    Args:
+        server_url: Server URL (non-empty).
+        credentials: Credentials dict.
+        user_alias: Alias to look up (non-empty).
+        project_root: Project root path (must not be None).
 
-    result: str = asyncio.run(fetch())
-    return result
+    Raises:
+        ValueError: If server_url is empty, project_root is None, or alias not found.
+    """
+    if not server_url:
+        raise ValueError("server_url must be a non-empty string")
+    if project_root is None:
+        raise ValueError("project_root must not be None")
+    client = ReposAPIClient(
+        server_url=server_url, credentials=credentials, project_root=project_root
+    )
+    try:
+        return _lookup_alias(client, user_alias)
+    finally:
+        client.close()
 
 
 def format_file_size(size_bytes: int) -> str:

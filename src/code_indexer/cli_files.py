@@ -46,6 +46,64 @@ def _handle_files_error(e: Exception, json_output: bool) -> None:
     sys.exit(1)
 
 
+def _resolve_file_content(
+    content: Optional[str],
+    from_file: Optional[str],
+    json_output: bool,
+) -> str:
+    """Validate content source arguments and return file content as a string.
+
+    Handles mutual-exclusion validation and local file reading.
+    Arbitrary local paths are intentionally permitted: this is a CLI tool
+    running as the user, reading files the user explicitly specifies.
+    Path.resolve() normalises the path (removes .., symlinks) so callers
+    work with a canonical absolute path.
+
+    Args:
+        content: Inline content string (None if not supplied; empty string is valid).
+        from_file: Path to a local file to read (None if not supplied).
+        json_output: Controls error output format.
+
+    Returns:
+        File content as a string.
+
+    Raises:
+        SystemExit: On validation failure or unreadable file.
+    """
+    from .cli_utils import format_json_error
+
+    if content is None and from_file is None:
+        msg = "Must provide either --content or --from-file"
+        if json_output:
+            console.print(format_json_error(msg, "ValidationError"))
+        else:
+            console.print(f"[red]Error: {msg}[/red]")
+        sys.exit(1)
+
+    if content is not None and from_file is not None:
+        msg = "Cannot use both --content and --from-file"
+        if json_output:
+            console.print(format_json_error(msg, "ValidationError"))
+        else:
+            console.print(f"[red]Error: {msg}[/red]")
+        sys.exit(1)
+
+    if from_file is not None:
+        resolved = Path(from_file).resolve()
+        try:
+            return resolved.read_text()
+        except Exception as e:
+            if json_output:
+                console.print(format_json_error(str(e), "FileReadError"))
+            else:
+                console.print(f"[red]Error reading file: {e}[/red]")
+            sys.exit(1)
+
+    # content is guaranteed non-None here: both-None and both-set cases handled above
+    assert content is not None
+    return content
+
+
 @click.group("files")
 @require_mode("remote")
 def files_group():
@@ -60,11 +118,12 @@ def files_group():
 @files_group.command("create")
 @click.argument("path")
 @click.option("--repository", "-r", required=True, help="Repository alias")
-@click.option("--content", "-c", help="File content (inline)")
+@click.option("--content", "-c", default=None, help="File content (inline)")
 @click.option(
     "--from-file",
     "-f",
     type=click.Path(exists=True),
+    default=None,
     help="Read content from local file",
 )
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
@@ -87,47 +146,15 @@ def files_create(
 
         cidx files create config.yaml -r myrepo --from-file ./local_config.yaml
     """
-    import asyncio
     from .api_clients.file_client import FileAPIClient
-    from .cli_utils import format_json_success, format_json_error
+    from .cli_utils import format_json_success
 
-    # Validate content source
-    if not content and not from_file:
-        msg = "Must provide either --content or --from-file"
-        if json_output:
-            console.print(format_json_error(msg, "ValidationError"))
-        else:
-            console.print(f"[red]Error: {msg}[/red]")
-        sys.exit(1)
-
-    if content and from_file:
-        msg = "Cannot use both --content and --from-file"
-        if json_output:
-            console.print(format_json_error(msg, "ValidationError"))
-        else:
-            console.print(f"[red]Error: {msg}[/red]")
-        sys.exit(1)
-
-    # Read content from file if specified
-    file_content: str
-    if from_file:
-        try:
-            file_content = Path(from_file).read_text()
-        except Exception as e:
-            if json_output:
-                console.print(format_json_error(str(e), "FileReadError"))
-            else:
-                console.print(f"[red]Error reading file: {e}[/red]")
-            sys.exit(1)
-    else:
-        # content is guaranteed non-None here due to validation above
-        assert content is not None
-        file_content = content
+    file_content = _resolve_file_content(content, from_file, json_output)
 
     try:
         config = _load_remote_config_for_files()
         client = FileAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.create_file(repository, path, file_content))  # type: ignore[arg-type, var-annotated]
+        result = client.create_file(repository, path, file_content)
 
         if json_output:
             console.print(format_json_success(result))
@@ -176,22 +203,19 @@ def files_edit(
 
         cidx files edit app.py -r myrepo --old "v1" --new "v2" --content-hash abc123
     """
-    import asyncio
     from .api_clients.file_client import FileAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_files()
         client = FileAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(  # type: ignore[var-annotated]
-            client.edit_file(  # type: ignore[arg-type]
-                repository,
-                path,
-                old_string=old,
-                new_string=new,
-                content_hash=content_hash,
-                replace_all=replace_all,
-            )
+        result = client.edit_file(
+            repository,
+            path,
+            old_string=old,
+            new_string=new,
+            content_hash=content_hash,
+            replace_all=replace_all,
         )
 
         if json_output:
@@ -234,7 +258,6 @@ def files_delete(
 
         cidx files delete old_config.yaml -r myrepo --content-hash abc123 --confirm
     """
-    import asyncio
     from .api_clients.file_client import FileAPIClient
     from .cli_utils import format_json_success, format_json_error
 
@@ -250,9 +273,7 @@ def files_delete(
     try:
         config = _load_remote_config_for_files()
         client = FileAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(  # type: ignore[var-annotated]
-            client.delete_file(repository, path, content_hash=content_hash)  # type: ignore[arg-type]
-        )
+        result = client.delete_file(repository, path, content_hash=content_hash)
 
         if json_output:
             console.print(format_json_success(result))

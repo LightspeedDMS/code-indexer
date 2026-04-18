@@ -108,19 +108,16 @@ def index_trigger(
         cidx remote-index trigger my-repo --types semantic,fts
         cidx remote-index trigger my-repo --types scip --json
     """
-    import asyncio
     from .api_clients.index_client import IndexAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_index()
         client = IndexAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(  # type: ignore[var-annotated]
-            client.trigger(  # type: ignore[arg-type]
-                repository=repository,
-                clear=clear,
-                index_types=types,
-            )
+        result = client.trigger(
+            repository=repository,
+            clear=clear,
+            index_types=types,
         )
 
         if json_output:
@@ -153,14 +150,13 @@ def index_status(repository: str, json_output: bool):
         cidx remote-index status my-repo
         cidx remote-index status my-repo --json
     """
-    import asyncio
     from .api_clients.index_client import IndexAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_index()
         client = IndexAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.status(repository))  # type: ignore[arg-type, var-annotated]
+        result = client.status(repository)
 
         if json_output:
             console.print(format_json_success(result))
@@ -226,14 +222,13 @@ def index_add_type(repository: str, type: str, json_output: bool):
         cidx remote-index add-type my-repo temporal
         cidx remote-index add-type my-repo scip --json
     """
-    import asyncio
     from .api_clients.index_client import IndexAPIClient
     from .cli_utils import format_json_success
 
     try:
         config = _load_remote_config_for_index()
         client = IndexAPIClient(config["server_url"], config["credentials"])
-        result = asyncio.run(client.add_type(repository, type))  # type: ignore[arg-type, var-annotated]
+        result = client.add_type(repository, type)
 
         if json_output:
             console.print(format_json_success(result))
