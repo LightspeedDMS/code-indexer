@@ -140,7 +140,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
     # API Key Methods (3 methods)
     # =============================================================================
 
-    async def list_api_keys(self) -> Dict[str, Any]:
+    def list_api_keys(self) -> Dict[str, Any]:
         """List all API keys for the current user.
 
         Returns:
@@ -158,7 +158,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"api_keys": result.get("api_keys", [])}
 
-    async def create_api_key(self, description: str = "") -> Dict[str, Any]:
+    def create_api_key(self, description: str = "") -> Dict[str, Any]:
         """Create a new API key for the current user.
 
         Args:
@@ -188,7 +188,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             "description": result.get("description", ""),
         }
 
-    async def delete_api_key(self, key_id: str) -> Dict[str, Any]:
+    def delete_api_key(self, key_id: str) -> Dict[str, Any]:
         """Delete an API key.
 
         Args:
@@ -215,7 +215,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
     # MCP Credential Methods - User Self-Service (3 methods)
     # =============================================================================
 
-    async def list_mcp_credentials(self) -> Dict[str, Any]:
+    def list_mcp_credentials(self) -> Dict[str, Any]:
         """List all MCP credentials for the current user.
 
         Returns:
@@ -233,7 +233,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"credentials": result.get("credentials", [])}
 
-    async def create_mcp_credential(self, description: str = "") -> Dict[str, Any]:
+    def create_mcp_credential(self, description: str = "") -> Dict[str, Any]:
         """Create a new MCP credential for the current user.
 
         Args:
@@ -263,7 +263,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             "description": result.get("description", ""),
         }
 
-    async def delete_mcp_credential(self, credential_id: str) -> Dict[str, Any]:
+    def delete_mcp_credential(self, credential_id: str) -> Dict[str, Any]:
         """Delete an MCP credential.
 
         Args:
@@ -292,7 +292,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
     # Admin MCP Credential Methods (4 methods)
     # =============================================================================
 
-    async def admin_list_user_mcp_credentials(self, username: str) -> Dict[str, Any]:
+    def admin_list_user_mcp_credentials(self, username: str) -> Dict[str, Any]:
         """List all MCP credentials for a specific user (Admin only).
 
         Args:
@@ -351,7 +351,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
             "description": result.get("description", ""),
         }
 
-    async def admin_delete_user_mcp_credential(
+    def admin_delete_user_mcp_credential(
         self, username: str, credential_id: str
     ) -> Dict[str, Any]:
         """Delete an MCP credential for a specific user (Admin only).
@@ -382,7 +382,7 @@ class CredentialAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    async def admin_list_all_mcp_credentials(self) -> Dict[str, Any]:
+    def admin_list_all_mcp_credentials(self) -> Dict[str, Any]:
         """List all MCP credentials across all users (Admin only).
 
         Returns:

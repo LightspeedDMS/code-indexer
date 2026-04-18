@@ -14774,7 +14774,7 @@ def admin_users_delete(ctx, username: str, force: bool, json_output: bool):
                     credentials=credentials,
                     project_root=project_root,
                 )
-                user_info = run_async(temp_client.get_user(username))
+                user_info = temp_client.get_user(username)
                 user = user_info.get("user", {})
                 console.print(
                     f"User role: [yellow]{user.get('role', 'unknown')}[/yellow]"

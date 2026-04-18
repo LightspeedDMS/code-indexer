@@ -198,7 +198,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing users: {e}")
 
-    async def get_user(
+    def get_user(
         self,
         username: str,
     ) -> Dict[str, Any]:
@@ -243,7 +243,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error getting user: {e}")
 
-    async def update_user(
+    def update_user(
         self,
         username: str,
         role: str,
@@ -316,7 +316,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error updating user: {e}")
 
-    async def delete_user(
+    def delete_user(
         self,
         username: str,
     ) -> Dict[str, Any]:
@@ -385,7 +385,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error deleting user: {e}")
 
-    async def change_user_password(
+    def change_user_password(
         self,
         username: str,
         new_password: str,
@@ -555,7 +555,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error adding golden repository: {e}")
 
-    async def list_golden_repositories(self) -> Dict[str, Any]:
+    def list_golden_repositories(self) -> Dict[str, Any]:
         """List all golden repositories (admin only).
 
         Returns:
@@ -606,7 +606,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error listing golden repositories: {e}")
 
-    async def refresh_golden_repository(self, alias: str) -> Dict[str, Any]:
+    def refresh_golden_repository(self, alias: str) -> Dict[str, Any]:
         """Refresh a golden repository (admin only).
 
         Args:
@@ -665,7 +665,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error refreshing golden repository: {e}")
 
-    async def get_golden_repository_branches(self, alias: str) -> Dict[str, Any]:
+    def get_golden_repository_branches(self, alias: str) -> Dict[str, Any]:
         """Get branches for a golden repository.
 
         Args:
@@ -801,9 +801,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error deleting golden repository: {e}")
 
-    async def add_index_to_golden_repo(
-        self, alias: str, index_type: str
-    ) -> Dict[str, Any]:
+    def add_index_to_golden_repo(self, alias: str, index_type: str) -> Dict[str, Any]:
         """Add an index type to a golden repository (admin only).
 
         Args:
@@ -878,7 +876,7 @@ class AdminAPIClient(CIDXRemoteAPIClient):
                 f"Unexpected error adding index to golden repository: {e}"
             )
 
-    async def get_golden_repo_indexes(self, alias: str) -> Dict[str, Any]:
+    def get_golden_repo_indexes(self, alias: str) -> Dict[str, Any]:
         """Get index status for a golden repository (admin only).
 
         Args:
