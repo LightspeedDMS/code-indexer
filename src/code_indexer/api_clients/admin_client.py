@@ -405,7 +405,6 @@ class AdminAPIClient(CIDXRemoteAPIClient):
             NetworkError: If network request fails
         """
         password_data = {
-            "old_password": "",  # Not required for admin endpoint, but model expects it
             "new_password": new_password,
         }
 

@@ -21,6 +21,7 @@ from fastapi import (
 )
 
 from ..models.auth import (
+    AdminChangePasswordRequest,
     CreateUserRequest,
     UpdateUserRequest,
     ChangePasswordRequest,
@@ -404,7 +405,7 @@ def register_admin_user_routes(
     )
     def change_user_password(
         username: str,
-        password_data: ChangePasswordRequest,
+        password_data: AdminChangePasswordRequest,
         current_user: dependencies.User = Depends(dependencies.get_current_admin_user),
     ):
         """

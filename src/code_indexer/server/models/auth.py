@@ -181,6 +181,24 @@ class ChangePasswordRequest(BaseModel):
         return v
 
 
+class AdminChangePasswordRequest(BaseModel):
+    """Request model for admin-initiated password change (no old password required)."""
+
+    new_password: str = Field(
+        ..., min_length=1, max_length=1000, description="New password set by admin"
+    )
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        """Validate new password complexity."""
+        if not v or not v.strip():
+            raise ValueError("Password cannot be empty or contain only whitespace")
+        if not validate_password_complexity(v):
+            raise ValueError(get_password_complexity_error_message())
+        return v
+
+
 class UserResponse(BaseModel):
     """Response model for user operations."""
 
