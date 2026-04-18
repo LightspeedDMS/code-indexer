@@ -29,16 +29,34 @@ class ActivatedRepository(BaseModel):
 
 
 class GoldenRepository(BaseModel):
-    """Model for a golden repository."""
+    """Model for a golden repository.
+
+    Server source (``golden_repos_metadata``) currently only persists the
+    core identity columns (alias, repo_url, default_branch, created_at).
+    Fields below with defaults are not stored in the schema yet; they
+    default so the CLI parses minimal server responses without crashing.
+    When a backend column is added, callers can populate the field on
+    the server side without a client migration.
+    """
 
     alias: str = Field(..., description="Repository alias")
-    description: str = Field(..., description="Repository description")
     default_branch: str = Field(..., description="Default branch name")
-    indexed_branches: List[str] = Field(..., description="List of indexed branches")
-    is_activated: bool = Field(
-        ..., description="Whether repository is activated by user"
+    description: Optional[str] = Field(
+        default=None, description="Repository description (None if not persisted)"
     )
-    last_updated: str = Field(..., description="Last update timestamp")
+    indexed_branches: List[str] = Field(
+        default_factory=list,
+        description="List of indexed branches (empty if not tracked server-side)",
+    )
+    is_activated: bool = Field(
+        default=False,
+        description="Whether the current user has activated this repo. "
+        "Default listing excludes activated repos, so False is the safe default.",
+    )
+    last_updated: Optional[str] = Field(
+        default=None,
+        description="Last update timestamp (None if not tracked server-side)",
+    )
 
 
 class DiscoveredRepository(BaseModel):
