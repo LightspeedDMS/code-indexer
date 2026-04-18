@@ -68,6 +68,109 @@ def _parse_group_id(result: CompletedProcess[str], context: str) -> int:
         )
 
 
+def _remove_all_members_from_group(
+    group_id: int,
+    workspace: Path,
+    cli_env: dict[str, str],
+    *,
+    label: str = "cleanup",
+) -> None:
+    """Remove all members from a group by reassigning them to the default admins group.
+
+    Uses the 1:1 user-to-group relationship: calling add-member on the "admins"
+    default group moves each user out of the test group automatically.  This is
+    necessary before delete, because cidx admin groups delete refuses when active
+    members exist (GroupHasUsersError on the server side).
+
+    Each failure path emits an explicit warning via pytest.warns-style print so the
+    reason for any skipped removal is visible in test output.  After this function
+    returns (regardless of outcome), the caller attempts the delete and surfaces any
+    remaining error through its own AssertionError.
+    """
+    import warnings
+
+    # Get the current member list from the group
+    show_result = run_cidx(
+        "admin", "groups", "show", str(group_id),
+        "--json",
+        cwd=str(workspace),
+        env=cli_env,
+    )
+    if show_result.returncode != 0:
+        warnings.warn(
+            f"{label}: could not fetch group {group_id} members before delete "
+            f"(rc={show_result.returncode}): {show_result.stdout}{show_result.stderr}",
+            stacklevel=2,
+        )
+        return
+
+    try:
+        data = json.loads(show_result.stdout)
+        members: list[str] = data.get("members", [])
+    except (json.JSONDecodeError, KeyError) as exc:
+        warnings.warn(
+            f"{label}: could not parse members from group {group_id} show output: {exc}\n"
+            f"stdout: {show_result.stdout}",
+            stacklevel=2,
+        )
+        return
+
+    if not members:
+        return  # Nothing to remove -- no warning needed
+
+    # Find the ID of the default "admins" group so we can move users back to it
+    list_result = run_cidx(
+        "admin", "groups", "list",
+        "--json",
+        cwd=str(workspace),
+        env=cli_env,
+    )
+    admins_group_id: int | None = None
+    if list_result.returncode == 0:
+        try:
+            groups_data = json.loads(list_result.stdout)
+            for grp in groups_data.get("groups", []):
+                if grp.get("name") == "admins":
+                    admins_group_id = int(grp["id"])
+                    break
+        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+            warnings.warn(
+                f"{label}: could not parse groups list to find admins group: {exc}\n"
+                f"stdout: {list_result.stdout}",
+                stacklevel=2,
+            )
+    else:
+        warnings.warn(
+            f"{label}: cidx admin groups list failed "
+            f"(rc={list_result.returncode}): {list_result.stdout}{list_result.stderr}",
+            stacklevel=2,
+        )
+
+    if admins_group_id is None:
+        warnings.warn(
+            f"{label}: admins group not found in list output -- "
+            f"cannot move members {members} out of group {group_id} before delete",
+            stacklevel=2,
+        )
+        return
+
+    for member in members:
+        move_result = run_cidx(
+            "admin", "groups", "add-member", str(admins_group_id),
+            "--user", member,
+            cwd=str(workspace),
+            env=cli_env,
+        )
+        if move_result.returncode != 0:
+            warnings.warn(
+                f"{label}: failed to move user '{member}' from group {group_id} "
+                f"to admins group {admins_group_id} "
+                f"(rc={move_result.returncode}): "
+                f"{move_result.stdout}{move_result.stderr}",
+                stacklevel=2,
+            )
+
+
 def _delete_group_best_effort(
     group_id: int,
     workspace: Path,
@@ -77,8 +180,14 @@ def _delete_group_best_effort(
 ) -> None:
     """Delete a group by ID, accepting success or 'already gone' outcomes.
 
+    Moves any active members back to the default admins group first (required
+    because the server rejects delete when active members exist).
+
     Any other failure is re-raised so cleanup errors are not silently discarded.
     """
+    # Move members out before attempting delete
+    _remove_all_members_from_group(group_id, workspace, cli_env, label=label)
+
     result = run_cidx(
         "admin", "groups", "delete", str(group_id),
         "--confirm",
