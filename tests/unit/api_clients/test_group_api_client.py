@@ -9,10 +9,50 @@ This file contains tests for:
 - GroupAPIClient initialization
 """
 
+import inspect
 import pytest
 import tempfile
 from pathlib import Path
 from typing import Dict, Any
+
+
+# ---------------------------------------------------------------------------
+# Bug #749 regression contract: all public GroupAPIClient methods must be
+# async coroutines so run_async(client.method()) in the CLI works correctly.
+# ---------------------------------------------------------------------------
+class TestGroupAPIClientAsyncContracts:
+    """Bug #749: GroupAPIClient public methods must be async coroutines.
+
+    The CLI calls run_async(client.<method>(...)) for every group operation.
+    run_async() calls asyncio.run()/loop.run_until_complete() on the return
+    value, which requires a coroutine object.  Plain `def` methods return
+    the dict immediately, causing:
+        ValueError: a coroutine was expected, got {'group_id': N, 'name': 'X'}
+    """
+
+    @pytest.mark.parametrize(
+        "method_name",
+        [
+            "list_groups",
+            "create_group",
+            "get_group",
+            "update_group",
+            "delete_group",
+            "add_member",
+            "add_repos",
+            "remove_repo",
+            "remove_repos",
+        ],
+    )
+    def test_method_is_coroutine(self, method_name: str):
+        """Each public method must be async def for run_async() compatibility."""
+        from code_indexer.api_clients.group_client import GroupAPIClient
+
+        method = getattr(GroupAPIClient, method_name)
+        assert inspect.iscoroutinefunction(method), (
+            f"GroupAPIClient.{method_name} must be async def "
+            f"so run_async(client.{method_name}(...)) works (Bug #749)"
+        )
 
 
 class TestGroupAPIClientMethods:

@@ -136,7 +136,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
         except Exception as e:
             raise APIClientError(f"Unexpected error calling MCP tool: {e}")
 
-    def list_groups(self) -> Dict[str, Any]:
+    async def list_groups(self) -> Dict[str, Any]:
         """List all groups with member counts and repository access.
 
         Returns:
@@ -154,7 +154,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"groups": result.get("groups", [])}
 
-    def create_group(self, name: str, description: str = "") -> Dict[str, Any]:
+    async def create_group(self, name: str, description: str = "") -> Dict[str, Any]:
         """Create a new custom group.
 
         Args:
@@ -182,7 +182,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"group_id": result.get("group_id"), "name": result.get("name")}
 
-    def get_group(self, group_id: int) -> Dict[str, Any]:
+    async def get_group(self, group_id: int) -> Dict[str, Any]:
         """Get detailed information about a specific group.
 
         Args:
@@ -211,7 +211,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
             "repos": result.get("repos", []),
         }
 
-    def update_group(
+    async def update_group(
         self,
         group_id: int,
         name: Optional[str] = None,
@@ -247,7 +247,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    def delete_group(self, group_id: int) -> Dict[str, Any]:
+    async def delete_group(self, group_id: int) -> Dict[str, Any]:
         """Delete a custom group.
 
         Args:
@@ -275,7 +275,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    def add_member(self, group_id: int, user_id: str) -> Dict[str, Any]:
+    async def add_member(self, group_id: int, user_id: str) -> Dict[str, Any]:
         """Assign a user to a group.
 
         Args:
@@ -301,7 +301,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    def add_repos(self, group_id: int, repo_names: List[str]) -> Dict[str, Any]:
+    async def add_repos(self, group_id: int, repo_names: List[str]) -> Dict[str, Any]:
         """Grant a group access to one or more repositories.
 
         Args:
@@ -327,7 +327,7 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True, "added_count": result.get("added_count", 0)}
 
-    def remove_repo(self, group_id: int, repo_name: str) -> Dict[str, Any]:
+    async def remove_repo(self, group_id: int, repo_name: str) -> Dict[str, Any]:
         """Revoke a group's access to a single repository.
 
         Args:
@@ -356,7 +356,9 @@ class GroupAPIClient(CIDXRemoteAPIClient):
 
         return {"success": True}
 
-    def remove_repos(self, group_id: int, repo_names: List[str]) -> Dict[str, Any]:
+    async def remove_repos(
+        self, group_id: int, repo_names: List[str]
+    ) -> Dict[str, Any]:
         """Revoke a group's access to multiple repositories.
 
         Args:

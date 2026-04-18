@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.19.2
+
+### Bug Fixes
+
+- fix(#749): Fixed `cidx admin groups create` returning "a coroutine was expected, got dict". Root cause: `GroupAPIClient`, `AdminAPIClient`, and `CredentialAPIClient` methods were plain `def` (synchronous) but the CLI calls them via `run_async()` which requires coroutines. Converted 27 affected methods across three client files to `async def`. Also fixed a bare `temp_client.get_user()` call in cli.py that was not wrapped in `run_async()` (exposed by mypy). Added 27 parametrized regression tests using `inspect.iscoroutinefunction()` to enforce the async contract.
+
 ## v9.19.1
 
 ### Bug Fixes
