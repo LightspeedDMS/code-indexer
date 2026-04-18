@@ -35,7 +35,12 @@ def _make_service_with_tracking_backend(tmp_path, refresh_scheduler=None):
     gm.golden_repos_dir = str(tmp_path)
 
     return DependencyMapService(
-        gm, Mock(), tracking, Mock(), refresh_scheduler=refresh_scheduler
+        gm,
+        Mock(),
+        tracking,
+        Mock(),
+        refresh_scheduler=refresh_scheduler,
+        description_refresh_tracking_backend=tracking,
     )
 
 

@@ -58,6 +58,7 @@ class DependencyMapService:
         analyzer,
         refresh_scheduler=None,
         job_tracker=None,
+        description_refresh_tracking_backend=None,
     ):
         """
         Initialize dependency map service.
@@ -69,6 +70,10 @@ class DependencyMapService:
             analyzer: DependencyMapAnalyzer instance
             refresh_scheduler: Optional RefreshScheduler for write-lock coordination (Story #227)
             job_tracker: Optional JobTracker for unified job tracking (Story #312)
+            description_refresh_tracking_backend: Optional DescriptionRefreshTrackingBackend
+                instance for lifecycle backfill (Epic #725). Provides access to the
+                description_refresh_tracking table, which is separate from the
+                DependencyMapTrackingBackend. Must be supplied for backfill to run.
         """
         self._golden_repos_manager = golden_repos_manager
         self._config_manager = config_manager
@@ -79,6 +84,9 @@ class DependencyMapService:
             refresh_scheduler  # Story #227: write-lock coordination
         )
         self._job_tracker = job_tracker  # Story #312: unified job tracking (Epic #261)
+        self._description_refresh_tracking_backend = (
+            description_refresh_tracking_backend  # Epic #725: lifecycle backfill
+        )
         self._activity_journal = (
             ActivityJournalService()
         )  # Story #329: activity journal
@@ -2188,9 +2196,9 @@ class DependencyMapService:
         Returns:
             int: Rows this node transitioned to pending (sum of cursor.rowcount values).
         """
-        if self._refresh_scheduler is None:
+        if self._description_refresh_tracking_backend is None:
             return 0
-        conn_manager = self._tracking_backend._conn_manager
+        conn_manager = self._description_refresh_tracking_backend._conn_manager
         owns_aggregate = self._backfill_try_acquire_aggregate_job()
         # AC8: only owner needs cluster-wide total; non-owner skips this SELECT.
         cluster_wide_total = (

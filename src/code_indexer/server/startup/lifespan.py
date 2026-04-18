@@ -885,6 +885,23 @@ def make_lifespan(
                 tracking_backend = DependencyMapTrackingBackend(db_path)
             tracking_backend.cleanup_stale_status_on_startup()
 
+            # Create description refresh tracking backend for lifecycle backfill (Epic #725).
+            # This is the DescriptionRefreshTrackingBackend (description_refresh_tracking table),
+            # which is separate from DependencyMapTrackingBackend. Must be passed explicitly
+            # because DependencyMapService only holds DependencyMapTrackingBackend by default.
+            if backend_registry is not None:
+                description_refresh_tracking_backend = (
+                    backend_registry.description_refresh_tracking
+                )
+            else:
+                from code_indexer.server.storage.sqlite_backends import (
+                    DescriptionRefreshTrackingBackend,
+                )
+
+                description_refresh_tracking_backend = (
+                    DescriptionRefreshTrackingBackend(db_path)
+                )
+
             # Bug #383: Clean stale staging directory on server startup.
             # A prior crashed analysis may have left dependency-map.staging/ behind.
             # RefreshScheduler would index it and bake it into versioned snapshots,
@@ -932,6 +949,7 @@ def make_lifespan(
                     else None
                 ),
                 job_tracker=job_tracker,  # Story #312: Unified job tracking (Epic #261)
+                description_refresh_tracking_backend=description_refresh_tracking_backend,  # Epic #725
             )
 
             # Start scheduler (internally checks if enabled)

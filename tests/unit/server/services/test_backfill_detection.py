@@ -89,11 +89,12 @@ def _get_status(db, alias):
 def _make_service(db, job_tracker=None):
     """Build a minimal DependencyMapService with real tracking backends.
 
-    Two distinct backends are wired:
+    Two distinct backends are wired (Epic #725 lifecycle-backfill wiring):
     - svc._tracking_backend: DependencyMapTrackingBackend — used by detect_changes()
       (has get_tracking / update_tracking for commit-hash comparisons)
-    - svc._refresh_scheduler._tracking_backend: DescriptionRefreshTrackingBackend —
-      used by _queue_lifecycle_backfill_if_needed() (has get_stale_repos / upsert_tracking)
+    - svc._description_refresh_tracking_backend: DescriptionRefreshTrackingBackend —
+      used by _queue_lifecycle_backfill_if_needed() (reads directly from service,
+      not via _refresh_scheduler).
     """
     from code_indexer.server.services.dependency_map_service import DependencyMapService
     from code_indexer.server.storage.sqlite_backends import (
@@ -113,16 +114,14 @@ def _make_service(db, job_tracker=None):
     svc._daemon_thread = None
 
     # DependencyMapTrackingBackend: used by detect_changes() via get_tracking().
-    dep_map_tracking = DependencyMapTrackingBackend(str(db))
-    svc._tracking_backend = dep_map_tracking
+    svc._tracking_backend = DependencyMapTrackingBackend(str(db))
 
-    # DescriptionRefreshTrackingBackend: used by _queue_lifecycle_backfill_if_needed()
-    # via get_stale_repos / upsert_tracking.
-    desc_refresh_tracking = DescriptionRefreshTrackingBackend(str(db))
-    refresh_scheduler = MagicMock()
-    refresh_scheduler._tracking_backend = desc_refresh_tracking
-    refresh_scheduler._db_path = str(db)
-    svc._refresh_scheduler = refresh_scheduler
+    # DescriptionRefreshTrackingBackend: Epic #725 fix — backfill reads from
+    # svc._description_refresh_tracking_backend directly (not via refresh_scheduler).
+    svc._description_refresh_tracking_backend = DescriptionRefreshTrackingBackend(
+        str(db)
+    )
+    svc._refresh_scheduler = MagicMock()
 
     return svc
 
@@ -233,7 +232,7 @@ class TestBackfillCountFromRowcount:
         _insert_repo(db, "repo-loses", status="completed", lifecycle_schema_version=0)
 
         svc = _make_service(db)
-        conn_manager = svc._refresh_scheduler._tracking_backend._conn_manager
+        conn_manager = svc._description_refresh_tracking_backend._conn_manager
 
         class _ZeroRowcountCursor:
             rowcount = 0
@@ -306,7 +305,7 @@ class TestBackfillRunsUnconditionally:
         svc._config_manager.get_claude_integration_config.return_value = mock_config
 
         call_order = []
-        conn_manager = svc._refresh_scheduler._tracking_backend._conn_manager
+        conn_manager = svc._description_refresh_tracking_backend._conn_manager
         real_execute_atomic = conn_manager.execute_atomic
 
         def spy_execute_atomic(fn):
