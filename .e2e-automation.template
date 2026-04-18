@@ -1,0 +1,84 @@
+# .e2e-automation — Local E2E test suite configuration
+#
+# Copy this file to .e2e-automation and fill in the required values.
+# .e2e-automation is gitignored and must never be committed.
+#
+# This file is sourced by e2e-automation.sh as a bash script.
+# All variables are optional unless marked REQUIRED.
+#
+# Usage:
+#   cp .e2e-automation.template .e2e-automation
+#   # Edit .e2e-automation to set credentials and adjust paths if needed
+#   ./e2e-automation.sh
+
+# ---------------------------------------------------------------------------
+# REQUIRED: Server admin credentials
+# The E2E suite creates a fresh, isolated server data directory on each run.
+# These credentials are used to log in to that temporary server instance.
+# They do NOT affect your real CIDX server installation.
+# ---------------------------------------------------------------------------
+E2E_ADMIN_USER=admin
+E2E_ADMIN_PASS=admin
+
+# ---------------------------------------------------------------------------
+# VoyageAI API key (optional if VOYAGE_API_KEY is already in your environment)
+# If set here, it takes precedence over the shell environment variable.
+# Tests that require semantic search will fail if neither this nor VOYAGE_API_KEY
+# is set in the environment when the suite runs.
+# ---------------------------------------------------------------------------
+E2E_VOYAGE_API_KEY=
+
+# ---------------------------------------------------------------------------
+# Server configuration
+# The E2E suite starts a dedicated server on this port for Phase 4 tests.
+# Choose a port not in use by your regular CIDX server (default: 8000).
+# ---------------------------------------------------------------------------
+E2E_SERVER_PORT=8899
+E2E_SERVER_HOST=127.0.0.1
+
+# ---------------------------------------------------------------------------
+# Data directories
+# These paths are created automatically and wiped at the start of each run.
+# Using ~/.tmp keeps them out of project directories and outside git.
+# ---------------------------------------------------------------------------
+
+# Persistent cache for cloned seed repositories.
+# Repos are cloned once and reused across runs. Delete to force re-clone.
+E2E_SEED_CACHE_DIR=$HOME/.tmp/cidx-e2e-seed-repos
+
+# Isolated data directory for the E2E server instance.
+# Wiped clean at the start of every run to guarantee a fresh state.
+E2E_SERVER_DATA_DIR=$HOME/.tmp/cidx-e2e-server-data
+
+# Working directory for per-run copies of seed repos.
+# Fresh copies are made from the cache before each run so tests
+# can modify repo contents without corrupting the cache.
+E2E_WORK_DIR=$HOME/.tmp/cidx-e2e-work
+
+# ---------------------------------------------------------------------------
+# Seed repositories
+# These small, pinned public repos are used as test fixtures.
+# markupsafe: Python project (used for CLI/server indexing tests)
+# type-fest: TypeScript project (used for multi-language tests)
+# tries: Internal project with HEAD tracking
+# ---------------------------------------------------------------------------
+
+# markupsafe (Python, pinned tag)
+E2E_MARKUPSAFE_URL=https://github.com/pallets/markupsafe.git
+E2E_MARKUPSAFE_TAG=2.1.5
+
+# type-fest (TypeScript, pinned tag)
+E2E_TYPEFEST_URL=https://github.com/sindresorhus/type-fest.git
+E2E_TYPEFEST_TAG=v4.8.3
+
+# tries (internal, HEAD — no pinned tag)
+E2E_TRIES_URL=https://github.com/LightspeedDMS/tries.git
+E2E_TRIES_TAG=HEAD
+
+# ---------------------------------------------------------------------------
+# Server readiness polling (Phase 4)
+# How long to wait for the uvicorn subprocess to respond to GET /health
+# before declaring Phase 4 a failure.
+# ---------------------------------------------------------------------------
+E2E_SERVER_READINESS_TIMEOUT=30   # seconds total
+E2E_SERVER_READINESS_POLL=1       # seconds between polls

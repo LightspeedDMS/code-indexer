@@ -277,7 +277,7 @@ def wait_for_job(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         response = rest_call(
-            client, "GET", f"/jobs/{job_id}", token, timeout=JOB_POLL_HTTP_TIMEOUT
+            client, "GET", f"/api/jobs/{job_id}", token, timeout=JOB_POLL_HTTP_TIMEOUT
         )
         response.raise_for_status()
         status_data: dict[str, Any] = response.json()

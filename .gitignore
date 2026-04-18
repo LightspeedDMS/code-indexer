@@ -139,6 +139,7 @@ dev/debug/
 /parse_test_results.py
 /.tmp/
 /.local/
+.e2e-automation
 /.analysis/
 /reports/troubleshooting/
 

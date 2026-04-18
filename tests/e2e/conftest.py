@@ -52,6 +52,10 @@ class E2EConfig:
     server_data_dir: Path
     work_dir: Path
     voyage_api_key: str
+    golden_repo_job_timeout: float
+    """Maximum seconds to wait for a golden repository indexing job (E2E_GOLDEN_REPO_JOB_TIMEOUT)."""
+    golden_repo_job_poll_interval: float
+    """Seconds between polls when waiting for a golden repo job (E2E_GOLDEN_REPO_JOB_POLL_INTERVAL)."""
 
     @property
     def server_url(self) -> str:
@@ -129,6 +133,12 @@ def e2e_config() -> E2EConfig:
         server_data_dir=Path(_require_env("E2E_SERVER_DATA_DIR")),
         work_dir=Path(_require_env("E2E_WORK_DIR")),
         voyage_api_key=_optional_env("E2E_VOYAGE_API_KEY"),
+        golden_repo_job_timeout=float(
+            os.environ.get("E2E_GOLDEN_REPO_JOB_TIMEOUT", "180.0")
+        ),
+        golden_repo_job_poll_interval=float(
+            os.environ.get("E2E_GOLDEN_REPO_JOB_POLL_INTERVAL", "2.0")
+        ),
     )
 
 

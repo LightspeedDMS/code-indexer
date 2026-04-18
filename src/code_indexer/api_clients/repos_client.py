@@ -279,7 +279,7 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             APIClientError: If the request fails (409 for conflicts, 404 for not found, etc.)
         """
         request_data = {
-            "golden_alias": golden_alias,
+            "golden_repo_alias": golden_alias,
             "user_alias": user_alias,
             "target_branch": target_branch,
         }
