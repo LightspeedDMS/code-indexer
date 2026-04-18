@@ -70,7 +70,10 @@ def seed_api_keys_on_startup(
             )
 
         # VoyageAI: config → env (unidirectional)
-        # Config has key → set env; config blank → clear env
+        # Config has key → set env (config wins); config blank → leave env alone
+        # (Bug #755: blank config means "server doesn't manage this key" — do NOT
+        # clear a VOYAGE_API_KEY the operator set in the shell before starting the
+        # server, or cidx index subprocesses will fail with "key required".)
         if config.claude_integration_config.voyageai_api_key:
             os.environ["VOYAGE_API_KEY"] = (
                 config.claude_integration_config.voyageai_api_key
@@ -80,13 +83,13 @@ def seed_api_keys_on_startup(
                 "Synced VoyageAI API key from server config to process environment"
             )
         else:
-            os.environ.pop("VOYAGE_API_KEY", None)
             logger.info(
-                "Cleared VoyageAI API key from process environment (config is blank)"
+                "VoyageAI API key not in server config; leaving process environment unchanged"
             )
 
         # Cohere: config → env (unidirectional)
-        # Config has key → set env; config blank → clear env
+        # Config has key → set env (config wins); config blank → leave env alone
+        # (same rationale as VoyageAI above — Bug #755)
         if config.claude_integration_config.cohere_api_key:
             os.environ["CO_API_KEY"] = config.claude_integration_config.cohere_api_key
             result["cohere_seeded"] = True
@@ -94,9 +97,8 @@ def seed_api_keys_on_startup(
                 "Synced Cohere API key from server config to process environment"
             )
         else:
-            os.environ.pop("CO_API_KEY", None)
             logger.info(
-                "Cleared Cohere API key from process environment (config is blank)"
+                "Cohere API key not in server config; leaving process environment unchanged"
             )
 
     except Exception as e:
