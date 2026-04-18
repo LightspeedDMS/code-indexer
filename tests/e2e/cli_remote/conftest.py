@@ -44,29 +44,17 @@ def registered_golden_repo(
     repo_path = str(e2e_config.seed_cache_dir / "markupsafe")
     alias = "markupsafe"
 
-    _SKIP_REASON = (
-        "Golden repo registration endpoint mismatch — follow-up needed: "
-        "server returned 422/500 for documented endpoints"
+    response = rest_call(
+        e2e_http_client,
+        "POST",
+        "/api/admin/golden-repos",
+        token=e2e_admin_token,
+        json={"repo_url": repo_path, "alias": alias},
     )
-    try:
-        response = rest_call(
-            e2e_http_client,
-            "POST",
-            "/admin/golden-repos/add",
-            token=e2e_admin_token,
-            data={"url": repo_path, "alias": alias},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-    except httpx.HTTPError:
-        pytest.skip(_SKIP_REASON)
-
-    if 400 <= response.status_code < 600:
-        pytest.skip(_SKIP_REASON)
+    response.raise_for_status()
 
     body = response.json()
-    job_id: str | None = body.get("job_id")
-    if not job_id:
-        pytest.skip(_SKIP_REASON)
+    job_id: str = body["job_id"]
 
     wait_for_job(
         e2e_http_client,

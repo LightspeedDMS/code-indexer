@@ -883,10 +883,13 @@ curl -s -X POST http://localhost:8000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_repositories","arguments":{}}}'
 
 # 3. Add golden repo (if needed)
-curl -s -X POST http://localhost:8000/admin/golden-repos/add \
+# Correct endpoint is POST /api/admin/golden-repos with JSON body.
+# Returns HTTP 202 with {"job_id": "<uuid>", "message": "..."}.
+# Poll /api/jobs/{job_id} for completion status.
+curl -s -X POST http://localhost:8000/api/admin/golden-repos \
   -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "url=git@github.com:org/repo.git&alias=my-repo&description=Description"
+  -H "Content-Type: application/json" \
+  -d '{"repo_url":"git@github.com:org/repo.git","alias":"my-repo","description":"Description"}'
 
 # 4. Query (NOTE: use "query_text" not "query")
 curl -s -X POST http://localhost:8000/mcp \
