@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.18.1
+
+### Bug Fixes
+
+- fix(#748): Bug #748 (P1) — Delta dep-map analysis crashed immediately on every invocation with `'RefreshScheduler' object has no attribute '_tracking_backend'`. The `_queue_lifecycle_backfill_if_needed` method (Story #728 AC8) and its `_backfill_*` helpers erroneously accessed `self._refresh_scheduler._tracking_backend` when the attribute lives on `DependencyMapService` itself (`self._tracking_backend`). Corrected all affected accesses. Added wiring-level regression test (`test_dependency_map_service_lifecycle_backfill.py`) that constructs the real service and invokes `_queue_lifecycle_backfill_if_needed` without patching it out, proving no `AttributeError` is raised. Unblocks delta-mode dep-map refreshes on all deployments.
+
 ## v9.18.0
 
 ### Features

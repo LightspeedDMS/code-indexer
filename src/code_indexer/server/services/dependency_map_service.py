@@ -2315,7 +2315,7 @@ class DependencyMapService:
         """
         if self._refresh_scheduler is None:
             return 0
-        conn_manager = self._refresh_scheduler._tracking_backend._conn_manager
+        conn_manager = self._tracking_backend._conn_manager
         owns_aggregate = self._backfill_try_acquire_aggregate_job()
         # AC8: only owner needs cluster-wide total; non-owner skips this SELECT.
         cluster_wide_total = (
