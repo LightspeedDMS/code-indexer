@@ -56,12 +56,20 @@ def registered_golden_repo(
     body = response.json()
     job_id: str = body["job_id"]
 
-    wait_for_job(
+    job_status = wait_for_job(
         e2e_http_client,
         job_id,
         token=e2e_admin_token,
         timeout=e2e_config.golden_repo_job_timeout,
         poll_interval=e2e_config.golden_repo_job_poll_interval,
+    )
+    # Messi Rule #13: fail loudly if the async registration didn't succeed.
+    # wait_for_job() returns on ANY terminal state (completed/failed/cancelled),
+    # so we must assert "completed" explicitly or downstream tests see a
+    # phantom successful registration and fail in confusing ways.
+    assert job_status["status"] == "completed", (
+        f"Golden repo registration job did not complete successfully:\n"
+        f"{job_status}"
     )
 
     return alias
