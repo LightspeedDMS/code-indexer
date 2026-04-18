@@ -10,6 +10,13 @@ import pytest
 from code_indexer.server.jobs.manager import SyncJobManager
 from code_indexer.server.jobs.models import JobType
 
+# Disable resource-limit checks in all test fixtures so that host CPU/memory
+# spikes during parallel test runs cannot trigger ResourceLimitExceededError
+# and cause false failures.  These tests exercise queue logic, not resource
+# gating, so real psutil readings are irrelevant here.
+_UNLIMITED_CPU_PERCENT = 100.0
+_UNLIMITED_MEMORY_PERCENT = 100.0
+
 
 class TestJobQueueConcurrency:
     """Verify system-wide and per-user concurrency limits are enforced."""
@@ -21,6 +28,8 @@ class TestJobQueueConcurrency:
             storage_path=str(tmp_path / "jobs.json"),
             max_total_concurrent_jobs=2,
             max_concurrent_jobs_per_user=1,
+            max_cpu_percent=_UNLIMITED_CPU_PERCENT,
+            max_memory_percent=_UNLIMITED_MEMORY_PERCENT,
         )
 
     def test_respects_max_total_concurrent_jobs(self, job_manager):
@@ -126,6 +135,8 @@ class TestJobQueueConfiguration:
             storage_path=str(tmp_path / "jobs.json"),
             max_total_concurrent_jobs=10,
             max_concurrent_jobs_per_user=3,
+            max_cpu_percent=_UNLIMITED_CPU_PERCENT,
+            max_memory_percent=_UNLIMITED_MEMORY_PERCENT,
         )
 
     def test_update_max_total_concurrent_jobs(self, job_manager):
@@ -146,6 +157,8 @@ class TestJobQueueConfiguration:
             storage_path=str(tmp_path / "jobs.json"),
             max_total_concurrent_jobs=2,
             max_concurrent_jobs_per_user=3,
+            max_cpu_percent=_UNLIMITED_CPU_PERCENT,
+            max_memory_percent=_UNLIMITED_MEMORY_PERCENT,
         )
 
         # Create 2 jobs - both should run
@@ -186,6 +199,8 @@ class TestJobQueueStatusAPI:
             storage_path=str(tmp_path / "jobs.json"),
             max_total_concurrent_jobs=2,
             max_concurrent_jobs_per_user=1,
+            max_cpu_percent=_UNLIMITED_CPU_PERCENT,
+            max_memory_percent=_UNLIMITED_MEMORY_PERCENT,
         )
 
     def test_get_queue_status_counts(self, job_manager):
@@ -216,6 +231,8 @@ class TestJobQueueStatusAPI:
             max_total_concurrent_jobs=1,
             max_concurrent_jobs_per_user=1,
             average_job_duration_minutes=15,
+            max_cpu_percent=_UNLIMITED_CPU_PERCENT,
+            max_memory_percent=_UNLIMITED_MEMORY_PERCENT,
         )
 
         # Create 3 jobs - 1 runs, 2 queued
