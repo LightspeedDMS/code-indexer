@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.19.0
+
+### Story #724 v2 — Post-Generation Verification Pass: file-edit contract, no fallbacks
+
+**Behavioral change**: verification failure now **propagates** → enclosing refresh job **FAILS**. No silent "fallback to original" passthrough anywhere.
+
+**Nuked from v1** (v9.18.x):
+- `VerificationResult` dataclass + `fallback_reason` field
+- Evidence filter + `discovery_mode` parameter
+- Three safety guards (length ratio, removed ratio, empty counts)
+- 30-second delay retry machinery
+- Two-layer JSON envelope parser (`--output-format json` flag)
+- Three `except Exception` swallowers around `_run_verification_and_log` in `dependency_map_service.py` (Pass 2 loop + delta merge path) and `meta_description_hook.py` (description path)
+- All related AC9 structured-log helpers (`_format_journal_summary`, `_build_bounded_diff`, `_AC9_DIFF_MAX_LINES`)
+
+**Added**:
+- `class VerificationFailed(RuntimeError)` at top of `dependency_map_analyzer.py`
+- `invoke_verification_pass(document_path, repo_list, config) -> None` — simple 2-attempt retry loop with re-seed-from-original-content before each attempt. Any of 5 failure conditions triggers retry; persistent failure raises:
+  1. `subprocess.TimeoutExpired`
+  2. `subprocess.CalledProcessError` (non-zero exit)
+  3. `FILE_EDIT_COMPLETE` sentinel missing from stdout
+  4. Temp file mtime unchanged (Claude printed sentinel but didn't edit)
+  5. Temp file empty or whitespace-only
+- Rewritten `prompts/fact_check.md` — tight imperative: Claude uses Read/Glob/Grep/Edit tools directly on the temp file, prints `FILE_EDIT_COMPLETE` sentinel when done. `_build_file_based_instructions` appends the file-path hint.
+- Single WARNING log per failed attempt. No pre-raise ERROR. No structured `extra=` payload. No activity-journal gating.
+
+**Kept unchanged from v1**:
+- Shared `threading.Semaphore` (inherited via `_invoke_claude_cli`, no new code)
+- `dep_map_fact_check_enabled` and `fact_check_timeout_seconds` config fields (default off / 600s)
+- Rolling-upgrade pop-unknown-keys deserializer
+- Web UI Config Screen fields
+- Scheduler INFO log on refresh collision
+
+**Why**: v1 staging E2E showed every verification call fell into the silent-fallback branch (CLI exit 1 because `--dangerously-skip-permissions` was missing when using `--max-turns`). Even after fixing that, the inner JSON-parse layer failed because Claude wasn't reliably emitting pure JSON in tool-use mode. Codex's original pressure test flagged the design as over-engineered; v2 follows the codebase's existing file-edit idiom (`invoke_delta_merge_file`, `invoke_refinement_file`) instead of inventing a parallel JSON-return-and-parse flow.
+
+**Tests**: removed ~80 v1 fallback/evidence/guard/discovery-mode tests; added 5 retry-loop tests (`test_retry_subprocess_exception_first_fails_second_succeeds`, `test_retry_postcondition_first_fails_second_succeeds`, `test_retry_both_attempts_subprocess_fail_raises`, `test_retry_both_attempts_postcondition_fail_raises`, `test_retry_reseeds_temp_file_between_attempts`). Rolling-upgrade and Web UI config-field tests retained.
+
 ## v9.18.2
 
 ### Bug Fixes

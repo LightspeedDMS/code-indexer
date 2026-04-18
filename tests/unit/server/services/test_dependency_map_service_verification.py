@@ -1,36 +1,32 @@
 """
-Unit tests for Story #724 Phase B2: verification pass wiring in DependencyMapService.
+Unit tests for Story #724 v2: verification pass wiring in DependencyMapService.
 
-Coverage:
-- _run_verification_and_log: call signature, return contract, AC9 log, AC10 journal gating
-- _update_domain_file (real method, temp files): delta merge flag gating, verified content
-  written to disk, AC9 context label, AC10 journal gating
+v2 contract: invoke_verification_pass(document_path, repo_list, config) -> None
+  - edits document_path in place
+  - no _run_verification_and_log helper (deleted)
+  - no VerificationResult, no discovery_mode
+  - VerificationFailed propagates (no except-swallower on delta merge path)
 
-NOTE: The Pass 2 per-domain loop guard inside run_full_analysis is NOT exercised here —
-calling run_full_analysis requires mocking the entire pipeline (staging dirs, Pass 1,
-domain list construction, etc.). That guard is a single `if config.dep_map_fact_check_enabled:`
-before calling _run_verification_and_log; it is implicitly covered because the helper
-tests prove the helper's contract and the delta-merge real-method tests prove the gate
-pattern works end-to-end through _update_domain_file.
+Coverage (_update_domain_file — real method, temp files):
+- Flag off: invoke_verification_pass not called; file written with merge content
+- Flag on: invoke_verification_pass called with domain_file; in-place edit reflected on disk
+- VerificationFailed propagates (no swallower)
+- repo_list built from changed + new + removed aliases (all three sources)
 """
 
-import logging
 import tempfile
 from pathlib import Path
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
 
-from code_indexer.global_repos.dependency_map_analyzer import VerificationResult
+from code_indexer.global_repos.dependency_map_analyzer import VerificationFailed
 from code_indexer.server.services.dependency_map_service import DependencyMapService
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-_ORIGINAL_CONTENT = "# Domain: services\n\nOriginal generated body.\n"
-_VERIFIED_CONTENT = "# Domain: services\n\nVerified body (corrected).\n"
 _DOMAIN_FILE_WITH_FRONTMATTER = (
     "---\n"
     "domain: services\n"
@@ -45,21 +41,6 @@ _VERIFIED_MERGE_BODY = "Verified delta merge body.\n"
 # ---------------------------------------------------------------------------
 # Builders
 # ---------------------------------------------------------------------------
-
-
-def _make_verification_result(
-    *,
-    verified_document: str,
-    fallback_reason: Optional[str] = None,
-    counts: Optional[dict] = None,
-    evidence: Optional[list] = None,
-) -> VerificationResult:
-    return VerificationResult(
-        verified_document=verified_document,
-        fallback_reason=fallback_reason,
-        counts=counts or {"verified": 2, "corrected": 1, "removed": 0, "added": 0},
-        evidence=evidence or ["ev1"],
-    )
 
 
 def _make_ci_config(*, fact_check_enabled: bool) -> MagicMock:
@@ -95,154 +76,28 @@ def _build_service(
     return service, mock_analyzer, mock_journal
 
 
-# ---------------------------------------------------------------------------
-# TestRunVerificationAndLogHelper
-# ---------------------------------------------------------------------------
+def _prime_analyzer(
+    mock_analyzer: MagicMock,
+    *,
+    merge_body: str = _MERGE_RESULT_BODY,
+    invoke_side_effect=None,
+) -> None:
+    """Configure mock_analyzer for a delta merge that produces merge_body."""
+    mock_analyzer.build_delta_merge_prompt.return_value = "mock prompt"
+    mock_analyzer.invoke_delta_merge_file.return_value = merge_body
+    if invoke_side_effect is not None:
+        mock_analyzer.invoke_verification_pass.side_effect = invoke_side_effect
+    else:
+        mock_analyzer.invoke_verification_pass.return_value = None  # v2: returns None
 
 
-class TestRunVerificationAndLogHelper:
-    """Unit tests of _run_verification_and_log — call contract, AC9, AC10."""
-
-    @pytest.mark.parametrize("fallback_reason", [None, "timeout", "double_timeout"])
-    def test_returns_verified_document(self, fallback_reason: Optional[str]) -> None:
-        """Helper returns result.verified_document regardless of fallback_reason."""
-        service, mock_analyzer, _ = _build_service()
-        expected = _VERIFIED_CONTENT if fallback_reason is None else _ORIGINAL_CONTENT
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=expected, fallback_reason=fallback_reason
-        )
-
-        returned = service._run_verification_and_log(
-            document_content=_ORIGINAL_CONTENT,
-            repo_list=[],
-            discovery_mode=False,
-            context_label="pass2:services",
-        )
-
-        assert returned == expected
-
-    def test_calls_invoke_with_correct_kwargs(self) -> None:
-        """invoke_verification_pass receives all required kwargs including discovery_mode=False."""
-        service, mock_analyzer, _ = _build_service()
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=_VERIFIED_CONTENT
-        )
-        repo_list = [{"alias": "repo-a"}]
-        ci_config = service._config_manager.get_claude_integration_config()
-
-        service._run_verification_and_log(
-            document_content=_ORIGINAL_CONTENT,
-            repo_list=repo_list,
-            discovery_mode=False,
-            context_label="pass2:services",
-        )
-
-        mock_analyzer.invoke_verification_pass.assert_called_once_with(
-            document_content=_ORIGINAL_CONTENT,
-            repo_list=repo_list,
-            discovery_mode=False,
-            claude_integration_config=ci_config,
-        )
-
-    @pytest.mark.parametrize("journal_active", [True, False])
-    def test_ac9_always_emitted(
-        self, caplog: pytest.LogCaptureFixture, journal_active: bool
-    ) -> None:
-        """AC9: structured 'verification_pass' logger.info emitted regardless of journal state."""
-        service, mock_analyzer, mock_journal = _build_service()
-        mock_journal.is_active = journal_active
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=_VERIFIED_CONTENT
-        )
-
-        with caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.server.services.dependency_map_service",
-        ):
-            service._run_verification_and_log(
-                document_content=_ORIGINAL_CONTENT,
-                repo_list=[],
-                discovery_mode=False,
-                context_label="pass2:services",
-            )
-
-        vp_records = [
-            r for r in caplog.records if r.getMessage() == "verification_pass"
-        ]
-        assert len(vp_records) == 1
-        rec = vp_records[0]
-        for key in (
-            "domain_or_repo",
-            "counts",
-            "evidence",
-            "fallback_reason",
-            "diff_summary",
-            "duration_ms",
-        ):
-            assert hasattr(rec, key), f"AC9 log missing key: {key}"
-        assert rec.domain_or_repo == "pass2:services"
-
-    def test_ac10_journal_written_when_active(self) -> None:
-        """AC10: journal.log called with context_label in summary when is_active=True."""
-        service, mock_analyzer, mock_journal = _build_service()
-        mock_journal.is_active = True
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=_VERIFIED_CONTENT
-        )
-
-        service._run_verification_and_log(
-            document_content=_ORIGINAL_CONTENT,
-            repo_list=[],
-            discovery_mode=False,
-            context_label="pass2:services",
-        )
-
-        mock_journal.log.assert_called_once()
-        assert "pass2:services" in mock_journal.log.call_args[0][0]
-
-    def test_ac10_journal_skipped_when_inactive(self) -> None:
-        """AC10: journal.log NOT called when is_active=False."""
-        service, mock_analyzer, mock_journal = _build_service()
-        mock_journal.is_active = False
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=_VERIFIED_CONTENT
-        )
-
-        service._run_verification_and_log(
-            document_content=_ORIGINAL_CONTENT,
-            repo_list=[],
-            discovery_mode=False,
-            context_label="pass2:services",
-        )
-
-        mock_journal.log.assert_not_called()
-
-    @pytest.mark.parametrize("domain", ["services", "data", "api"])
-    def test_multiple_invocations_emit_separate_ac9_logs(
-        self, caplog: pytest.LogCaptureFixture, domain: str
-    ) -> None:
-        """Each call emits exactly one AC9 log with matching context."""
-        service, mock_analyzer, _ = _build_service()
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=_VERIFIED_CONTENT
-        )
-
-        with caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.server.services.dependency_map_service",
-        ):
-            service._run_verification_and_log(
-                document_content=_ORIGINAL_CONTENT,
-                repo_list=[],
-                discovery_mode=False,
-                context_label=f"pass2:{domain}",
-            )
-
-        vp_records = [
-            r for r in caplog.records if r.getMessage() == "verification_pass"
-        ]
-        assert len(vp_records) == 1
-        assert vp_records[0].domain_or_repo == f"pass2:{domain}"
+def _extract_repo_list(mock_analyzer: MagicMock) -> list:
+    """Extract the repo_list argument from the first invoke_verification_pass call."""
+    call_args = mock_analyzer.invoke_verification_pass.call_args
+    # Accept both positional (path, repo_list, config) and keyword forms
+    if call_args[0] and len(call_args[0]) > 1:
+        return call_args[0][1]
+    return call_args[1].get("repo_list", [])
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +109,7 @@ class TestDeltaMergeVerificationWiring:
     """Integration tests of the real _update_domain_file method.
 
     Uses a real temp domain file. Mocks analyzer collaborators so no Claude CLI runs.
-    Verifies the verification gate, disk write, AC9 label, and AC10 journal gating.
+    Verifies the verification gate, disk write, and VerificationFailed propagation.
     """
 
     @pytest.fixture()
@@ -264,51 +119,50 @@ class TestDeltaMergeVerificationWiring:
             p.write_text(_DOMAIN_FILE_WITH_FRONTMATTER)
             yield p
 
-    def _prime_analyzer(
-        self,
-        mock_analyzer: MagicMock,
-        *,
-        merge_body: str = _MERGE_RESULT_BODY,
-        verified_document: str = _VERIFIED_MERGE_BODY,
-        fallback_reason: Optional[str] = None,
-    ) -> None:
-        mock_analyzer.build_delta_merge_prompt.return_value = "mock prompt"
-        mock_analyzer.invoke_delta_merge_file.return_value = merge_body
-        mock_analyzer.invoke_verification_pass.return_value = _make_verification_result(
-            verified_document=verified_document, fallback_reason=fallback_reason
-        )
-
-    def test_flag_false_no_verification_call_no_ac9_log(
-        self, caplog: pytest.LogCaptureFixture, domain_file: Path
-    ) -> None:
-        """Flag=False: invoke_verification_pass not called; no AC9 log; file still written."""
+    def test_flag_false_no_verification_call(self, domain_file: Path) -> None:
+        """Flag=False: invoke_verification_pass not called; file still written."""
         service, mock_analyzer, _ = _build_service(fact_check_enabled=False)
-        self._prime_analyzer(mock_analyzer)
+        _prime_analyzer(mock_analyzer)
         config = _make_ci_config(fact_check_enabled=False)
 
-        with caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.server.services.dependency_map_service",
-        ):
-            service._update_domain_file(
-                domain_name="services",
-                domain_file=domain_file,
-                changed_repos=["repo-a"],
-                new_repos=[],
-                removed_repos=[],
-                domain_list=["services"],
-                config=config,
-            )
+        service._update_domain_file(
+            domain_name="services",
+            domain_file=domain_file,
+            changed_repos=["repo-a"],
+            new_repos=[],
+            removed_repos=[],
+            domain_list=["services"],
+            config=config,
+        )
 
         mock_analyzer.invoke_verification_pass.assert_not_called()
-        vp = [r for r in caplog.records if r.getMessage() == "verification_pass"]
-        assert len(vp) == 0
         assert domain_file.exists() and len(domain_file.read_text()) > 0
 
-    def test_flag_true_writes_verified_content_to_disk(self, domain_file: Path) -> None:
-        """Flag=True: verified_document fragment appears in the file after the call."""
+    def test_flag_false_merge_content_written(self, domain_file: Path) -> None:
+        """Flag=False: merge body appears in file after call."""
+        service, mock_analyzer, _ = _build_service(fact_check_enabled=False)
+        _prime_analyzer(mock_analyzer, merge_body=_MERGE_RESULT_BODY)
+        config = _make_ci_config(fact_check_enabled=False)
+
+        service._update_domain_file(
+            domain_name="services",
+            domain_file=domain_file,
+            changed_repos=["repo-a"],
+            new_repos=[],
+            removed_repos=[],
+            domain_list=["services"],
+            config=config,
+        )
+
+        assert _MERGE_RESULT_BODY in domain_file.read_text()
+
+    def test_flag_true_calls_verification_with_temp_file_in_same_dir(
+        self, domain_file: Path
+    ) -> None:
+        """Flag=True: invoke_verification_pass receives a temp path in domain_file.parent
+        (not domain_file itself) — spec AC8 temp-file pattern."""
         service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
-        self._prime_analyzer(mock_analyzer, verified_document=_VERIFIED_MERGE_BODY)
+        _prime_analyzer(mock_analyzer)
         config = _make_ci_config(fact_check_enabled=True)
 
         service._update_domain_file(
@@ -321,21 +175,76 @@ class TestDeltaMergeVerificationWiring:
             config=config,
         )
 
-        written = domain_file.read_text()
-        assert _VERIFIED_MERGE_BODY in written
+        mock_analyzer.invoke_verification_pass.assert_called_once()
+        call_args = mock_analyzer.invoke_verification_pass.call_args
+        received_path = (
+            call_args[0][0] if call_args[0] else call_args[1].get("document_path")
+        )
+        # Must be a Path in the same directory as domain_file, but NOT domain_file itself
+        assert isinstance(received_path, Path)
+        assert received_path.parent == domain_file.parent
+        assert received_path != domain_file
 
-    def test_flag_true_ac9_log_has_delta_merge_context(
-        self, caplog: pytest.LogCaptureFixture, domain_file: Path
-    ) -> None:
-        """AC9: context label is 'delta_merge:services' on the delta path."""
+    def test_flag_true_in_place_edit_reflected_on_disk(self, domain_file: Path) -> None:
+        """Flag=True: when verification edits domain_file in-place, new content on disk."""
         service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
-        self._prime_analyzer(mock_analyzer)
+
+        def _edit_in_place(document_path, *args, **kwargs):
+            document_path.write_text(_VERIFIED_MERGE_BODY)
+
+        _prime_analyzer(mock_analyzer, invoke_side_effect=_edit_in_place)
         config = _make_ci_config(fact_check_enabled=True)
 
-        with caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.server.services.dependency_map_service",
-        ):
+        service._update_domain_file(
+            domain_name="services",
+            domain_file=domain_file,
+            changed_repos=["repo-a"],
+            new_repos=[],
+            removed_repos=[],
+            domain_list=["services"],
+            config=config,
+        )
+
+        assert _VERIFIED_MERGE_BODY in domain_file.read_text()
+
+    def test_flag_true_repo_list_includes_all_alias_sources(
+        self, domain_file: Path
+    ) -> None:
+        """repo_list passed to invoke_verification_pass contains aliases from
+        changed_repos, new_repos, and removed_repos — all three sources."""
+        service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
+        _prime_analyzer(mock_analyzer)
+        config = _make_ci_config(fact_check_enabled=True)
+
+        service._update_domain_file(
+            domain_name="services",
+            domain_file=domain_file,
+            changed_repos=["changed-repo"],
+            new_repos=["new-repo"],
+            removed_repos=["removed-repo"],
+            domain_list=["services"],
+            config=config,
+        )
+
+        repo_list = _extract_repo_list(mock_analyzer)
+        aliases = [r["alias"] for r in repo_list]
+        assert "changed-repo" in aliases, f"changed alias missing: {aliases}"
+        assert "new-repo" in aliases, f"new alias missing: {aliases}"
+        assert "removed-repo" in aliases, f"removed alias missing: {aliases}"
+
+    def test_flag_true_verification_failed_propagates(self, domain_file: Path) -> None:
+        """VerificationFailed must propagate — no except-swallower on delta merge path.
+        Also confirms domain_file is NOT overwritten with unverified content (AC8)."""
+        service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
+        original_content = domain_file.read_text()
+
+        def _raise_failed(document_path, *args, **kwargs):
+            raise VerificationFailed("both attempts failed")
+
+        _prime_analyzer(mock_analyzer, invoke_side_effect=_raise_failed)
+        config = _make_ci_config(fact_check_enabled=True)
+
+        with pytest.raises(VerificationFailed):
             service._update_domain_file(
                 domain_name="services",
                 domain_file=domain_file,
@@ -346,73 +255,5 @@ class TestDeltaMergeVerificationWiring:
                 config=config,
             )
 
-        vp = [r for r in caplog.records if r.getMessage() == "verification_pass"]
-        assert len(vp) == 1
-        assert vp[0].domain_or_repo == "delta_merge:services"
-
-    def test_flag_true_ac10_journal_written_when_active(
-        self, domain_file: Path
-    ) -> None:
-        """AC10: journal.log called on delta merge path when is_active=True."""
-        service, mock_analyzer, mock_journal = _build_service(fact_check_enabled=True)
-        mock_journal.is_active = True
-        self._prime_analyzer(mock_analyzer)
-        config = _make_ci_config(fact_check_enabled=True)
-
-        service._update_domain_file(
-            domain_name="services",
-            domain_file=domain_file,
-            changed_repos=["repo-a"],
-            new_repos=[],
-            removed_repos=[],
-            domain_list=["services"],
-            config=config,
-        )
-
-        mock_journal.log.assert_called_once()
-
-    def test_flag_true_ac10_journal_skipped_when_inactive(
-        self, domain_file: Path
-    ) -> None:
-        """AC10: journal.log NOT called on delta merge path when is_active=False."""
-        service, mock_analyzer, mock_journal = _build_service(fact_check_enabled=True)
-        mock_journal.is_active = False
-        self._prime_analyzer(mock_analyzer)
-        config = _make_ci_config(fact_check_enabled=True)
-
-        service._update_domain_file(
-            domain_name="services",
-            domain_file=domain_file,
-            changed_repos=["repo-a"],
-            new_repos=[],
-            removed_repos=[],
-            domain_list=["services"],
-            config=config,
-        )
-
-        mock_journal.log.assert_not_called()
-
-    def test_flag_true_fallback_content_on_disk(self, domain_file: Path) -> None:
-        """When verification returns fallback, fallback document written to disk."""
-        service, mock_analyzer, _ = _build_service(fact_check_enabled=True)
-        fallback_doc = _MERGE_RESULT_BODY  # fallback = same as merge body
-        self._prime_analyzer(
-            mock_analyzer,
-            merge_body=_MERGE_RESULT_BODY,
-            verified_document=fallback_doc,
-            fallback_reason="timeout",
-        )
-        config = _make_ci_config(fact_check_enabled=True)
-
-        service._update_domain_file(
-            domain_name="services",
-            domain_file=domain_file,
-            changed_repos=["repo-a"],
-            new_repos=[],
-            removed_repos=[],
-            domain_list=["services"],
-            config=config,
-        )
-
-        written = domain_file.read_text()
-        assert fallback_doc in written
+        # domain_file must still contain the original content — unverified merge never written
+        assert domain_file.read_text() == original_content

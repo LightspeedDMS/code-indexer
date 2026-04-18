@@ -21,3 +21,4 @@
 - [reference_cow_daemon_architecture.md](reference_cow_daemon_architecture.md) - CoW Storage Daemon: REST API for clone lifecycle, NFS for filesystem access — CIDX client NOT yet built (needs CowStorageDaemonClient story)
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_check_running_jobs_before_restart.md](feedback_check_running_jobs_before_restart.md) - NEVER restart local/staging cidx-server without checking for active long-running jobs first
+- [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex pressure-test flags over-engineering, SIMPLIFY immediately — do not commission architect counter-reviews that rubber-stamp complexity

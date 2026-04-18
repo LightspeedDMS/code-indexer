@@ -27,6 +27,10 @@ _JOIN_TIMEOUT: float = 10.0  # max wait for threads to finish after release
 
 _FAKE_STDOUT_EMPTY = '{"is_error": false, "result": "{}"}'
 
+# Seconds to advance doc_path mtime in fake_run so the mtime-change postcondition
+# is satisfied deterministically on all filesystems regardless of timestamp resolution.
+_DOC_MTIME_ADVANCE_SECONDS = 2.0
+
 
 def _semaphore_with_bad_arg(value: object) -> None:
     """Call _get_verification_semaphore with a deliberately invalid argument type.
@@ -49,6 +53,32 @@ class _SharedState:
     condition: threading.Condition = field(default_factory=threading.Condition)
 
 
+def _make_doc_path_setup(
+    tmp_path: Path,
+) -> tuple:
+    """Return (doc_path_factory, doc_path_local) for use in concurrent tests.
+
+    Each call to doc_path_factory() creates a unique numbered document file
+    under tmp_path.  doc_path_local is a threading.local whose .path attribute
+    each caller thread sets to its own document file before invoking
+    invoke_verification_pass, so that fake_run can write to the correct
+    per-thread file without racing against another thread's reseed.
+    """
+    counter: List[int] = [0]
+    counter_lock = threading.Lock()
+    doc_path_local: threading.local = threading.local()
+
+    def doc_path_factory() -> Path:
+        with counter_lock:
+            counter[0] += 1
+            idx = counter[0]
+        p = tmp_path / f"test_doc_{idx}.md"
+        p.write_text("# Test\n\nSome content for verification.\n")
+        return p
+
+    return doc_path_factory, doc_path_local
+
+
 def _make_analyzer(tmp_dir: Path) -> DependencyMapAnalyzer:
     """Return a minimally configured analyzer using a portable temp directory."""
     return DependencyMapAnalyzer(
@@ -62,11 +92,14 @@ def _make_analyzer(tmp_dir: Path) -> DependencyMapAnalyzer:
 def _make_config(max_concurrent: int = 2) -> MagicMock:
     cfg = MagicMock()
     cfg.fact_check_timeout_seconds = 10
+    cfg.dependency_map_delta_max_turns = 5
     cfg.max_concurrent_claude_cli = max_concurrent
     return cfg
 
 
-def _make_blocking_fake_run(cap: int, shared: _SharedState) -> Callable:
+def _make_blocking_fake_run(
+    cap: int, shared: _SharedState, doc_path_local: threading.local
+) -> Callable:
     """Return a fake subprocess.run that blocks until shared.released is True.
 
     All coordination uses shared.condition:
@@ -75,6 +108,15 @@ def _make_blocking_fake_run(cap: int, shared: _SharedState) -> Callable:
       The return value is checked; RuntimeError on timeout surfaces failures
       rather than silently returning a success result.
     - Release: set shared.released = True then condition.notify_all().
+
+    On return, writes different content to the per-thread doc_path stored in
+    doc_path_local.path so the content-change postcondition is satisfied
+    deterministically.  Each caller thread stores its own Path in
+    doc_path_local.path before invoking invoke_verification_pass, eliminating
+    the reseed race where invoke_verification_pass's per-attempt reseed writes
+    original_content back to a shared path while another thread's fake_run is
+    still using that same path.
+    Returns FILE_EDIT_COMPLETE in stdout to satisfy the sentinel postcondition.
     """
 
     def fake_run(*args, **kwargs):
@@ -84,17 +126,25 @@ def _make_blocking_fake_run(cap: int, shared: _SharedState) -> Callable:
                 shared.peak = shared.active
             if shared.active == cap:
                 shared.condition.notify_all()
-            released = shared.condition.wait_for(
-                lambda: shared.released, timeout=_SYNC_TIMEOUT
-            )
+            try:
+                released = shared.condition.wait_for(
+                    lambda: shared.released, timeout=_SYNC_TIMEOUT
+                )
+            finally:
+                # Always restore active count so shared state stays consistent
+                # on both the normal path and the timeout-error path.
+                shared.active -= 1
             if not released:
                 raise RuntimeError(
                     f"fake_run timed out waiting for release after {_SYNC_TIMEOUT}s"
                 )
-        with shared.condition:
-            shared.active -= 1
+        # threading.local attributes are set by each caller thread before it
+        # starts invoke_verification_pass, so .path is guaranteed to exist here.
+        # getattr avoids a type: ignore on the dynamic attribute access.
+        thread_doc_path: Path = getattr(doc_path_local, "path")
+        thread_doc_path.write_text("# Test\n\nVerified.\n")
         return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=_FAKE_STDOUT_EMPTY, stderr=""
+            args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
         )
 
     return fake_run
@@ -111,9 +161,18 @@ def _run_concurrent_callers(
     count_lock: threading.Lock,
     errors: List[Exception],
     errors_lock: threading.Lock,
+    doc_path_factory: Callable[[], Path],
+    doc_path_local: threading.local,
     at_cap_callback: Optional[Callable[[_SharedState], None]] = None,
 ) -> None:
     """Start threads, wait deterministically for cap to be active, then release.
+
+    Each caller receives its own doc_path from doc_path_factory() and stores it
+    in doc_path_local.path before calling invoke_verification_pass.  This
+    eliminates the reseed race where invoke_verification_pass's per-attempt
+    reseed writes original_content back to a shared path while fake_run in
+    another thread is trying to write different content to satisfy the
+    content-change postcondition.
 
     `at_cap_callback` is invoked (when provided) while exactly `cap` threads are
     blocked inside fake_run — useful for asserting peak/active counts mid-run.
@@ -124,12 +183,15 @@ def _run_concurrent_callers(
     """
 
     def caller() -> None:
+        # Each thread gets its own document file — no shared-file race with
+        # invoke_verification_pass's per-attempt reseed.
+        my_doc_path = doc_path_factory()
+        doc_path_local.path = my_doc_path
         try:
             analyzer.invoke_verification_pass(
-                document_content="doc " * 30,
+                document_path=my_doc_path,
                 repo_list=[],
-                discovery_mode=False,
-                claude_integration_config=config,
+                config=config,
             )
             with count_lock:
                 completed_count[0] += 1
@@ -215,8 +277,9 @@ class TestSemaphoreConcurrencyCap(TestCase):
         num_callers = 3
         config = _make_config(max_concurrent=cap)
         analyzer = _make_analyzer(self._tmp_path)
+        doc_path_factory, doc_path_local = _make_doc_path_setup(self._tmp_path)
         shared = _SharedState()
-        fake_run = _make_blocking_fake_run(cap, shared)
+        fake_run = _make_blocking_fake_run(cap, shared, doc_path_local)
         completed_count: List[int] = [0]
         count_lock = threading.Lock()
         errors: List[Exception] = []
@@ -241,6 +304,8 @@ class TestSemaphoreConcurrencyCap(TestCase):
             count_lock=count_lock,
             errors=errors,
             errors_lock=errors_lock,
+            doc_path_factory=doc_path_factory,
+            doc_path_local=doc_path_local,
             at_cap_callback=assert_at_cap,
         )
 
@@ -261,8 +326,9 @@ class TestSemaphoreConcurrencyCap(TestCase):
         num_callers = 3
         config = _make_config(max_concurrent=cap)
         analyzer = _make_analyzer(self._tmp_path)
+        doc_path_factory, doc_path_local = _make_doc_path_setup(self._tmp_path)
         shared = _SharedState()
-        fake_run = _make_blocking_fake_run(cap, shared)
+        fake_run = _make_blocking_fake_run(cap, shared, doc_path_local)
         completed_count: List[int] = [0]
         count_lock = threading.Lock()
         errors: List[Exception] = []
@@ -279,6 +345,8 @@ class TestSemaphoreConcurrencyCap(TestCase):
             count_lock=count_lock,
             errors=errors,
             errors_lock=errors_lock,
+            doc_path_factory=doc_path_factory,
+            doc_path_local=doc_path_local,
         )
 
         with errors_lock:

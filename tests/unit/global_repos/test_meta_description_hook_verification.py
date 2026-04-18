@@ -1,23 +1,28 @@
 """
-Unit tests for Story #724 Phase B1: verification pass wiring in meta_description_hook.
+Unit tests for Story #724 v2: verification pass wiring in meta_description_hook.
 
-Verifies that invoke_verification_pass is wired correctly between
-_generate_repo_description and atomic_write_description in on_repo_added:
-- Flag off: verification not called, original body written, no AC9 log (AC12)
-- Flag on: verified body from result written exactly once (AC1)
-- Fallback: result.verified_document written (the fallback body on timeout)
-- AC9 structured log emitted with exact repr() payload values after the write
-- discovery_mode=False always passed to invoke_verification_pass
-- atomic_write_description called exactly once per generation (AC1 / no double-lock)
+v2 contract: invoke_verification_pass(document_path, repo_list, config) -> None
+  - edits document_path in place
+  - no VerificationResult, no fallback_reason, no discovery_mode
+  - inner except-swallower removed: VerificationFailed propagates past the
+    verification block and is caught by the outer on_repo_added error handler,
+    which falls back to README copy (atomic_write_description NOT called)
+
+Coverage:
+- Flag off: verification not called, original body written (AC12)
+- Flag on: mock edits file in place, atomic_write_description receives verified body
+- VerificationFailed: inner swallower gone, outer handler fires (no atomic write)
+- Ordering: invoke_verification_pass called before atomic_write_description
 """
 
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from code_indexer.global_repos.dependency_map_analyzer import VerificationFailed
 
 
 # ---------------------------------------------------------------------------
@@ -26,8 +31,6 @@ import pytest
 
 _ORIGINAL_BODY = "---\nname: test-repo\n---\n\n# test-repo\n\nOriginal body.\n"
 _VERIFIED_BODY = "---\nname: test-repo\n---\n\n# test-repo\n\nVerified body.\n"
-# Distinct body returned by VerificationResult.verified_document on fallback
-_FALLBACK_BODY = "---\nname: test-repo\n---\n\n# test-repo\n\nFallback body.\n"
 
 
 # ---------------------------------------------------------------------------
@@ -72,42 +75,19 @@ def _make_server_config(*, enabled: bool) -> MagicMock:
     return server_cfg
 
 
-def _make_verification_result(
-    *,
-    verified_document: str,
-    fallback_reason: Optional[str] = None,
-    counts: Optional[dict] = None,
-    evidence: Optional[list] = None,
-) -> MagicMock:
-    result = MagicMock()
-    result.verified_document = verified_document
-    result.fallback_reason = fallback_reason
-    result.counts = counts or {"verified": 3, "corrected": 1, "removed": 0, "added": 0}
-    result.evidence = evidence or [
-        {"claim": "repo uses Python", "evidence": "setup.py line 1"}
-    ]
-    return result
-
-
 def _run_on_repo_added(
     dirs: dict,
     *,
     enabled: bool,
-    verification_result: Optional[MagicMock] = None,
     invoke_side_effect=None,
     write_side_effect=None,
 ):
     """
     Run on_repo_added with all external dependencies mocked.
 
-    Args:
-        dirs: fixture dict from temp_dirs
-        enabled: value for dep_map_fact_check_enabled
-        verification_result: MagicMock returned by invoke_verification_pass;
-            default is a success result with _VERIFIED_BODY
-        invoke_side_effect: optional callable side effect for invoke_verification_pass;
-            when set, overrides return_value (side_effect takes precedence in Mock)
-        write_side_effect: optional callable side effect for atomic_write_description
+    The mock for invoke_verification_pass defaults to a no-op (returns None),
+    simulating a successful in-place edit.  Pass invoke_side_effect to override,
+    e.g. to write _VERIFIED_BODY to the path arg or to raise VerificationFailed.
 
     Returns:
         (mock_atomic_write, mock_invoke_verification_pass)
@@ -120,15 +100,7 @@ def _run_on_repo_added(
     mock_config_service = MagicMock()
     mock_config_service.get_config.return_value = _make_server_config(enabled=enabled)
 
-    default_vresult = verification_result or _make_verification_result(
-        verified_document=_VERIFIED_BODY
-    )
-
-    if invoke_side_effect is not None:
-        mock_invoke = MagicMock(side_effect=invoke_side_effect)
-    else:
-        mock_invoke = MagicMock(return_value=default_vresult)
-
+    mock_invoke = MagicMock(side_effect=invoke_side_effect)
     mock_atomic_write = MagicMock(side_effect=write_side_effect)
 
     with (
@@ -181,27 +153,12 @@ class TestWiringWhenFlagDisabled:
         _, mock_invoke = _run_on_repo_added(temp_dirs, enabled=False)
         assert mock_invoke.call_count == 0
 
-    def test_flag_false_writes_original_body_not_verified(self, temp_dirs):
+    def test_flag_false_writes_original_body(self, temp_dirs):
         """atomic_write_description must receive the original (unverified) body."""
         mock_atomic_write, _ = _run_on_repo_added(temp_dirs, enabled=False)
         assert mock_atomic_write.call_count == 1
         written_content = mock_atomic_write.call_args[0][1]
         assert written_content == _ORIGINAL_BODY
-
-    def test_flag_false_does_not_log_verification_entry(self, temp_dirs, caplog):
-        """No AC9 structured log entry is emitted when flag is False."""
-        import logging
-
-        with caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.global_repos.meta_description_hook",
-        ):
-            _run_on_repo_added(temp_dirs, enabled=False)
-
-        ac9_entries = [
-            r for r in caplog.records if "AC9 description verification" in r.message
-        ]
-        assert len(ac9_entries) == 0
 
 
 # ===========================================================================
@@ -210,146 +167,107 @@ class TestWiringWhenFlagDisabled:
 
 
 class TestWiringWritePath:
-    """Correct content reaches atomic_write_description when flag is enabled."""
+    """atomic_write_description receives verified content read from the temp file."""
 
-    def test_flag_true_writes_verified_document_not_original(self, temp_dirs):
-        """atomic_write_description receives result.verified_document."""
-        vresult = _make_verification_result(verified_document=_VERIFIED_BODY)
-        mock_atomic_write, _ = _run_on_repo_added(
-            temp_dirs, enabled=True, verification_result=vresult
+    def test_flag_true_writes_verified_content(self, temp_dirs):
+        """
+        Spec AC8 contract: invoke_verification_pass edits the TEMP file in-place,
+        then atomic_write_description is called ONCE with the verified (edited) body.
+        """
+
+        def _edit_in_place(document_path, *args, **kwargs):
+            # Simulate Claude editing the temp file in-place
+            document_path.write_text(_VERIFIED_BODY)
+
+        mock_atomic_write, mock_invoke = _run_on_repo_added(
+            temp_dirs, enabled=True, invoke_side_effect=_edit_in_place
         )
+
+        assert mock_invoke.call_count == 1
+        assert mock_atomic_write.call_count == 1
+        # atomic_write_description receives the VERIFIED body (read from temp after edit)
         written_content = mock_atomic_write.call_args[0][1]
         assert written_content == _VERIFIED_BODY
-        assert written_content != _ORIGINAL_BODY
 
-    def test_flag_true_fallback_writes_result_verified_document(self, temp_dirs):
-        """
-        When verification returns fallback_reason='timeout', result.verified_document
-        is written.  _FALLBACK_BODY is distinct from _ORIGINAL_BODY, so a buggy
-        implementation that hardcodes the original will fail this assertion.
-        """
-        fallback_result = _make_verification_result(
-            verified_document=_FALLBACK_BODY,
-            fallback_reason="timeout",
-        )
-        mock_atomic_write, _ = _run_on_repo_added(
-            temp_dirs, enabled=True, verification_result=fallback_result
-        )
-        written_content = mock_atomic_write.call_args[0][1]
-        assert written_content == _FALLBACK_BODY
-        assert written_content != _ORIGINAL_BODY
-
-    def test_flag_true_single_lock_acquisition(self, temp_dirs):
-        """
-        atomic_write_description encapsulates lock acquisition.
-        Must be called exactly once — no double-lock, no second write (AC1).
-        """
+    def test_flag_true_single_atomic_write_call(self, temp_dirs):
+        """atomic_write_description called exactly once — no double-lock (AC1)."""
         mock_atomic_write, _ = _run_on_repo_added(temp_dirs, enabled=True)
         assert mock_atomic_write.call_count == 1
 
 
 # ===========================================================================
-# TestWiringInvocationArgs
+# TestVerificationFailed
 # ===========================================================================
 
 
-class TestWiringInvocationArgs:
-    """invoke_verification_pass is called with the correct arguments and ordering."""
+class TestVerificationFailed:
+    """VerificationFailed propagates out of on_repo_added (no swallower in v2).
 
-    def test_flag_true_calls_verification_once_before_atomic_write(self, temp_dirs):
-        """
-        invoke_verification_pass is called exactly once, strictly before
-        atomic_write_description.
-        """
-        call_order: list[str] = []
-        vresult = _make_verification_result(verified_document=_VERIFIED_BODY)
+    The inner try/except VerificationFailed fallback was deleted in Story #724 v2.
+    VerificationFailed propagates to the caller of on_repo_added.
+    atomic_write_description is NOT called because the exception fires before it.
+    """
 
-        def _invoke_effect(*args, **kwargs):
+    def test_verification_failed_skips_atomic_write(self, temp_dirs):
+        """Spec AC8: when VerificationFailed is raised, atomic_write_description is
+        NOT called — unverified content never ships to the final path."""
+        from unittest.mock import MagicMock, patch
+
+        def raise_failed(document_path, *args, **kwargs):
+            raise VerificationFailed("both attempts failed")
+
+        write_mock = MagicMock()
+        with patch(
+            "code_indexer.global_repos.meta_description_hook.atomic_write_description",
+            write_mock,
+        ):
+            with pytest.raises(VerificationFailed):
+                _run_on_repo_added(
+                    temp_dirs, enabled=True, invoke_side_effect=raise_failed
+                )
+
+        # atomic_write_description must NOT be called when verification fails
+        assert write_mock.call_count == 0
+
+    def test_verification_failed_invoke_called_once(self, temp_dirs):
+        """invoke_verification_pass called exactly once even when it raises."""
+        call_count = [0]
+
+        def raise_failed(document_path, *args, **kwargs):
+            call_count[0] += 1
+            raise VerificationFailed("both attempts failed")
+
+        with pytest.raises(VerificationFailed):
+            _run_on_repo_added(temp_dirs, enabled=True, invoke_side_effect=raise_failed)
+        assert call_count[0] == 1
+
+
+# ===========================================================================
+# TestWiringOrdering
+# ===========================================================================
+
+
+class TestWiringOrdering:
+    """invoke_verification_pass called BEFORE atomic_write_description (Spec AC8)."""
+
+    def test_verification_before_atomic_write(self, temp_dirs):
+        """Spec AC8 call order: invoke_verification_pass first, then atomic_write_description.
+        Verification runs on the temp file; atomic write ships the verified content."""
+        call_order: list = []
+
+        def _invoke_effect(document_path, *args, **kwargs):
             call_order.append("invoke_verification_pass")
-            return vresult
 
         def _write_effect(*args, **kwargs):
             call_order.append("atomic_write_description")
 
-        mock_atomic_write, mock_invoke = _run_on_repo_added(
+        _run_on_repo_added(
             temp_dirs,
             enabled=True,
             invoke_side_effect=_invoke_effect,
             write_side_effect=_write_effect,
         )
 
-        assert mock_invoke.call_count == 1
-        assert mock_atomic_write.call_count == 1
         assert call_order == ["invoke_verification_pass", "atomic_write_description"], (
             f"Expected verification before write, got: {call_order}"
         )
-
-    def test_flag_true_passes_discovery_mode_false(self, temp_dirs):
-        """invoke_verification_pass must be called with discovery_mode=False."""
-        _, mock_invoke = _run_on_repo_added(temp_dirs, enabled=True)
-        assert mock_invoke.call_count == 1
-        _, kwargs = mock_invoke.call_args
-        assert kwargs.get("discovery_mode") is False
-
-
-# ===========================================================================
-# TestWiringLogging
-# ===========================================================================
-
-
-class TestWiringLogging:
-    """AC9 structured log is emitted with exact repr() payload values after atomic write."""
-
-    def test_flag_true_emits_ac9_structured_log_with_payload(self, temp_dirs, caplog):
-        """
-        logger.info("verification_pass", extra={...}) is emitted once.
-        Assert payload values are present as LogRecord attributes set via extra=.
-        Keys: domain_or_repo, counts, evidence, diff_summary, duration_ms, fallback_reason.
-        """
-        import logging
-
-        known_counts = {"verified": 5, "corrected": 2, "removed": 0, "added": 0}
-        known_evidence = [
-            {"claim": "uses FastAPI", "evidence": "requirements.txt line 3"}
-        ]
-        known_fallback_reason = None
-
-        vresult = _make_verification_result(
-            verified_document=_VERIFIED_BODY,
-            fallback_reason=known_fallback_reason,
-            counts=known_counts,
-            evidence=known_evidence,
-        )
-
-        with caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.global_repos.meta_description_hook",
-        ):
-            _run_on_repo_added(temp_dirs, enabled=True, verification_result=vresult)
-
-        ac9_entries = [
-            r for r in caplog.records if r.getMessage() == "verification_pass"
-        ]
-        assert len(ac9_entries) == 1, (
-            f"Expected 1 AC9 log entry, got {len(ac9_entries)}"
-        )
-        rec = ac9_entries[0]
-
-        # repo alias present in domain_or_repo extra key
-        assert hasattr(rec, "domain_or_repo"), "AC9 log missing 'domain_or_repo' key"
-        assert rec.domain_or_repo == "test-repo"
-
-        # structured extra keys all present
-        for key in (
-            "counts",
-            "evidence",
-            "diff_summary",
-            "duration_ms",
-            "fallback_reason",
-        ):
-            assert hasattr(rec, key), f"AC9 log missing key: {key}"
-
-        assert rec.counts == known_counts
-        assert rec.evidence == known_evidence
-        assert rec.fallback_reason == known_fallback_reason
-        assert isinstance(rec.duration_ms, int) and rec.duration_ms >= 0

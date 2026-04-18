@@ -8,7 +8,6 @@ Three test classes, one test each, all sharing _Base setUp/tearDown:
   TestCliVerificationShared   -- CLI and verification share the same semaphore
 """
 
-import json
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +32,10 @@ _FAKE_VERIFICATION_STDOUT = (
     '\\"evidence\\": [], \\"counts\\": {\\"verified\\": 1, \\"corrected\\": 0, '
     '\\"removed\\": 0, \\"added\\": 0}}"}'
 )
+
+# Seconds to advance doc_path mtime in fake verification subprocess so the
+# mtime-change postcondition is satisfied deterministically on all filesystems.
+_DOC_MTIME_ADVANCE_SECONDS = 2.0
 
 
 @dataclass
@@ -60,6 +63,7 @@ def _make_analyzer(tmp_path: Path) -> DependencyMapAnalyzer:
 def _make_config(max_concurrent: int) -> MagicMock:
     cfg = MagicMock()
     cfg.fact_check_timeout_seconds = 10
+    cfg.dependency_map_delta_max_turns = 5
     cfg.max_concurrent_claude_cli = max_concurrent
     return cfg
 
@@ -147,6 +151,7 @@ def _run_verification_caller(
     completed_lock: threading.Lock,
     errors: List[Exception],
     errors_lock: threading.Lock,
+    doc_path: Path,
 ) -> threading.Thread:
     def caller() -> None:
         with shared.condition:
@@ -154,10 +159,9 @@ def _run_verification_caller(
             shared.condition.notify_all()
         try:
             analyzer.invoke_verification_pass(
-                document_content="doc " * 30,
+                document_path=doc_path,
                 repo_list=[],
-                discovery_mode=False,
-                claude_integration_config=cfg,
+                config=cfg,
             )
             with completed_lock:
                 completed[0] += 1
@@ -171,9 +175,17 @@ def _run_verification_caller(
 
 
 def _build_dispatching_run(
-    shared: _SharedState, call_count: List[int], call_count_lock: threading.Lock
+    shared: _SharedState,
+    call_count: List[int],
+    call_count_lock: threading.Lock,
+    doc_path: Path,
 ):
-    """First call blocks (CLI); second is fast (verification) and signals ver_entered_run."""
+    """First call blocks (CLI); second is fast (verification) and signals ver_entered_run.
+
+    The verification branch (seq != 1) writes different content to doc_path and
+    returns FILE_EDIT_COMPLETE in stdout so all three verification postconditions
+    (sentinel, content-change, non-empty content) are satisfied.
+    """
 
     def dispatching_fake_run(*args, **kwargs):
         with call_count_lock:
@@ -184,8 +196,11 @@ def _build_dispatching_run(
         with shared.condition:
             shared.ver_entered_run = True
             shared.condition.notify_all()
+        # Write fixed different content so the content-change postcondition passes
+        # (constant write — no read — avoids races with concurrent re-seeds)
+        doc_path.write_text("# Test\n\nVerified.\n")
         return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=_FAKE_VERIFICATION_STDOUT, stderr=""
+            args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
         )
 
     return dispatching_fake_run
@@ -246,6 +261,8 @@ class TestCliVerificationShared(_Base):
         the semaphore; it proceeds immediately after CLI releases."""
         cap = 1
         analyzer = _make_analyzer(self._tmp_path)
+        doc_path = self._tmp_path / "ver_doc.md"
+        doc_path.write_text("# Test\n\nContent for verification.\n")
         sem = _get_verification_semaphore(cap)
         shared = _SharedState()
         call_count: List[int] = [0]
@@ -266,7 +283,9 @@ class TestCliVerificationShared(_Base):
             ),
             patch(
                 "subprocess.run",
-                side_effect=_build_dispatching_run(shared, call_count, call_count_lock),
+                side_effect=_build_dispatching_run(
+                    shared, call_count, call_count_lock, doc_path
+                ),
             ),
         ):
             cli_threads = _run_cli_callers(
@@ -276,7 +295,14 @@ class TestCliVerificationShared(_Base):
             self.assertEqual(_sem_value(sem), 0, "semaphore should be exhausted")
 
             t_ver = _run_verification_caller(
-                analyzer, cfg, shared, completed, completed_lock, errors, errors_lock
+                analyzer,
+                cfg,
+                shared,
+                completed,
+                completed_lock,
+                errors,
+                errors_lock,
+                doc_path=doc_path,
             )
             _wait_cond(shared, lambda: shared.ver_started, "verification not started")
 
@@ -310,26 +336,39 @@ class TestColdStartSemaphoreCompatibility(_Base):
     def test_cli_cold_start_followed_by_verification_does_not_raise(self) -> None:
         """Clear the semaphore cache. CLI call first with configured max=5. Then
         verification pass with same configured max=5. No ValueError."""
+        import os
+        import time
+
         _VERIFICATION_SEMAPHORE_STATE.clear()
 
         analyzer = _make_analyzer(self._tmp_path)
+        doc_path = self._tmp_path / "cold_start_doc.md"
+        doc_path.write_text("# Cold Start Test\n\nOriginal content.\n")
         cfg_max = 5
 
         config_mock = MagicMock()
         config_mock.get_config.return_value.claude_integration_config.max_concurrent_claude_cli = cfg_max
 
         cfg_for_verification = _make_config(cfg_max)
+        call_count: List[int] = [0]
 
         def _fake_run(*args, **kwargs):
-            """Return a valid JSON envelope for any subprocess.run call."""
-            inner = {
-                "corrected_document": "OK",
-                "evidence": [{"claim": "x", "disposition": "VERIFIED"}],
-                "counts": {"verified": 1, "corrected": 0, "removed": 0, "added": 0},
-            }
-            envelope = {"is_error": False, "result": json.dumps(inner)}
+            """First call (CLI cold-start): return plain text.
+            Second call (verification): write updated content, advance mtime by 2s
+            using os.utime so the mtime-change postcondition is satisfied
+            deterministically on all filesystems."""
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # CLI call — just needs non-error returncode
+                return subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="CLI result text here", stderr=""
+                )
+            # Verification call: satisfy FILE_EDIT_COMPLETE, mtime-change, non-empty
+            doc_path.write_text("# Cold Start Test\n\nVerified content.\n")
+            future_time = time.time() + 2.0
+            os.utime(doc_path, (future_time, future_time))
             return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout=json.dumps(envelope), stderr=""
+                args=[], returncode=0, stdout="FILE_EDIT_COMPLETE", stderr=""
             )
 
         with (
@@ -343,15 +382,14 @@ class TestColdStartSemaphoreCompatibility(_Base):
             analyzer._invoke_claude_cli(prompt="test", timeout=10, max_turns=0)
 
             # Verification pass with same cfg_max — must not raise ValueError
-            result = analyzer.invoke_verification_pass(
-                document_content="orig " * 20,
+            # v2 returns None on success
+            analyzer.invoke_verification_pass(
+                document_path=doc_path,
                 repo_list=[],
-                discovery_mode=False,
-                claude_integration_config=cfg_for_verification,
+                config=cfg_for_verification,
             )
 
-        # Both calls completed without raising
-        self.assertIsNotNone(result)
+        # Both calls completed without raising ValueError
         # Semaphore singleton still valid with the configured value
         sem = _get_verification_semaphore(cfg_max)
         self.assertIsNotNone(sem)

@@ -6,12 +6,10 @@ when golden repos are added/removed, eliminating the need for special-case
 meta directory management code.
 """
 
-import difflib
 import logging
 import os
 import tempfile
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -28,9 +26,6 @@ from code_indexer.server.services.claude_cli_manager import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Maximum number of unified-diff lines emitted in the AC9 structured log (Story #724 B1).
-_AC9_DIFF_MAX_LINES = 200
 
 # README file detection order
 README_NAMES = [
@@ -362,96 +357,64 @@ def on_repo_added(
 
     else:
         # Generate .md file using Claude CLI (two-phase: Phase 1 + Phase 2 lifecycle)
-        try:
-            md_content, phase2_outcome = _generate_repo_description(
-                repo_name,
-                repo_url,
-                clone_path,
-                mcp_registration_service=mcp_registration_service,
+        md_content, phase2_outcome = _generate_repo_description(
+            repo_name,
+            repo_url,
+            clone_path,
+            mcp_registration_service=mcp_registration_service,
+        )
+
+        md_file = cidx_meta_path / f"{repo_name}.md"
+
+        # Story #724 v2: optional post-generation verification pass BEFORE atomic write
+        from code_indexer.server.services.config_service import (
+            get_config_service,
+        )
+
+        ci_config = get_config_service().get_config().claude_integration_config
+        verified_content = md_content  # default: unverified content when flag is off
+
+        if ci_config is not None and ci_config.dep_map_fact_check_enabled:
+            import tempfile
+
+            from code_indexer.global_repos.dependency_map_analyzer import (
+                DependencyMapAnalyzer,
             )
 
-            # --- Story #724 Phase B1: optional post-generation verification pass ---
-            # Load config lazily to avoid circular imports at module level.
-            write_content = md_content
-            verification_result = None
+            # Write to a temp file inside cidx_meta_path so same-filesystem rename works later
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".md",
+                dir=str(cidx_meta_path),
+                delete=False,
+                encoding="utf-8",
+            ) as tmp:
+                tmp.write(md_content)
+                tmp_path = Path(tmp.name)
+
             try:
-                from code_indexer.server.services.config_service import (
-                    get_config_service,
+                _analyzer = DependencyMapAnalyzer(
+                    golden_repos_root=Path(golden_repos_dir),
+                    cidx_meta_path=cidx_meta_path,
+                    pass_timeout=ci_config.dependency_map_pass_timeout_seconds,
                 )
-                from code_indexer.global_repos.dependency_map_analyzer import (
-                    DependencyMapAnalyzer,
+                _analyzer.invoke_verification_pass(
+                    document_path=tmp_path,
+                    repo_list=[{"alias": repo_name, "clone_path": clone_path}],
+                    config=ci_config,
                 )
+                # Verification succeeded — read the now-edited temp file as verified content
+                verified_content = tmp_path.read_text(encoding="utf-8")
+            finally:
+                tmp_path.unlink(missing_ok=True)
 
-                ci_config = get_config_service().get_config().claude_integration_config
-                if ci_config is not None and ci_config.dep_map_fact_check_enabled:
-                    _analyzer = DependencyMapAnalyzer(
-                        golden_repos_root=Path(golden_repos_dir),
-                        cidx_meta_path=cidx_meta_path,
-                        pass_timeout=ci_config.dependency_map_pass_timeout_seconds,
-                    )
-                    _verif_started = time.monotonic()
-                    verification_result = _analyzer.invoke_verification_pass(
-                        document_content=md_content,
-                        repo_list=[{"alias": repo_name, "clone_path": clone_path}],
-                        discovery_mode=False,
-                        claude_integration_config=ci_config,
-                    )
-                    _verif_duration_ms = int(
-                        round((time.monotonic() - _verif_started) * 1000)
-                    )
-                    write_content = verification_result.verified_document
-            except Exception as _verif_exc:
-                logger.warning(
-                    "Verification pass failed for %s (using original content): %s",
-                    repo_name,
-                    _verif_exc,
-                )
-                write_content = md_content
-            # --- End verification pass ---
+        # Single atomic write with (verified or original) content — always ONCE
+        atomic_write_description(md_file, verified_content)
 
-            md_file = cidx_meta_path / f"{repo_name}.md"
-            atomic_write_description(md_file, write_content)
-
-            # AC9: emit structured log after the single atomic write
-            if verification_result is not None:
-                diff_lines = list(
-                    difflib.unified_diff(
-                        md_content.splitlines(keepends=True),
-                        write_content.splitlines(keepends=True),
-                        fromfile="original",
-                        tofile="verified",
-                    )
-                )
-                truncated = len(diff_lines) > _AC9_DIFF_MAX_LINES
-                diff_summary = "".join(diff_lines[:_AC9_DIFF_MAX_LINES])
-                if truncated:
-                    diff_summary += (
-                        "\n... diff truncated (exceeded _AC9_DIFF_MAX_LINES)\n"
-                    )
-                logger.info(
-                    "verification_pass",
-                    extra={
-                        "domain_or_repo": repo_name,
-                        "counts": verification_result.counts,
-                        "evidence": verification_result.evidence,
-                        "diff_summary": diff_summary,
-                        "duration_ms": _verif_duration_ms,
-                        "fallback_reason": verification_result.fallback_reason,
-                    },
-                )
-
-            logger.info(
-                f"Created meta description file: {md_file} "
-                f"(phase2_outcome={phase2_outcome})"
-            )
-
-        except Exception as e:
-            logger.error(
-                f"Failed to create meta description for {repo_name}: {e}", exc_info=True
-            )
-            # Fall back to README copy
-            logger.info(f"Falling back to README copy for {repo_name}")
-            _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
+        logger.info(
+            f"Created meta description file: {md_file} "
+            f"(phase2_outcome={phase2_outcome})"
+        )
 
     # Trigger cidx-meta reindex to make the new description searchable
     if _refresh_scheduler is not None:

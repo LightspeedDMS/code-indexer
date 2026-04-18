@@ -25,10 +25,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +75,6 @@ _VERIFICATION_SEMAPHORE_STATE: Dict[
     str, Any
 ] = {}  # keys: 'semaphore', 'max_concurrent'
 
-# Story #724: Verification pass named constants (module-level, not class-level)
-VERIFICATION_RETRY_DELAY_SECONDS: int = 30
-MIN_CORRECTED_DOCUMENT_LENGTH_RATIO: float = 0.5
-MAX_REMOVED_EVIDENCE_RATIO: float = 0.5
 # Default semaphore capacity when the config service is unavailable (CLI-only contexts
 # outside the server).  Must equal the schema default for ClaudeIntegrationConfig so
 # cold-start sequences are consistent between server and non-server invocations.
@@ -132,33 +127,11 @@ def _get_verification_semaphore(max_concurrent: int) -> threading.Semaphore:
         return cast(threading.Semaphore, _VERIFICATION_SEMAPHORE_STATE["semaphore"])
 
 
-@dataclass
-class VerificationResult:
-    """Return value of invoke_verification_pass (Story #724).
+class VerificationFailed(RuntimeError):
+    """Raised by invoke_verification_pass when both retry attempts fail (Story #724 v2).
 
-    verified_document: the corrected document text, OR the original on fallback
-    evidence: filtered evidence array (after evidence-requirement and
-              discovery_mode filters, and after guard evaluation)
-    counts: dict with keys verified, corrected, removed, added (ints)
-    fallback_reason: None on success; one of 'double_timeout',
-                     'envelope_parse_error', 'inner_parse_error',
-                     'envelope_is_error', 'missing_required_field',
-                     'guard_length_under_threshold',
-                     'guard_removed_ratio_over_threshold',
-                     'guard_empty_counts_on_nonempty_doc' on fallback
+    The exception message includes the temp file path for debugging.
     """
-
-    verified_document: str
-    evidence: list = field(default_factory=list)
-    counts: dict = field(
-        default_factory=lambda: {
-            "verified": 0,
-            "corrected": 0,
-            "removed": 0,
-            "added": 0,
-        }
-    )
-    fallback_reason: Optional[str] = None
 
 
 class DependencyMapAnalyzer:
@@ -2980,356 +2953,142 @@ Rules:
 
     def invoke_verification_pass(
         self,
-        document_content: str,
+        document_path: Path,
         repo_list: list,
-        discovery_mode: bool = False,
-        *,
-        claude_integration_config: Any,  # duck-typed; avoids circular import of ClaudeIntegrationConfig
-    ) -> "VerificationResult":
-        """Post-generation verification pass (Story #724 AC2-AC8).
+        config: Any,  # duck-typed; avoids circular import of ClaudeIntegrationConfig
+    ) -> None:
+        """Post-generation verification pass — file-edit contract (Story #724 v2).
 
-        Args:
-            document_content: Generated markdown document to verify.
-            repo_list: Repo dicts whose source code is ground truth.
-            discovery_mode: If True, ADDED items are permitted (AC4).
-            claude_integration_config: Duck-typed config supplying
-                fact_check_timeout_seconds and max_concurrent_claude_cli.
+        Claude reads the file at document_path, verifies every claim against source,
+        edits the file in-place, then prints FILE_EDIT_COMPLETE.  Two attempts are
+        made; the file is re-seeded from original content before each attempt so a
+        partial edit by attempt 1 cannot corrupt attempt 2.
 
-        Returns:
-            VerificationResult (fallback_reason=None on success).
+        Postconditions checked after each subprocess call (spec Architecture §h):
+          - stdout contains "FILE_EDIT_COMPLETE" sentinel
+          - file mtime changed (Claude actually edited the file)
+          - file content is non-empty after edits
+
+        Raises:
+            VerificationFailed: If both attempts fail any postcondition check.
         """
-        if not isinstance(document_content, str):
-            raise ValueError("document_content must be a str")
+        if not isinstance(document_path, Path):
+            raise ValueError("document_path must be a pathlib.Path")
         if not isinstance(repo_list, list):
             raise ValueError("repo_list must be a list")
-        if claude_integration_config is None:
-            raise ValueError("claude_integration_config must not be None")
+        if config is None:
+            raise ValueError("config must not be None")
 
+        prompt = self._build_verification_prompt(document_path, repo_list)
+        original_content = document_path.read_text(encoding="utf-8")
+        started = time.monotonic()
+
+        for attempt in (1, 2):
+            document_path.write_text(original_content, encoding="utf-8")
+            failure = self._run_verification_attempt(
+                document_path, prompt, config, attempt, original_content
+            )
+            if failure is None:
+                duration_ms = int(round((time.monotonic() - started) * 1000))
+                logger.info(
+                    "verification pass completed: domain=%s duration_ms=%d attempt=%d",
+                    document_path.stem,
+                    duration_ms,
+                    attempt,
+                )
+                return
+
+        raise VerificationFailed(f"verification failed twice for {document_path}")
+
+    def _build_verification_prompt(self, document_path: Path, repo_list: list) -> str:
+        """Build the full verification prompt: rendered fact_check.md + file instructions."""
         from code_indexer.global_repos.prompts import get_prompt  # lazy import
 
         repo_text = "\n".join(
             f"- {r.get('alias', 'unknown')}: {r.get('clone_path', 'unknown')}"
             for r in repo_list
         )
-        rendered = (
-            get_prompt("fact_check")
-            .replace("{document_content}", document_content)
-            .replace("{repo_list}", repo_text)
-            .replace("{discovery_mode}", "true" if discovery_mode else "false")
+        base_prompt: str = str(get_prompt("fact_check")).replace(
+            "{repo_list}", repo_text
         )
+        return base_prompt + self._build_file_based_instructions(document_path)
 
-        stdout_or_fallback = self._execute_verification_cli(
-            rendered, document_content, claude_integration_config
-        )
-        if isinstance(stdout_or_fallback, VerificationResult):
-            return stdout_or_fallback
-
-        inner_or_fallback = self._parse_verification_envelope(
-            stdout_or_fallback, document_content
-        )
-        if isinstance(inner_or_fallback, VerificationResult):
-            return inner_or_fallback
-
-        filtered, counts, discarded_count = self._apply_verification_evidence_filters(
-            inner_or_fallback["evidence"], discovery_mode
-        )
-        if discarded_count > 0:
-            logger.critical(
-                "Verification pass discarded %d unsupported claim(s); falling back to original document",
-                discarded_count,
-            )
-            return VerificationResult(
-                verified_document=document_content,
-                evidence=[],
-                counts={"verified": 0, "corrected": 0, "removed": 0, "added": 0},
-                fallback_reason="unsupported_claims_in_document",
-            )
-
-        guard = self._check_verification_safety_guards(
-            inner_or_fallback["corrected_document"], document_content, counts
-        )
-        if guard is not None:
-            return guard
-
-        return VerificationResult(
-            verified_document=inner_or_fallback["corrected_document"],
-            evidence=filtered,
-            counts=counts,
-        )
-
-    def _run_with_semaphore(
+    def _run_verification_attempt(
         self,
-        semaphore: threading.Semaphore,
-        cmd: List[str],
-        rendered_prompt: str,
-        timeout: int,
-    ) -> "subprocess.CompletedProcess[str]":
-        """Acquire semaphore, run subprocess, release in finally. (Story #724 AC5)
+        document_path: Path,
+        prompt: str,
+        config: Any,  # duck-typed; avoids circular import of ClaudeIntegrationConfig
+        attempt: int,
+        original_content: str,
+    ) -> Optional[str]:
+        """Execute one verification subprocess and check all postconditions.
 
-        Returns CompletedProcess; caller must check returncode.
-        Raises subprocess.TimeoutExpired on timeout (semaphore released in finally).
+        Returns None on full success, or a short failure-reason string on any failure.
+        Logs WARNING for each failure; the caller (invoke_verification_pass) retries or raises.
         """
-        semaphore.acquire()
         try:
-            return subprocess.run(
-                cmd,
-                cwd=str(self.golden_repos_root),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                input=rendered_prompt,
-            )
-        finally:
-            semaphore.release()
-
-    def _execute_verification_cli(
-        self,
-        rendered_prompt: str,
-        document_content: str,
-        claude_integration_config: Any,  # duck-typed; avoids circular import
-    ) -> Union[str, "VerificationResult"]:
-        """Run Claude CLI with semaphore gate and single retry on timeout. (AC8)
-
-        Returns stdout str on success, or VerificationResult on timeout/CLI error.
-        The 30s sleep happens OUTSIDE the semaphore hold (AC5).
-        """
-        timeout = claude_integration_config.fact_check_timeout_seconds
-        semaphore = _get_verification_semaphore(
-            claude_integration_config.max_concurrent_claude_cli
-        )
-        cmd = [
-            "claude",
-            "--print",
-            "--output-format",
-            "json",
-            "--model",
-            self.analysis_model,
-            "--max-turns",
-            str(claude_integration_config.dependency_map_delta_max_turns),
-            "--dangerously-skip-permissions",
-        ]
-        try:
-            completed = self._run_with_semaphore(
-                semaphore, cmd, rendered_prompt, timeout
+            stdout = self._invoke_claude_cli(
+                prompt,
+                config.fact_check_timeout_seconds,
+                config.dependency_map_delta_max_turns,
+                dangerously_skip_permissions=True,
             )
         except subprocess.TimeoutExpired:
+            logger.warning("invoke_verification_pass: attempt %d timed out", attempt)
+            return "timeout"
+        except subprocess.CalledProcessError as exc:
             logger.warning(
-                "invoke_verification_pass: attempt 1 timed out after %ds; "
-                "sleeping %ds then retrying",
-                timeout,
-                VERIFICATION_RETRY_DELAY_SECONDS,
+                "invoke_verification_pass: attempt %d exit=%d", attempt, exc.returncode
             )
-            time.sleep(VERIFICATION_RETRY_DELAY_SECONDS)
-            try:
-                completed = self._run_with_semaphore(
-                    semaphore, cmd, rendered_prompt, timeout
-                )
-            except subprocess.TimeoutExpired:
-                logger.error(
-                    "invoke_verification_pass: double timeout after %ds; returning fallback",
-                    timeout,
-                )
-                return VerificationResult(
-                    verified_document=document_content,
-                    fallback_reason="double_timeout",
-                )
+            return "cli_error"
 
-        if completed.returncode != 0:
-            logger.error(
-                "invoke_verification_pass: CLI exited %d; stderr: %s",
-                completed.returncode,
-                (completed.stderr or "")[:500],
-            )
-            return VerificationResult(
-                verified_document=document_content,
-                fallback_reason="cli_error",
-            )
-        return completed.stdout
+        return self._check_verification_postconditions(
+            document_path, stdout, original_content, attempt
+        )
 
-    def _parse_verification_envelope(
+    def _check_verification_postconditions(
         self,
-        raw_stdout: str,
-        document_content: str,
-    ) -> Union[Dict[str, Any], "VerificationResult"]:
-        """Parse outer --output-format json envelope, then inner model JSON. (AC2)
+        document_path: Path,
+        stdout: str,
+        original_content: str,
+        attempt: int,
+    ) -> Optional[str]:
+        """Check all postconditions after a verification subprocess returns.
 
-        Validates outer envelope structure, then parses inner JSON and checks
-        for required keys (corrected_document, evidence, counts).
-
-        Returns inner dict on success, or VerificationResult fallback on error.
+        Returns None on success (all checks pass). Returns a reason string
+        (e.g., "content_unchanged", "empty_file", "missing_sentinel") on failure.
+        Failure reason strings are used for WARNING log messages.
         """
-        try:
-            outer = json.loads(raw_stdout)
-        except json.JSONDecodeError as exc:
-            logger.error(
-                "invoke_verification_pass: outer envelope parse failed: %s", exc
+        # Sentinel must be the last non-empty line, not merely present as substring
+        non_empty_lines = [
+            line.strip() for line in (stdout or "").splitlines() if line.strip()
+        ]
+        if not non_empty_lines or non_empty_lines[-1] != "FILE_EDIT_COMPLETE":
+            logger.warning(
+                "invoke_verification_pass: attempt %d missing FILE_EDIT_COMPLETE sentinel on final line",
+                attempt,
             )
-            return VerificationResult(
-                verified_document=document_content,
-                fallback_reason="envelope_parse_error",
-            )
-
-        if not isinstance(outer, dict):
-            logger.error(
-                "invoke_verification_pass: outer envelope is not a dict, got %s",
-                type(outer).__name__,
-            )
-            return VerificationResult(
-                verified_document=document_content,
-                fallback_reason="envelope_parse_error",
-            )
-
-        if outer.get("is_error"):
-            logger.error(
-                "invoke_verification_pass: Claude CLI error: %s",
-                outer.get("error", "(no detail)"),
-            )
-            return VerificationResult(
-                verified_document=document_content, fallback_reason="envelope_is_error"
-            )
-
-        model_text = outer.get("result")
-        if model_text is None:
-            logger.error(
-                "invoke_verification_pass: outer envelope missing 'result' key"
-            )
-            return VerificationResult(
-                verified_document=document_content,
-                fallback_reason="missing_required_field",
-            )
+            return "missing_sentinel"
 
         try:
-            inner = json.loads(model_text)
-        except json.JSONDecodeError as exc:
-            logger.error("invoke_verification_pass: inner JSON parse failed: %s", exc)
-            return VerificationResult(
-                verified_document=document_content, fallback_reason="inner_parse_error"
+            current_content = document_path.read_text(encoding="utf-8")
+        except OSError:
+            logger.warning(
+                "invoke_verification_pass: attempt %d could not read file", attempt
             )
+            return "file_missing"
 
-        if not isinstance(inner, dict):
-            logger.error(
-                "invoke_verification_pass: inner JSON is not a dict, got %s",
-                type(inner).__name__,
+        if current_content == original_content:
+            logger.warning(
+                "invoke_verification_pass: attempt %d did not edit file (content unchanged)",
+                attempt,
             )
-            return VerificationResult(
-                verified_document=document_content, fallback_reason="inner_parse_error"
+            return "content_unchanged"
+
+        if not current_content.strip():
+            logger.warning(
+                "invoke_verification_pass: attempt %d produced empty file", attempt
             )
-
-        for key in ("corrected_document", "evidence", "counts"):
-            if key not in inner:
-                logger.error(
-                    "invoke_verification_pass: inner JSON missing required key '%s'",
-                    key,
-                )
-                return VerificationResult(
-                    verified_document=document_content,
-                    fallback_reason="missing_required_field",
-                )
-
-        return inner
-
-    def _apply_verification_evidence_filters(
-        self,
-        evidence_list: list,
-        discovery_mode: bool,
-    ) -> Tuple[List[Any], Dict[str, int], int]:
-        """Filter evidence per AC3 (evidence requirements) and AC4 (discovery_mode).
-
-        AC3: CORRECTED/ADDED items need file_path+line_range OR symbol+definition_location.
-        AC4: If discovery_mode is False, ALL ADDED items are unconditionally dropped.
-        Non-dict items in evidence_list are skipped with a warning.
-
-        Returns (filtered_evidence, recomputed_counts, discarded_count).
-        discarded_count is the number of items removed by AC3/AC4 filters (not counting
-        non-dict items which are skipped with a warning, not counted as discards).
-        """
-        filtered: List[Any] = []
-        discarded_count: int = 0
-        for item in evidence_list:
-            if not isinstance(item, dict):
-                logger.warning(
-                    "invoke_verification_pass: skipping non-dict evidence item: %r",
-                    item,
-                )
-                continue
-            disp = item.get("disposition", "")
-            if disp in ("CORRECTED", "ADDED"):
-                has_file = bool(item.get("file_path") and item.get("line_range"))
-                has_sym = bool(item.get("symbol") and item.get("definition_location"))
-                if not has_file and not has_sym:
-                    logger.warning(
-                        "invoke_verification_pass: discarding %s item %r — no evidence",
-                        disp,
-                        item.get("claim", ""),
-                    )
-                    discarded_count += 1
-                    continue
-            filtered.append(item)
-
-        before_discovery_filter = len(filtered)
-        if not discovery_mode:
-            filtered = [e for e in filtered if e.get("disposition") != "ADDED"]
-        discarded_count += before_discovery_filter - len(filtered)
-
-        counts: Dict[str, int] = {
-            "verified": 0,
-            "corrected": 0,
-            "removed": 0,
-            "added": 0,
-        }
-        for item in filtered:
-            key = item.get("disposition", "").lower()
-            if key in counts:
-                counts[key] += 1
-        return filtered, counts, discarded_count
-
-    def _check_verification_safety_guards(
-        self,
-        corrected_doc: str,
-        original_doc: str,
-        counts: Dict[str, int],
-    ) -> Optional["VerificationResult"]:
-        """Apply AC7 safety guards. Returns fallback VerificationResult or None.
-
-        Guard a: corrected length < MIN_CORRECTED_DOCUMENT_LENGTH_RATIO * original
-        Guard b: removed / total >= MAX_REMOVED_EVIDENCE_RATIO (when total > 0)
-        Guard c: total == 0 and original is non-empty
-        """
-        orig_len = len(original_doc)
-        if (
-            orig_len > 0
-            and len(corrected_doc) < MIN_CORRECTED_DOCUMENT_LENGTH_RATIO * orig_len
-        ):
-            logger.critical(
-                "invoke_verification_pass: GUARD length — corrected %d < %.0f%% of %d",
-                len(corrected_doc),
-                MIN_CORRECTED_DOCUMENT_LENGTH_RATIO * 100,
-                orig_len,
-            )
-            return VerificationResult(
-                verified_document=original_doc,
-                fallback_reason="guard_length_under_threshold",
-            )
-
-        total = sum(counts.values())
-        if total > 0 and counts.get("removed", 0) / total >= MAX_REMOVED_EVIDENCE_RATIO:
-            logger.critical(
-                "invoke_verification_pass: GUARD removed ratio %.1f%% >= %.0f%%",
-                counts.get("removed", 0) / total * 100,
-                MAX_REMOVED_EVIDENCE_RATIO * 100,
-            )
-            return VerificationResult(
-                verified_document=original_doc,
-                fallback_reason="guard_removed_ratio_over_threshold",
-            )
-
-        if total == 0 and orig_len > 0:
-            logger.critical(
-                "invoke_verification_pass: GUARD empty counts on non-empty document"
-            )
-            return VerificationResult(
-                verified_document=original_doc,
-                fallback_reason="guard_empty_counts_on_nonempty_doc",
-            )
+            return "empty_file"
 
         return None
