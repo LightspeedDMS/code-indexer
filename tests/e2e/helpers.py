@@ -37,8 +37,13 @@ LOGIN_TIMEOUT: float = 15.0
 MCP_CALL_TIMEOUT: float = 30.0
 """Seconds to wait for a single MCP JSON-RPC call."""
 
-JOB_POLL_HTTP_TIMEOUT: float = 10.0
-"""Per-request timeout when polling /jobs/{id}."""
+JOB_POLL_HTTP_TIMEOUT: float = 30.0
+"""Per-request timeout when polling /jobs/{id}.
+
+30s gives occasional event-loop stalls or connection-pool hiccups room
+to recover without failing the whole fixture. Individual polls usually
+respond in <100ms; this is a resilience ceiling, not an expected latency.
+"""
 
 JOB_WAIT_TIMEOUT: float = 60.0
 """Default maximum seconds to wait for a background job to reach terminal state."""
@@ -276,13 +281,24 @@ def wait_for_job(
     terminal_states = {"completed", "failed", "cancelled"}
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        response = rest_call(
-            client, "GET", f"/api/jobs/{job_id}", token, timeout=JOB_POLL_HTTP_TIMEOUT
-        )
-        response.raise_for_status()
-        status_data: dict[str, Any] = response.json()
-        if status_data.get("status") in terminal_states:
-            return status_data
+        try:
+            response = rest_call(
+                client,
+                "GET",
+                f"/api/jobs/{job_id}",
+                token,
+                timeout=JOB_POLL_HTTP_TIMEOUT,
+            )
+            response.raise_for_status()
+            status_data: dict[str, Any] = response.json()
+            if status_data.get("status") in terminal_states:
+                return status_data
+        except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+            logger.warning(
+                "wait_for_job: transient poll timeout for job %s (%s); retrying",
+                job_id,
+                exc.__class__.__name__,
+            )
         time.sleep(poll_interval)
     raise TimeoutError(
         f"Job {job_id!r} did not reach a terminal state within {timeout}s"
