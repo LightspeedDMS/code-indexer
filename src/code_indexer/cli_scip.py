@@ -844,7 +844,6 @@ def scip_definition(
 
 def _run_remote_definition(symbol: str, repository: str, project: Optional[str]):
     """Execute remote SCIP definition query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -857,15 +856,15 @@ def _run_remote_definition(symbol: str, repository: str, project: Optional[str])
         "password": config.get("password"),
     }
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
             result = client.definition(symbol, repository, project)
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_scip_results(result, symbol, "definition")
 
 
@@ -995,7 +994,6 @@ def _run_remote_references(
     symbol: str, repository: str, limit: int, project: Optional[str]
 ):
     """Execute remote SCIP references query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -1009,15 +1007,15 @@ def _run_remote_references(
     }
     api_limit = limit if limit > 0 else 100
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
             result = client.references(symbol, repository, api_limit, project)
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_scip_results(result, symbol, "reference")
 
 
@@ -1156,7 +1154,6 @@ def _run_remote_dependencies(
     symbol: str, repository: str, depth: int, project: Optional[str]
 ):
     """Execute remote SCIP dependencies query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -1169,15 +1166,15 @@ def _run_remote_dependencies(
         "password": config.get("password"),
     }
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
             result = client.dependencies(symbol, repository, depth, project)
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_scip_results(result, symbol, "dependency")
 
 
@@ -1315,7 +1312,6 @@ def _run_remote_dependents(
     symbol: str, repository: str, depth: int, project: Optional[str]
 ):
     """Execute remote SCIP dependents query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -1328,15 +1324,15 @@ def _run_remote_dependents(
         "password": config.get("password"),
     }
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
             result = client.dependents(symbol, repository, depth, project)
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_scip_results(result, symbol, "dependent")
 
 
@@ -1455,7 +1451,6 @@ def _run_remote_impact(
     symbol: str, repository: str, depth: int, project: Optional[str]
 ):
     """Execute remote SCIP impact query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -1468,15 +1463,15 @@ def _run_remote_impact(
         "password": config.get("password"),
     }
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.impact(symbol, repository, depth, project)
+            result = client.impact(symbol, repository, depth, project)
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_scip_results(result, symbol, "impact")
 
 
@@ -1702,7 +1697,6 @@ def _run_remote_callchain(
     project: Optional[str],
 ):
     """Execute remote SCIP callchain query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -1715,7 +1709,7 @@ def _run_remote_callchain(
         "password": config.get("password"),
     }
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
             result = client.callchain(
@@ -1723,9 +1717,9 @@ def _run_remote_callchain(
             )
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_callchain_results(result, from_symbol, to_symbol)
 
 
@@ -1875,7 +1869,6 @@ def _run_remote_context(
     symbol: str, repository: str, limit: int, project: Optional[str]
 ):
     """Execute remote SCIP context query via SCIPAPIClient."""
-    import asyncio
     from code_indexer.api_clients.scip_client import SCIPAPIClient
 
     config = _get_remote_config()
@@ -1888,13 +1881,13 @@ def _run_remote_context(
         "password": config.get("password"),
     }
 
-    async def run_query():
+    def run_query():
         client = SCIPAPIClient(server_url, credentials, Path.cwd())
         try:
-            result = await client.context(symbol, repository, limit, project)
+            result = client.context(symbol, repository, limit, project)
             return result
         finally:
-            await client.close()
+            client.close()
 
-    result = asyncio.run(run_query())
+    result = run_query()
     _display_scip_results(result, symbol, "context")

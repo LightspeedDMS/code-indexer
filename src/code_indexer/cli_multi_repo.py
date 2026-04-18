@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any
 from rich.console import Console
 
 
-async def execute_multi_repo_query(
+def execute_multi_repo_query(
     query_text: str,
     repos: List[str],
     limit: int,
@@ -80,7 +80,7 @@ async def execute_multi_repo_query(
     credentials = _get_decrypted_credentials(project_root)
 
     # Execute multi-repo query
-    async with RemoteQueryClient(  # type: ignore[attr-defined]
+    with RemoteQueryClient(
         server_url=server_url, credentials=credentials
     ) as query_client:
         # Build request parameters
@@ -103,7 +103,7 @@ async def execute_multi_repo_query(
             query_params["accuracy"] = accuracy
 
         # Call execute_multi_repo_query method
-        results: dict = await query_client.execute_multi_repo_query(
+        results: dict = query_client.execute_multi_repo_query(
             repositories=repos, **query_params
         )
 

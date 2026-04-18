@@ -4979,19 +4979,17 @@ def query(
                 display_multi_repo_results,
             )
 
-            multi_repo_results = asyncio.run(
-                execute_multi_repo_query(
-                    query_text=query,
-                    repos=repos_list,
-                    limit=limit,
-                    project_root=project_root,
-                    languages=languages,
-                    exclude_languages=exclude_languages,
-                    path_filter=path_filter,
-                    exclude_paths=exclude_paths,
-                    min_score=min_score,
-                    accuracy=accuracy,
-                )
+            multi_repo_results = execute_multi_repo_query(
+                query_text=query,
+                repos=repos_list,
+                limit=limit,
+                project_root=project_root,
+                languages=languages,
+                exclude_languages=exclude_languages,
+                path_filter=path_filter,
+                exclude_paths=exclude_paths,
+                min_score=min_score,
+                accuracy=accuracy,
             )
 
             # AC4: Format and display multi-repo results
@@ -9786,7 +9784,6 @@ def auth_status(ctx, verbose: bool, health: bool):
         cidx auth status --health           # Health diagnostics
     """
     try:
-        import asyncio
         from .api_clients.auth_client import create_auth_client
         from .mode_detection.command_mode_detector import find_project_root
         from .remote.config import load_remote_configuration
@@ -9833,18 +9830,18 @@ def auth_status(ctx, verbose: bool, health: bool):
             server_url=server_url, project_root=project_root, username=username
         )
 
-        async def run_status_check():
+        def run_status_check():
             if health:
                 # Comprehensive health check
-                health_result = await auth_client.check_credential_health()  # type: ignore[misc]
+                health_result = auth_client.check_credential_health()
                 _display_health_status(health_result)
             else:
                 # Regular status check
-                status = await auth_client.get_auth_status()  # type: ignore[misc]
+                status = auth_client.get_auth_status()
                 _display_auth_status(status, verbose)
 
-        # Run async status check
-        asyncio.run(run_status_check())
+        # Run status check
+        run_status_check()
 
     except Exception as e:
         console.print(f"❌ Error checking authentication status: {e}", style="red")
@@ -9961,7 +9958,6 @@ def auth_validate(ctx, verbose: bool):
         cidx auth validate --verbose        # Show validation details
     """
     try:
-        import asyncio
         from .api_clients.auth_client import create_auth_client
         from .mode_detection.command_mode_detector import find_project_root
         from .remote.config import load_remote_configuration
@@ -10022,11 +10018,11 @@ def auth_validate(ctx, verbose: bool):
             server_url=server_url, project_root=project_root, username=username
         )
 
-        async def run_validation():
+        def run_validation():
             if verbose:
                 console.print("🔍 Validating credentials...", style="blue")
 
-            is_valid = await auth_client.validate_credentials()  # type: ignore[misc]
+            is_valid = auth_client.validate_credentials()
 
             if verbose:
                 if is_valid:
@@ -10040,8 +10036,8 @@ def auth_validate(ctx, verbose: bool):
 
             return is_valid
 
-        # Run async validation
-        is_valid = asyncio.run(run_validation())
+        # Run validation
+        is_valid = run_validation()
 
         # Exit with appropriate code for automation
         sys.exit(0 if is_valid else 1)
@@ -11191,7 +11187,6 @@ def system_health(ctx, detailed: bool, verbose: bool):
         cidx system health --detailed --verbose  # Combined detailed and verbose
     """
     try:
-        import asyncio
         from .api_clients.system_client import create_system_client
         from .mode_detection.command_mode_detector import find_project_root
         from .remote.config import load_remote_configuration
@@ -11238,15 +11233,15 @@ def system_health(ctx, detailed: bool, verbose: bool):
             server_url=server_url, project_root=project_root, username=username
         )
 
-        async def run_health_check():
+        def run_health_check():
             try:
                 if detailed or verbose:
                     # Use detailed health endpoint for rich information
-                    health_result = await system_client.check_detailed_health()  # type: ignore[misc]
+                    health_result = system_client.check_detailed_health()
                     _display_detailed_health_status(health_result, verbose)
                 else:
                     # Use basic health endpoint for simple check
-                    health_result = await system_client.check_basic_health()  # type: ignore[misc]
+                    health_result = system_client.check_basic_health()
                     _display_basic_health_status(health_result)
 
             except Exception as e:
@@ -11268,8 +11263,8 @@ def system_health(ctx, detailed: bool, verbose: bool):
                     console.print(f"Error: {str(e)}", style="red")
                     sys.exit(1)
 
-        # Run async health check
-        asyncio.run(run_health_check())
+        # Run health check
+        run_health_check()
 
     except KeyboardInterrupt:
         console.print("\n❌ Operation cancelled by user", style="red")
@@ -11449,7 +11444,6 @@ def list_repos(ctx, filter: Optional[str]):
     """
     try:
         from pathlib import Path
-        import asyncio
         from .mode_detection.command_mode_detector import find_project_root
 
         # Get project root and credentials
@@ -11478,19 +11472,19 @@ def list_repos(ctx, filter: Optional[str]):
 
         # Create client and fetch repositories with proper cleanup
 
-        async def fetch_repositories():
+        def fetch_repositories():
             client = ReposAPIClient(
                 server_url=server_url,
                 credentials=credentials,
                 project_root=project_root,
             )
             try:
-                return await client.list_activated_repositories(filter_pattern=filter)  # type: ignore[misc]
+                return client.list_activated_repositories(filter_pattern=filter)
             finally:
                 # Ensure client is properly closed to avoid resource warnings
                 client.close()
 
-        repositories = asyncio.run(fetch_repositories())
+        repositories = fetch_repositories()
 
         # Display results
         if not repositories:
@@ -12634,7 +12628,6 @@ def repos_cat(ctx, user_alias: str, file_path: str, no_highlight: bool):
     """
     try:
         from pathlib import Path
-        import asyncio
         from .mode_detection.command_mode_detector import find_project_root
         from .cli_repos_files import (
             get_repo_id_from_alias_sync,
@@ -12678,20 +12671,20 @@ def repos_cat(ctx, user_alias: str, file_path: str, no_highlight: bool):
         # Fetch file content from API
         from .api_clients.repos_client import ReposAPIClient
 
-        async def fetch_file_content():
+        def fetch_file_content():
             client = ReposAPIClient(
                 server_url=server_url,
                 credentials=credentials,
                 project_root=project_root,
             )
             try:
-                return await client.get_file_content(  # type: ignore[misc]
+                return client.get_file_content(
                     repo_alias=user_alias, file_path=file_path
                 )
             finally:
                 client.close()
 
-        file_data = asyncio.run(fetch_file_content())
+        file_data = fetch_file_content()
 
         # Check if binary file
         if file_data.get("is_binary"):
@@ -16037,14 +16030,14 @@ def admin_repos_list(ctx, json_output: bool):
 
         try:
 
-            async def fetch_admin_data():
+            def fetch_admin_data():
                 try:
-                    return await admin_client.list_golden_repositories()  # type: ignore[misc]
+                    return admin_client.list_golden_repositories()
                 finally:
                     # Ensure client is properly closed to avoid resource warnings
                     admin_client.close()
 
-            result = run_async(fetch_admin_data())
+            result = fetch_admin_data()
             repositories = result.get("golden_repositories", [])
             total = result.get("total", 0)
 
