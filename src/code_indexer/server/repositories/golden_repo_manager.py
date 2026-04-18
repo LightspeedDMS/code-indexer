@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 
 logger = logging.getLogger(__name__)
 
@@ -905,9 +906,13 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_clone_timeout,
+                env=build_non_interactive_git_env(),
             )
             return result.returncode == 0
-        except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+            logger.debug(
+                "Repository accessibility check failed for %s: %s", repo_url, e
+            )
             return False
 
     def _clone_repository(self, repo_url: str, alias: str, branch: str) -> str:
@@ -1054,6 +1059,7 @@ class GoldenRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.resource_config.git_pull_timeout,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -2129,6 +2135,7 @@ class GoldenRepoManager:
             text=True,
             timeout=git_timeout,
             check=True,
+            env=build_non_interactive_git_env(),
         )
         result = subprocess.run(
             ["git", "branch", "-r"],
@@ -2137,6 +2144,7 @@ class GoldenRepoManager:
             text=True,
             timeout=git_timeout,
             check=True,
+            env=build_non_interactive_git_env(),
         )
         remote_branches = {b.strip() for b in result.stdout.splitlines() if b.strip()}
         if f"origin/{target_branch}" not in remote_branches:
@@ -2157,6 +2165,7 @@ class GoldenRepoManager:
             text=True,
             timeout=git_timeout,
             check=True,
+            env=build_non_interactive_git_env(),
         )
         subprocess.run(
             ["git", "pull", "origin", target_branch],
@@ -2165,6 +2174,7 @@ class GoldenRepoManager:
             text=True,
             timeout=git_timeout,
             check=True,
+            env=build_non_interactive_git_env(),
         )
 
     def _cb_cidx_index(self, base_clone_path: str) -> None:

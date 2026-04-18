@@ -22,3 +22,4 @@
 - [feedback_bump_version_before_staging.md](feedback_bump_version_before_staging.md) - ALWAYS bump version + tag BEFORE promoting to staging — auto-deployer requires it
 - [feedback_check_running_jobs_before_restart.md](feedback_check_running_jobs_before_restart.md) - NEVER restart local/staging cidx-server without checking for active long-running jobs first
 - [feedback_trust_codex_first_pass.md](feedback_trust_codex_first_pass.md) - When codex pressure-test flags over-engineering, SIMPLIFY immediately — do not commission architect counter-reviews that rubber-stamp complexity
+- [feedback_targeted_scope_discipline.md](feedback_targeted_scope_discipline.md) - Targeted improvement requests (pagination, one endpoint) must NOT trigger UI rewrites, column/button deletions, or styling changes — preserve template exactly and patch only requested behavior

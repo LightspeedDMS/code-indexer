@@ -311,6 +311,33 @@ class TestGitRetryLogic:
                 assert call_count == 2
 
 
+class TestGetGitEnvironmentSshSafety:
+    """Test that get_git_environment includes non-interactive SSH settings."""
+
+    def test_get_git_environment_has_ssh_batchmode(self, tmp_path):
+        """get_git_environment must set GIT_SSH_COMMAND with BatchMode=yes."""
+        from src.code_indexer.utils.git_runner import get_git_environment
+
+        env = get_git_environment(tmp_path)
+        assert "GIT_SSH_COMMAND" in env
+        assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
+
+    def test_get_git_environment_has_terminal_prompt_disabled(self, tmp_path):
+        """get_git_environment must set GIT_TERMINAL_PROMPT=0."""
+        from src.code_indexer.utils.git_runner import get_git_environment
+
+        env = get_git_environment(tmp_path)
+        assert env.get("GIT_TERMINAL_PROMPT") == "0"
+
+    def test_get_git_environment_still_sets_safe_directory(self, tmp_path):
+        """get_git_environment must still configure safe.directory for dubious ownership."""
+        from src.code_indexer.utils.git_runner import get_git_environment
+
+        env = get_git_environment(tmp_path)
+        assert env.get("GIT_CONFIG_KEY_0") == "safe.directory"
+        assert str(tmp_path.resolve()) in env.get("GIT_CONFIG_VALUE_0", "")
+
+
 class TestGitRetryIntegrationWithExistingRunner:
     """Test that retry logic integrates with existing git_runner.py."""
 

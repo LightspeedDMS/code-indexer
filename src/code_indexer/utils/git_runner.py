@@ -18,11 +18,16 @@ from typing import List, Dict, Optional
 
 def get_git_environment(project_dir: Path) -> Dict[str, str]:
     """
-    Get environment variables for git commands to handle dubious ownership.
+    Get environment variables for git commands to handle dubious ownership
+    and prevent SSH interactive prompts.
 
     This is critical for running under sudo or in environments where the
     repository owner differs from the current user (e.g., Docker, CI/CD,
     claude batch server).
+
+    Merges the non-interactive SSH env vars from build_non_interactive_git_env
+    so that every remote git operation using this function fails fast instead
+    of blocking on an SSH password prompt.
 
     Args:
         project_dir: Path to the project directory
@@ -30,7 +35,10 @@ def get_git_environment(project_dir: Path) -> Dict[str, str]:
     Returns:
         Dictionary of environment variables for git commands
     """
-    env = os.environ.copy()
+    from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+
+    # Start with SSH-safe base (GIT_SSH_COMMAND + GIT_TERMINAL_PROMPT + os.environ)
+    env: Dict[str, str] = build_non_interactive_git_env()
 
     # Handle dubious ownership by setting safe.directory
     # This allows git to work even when the repo is owned by a different user

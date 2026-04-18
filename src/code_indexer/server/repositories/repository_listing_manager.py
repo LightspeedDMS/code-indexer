@@ -6,6 +6,7 @@ Handles both golden repositories and user activated repositories.
 """
 
 from code_indexer.server.logging_utils import format_error_log, get_log_extra
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 
 import os
 import subprocess
@@ -260,6 +261,7 @@ class RepositoryListingManager:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:

@@ -4,6 +4,7 @@ v9.3.7: Verified self-restart + marker + forced-redeploy cycle on staging.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from code_indexer.server.utils.ripgrep_installer import RipgrepInstaller
 from datetime import datetime
 from pathlib import Path
@@ -454,6 +455,7 @@ class DeploymentExecutor:
                 cwd=self.repo_path,
                 capture_output=True,
                 text=True,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -799,6 +801,7 @@ class DeploymentExecutor:
                 capture_output=True,
                 text=True,
                 timeout=60,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:

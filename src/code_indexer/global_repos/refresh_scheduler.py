@@ -18,6 +18,7 @@ from typing import Any, Dict, List, NoReturn, Optional, Union, TYPE_CHECKING, ca
 from code_indexer.config import ConfigManager
 from .alias_manager import AliasManager
 from .git_error_classifier import GitFetchError
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from .git_pull_updater import GitPullUpdater
 from .meta_directory_updater import MetaDirectoryUpdater
 from .update_strategy import UpdateStrategy
@@ -395,6 +396,7 @@ class RefreshScheduler:
                 capture_output=True,
                 text=True,
                 timeout=self.CLONE_TIMEOUT_SECONDS,
+                env=build_non_interactive_git_env(),
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.critical(

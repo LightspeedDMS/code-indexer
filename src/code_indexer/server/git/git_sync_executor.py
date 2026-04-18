@@ -16,6 +16,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -33,6 +34,7 @@ from ...utils.git_runner import (
 )
 from ..services.git_state_manager import GitStateManager
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 
 
 # Configure logging
@@ -527,11 +529,14 @@ class GitSyncExecutor:
             )
 
         # Set up authentication environment if configured
-        env = os.environ.copy()
+        env = build_non_interactive_git_env()
 
-        # SSH authentication
+        # SSH authentication: append specific key path to the non-interactive command
         if self.auth_config["ssh"].get("key_path"):
-            env["GIT_SSH_COMMAND"] = f"ssh -i {self.auth_config['ssh']['key_path']}"
+            env["GIT_SSH_COMMAND"] = (
+                env["GIT_SSH_COMMAND"]
+                + f" -i {shlex.quote(self.auth_config['ssh']['key_path'])}"
+            )
             if self.auth_config["ssh"].get("passphrase"):
                 # Note: In production, use a proper SSH agent or credential manager
                 logger.warning(

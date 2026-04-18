@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.2
+
+> Note: tags v9.20.0 and v9.20.1 were pushed to origin pointing at earlier commits (pre-commit mypy hook blocked the intended commits but the tag pushes succeeded). Per CLAUDE.md tag-immutability policy ("NEVER replace a tag on a remote"), the release is re-cut as v9.20.2. Content identical to what v9.20.0 was intended to deliver, plus two mypy fixes: `git_subprocess_env.py` now uses `dict(os.environ)` instead of `os.environ.copy()` for a proper `dict[str, str]` return type, and `git_runner.py:41` carries an explicit `env: Dict[str, str]` annotation so the inferred type propagates through the helper chain.
+
+### Features
+
+- feat(#754): Auto-Discovery Client-Side Pagination. Replaced server-paged auto-discovery with a single exhaustive upstream fetch plus client-side pagination for both GitLab and GitHub. New JSON endpoints `GET /admin/api/discovery/{platform}/all` (returns `{repositories, total_source, total_unregistered}` with each repo annotated `is_hidden`) and `POST /admin/api/discovery/{platform}/enrich` (max 50 clone_urls per call, returns `{enrichments: {clone_url: info}}` with GitLab GraphQL batching of 10 and per-repo soft-fail). Frontend `auto_discovery.html` uses a client-side pagination engine (pageSize=50, instant client-side search/sort/show-hidden, on-demand enrichment with DOM patching, compound-key `platform:clone_url_https` selection model, prune-on-refresh). GitHub `/enrich` is a no-op because commit data is embedded in `/all` directly (`description`, `default_branch`, `is_private`, `last_commit_hash`, `last_commit_author`, `last_commit_date`, `last_activity` all present). GitLab `/enrich` response includes `commit_hash`, `commit_author`, `commit_date` (ISO 8601), `last_activity` (ISO 8601 from `lastActivityAt`). Verified E2E against real tenants: GitLab 1037/1040 repos in one request, GitHub 113/116.
+- Viewport-aware table scrollbox: `.table-container` max-height is computed at runtime from `getBoundingClientRect().top` + `visualViewport.height` minus `.pagination` height; recomputed on window resize and on `visualViewport.resize` (zoom). Pagination bar is always visible without page scroll regardless of browser size or zoom.
+
+### Security / Stability Hardening
+
+- Server-killer SSH password-prompt hang fixed across the entire server runtime. Every `git` subprocess against a remote (`clone`, `fetch`, `pull`, `push`, `ls-remote`) now passes a hardened env via new shared helper `src/code_indexer/server/git/git_subprocess_env.py::build_non_interactive_git_env()` which sets `GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PubkeyAuthentication=yes"` plus `GIT_TERMINAL_PROMPT=0`. Before this fix, when a registered SSH key went stale or none matched, the git subprocess could hang indefinitely waiting on an interactive password prompt, blocking the worker thread and freezing the server. Audit covered `server/repositories/golden_repo_manager.py`, `server/repositories/activated_repo_manager.py`, `server/repositories/repository_listing_manager.py`, `server/services/remote_branch_service.py`, `server/services/git_operations_service.py`, `server/services/git_state_manager.py`, `server/git/git_sync_executor.py`, `server/auto_update/change_detector.py`, `server/auto_update/deployment_executor.py`, `global_repos/git_pull_updater.py`, `global_repos/refresh_scheduler.py`, `utils/git_runner.py`. Verification script in-repo confirms zero unprotected call sites remain. Regression tests in `tests/unit/server/git/test_git_subprocess_env.py` and `tests/unit/server/repositories/test_golden_repo_manager_ssh_noninteractive.py`.
+
+### Bug Fixes (discovered during Story #754 E2E)
+
+- Fixed GitLab `/enrich` returning 500 "Object of type datetime is not JSON serializable" — `commit_date` is now converted to ISO string in `enrich_repositories` before returning.
+- Fixed GitLab `/enrich` returning 500 "'NoneType' object has no attribute 'get'" — added None-guards at every GraphQL nesting level (`project`, `repository`, `tree`, `lastCommit`) so null/empty responses fail soft per-repo.
+- Added `last_activity` to GitLab `/enrich` response — GraphQL query now fetches `project.lastActivityAt`, passed through as ISO string.
+- Fixed GitHub `/all` returning a stripped 5-field dict — now includes `description`, `default_branch`, `is_private`, `last_commit_hash`, `last_commit_author`, `last_commit_date` (ISO), `last_activity` (ISO) since GitHub `/enrich` is a no-op and all data must be embedded.
+- Added max-50 validation to `/admin/api/discovery/{platform}/enrich` — requests with more than 50 clone_urls now return 400 instead of silently being processed.
+- Fixed unauthenticated requests to `/admin/api/discovery/{platform}/all` returning 500 instead of 401; now correctly returns 401.
+- Fixed per-row Hide / Unhide button silently failing — frontend now sends `application/x-www-form-urlencoded` body matching the server's `request.form()` expectation (was sending JSON).
+- Fixed `NotRequired` Python-3.11+ import crashing on Python 3.9 — now sourced from `typing_extensions`.
+
+### UI (auto-discovery)
+
+- Restored Description, Branch, Last Commit (hash+author+date), Last Activity, Visibility badge columns (a prior rewrite in this series had dropped them).
+- Restored per-row Hide / Unhide button and batch-create modal with branch-selection dropdowns.
+- Removed per-row Add button — users select repos via checkbox and use the batch "Create Golden Repos" flow which routes through `/admin/golden-repos/batch-create` (the legacy per-row form POST routed through a single-add wizard that could trigger SSH password prompts on private repos).
+- Selection bar moved from below the panels to above the tabs.
+- Header row and search input now use theme-aware colors (`var(--card-sectioning-background-color)`, `var(--form-element-background-color)`) for proper dark-theme contrast.
+- Table header is `position: sticky` so columns stay visible while scrolling; row-hover uses a subtle `rgba(255,255,255,0.04)` instead of the prior bright gray eyesore.
+
+### Breaking Changes
+
+- Removed legacy cursor-paged helpers from both providers: `_run_fill_loop`, `_FILL_SAFETY_CAP`, `_collect_unindexed_from_batch`, `_encode_cursor`, `_decode_cursor`, `_decode_cursor_payload`, `_validate_cursor_metadata`, `_extract_cursor_fields`.
+- Removed partial templates `templates/partials/gitlab_repos.html` and `templates/partials/github_repos.html` (old server-paged routes `GET /admin/partials/auto-discovery/{gitlab,github}` remain as backwards-compat fallbacks).
+
 ## v9.19.2
 
 ### Bug Fixes

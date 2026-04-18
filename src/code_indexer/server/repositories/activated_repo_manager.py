@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from .golden_repo_manager import GoldenRepoManager
 from .background_jobs import BackgroundJobManager
 from ..services.committer_resolution_service import CommitterResolutionService
+from ..git.git_subprocess_env import build_non_interactive_git_env
 from ...config import GitServiceConfig
 
 
@@ -921,6 +922,7 @@ class ActivatedRepoManager:
                     capture_output=True,
                     text=True,
                     timeout=60,
+                    env=build_non_interactive_git_env(),
                 )
 
                 if fetch_result.returncode == 0:
@@ -1194,6 +1196,7 @@ class ActivatedRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=build_non_interactive_git_env(),
             )
 
             if fetch_result.returncode != 0:
@@ -2496,6 +2499,7 @@ class ActivatedRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=60,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -2612,6 +2616,7 @@ class ActivatedRepoManager:
                 capture_output=True,
                 text=True,
                 timeout=self.GIT_FETCH_TIMEOUT,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:

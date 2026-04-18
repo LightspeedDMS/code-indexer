@@ -87,10 +87,18 @@ def _get_status(db, alias):
 
 
 def _make_service(db, job_tracker=None):
-    """Build a minimal DependencyMapService with a real _refresh_scheduler._tracking_backend."""
+    """Build a minimal DependencyMapService with real tracking backends.
+
+    Two distinct backends are wired:
+    - svc._tracking_backend: DependencyMapTrackingBackend — used by detect_changes()
+      (has get_tracking / update_tracking for commit-hash comparisons)
+    - svc._refresh_scheduler._tracking_backend: DescriptionRefreshTrackingBackend —
+      used by _queue_lifecycle_backfill_if_needed() (has get_stale_repos / upsert_tracking)
+    """
     from code_indexer.server.services.dependency_map_service import DependencyMapService
     from code_indexer.server.storage.sqlite_backends import (
         DescriptionRefreshTrackingBackend,
+        DependencyMapTrackingBackend,
     )
 
     svc = object.__new__(DependencyMapService)
@@ -98,17 +106,21 @@ def _make_service(db, job_tracker=None):
     svc._job_tracker = job_tracker
     svc._lock = threading.Lock()
     svc._config_manager = MagicMock()
-    svc._tracking_backend = MagicMock()
     svc._analyzer = MagicMock()
     svc._golden_repos_manager = MagicMock()
     svc._activity_journal = MagicMock()
     svc._stop_event = threading.Event()
     svc._daemon_thread = None
 
-    # Wire a real refresh scheduler with a real tracking backend pointing at our DB
-    tracking_backend = DescriptionRefreshTrackingBackend(str(db))
+    # DependencyMapTrackingBackend: used by detect_changes() via get_tracking().
+    dep_map_tracking = DependencyMapTrackingBackend(str(db))
+    svc._tracking_backend = dep_map_tracking
+
+    # DescriptionRefreshTrackingBackend: used by _queue_lifecycle_backfill_if_needed()
+    # via get_stale_repos / upsert_tracking.
+    desc_refresh_tracking = DescriptionRefreshTrackingBackend(str(db))
     refresh_scheduler = MagicMock()
-    refresh_scheduler._tracking_backend = tracking_backend
+    refresh_scheduler._tracking_backend = desc_refresh_tracking
     refresh_scheduler._db_path = str(db)
     svc._refresh_scheduler = refresh_scheduler
 
@@ -292,10 +304,6 @@ class TestBackfillRunsUnconditionally:
         mock_config.dependency_map_enabled = True
         mock_config.dependency_map_interval_hours = 24
         svc._config_manager.get_claude_integration_config.return_value = mock_config
-
-        # detect_changes() calls get_tracking() first, then json.loads(result["commit_hashes"]).
-        # Return a minimal dict with commit_hashes=None so detect_changes runs normally.
-        svc._tracking_backend.get_tracking.return_value = {"commit_hashes": None}
 
         call_order = []
         conn_manager = svc._refresh_scheduler._tracking_backend._conn_manager

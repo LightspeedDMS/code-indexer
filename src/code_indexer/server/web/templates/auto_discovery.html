@@ -11,7 +11,7 @@
     <p class="subtitle">Discover repositories from GitLab and GitHub to add as golden repos</p>
 </div>
 
-<!-- Selection Summary Bar -->
+<!-- Selection Summary Bar (top placement) -->
 <div id="selection-bar" class="selection-bar" style="display: none;">
     <span id="selection-count">0 repositories selected</span>
     <div class="selection-actions">
@@ -20,6 +20,34 @@
             Create Golden Repos
         </button>
     </div>
+</div>
+
+<!-- Platform tabs -->
+<div class="platform-tabs" role="tablist">
+    <button
+        id="tab-gitlab"
+        role="tab"
+        aria-selected="true"
+        aria-controls="panel-gitlab"
+        class="tab-btn active"
+        onclick="switchPlatform('gitlab')"
+    >GitLab</button>
+    <button
+        id="tab-github"
+        role="tab"
+        aria-selected="false"
+        aria-controls="panel-github"
+        class="tab-btn"
+        onclick="switchPlatform('github')"
+    >GitHub</button>
+</div>
+
+<!-- Per-platform panels -->
+<div id="panel-gitlab" role="tabpanel" aria-labelledby="tab-gitlab" class="platform-panel">
+    <div id="panel-content-gitlab"></div>
+</div>
+<div id="panel-github" role="tabpanel" aria-labelledby="tab-github" class="platform-panel" hidden>
+    <div id="panel-content-github"></div>
 </div>
 
 <!-- Batch Create Modal -->
@@ -42,109 +70,516 @@
     </article>
 </dialog>
 
-<!-- GitLab Section -->
-<section class="discovery-section">
-    <div class="section-header">
-        <h2>GitLab Repositories</h2>
-        <div class="section-actions">
-            <button
-                id="refresh-gitlab-btn"
-                class="outline"
-                hx-get="/admin/partials/auto-discovery/gitlab"
-                hx-target="#gitlab-repos-section"
-                hx-swap="innerHTML"
-                hx-indicator="#gitlab-refresh-indicator"
-            >
-                Refresh
-            </button>
-            <span id="gitlab-refresh-indicator" class="htmx-indicator">Loading...</span>
-        </div>
-    </div>
-
-    <!-- GitLab Repositories List (loaded via HTMX) -->
-    <div id="gitlab-repos-section"
-        hx-get="/admin/partials/auto-discovery/gitlab"
-        hx-trigger="load"
-        hx-swap="innerHTML"
-        hx-indicator="#gitlab-load-indicator">
-        <div class="loading-container">
-            <span id="gitlab-load-indicator" class="htmx-indicator">Loading GitLab repositories...</span>
-        </div>
-    </div>
-</section>
-
-<!-- GitHub Section -->
-<section class="discovery-section">
-    <div class="section-header">
-        <h2>GitHub Repositories</h2>
-        <div class="section-actions">
-            <button
-                id="refresh-github-btn"
-                class="outline"
-                hx-get="/admin/partials/auto-discovery/github"
-                hx-target="#github-repos-section"
-                hx-swap="innerHTML"
-                hx-indicator="#github-refresh-indicator"
-            >
-                Refresh
-            </button>
-            <span id="github-refresh-indicator" class="htmx-indicator">Loading...</span>
-        </div>
-    </div>
-
-    <!-- GitHub Repositories List (loaded via HTMX) -->
-    <div id="github-repos-section"
-        hx-get="/admin/partials/auto-discovery/github"
-        hx-trigger="load"
-        hx-swap="innerHTML"
-        hx-indicator="#github-load-indicator">
-        <div class="loading-container">
-            <span id="github-load-indicator" class="htmx-indicator">Loading GitHub repositories...</span>
-        </div>
-    </div>
-</section>
-
 <script>
-// Global selection state (persists across pagination/search)
-const selectedRepos = new Map();  // key: clone_url, value: {platform, name, branch}
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
 
-function toggleSelectAll(platform, checked) {
-    document.querySelectorAll('input[data-platform="' + platform + '"]')
-        .forEach(function(checkbox) {
-            checkbox.checked = checked;
-            updateRepoSelection(checkbox);
+var PAGE_SIZE = 50;
+
+// Per-platform state keyed by platform string
+var _state = {
+    gitlab: {
+        repos: [],          // full unfiltered dataset from /all
+        enrichments: {},    // clone_url -> enrichment data
+        currentPage: 1,
+        sortField: 'name',
+        sortDir: 'asc',
+        searchQuery: '',
+        showHidden: false,
+        loading: false,
+        error: null
+    },
+    github: {
+        repos: [],
+        enrichments: {},
+        currentPage: 1,
+        sortField: 'name',
+        sortDir: 'asc',
+        searchQuery: '',
+        showHidden: false,
+        loading: false,
+        error: null
+    }
+};
+
+var _activePlatform = 'gitlab';
+
+// Compound key selection map: "{platform}:{clone_url_https}" -> repo data
+var selectedRepos = new Map();
+
+// ---------------------------------------------------------------------------
+// Platform switching
+// ---------------------------------------------------------------------------
+
+function switchPlatform(platform) {
+    _activePlatform = platform;
+
+    ['gitlab', 'github'].forEach(function(p) {
+        var tab = document.getElementById('tab-' + p);
+        var panel = document.getElementById('panel-' + p);
+        var active = (p === platform);
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        tab.classList.toggle('active', active);
+        if (active) {
+            panel.removeAttribute('hidden');
+        } else {
+            panel.setAttribute('hidden', '');
+        }
+    });
+
+    // Fetch if not already loaded and not currently loading
+    var st = _state[platform];
+    if (st.repos.length === 0 && !st.loading && !st.error) {
+        fetchAll(platform, false);
+    } else {
+        renderPanel(platform);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data fetching
+// ---------------------------------------------------------------------------
+
+function fetchAll(platform, force) {
+    var st = _state[platform];
+    st.loading = true;
+    st.error = null;
+    renderPanel(platform);
+
+    var url = '/admin/api/discovery/' + platform + '/all';
+    if (force) {
+        url += '?force=true';
+    }
+    if (st.showHidden) {
+        url += (url.indexOf('?') === -1 ? '?' : '&') + 'show_hidden=true';
+    }
+
+    fetch(url, { credentials: 'same-origin' })
+        .then(function(resp) {
+            if (!resp.ok) {
+                return resp.json().catch(function() {
+                    return { error: 'HTTP ' + resp.status };
+                }).then(function(body) {
+                    throw new Error(body.error || ('HTTP ' + resp.status));
+                });
+            }
+            return resp.json();
+        })
+        .then(function(data) {
+            st.loading = false;
+            st.repos = data.repositories || [];
+            st.currentPage = 1;
+            // On refresh, prune selections that are no longer in dataset
+            if (force) {
+                var urlSet = new Set(st.repos.map(function(r) { return r.clone_url_https; }));
+                Array.from(selectedRepos.keys()).forEach(function(key) {
+                    var parts = key.split(':');
+                    var keyPlatform = parts[0];
+                    var keyUrl = parts.slice(1).join(':');
+                    if (keyPlatform === platform && !urlSet.has(keyUrl)) {
+                        selectedRepos.delete(key);
+                    }
+                });
+            }
+            renderPanel(platform);
+            updateSelectionUI();
+        })
+        .catch(function(err) {
+            st.loading = false;
+            st.error = err.message || String(err);
+            renderPanel(platform);
         });
+}
+
+// ---------------------------------------------------------------------------
+// Enrichment
+// ---------------------------------------------------------------------------
+
+function enrichVisible(platform, visibleRepos) {
+    var st = _state[platform];
+    var toEnrich = visibleRepos
+        .map(function(r) { return r.clone_url_https; })
+        .filter(function(u) { return u && !st.enrichments[u]; });
+
+    if (toEnrich.length === 0) return;
+
+    // Batch in chunks of 50 (API max)
+    var chunks = [];
+    for (var i = 0; i < toEnrich.length; i += 50) {
+        chunks.push(toEnrich.slice(i, i + 50));
+    }
+
+    chunks.forEach(function(chunk) {
+        fetch('/admin/api/discovery/' + platform + '/enrich', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clone_urls: chunk })
+        })
+        .then(function(resp) {
+            if (!resp.ok) return null;
+            return resp.json();
+        })
+        .then(function(data) {
+            if (!data) return;
+            // data is a dict mapping clone_url -> enrichment info
+            Object.keys(data).forEach(function(url) {
+                st.enrichments[url] = data[url];
+            });
+            patchEnrichmentRows(platform, data);
+        })
+        .catch(function() {
+            // Enrichment failures are non-fatal — rows just stay without enrichment
+        });
+    });
+}
+
+function patchEnrichmentRows(platform, enrichmentData) {
+    Object.keys(enrichmentData).forEach(function(url) {
+        var row = document.querySelector(
+            '[data-platform="' + platform + '"][data-clone-url="' + CSS.escape(url) + '"]'
+        );
+        if (!row) return;
+        var info = enrichmentData[url];
+
+        var commitCell = row.querySelector('.cell-last-commit');
+        if (commitCell && info && info.commit_hash) {
+            var html = '<code class="commit-hash">' + escHtml(info.commit_hash.substring(0, 7)) + '</code>';
+            if (info.commit_author) {
+                html += '<span class="commit-author">' + escHtml(info.commit_author) + '</span>';
+            }
+            if (info.commit_date) {
+                html += '<span class="commit-date">' + escHtml(info.commit_date.substring(0, 10)) + '</span>';
+            }
+            commitCell.innerHTML = html;
+        }
+
+        var activityCells = row.querySelectorAll('td');
+        // Last Activity is the 7th td (index 6): checkbox, platform, name, description, branch, last-commit, last-activity
+        var activityCell = activityCells.length >= 7 ? activityCells[6] : null;
+        if (activityCell && info && info.last_activity) {
+            var d = new Date(info.last_activity);
+            var formatted = d.getUTCFullYear() + '-' +
+                String(d.getUTCMonth() + 1).padStart(2, '0') + '-' +
+                String(d.getUTCDate()).padStart(2, '0') + ' ' +
+                String(d.getUTCHours()).padStart(2, '0') + ':' +
+                String(d.getUTCMinutes()).padStart(2, '0');
+            activityCell.textContent = formatted;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Filtering and sorting
+// ---------------------------------------------------------------------------
+
+function getFilteredSorted(platform) {
+    var st = _state[platform];
+    var q = st.searchQuery.toLowerCase().trim();
+
+    var filtered = st.repos.filter(function(r) {
+        if (!st.showHidden && r.is_hidden) return false;
+        if (!q) return true;
+        var name = (r.name || '').toLowerCase();
+        var url = (r.clone_url_https || '').toLowerCase();
+        var ns = (r.namespace || '').toLowerCase();
+        return name.indexOf(q) !== -1 || url.indexOf(q) !== -1 || ns.indexOf(q) !== -1;
+    });
+
+    var field = st.sortField;
+    var dir = st.sortDir === 'asc' ? 1 : -1;
+    filtered.sort(function(a, b) {
+        var av = (a[field] || '').toLowerCase();
+        var bv = (b[field] || '').toLowerCase();
+        if (av < bv) return -dir;
+        if (av > bv) return dir;
+        return 0;
+    });
+
+    return filtered;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function renderPanel(platform) {
+    var container = document.getElementById('panel-content-' + platform);
+    if (!container) return;
+
+    var st = _state[platform];
+
+    if (st.loading) {
+        container.innerHTML = '<div class="loading-container"><p>Loading repositories...</p></div>';
+        return;
+    }
+
+    if (st.error) {
+        container.innerHTML =
+            '<div class="error-banner">' +
+                '<p class="error-msg">Error loading repositories: ' + escHtml(st.error) + '</p>' +
+                '<button onclick="fetchAll(\'' + platform + '\', false)" class="outline small">Retry</button>' +
+            '</div>';
+        return;
+    }
+
+    var filtered = getFilteredSorted(platform);
+    var totalFiltered = filtered.length;
+
+    // Count total repos and unregistered repos in full dataset
+    var totalSource = st.repos.filter(function(r) { return !r.is_hidden; }).length + st.repos.filter(function(r) { return r.is_hidden; }).length;
+    var totalUnregistered = st.repos.filter(function(r) { return !r.is_hidden; }).length;
+
+    var totalPages = Math.max(1, Math.ceil(totalFiltered / PAGE_SIZE));
+    if (st.currentPage > totalPages) st.currentPage = totalPages;
+
+    var startIdx = (st.currentPage - 1) * PAGE_SIZE;
+    var pageRepos = filtered.slice(startIdx, startIdx + PAGE_SIZE);
+
+    var html = '';
+
+    // Controls bar
+    html += '<div class="controls-bar">';
+    html += '<span class="count-label">' +
+        escHtml(String(totalUnregistered)) + ' unregistered of ' + escHtml(String(st.repos.length)) + ' total' +
+        (st.searchQuery ? ' (' + escHtml(String(totalFiltered)) + ' matching search)' : '') +
+        '</span>';
+    html += '<div class="controls-right">';
+    html += '<input type="text" class="search-input" placeholder="Search..." ' +
+        'value="' + escHtml(st.searchQuery) + '" ' +
+        'oninput="onSearch(\'' + platform + '\', this.value)">';
+    html += '<label class="show-hidden-label">' +
+        '<input type="checkbox" ' + (st.showHidden ? 'checked' : '') + ' ' +
+        'onchange="onShowHidden(\'' + platform + '\', this.checked)"> ' +
+        'Show hidden</label>';
+    html += '<button onclick="fetchAll(\'' + platform + '\', true)" class="outline small">Refresh</button>';
+    html += '</div></div>';
+
+    // Table
+    html += '<div class="table-container"><table class="discovery-table"><thead><tr>';
+    html += '<th><input type="checkbox" id="select-all-' + platform + '" ' +
+        'onchange="toggleSelectAll(\'' + platform + '\', this.checked)"></th>';
+    html += '<th>Platform</th>';
+    html += sortHeader(platform, 'name', 'Name', st);
+    html += sortHeader(platform, 'description', 'Description', st);
+    html += '<th>Branch</th>';
+    html += '<th>Last Commit</th>';
+    html += '<th>Last Activity</th>';
+    html += '<th>Visibility</th>';
+    html += '<th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    if (pageRepos.length === 0) {
+        html += '<tr><td colspan="9" class="empty-cell">No repositories found</td></tr>';
+    } else {
+        var csrfToken = getCsrfToken() || '';
+        pageRepos.forEach(function(repo) {
+            var key = platform + ':' + repo.clone_url_https;
+            var isSelected = selectedRepos.has(key);
+            var rowClass = repo.is_hidden ? 'row-hidden' : '';
+            var enrichment = st.enrichments[repo.clone_url_https];
+            // Last Commit: hash (7 chars) + author + date from enrichment,
+            // falling back to repo-level fields (populated for GitHub since /enrich is a no-op)
+            var hash = (enrichment && enrichment.commit_hash) || repo.last_commit_hash;
+            var author = (enrichment && enrichment.commit_author) || repo.last_commit_author;
+            var date = (enrichment && enrichment.commit_date) || repo.last_commit_date;
+            var lastCommitHtml = '';
+            if (hash) {
+                lastCommitHtml = '<code class="commit-hash">' + escHtml(hash.substring(0, 7)) + '</code>';
+                if (author) {
+                    lastCommitHtml += '<span class="commit-author">' + escHtml(author) + '</span>';
+                }
+                if (date) {
+                    lastCommitHtml += '<span class="commit-date">' + escHtml(date.substring(0, 10)) + '</span>';
+                }
+            }
+            // Last Activity from enrichment or repo field — format as YYYY-MM-DD HH:MM
+            function fmtActivity(isoStr) {
+                if (!isoStr) return '';
+                var d = new Date(isoStr);
+                if (isNaN(d.getTime())) return isoStr.substring(0, 10);
+                return d.getUTCFullYear() + '-' +
+                    String(d.getUTCMonth() + 1).padStart(2, '0') + '-' +
+                    String(d.getUTCDate()).padStart(2, '0') + ' ' +
+                    String(d.getUTCHours()).padStart(2, '0') + ':' +
+                    String(d.getUTCMinutes()).padStart(2, '0');
+            }
+            var lastActivity = (enrichment && enrichment.last_activity)
+                ? fmtActivity(enrichment.last_activity)
+                : fmtActivity(repo.last_activity);
+            html += '<tr class="' + rowClass + '" ' +
+                'data-platform="' + escHtml(platform) + '" ' +
+                'data-clone-url="' + escHtml(repo.clone_url_https) + '">';
+            html += '<td><input type="checkbox" class="repo-checkbox" ' +
+                'data-platform="' + escHtml(platform) + '" ' +
+                'data-name="' + escHtml(repo.name || '') + '" ' +
+                'data-branch="' + escHtml(repo.default_branch || 'main') + '" ' +
+                'value="' + escHtml(repo.clone_url_https) + '" ' +
+                (isSelected ? 'checked' : '') + ' ' +
+                'onchange="onCheckboxChange(\'' + platform + '\', this)"></td>';
+            html += '<td><span class="platform-badge ' + escHtml(platform) + '">' + escHtml(platform.charAt(0).toUpperCase() + platform.slice(1)) + '</span></td>';
+            html += '<td><strong>' + escHtml(repo.name || '') + '</strong></td>';
+            html += '<td class="repo-description">' + escHtml(repo.description || '-') + '</td>';
+            html += '<td><code>' + escHtml(repo.default_branch || '') + '</code></td>';
+            html += '<td class="cell-last-commit last-commit-cell">' + lastCommitHtml + '</td>';
+            html += '<td>' + escHtml(lastActivity) + '</td>';
+            var visClass = repo.is_private ? 'private' : 'public';
+            var visLabel = repo.is_private ? 'Private' : 'Public';
+            html += '<td><span class="visibility-badge ' + visClass + '">' + visLabel + '</span></td>';
+            // Hide/Unhide button: toggles the hidden flag via the discovery API.
+            // (Per-row Add removed — use the checkbox + top "Create Golden Repos" flow.)
+            var repoId = escHtml(platform + ':' + (repo.clone_url_https || ''));
+            html += '<td class="actions-cell">';
+            if (repo.is_hidden) {
+                html += '<button type="button" class="small outline" style="display:block;margin-top:4px;width:100%;" ' +
+                    'onclick="doUnhide(\'' + repoId + '\')">Unhide</button>';
+            } else {
+                html += '<button type="button" class="small outline secondary" style="display:block;margin-top:4px;width:100%;" ' +
+                    'onclick="doHide(\'' + repoId + '\')">Hide</button>';
+            }
+            html += '</td>';
+            html += '</tr>';
+        });
+    }
+
+    html += '</tbody></table></div>';
+
+    // Pagination controls
+    html += renderPagination(platform, st.currentPage, totalPages, totalFiltered);
+
+    container.innerHTML = html;
+
+    // Trigger enrichment for visible rows that haven't been enriched
+    enrichVisible(platform, pageRepos);
+}
+
+function sortHeader(platform, field, label, st) {
+    var indicator = '';
+    if (st.sortField === field) {
+        indicator = st.sortDir === 'asc' ? ' &uarr;' : ' &darr;';
+    }
+    return '<th class="sortable" onclick="onSort(\'' + platform + '\', \'' + field + '\')">' +
+        escHtml(label) + indicator + '</th>';
+}
+
+function renderPagination(platform, currentPage, totalPages, totalItems) {
+    if (totalPages <= 1) return '';
+
+    var html = '<div class="pagination">';
+    html += '<button onclick="goPage(\'' + platform + '\', 1)" ' +
+        (currentPage <= 1 ? 'disabled' : '') + ' class="outline small">First</button>';
+    html += '<button onclick="goPage(\'' + platform + '\', ' + (currentPage - 1) + ')" ' +
+        (currentPage <= 1 ? 'disabled' : '') + ' class="outline small">Prev</button>';
+    html += '<span class="page-info">Page ' + currentPage + ' of ' + totalPages +
+        ' (' + totalItems + ' repos)</span>';
+    html += '<button onclick="goPage(\'' + platform + '\', ' + (currentPage + 1) + ')" ' +
+        (currentPage >= totalPages ? 'disabled' : '') + ' class="outline small">Next</button>';
+    html += '<button onclick="goPage(\'' + platform + '\', ' + totalPages + ')" ' +
+        (currentPage >= totalPages ? 'disabled' : '') + ' class="outline small">Last</button>';
+    html += '<input type="number" class="page-jump" min="1" max="' + totalPages + '" ' +
+        'value="' + currentPage + '" ' +
+        'onchange="goPage(\'' + platform + '\', parseInt(this.value))" ' +
+        'title="Jump to page">';
+    html += '</div>';
+    return html;
+}
+
+// ---------------------------------------------------------------------------
+// Event handlers
+// ---------------------------------------------------------------------------
+
+function onSearch(platform, value) {
+    var st = _state[platform];
+    st.searchQuery = value;
+    st.currentPage = 1;
+    renderPanel(platform);
+}
+
+function onShowHidden(platform, checked) {
+    var st = _state[platform];
+    st.showHidden = checked;
+    st.currentPage = 1;
+    renderPanel(platform);
+}
+
+function onSort(platform, field) {
+    var st = _state[platform];
+    if (st.sortField === field) {
+        st.sortDir = st.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+        st.sortField = field;
+        st.sortDir = 'asc';
+    }
+    renderPanel(platform);
+}
+
+function goPage(platform, page) {
+    var st = _state[platform];
+    var filtered = getFilteredSorted(platform);
+    var totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    if (page < 1) page = 1;
+    if (page > totalPages) page = totalPages;
+    st.currentPage = page;
+    renderPanel(platform);
+}
+
+function onCheckboxChange(platform, checkbox) {
+    var url = checkbox.value;
+    var key = platform + ':' + url;
+    if (checkbox.checked) {
+        selectedRepos.set(key, {
+            platform: platform,
+            name: checkbox.dataset.name,
+            branch: checkbox.dataset.branch,
+            clone_url: url
+        });
+    } else {
+        selectedRepos.delete(key);
+    }
     updateSelectionUI();
 }
 
-function updateRepoSelection(checkbox) {
-    var url = checkbox.value;
-    if (checkbox.checked) {
-        selectedRepos.set(url, {
-            platform: checkbox.dataset.platform,
-            name: checkbox.dataset.name,
-            branch: checkbox.dataset.branch
+function toggleSelectAll(platform, checked) {
+    var st = _state[platform];
+    var filtered = getFilteredSorted(platform);
+    var startIdx = (st.currentPage - 1) * PAGE_SIZE;
+    var pageRepos = filtered.slice(startIdx, startIdx + PAGE_SIZE);
+
+    pageRepos.forEach(function(repo) {
+        var key = platform + ':' + repo.clone_url_https;
+        if (checked) {
+            selectedRepos.set(key, {
+                platform: platform,
+                name: repo.name || '',
+                branch: repo.default_branch || 'main',
+                clone_url: repo.clone_url_https
+            });
+        } else {
+            selectedRepos.delete(key);
+        }
+    });
+
+    // Sync checkboxes in DOM
+    document.querySelectorAll('input.repo-checkbox[data-platform="' + platform + '"]')
+        .forEach(function(cb) {
+            var k = platform + ':' + cb.value;
+            cb.checked = selectedRepos.has(k);
         });
-    } else {
-        selectedRepos.delete(url);
-    }
+
+    updateSelectionUI();
 }
 
 function updateSelectionUI() {
     var count = selectedRepos.size;
-    document.getElementById('selection-count').textContent = count + ' repositor' + (count === 1 ? 'y' : 'ies') + ' selected';
-    document.getElementById('selection-bar').style.display = count > 0 ? 'flex' : 'none';
-    document.getElementById('create-btn').disabled = count === 0;
-}
-
-// Restore selections after HTMX swap
-document.body.addEventListener('htmx:afterSettle', restoreSelections);
-
-function restoreSelections() {
-    document.querySelectorAll('input.repo-checkbox').forEach(function(checkbox) {
-        checkbox.checked = selectedRepos.has(checkbox.value);
-    });
-    updateSelectionUI();
+    var countEl = document.getElementById('selection-count');
+    if (countEl) {
+        countEl.textContent = count + ' repositor' + (count === 1 ? 'y' : 'ies') + ' selected';
+    }
+    var bar = document.getElementById('selection-bar');
+    if (bar) bar.style.display = count > 0 ? 'flex' : 'none';
+    var btn = document.getElementById('create-btn');
+    if (btn) btn.disabled = count === 0;
 }
 
 function clearSelection() {
@@ -158,35 +593,31 @@ function clearSelection() {
     updateSelectionUI();
 }
 
+// ---------------------------------------------------------------------------
+// Batch create modal
+// ---------------------------------------------------------------------------
+
 async function showCreateDialog() {
     var modal = document.getElementById('batch-create-modal');
     var list = document.getElementById('batch-repo-list');
     var countSpan = document.getElementById('batch-count');
 
-    // Defensive null checks for DOM elements
     if (!modal || !list || !countSpan) {
-        console.error('showCreateDialog: Required elements not found', {
-            modal: !!modal,
-            list: !!list,
-            countSpan: !!countSpan
-        });
-        alert('Error: Dialog elements not found. Please refresh the page (Ctrl+Shift+R).');
+        alert('Error: Dialog elements not found. Please refresh the page.');
         return;
     }
 
-    // Clear and show loading state
     list.innerHTML = '';
     countSpan.textContent = selectedRepos.size;
 
-    // Build initial list with loading spinners
-    selectedRepos.forEach(function(data, url) {
+    selectedRepos.forEach(function(data, key) {
         var item = document.createElement('div');
         item.className = 'batch-repo-item';
-        item.dataset.url = url;
+        item.dataset.key = key;
         item.innerHTML =
             '<div class="repo-info">' +
-                '<span class="repo-platform">' + data.platform.toUpperCase() + '</span>' +
-                '<span class="repo-name">' + data.name + '</span>' +
+                '<span class="repo-platform">' + escHtml(data.platform.toUpperCase()) + '</span>' +
+                '<span class="repo-name">' + escHtml(data.name) + '</span>' +
             '</div>' +
             '<div class="branch-select-container">' +
                 '<span class="branch-loading">Loading branches...</span>' +
@@ -195,19 +626,13 @@ async function showCreateDialog() {
     });
 
     modal.showModal();
-
-    // Fetch branches for all selected repos
     await fetchBranchesForSelectedRepos();
 }
 
 async function fetchBranchesForSelectedRepos() {
-    // Build request with all selected repos
     var repos = [];
-    selectedRepos.forEach(function(data, url) {
-        repos.push({
-            clone_url: url,
-            platform: data.platform
-        });
+    selectedRepos.forEach(function(data) {
+        repos.push({ clone_url: data.clone_url, platform: data.platform });
     });
 
     if (repos.length === 0) return;
@@ -215,9 +640,8 @@ async function fetchBranchesForSelectedRepos() {
     try {
         var response = await fetch('/admin/api/discovery/branches', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ repos: repos })
         });
 
@@ -226,94 +650,71 @@ async function fetchBranchesForSelectedRepos() {
         }
 
         var results = await response.json();
-
-        // Update each repo item with branches or error
-        selectedRepos.forEach(function(data, url) {
-            var result = results[url];
-            updateRepoBranchDropdown(url, data, result);
+        selectedRepos.forEach(function(data, key) {
+            updateRepoBranchDropdown(key, data, results[data.clone_url] || { branches: [], error: 'Not found' });
         });
-
     } catch (error) {
-        console.error('Error fetching branches:', error);
-        // Show error for all repos
-        selectedRepos.forEach(function(data, url) {
-            updateRepoBranchDropdown(url, data, {
-                branches: [],
-                default_branch: null,
-                error: error.message
-            });
+        selectedRepos.forEach(function(data, key) {
+            updateRepoBranchDropdown(key, data, { branches: [], default_branch: null, error: error.message });
         });
     }
 }
 
-function updateRepoBranchDropdown(url, repoData, branchResult) {
-    var item = document.querySelector('.batch-repo-item[data-url="' + CSS.escape(url) + '"]');
+function updateRepoBranchDropdown(key, repoData, branchResult) {
+    var item = document.querySelector('.batch-repo-item[data-key="' + CSS.escape(key) + '"]');
     if (!item) return;
-
     var container = item.querySelector('.branch-select-container');
     if (!container) return;
 
     if (branchResult.error) {
-        // Show error with fallback to default branch
         container.innerHTML =
             '<div class="branch-error">' +
-                '<span class="error-msg" title="' + branchResult.error + '">Error loading branches</span>' +
-                '<span class="branch-fallback">Using: ' + repoData.branch + '</span>' +
+                '<span class="error-msg" title="' + escHtml(branchResult.error) + '">Error loading branches</span>' +
+                '<span class="branch-fallback">Using: ' + escHtml(repoData.branch) + '</span>' +
             '</div>';
-    } else if (branchResult.branches.length === 0) {
-        // No branches found, use default
-        container.innerHTML =
-            '<span class="branch-fallback">Branch: ' + repoData.branch + '</span>';
-    } else {
-        // Show dropdown with branches
-        var select = document.createElement('select');
-        select.className = 'branch-select';
-        select.dataset.url = url;
-        select.onchange = function() { onBranchChange(url, this.value); };
+        return;
+    }
 
-        // Determine which branch to select by default
-        var defaultBranch = branchResult.default_branch || repoData.branch;
+    if (!branchResult.branches || branchResult.branches.length === 0) {
+        container.innerHTML = '<span class="branch-fallback">Branch: ' + escHtml(repoData.branch) + '</span>';
+        return;
+    }
 
-        branchResult.branches.forEach(function(branch) {
-            var option = document.createElement('option');
-            option.value = branch;
-            option.textContent = branch;
-            if (branch === defaultBranch) {
-                option.selected = true;
-            }
-            select.appendChild(option);
-        });
+    var defaultBranch = branchResult.default_branch || repoData.branch;
+    var select = document.createElement('select');
+    select.className = 'branch-select';
+    select.dataset.key = key;
+    select.onchange = function() { onBranchChange(key, this.value); };
 
-        // If default branch not in list, add it at top
-        if (defaultBranch && !branchResult.branches.includes(defaultBranch)) {
-            var option = document.createElement('option');
-            option.value = defaultBranch;
-            option.textContent = defaultBranch + ' (default)';
-            option.selected = true;
-            select.insertBefore(option, select.firstChild);
-        }
+    branchResult.branches.forEach(function(branch) {
+        var option = document.createElement('option');
+        option.value = branch;
+        option.textContent = branch;
+        if (branch === defaultBranch) option.selected = true;
+        select.appendChild(option);
+    });
 
-        container.innerHTML = '';
-        container.appendChild(select);
+    if (defaultBranch && !branchResult.branches.includes(defaultBranch)) {
+        var extra = document.createElement('option');
+        extra.value = defaultBranch;
+        extra.textContent = defaultBranch + ' (default)';
+        extra.selected = true;
+        select.insertBefore(extra, select.firstChild);
+    }
 
-        // Update selectedRepos with the selected branch
-        var selectedBranch = select.value;
-        if (selectedBranch !== repoData.branch) {
-            selectedRepos.set(url, {
-                ...repoData,
-                branch: selectedBranch
-            });
-        }
+    container.innerHTML = '';
+    container.appendChild(select);
+
+    if (select.value !== repoData.branch) {
+        var updated = Object.assign({}, repoData, { branch: select.value });
+        selectedRepos.set(key, updated);
     }
 }
 
-function onBranchChange(url, newBranch) {
-    var data = selectedRepos.get(url);
+function onBranchChange(key, newBranch) {
+    var data = selectedRepos.get(key);
     if (data) {
-        selectedRepos.set(url, {
-            ...data,
-            branch: newBranch
-        });
+        selectedRepos.set(key, Object.assign({}, data, { branch: newBranch }));
     }
 }
 
@@ -323,9 +724,9 @@ function closeBatchModal() {
 
 async function executeBatchCreate() {
     var repos = [];
-    selectedRepos.forEach(function(data, url) {
+    selectedRepos.forEach(function(data) {
         repos.push({
-            clone_url: url,
+            clone_url: data.clone_url,
             alias: data.name,
             branch: data.branch,
             platform: data.platform
@@ -335,13 +736,9 @@ async function executeBatchCreate() {
     var formData = new FormData();
     formData.append('repos', JSON.stringify(repos));
 
-    // Get CSRF token from cookie or form
     var csrfToken = getCsrfToken();
-    if (csrfToken) {
-        formData.append('csrf_token', csrfToken);
-    }
+    if (csrfToken) formData.append('csrf_token', csrfToken);
 
-    // Disable button during request
     var executeBtn = document.getElementById('execute-batch-btn');
     executeBtn.disabled = true;
     executeBtn.innerHTML = 'Creating...';
@@ -349,62 +746,353 @@ async function executeBatchCreate() {
     try {
         var response = await fetch('/admin/golden-repos/batch-create', {
             method: 'POST',
+            credentials: 'same-origin',
             body: formData
         });
         var result = await response.json();
-
         closeBatchModal();
         clearSelection();
-
-        // Show result message
-        showNotification(result.summary, result.success ? 'success' : 'warning');
-
-        // Reload discovery to update exclusions
-        htmx.ajax('GET', '/admin/partials/auto-discovery/gitlab?page=1', {target: '#gitlab-repos-section', swap: 'innerHTML'});
-        htmx.ajax('GET', '/admin/partials/auto-discovery/github?page=1', {target: '#github-repos-section', swap: 'innerHTML'});
+        alert(result.summary || (result.success ? 'Created successfully.' : 'Some errors occurred.'));
+        // Refresh both platforms
+        fetchAll(_activePlatform, true);
     } catch (error) {
-        showNotification('Error creating repositories: ' + error.message, 'error');
+        alert('Error creating repositories: ' + error.message);
     } finally {
         executeBtn.disabled = false;
         executeBtn.innerHTML = 'Create <span id="batch-count">' + selectedRepos.size + '</span> Repositories';
     }
 }
 
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+function doHide(repoId) {
+    var csrfToken = getCsrfToken() || '';
+    var body = 'repo_identifier=' + encodeURIComponent(repoId) +
+               '&csrf_token=' + encodeURIComponent(csrfToken);
+    fetch('/admin/api/discovery/hide', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+    }).then(function(resp) {
+        if (resp.ok) {
+            // Update local state and re-render
+            var parts = repoId.split(':');
+            var p = parts[0];
+            var st = _state[p];
+            if (st) {
+                st.repos.forEach(function(r) {
+                    if ((p + ':' + r.clone_url_https) === repoId) {
+                        r.is_hidden = true;
+                    }
+                });
+                renderPanel(p);
+            }
+        }
+    }).catch(function() {
+        // Non-fatal — ignore hide failures silently
+    });
+}
+
+function doUnhide(repoId) {
+    var csrfToken = getCsrfToken() || '';
+    var body = 'repo_identifier=' + encodeURIComponent(repoId) +
+               '&csrf_token=' + encodeURIComponent(csrfToken);
+    fetch('/admin/api/discovery/unhide', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+    }).then(function(resp) {
+        if (resp.ok) {
+            var parts = repoId.split(':');
+            var p = parts[0];
+            var st = _state[p];
+            if (st) {
+                st.repos.forEach(function(r) {
+                    if ((p + ':' + r.clone_url_https) === repoId) {
+                        r.is_hidden = false;
+                    }
+                });
+                renderPanel(p);
+            }
+        }
+    }).catch(function() {
+        // Non-fatal — ignore unhide failures silently
+    });
+}
+
 function getCsrfToken() {
-    // Try to get CSRF token from a form on the page or from cookie
     var csrfInput = document.querySelector('input[name="csrf_token"]');
-    if (csrfInput) {
-        return csrfInput.value;
-    }
-    // Try to parse from cookie
+    if (csrfInput) return csrfInput.value;
     var match = document.cookie.match(/(?:^|; )_csrf=([^;]*)/);
     return match ? decodeURIComponent(match[1]) : null;
 }
 
-function showNotification(message, type) {
-    // Simple alert for now - can be enhanced with toast notifications
-    alert(message);
+function escHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
-function retryGitLabDiscovery() {
-    htmx.ajax('GET', '/admin/partials/auto-discovery/gitlab', {target: '#gitlab-repos-section', swap: 'innerHTML'});
+// ---------------------------------------------------------------------------
+// Initialise on load
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Viewport-aware table sizing
+// Measures the real distance from the table's top to the viewport bottom,
+// reserves space for the pagination bar, and applies the result as
+// max-height on the table container. Runs on load, on window resize, on
+// visualViewport resize (zoom), and after every renderPanel() call.
+// No hardcoded offsets — fully deterministic from actual DOM geometry.
+// ---------------------------------------------------------------------------
+function sizeTableContainer() {
+    var panel = document.getElementById('panel-' + _activePlatform);
+    if (!panel || panel.hasAttribute('hidden')) return;
+    var container = panel.querySelector('.table-container');
+    if (!container) return;
+    var pagination = panel.querySelector('.pagination');
+
+    var rect = container.getBoundingClientRect();
+    var paginationH = pagination ? pagination.getBoundingClientRect().height : 0;
+    var viewportH = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+
+    // Available = viewport bottom - table top - pagination - small bottom gap
+    var available = viewportH - rect.top - paginationH - 20;
+    if (available < 200) available = 200; // floor so it's still usable on tiny viewports
+    container.style.maxHeight = available + 'px';
 }
 
-function loadGitLabPage(page, pageSize) {
-    htmx.ajax('GET', '/admin/partials/auto-discovery/gitlab?page=' + page + '&page_size=' + pageSize, {target: '#gitlab-repos-section', swap: 'innerHTML'});
+window.addEventListener('resize', sizeTableContainer);
+if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', sizeTableContainer);
 }
 
-function retryGitHubDiscovery() {
-    htmx.ajax('GET', '/admin/partials/auto-discovery/github', {target: '#github-repos-section', swap: 'innerHTML'});
-}
+// Re-run after any render so new DOM structure is measured
+(function wrapRender() {
+    var _origRender = renderPanel;
+    renderPanel = function(platform) {
+        _origRender(platform);
+        // schedule after layout settles
+        requestAnimationFrame(sizeTableContainer);
+    };
+})();
 
-function loadGitHubPage(page, pageSize) {
-    htmx.ajax('GET', '/admin/partials/auto-discovery/github?page=' + page + '&page_size=' + pageSize, {target: '#github-repos-section', swap: 'innerHTML'});
-}
+document.addEventListener('DOMContentLoaded', function() {
+    fetchAll('gitlab', false);
+    requestAnimationFrame(sizeTableContainer);
+});
 </script>
 
 <style>
-/* Selection bar styles */
+/* Platform tabs */
+.platform-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--muted-border-color, #ccc);
+    margin-bottom: 1.5rem;
+}
+
+.tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    padding: 0.6rem 1.25rem;
+    font-size: 1rem;
+    cursor: pointer;
+    color: var(--muted-color, #666);
+    border-radius: 0;
+}
+
+.tab-btn:hover {
+    color: var(--color, #1a1a1a);
+}
+
+.tab-btn.active {
+    color: var(--primary, #1976d2);
+    border-bottom-color: var(--primary, #1976d2);
+    font-weight: 600;
+}
+
+/* Controls bar */
+.controls-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.count-label {
+    font-size: 0.9rem;
+    color: var(--muted-color, #666);
+}
+
+.controls-right {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.search-input {
+    padding: 0.45rem 0.7rem;
+    font-size: 0.95rem;
+    border: 1px solid var(--muted-border-color, rgba(255,255,255,0.2));
+    border-radius: 4px;
+    background: var(--form-element-background-color, rgba(0,0,0,0.2));
+    color: var(--color, inherit);
+    width: 260px;
+}
+
+.show-hidden-label {
+    font-size: 0.85rem;
+    color: var(--muted-color, #666);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+/* Panel: natural layout. Table scroll height is computed via JS on
+   load/resize/zoom to fit the remaining viewport, so the pagination row
+   beneath it is always visible without page scroll (see sizeTableContainer). */
+.platform-panel {
+    display: block;
+}
+
+.controls-bar,
+.pagination {
+    flex: 0 0 auto;
+}
+
+/* Table */
+.table-container {
+    overflow: auto;
+    border: 1px solid var(--muted-border-color, rgba(255,255,255,0.1));
+    border-radius: 4px;
+    /* maxHeight set dynamically via sizeTableContainer() in JS */
+}
+
+.discovery-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.95rem;
+}
+
+.discovery-table th,
+.discovery-table td {
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--muted-border-color, rgba(255,255,255,0.08));
+    text-align: left;
+    vertical-align: middle;
+}
+
+.discovery-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--card-sectioning-background-color, rgba(255,255,255,0.07));
+    color: var(--color, inherit);
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    box-shadow: inset 0 -1px 0 var(--muted-border-color, rgba(255,255,255,0.15));
+}
+
+.discovery-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.discovery-table th.sortable:hover {
+    background: var(--primary-focus, #e3f2fd);
+}
+
+.discovery-table tbody tr:hover td {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.url-cell {
+    font-family: monospace;
+    font-size: 0.78rem;
+    word-break: break-all;
+    max-width: 280px;
+}
+
+.empty-cell {
+    text-align: center;
+    color: var(--muted-color, #888);
+    padding: 2rem;
+}
+
+/* Hidden rows */
+.row-hidden td {
+    color: var(--muted-color, #aaa);
+    font-style: italic;
+    background: var(--secondary-background, #f8f8f8);
+    opacity: 0.65;
+}
+
+/* Pagination */
+.pagination {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+}
+
+.page-info {
+    font-size: 0.85rem;
+    color: var(--muted-color, #666);
+    white-space: nowrap;
+}
+
+.page-jump {
+    width: 70px;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.85rem;
+    border: 1px solid var(--muted-border-color, #ccc);
+    border-radius: 4px;
+    text-align: center;
+}
+
+/* Loading/Error states */
+.loading-container {
+    text-align: center;
+    padding: 3rem;
+    color: var(--muted-color, #888);
+}
+
+.error-banner {
+    padding: 1rem 1.25rem;
+    background: var(--del-color-light, #fff3f3);
+    border: 1px solid var(--del-color, #dc3545);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.error-banner .error-msg {
+    color: var(--del-color, #dc3545);
+    margin: 0;
+    flex: 1;
+}
+
+/* Selection bar */
 .selection-bar {
     display: flex;
     justify-content: space-between;
@@ -413,6 +1101,7 @@ function loadGitHubPage(page, pageSize) {
     background-color: var(--primary-focus, #e3f2fd);
     border: 1px solid var(--primary, #1976d2);
     border-radius: 8px;
+    margin-top: 1.5rem;
     margin-bottom: 1.5rem;
 }
 
@@ -426,7 +1115,7 @@ function loadGitHubPage(page, pageSize) {
     gap: 0.5rem;
 }
 
-/* Batch modal styles */
+/* Batch modal */
 #batch-create-modal {
     max-width: 600px;
     width: 90%;
@@ -554,6 +1243,7 @@ function loadGitHubPage(page, pageSize) {
     border-top: 1px solid var(--muted-border-color);
 }
 
+/* Header */
 .auto-discovery-header {
     margin-bottom: 2rem;
 }
@@ -567,30 +1257,78 @@ function loadGitHubPage(page, pageSize) {
     margin: 0;
 }
 
-.discovery-section {
-    margin-bottom: 2rem;
+/* Platform and visibility badges */
+.platform-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
 }
 
-.section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
+.platform-badge.gitlab {
+    background-color: #fc6d26;
+    color: white;
 }
 
-.section-header h2 {
-    margin: 0;
+.platform-badge.github {
+    background-color: #24292E;
+    color: white;
 }
 
-.section-actions {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
+.visibility-badge {
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 500;
 }
 
-.loading-container {
-    text-align: center;
-    padding: 2rem;
+.visibility-badge.private {
+    background-color: #ffeeba;
+    color: #856404;
+}
+
+.visibility-badge.public {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+/* Commit cell styling */
+.last-commit-cell {
+    font-size: 0.85rem;
+}
+
+.last-commit-cell .commit-hash {
+    background-color: var(--code-background-color, #f4f4f4);
+    padding: 2px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+}
+
+.commit-author {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+.commit-date {
+    display: block;
+    color: var(--muted-color);
+    font-size: 0.75rem;
+    margin-top: 2px;
+}
+
+/* Description cell */
+.repo-description {
+    color: var(--muted-color);
+    font-size: 0.9rem;
+}
+
+/* Actions cell */
+.actions-cell {
+    white-space: nowrap;
 }
 </style>
 {% endblock %}

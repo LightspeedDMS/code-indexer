@@ -5,12 +5,10 @@ Implements repository discovery from GitLab API, supporting both gitlab.com
 and self-hosted GitLab instances.
 """
 
-import base64
-import json
 import logging
-from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, TypedDict
+from typing_extensions import NotRequired
 
 import httpx
 
@@ -28,19 +26,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CURSOR_VERSION = 1
-_CURSOR_PLATFORM = "gitlab"
-_FILL_SAFETY_CAP = 5
-_VALID_CURSOR_MODES = frozenset({"rest"})
+_DISCOVERY_REST_PAGE_SIZE = 100  # repos per page for exhaustive all-fetch
+_DISCOVERY_MAX_PAGES = 10000  # hard upper bound; GitLabProviderError if exceeded
+_ENRICH_BATCH_SIZE = 10  # GitLab GraphQL multiplex limit per request
 
 
-@dataclass
-class _CursorState:
-    """Decoded cursor state for GitLab pagination."""
+class _CommitInfo(TypedDict):
+    """Parsed commit information returned by _parse_multiplex_response."""
 
-    source: Optional[Union[str, int]]  # REST page number
-    skip: int  # items to skip within the first fetched batch
-    mode: str = "rest"  # GitLab only uses REST
+    commit_hash: Optional[str]
+    commit_author: Optional[str]
+    commit_date: Optional[datetime]
+    last_activity: NotRequired[str]
 
 
 class GitLabProviderError(Exception):
@@ -123,7 +120,7 @@ class GitLabProvider(RepositoryProviderBase):
                     indexed_urls.add(canonical)
                 except GitUrlNormalizationError:
                     # Skip URLs that cannot be normalized (e.g., local paths)
-                    pass
+                    logger.debug("Skipping un-normalizable indexed URL: %r", repo_url)
 
         return indexed_urls
 
@@ -147,7 +144,9 @@ class GitLabProvider(RepositoryProviderBase):
                 if canonical in indexed_urls:
                     return True
             except GitUrlNormalizationError:
-                pass
+                logger.debug(
+                    "Skipping un-normalizable URL during indexed check: %r", url
+                )
         return False
 
     def _make_api_request(
@@ -244,6 +243,7 @@ class GitLabProvider(RepositoryProviderBase):
             query_parts.append(
                 f"""
   {alias}: project(fullPath: "{full_path}") {{
+    lastActivityAt
     repository {{
       tree {{
         lastCommit {{
@@ -270,54 +270,55 @@ class GitLabProvider(RepositoryProviderBase):
             full_paths: List of project full paths (same order as query)
 
         Returns:
-            Dict mapping full_path to commit info dict with keys:
+            Dict mapping full_path to _CommitInfo with keys:
             - commit_hash: 7-character SHA (or None)
             - commit_author: Author name (or None)
             - commit_date: datetime object (or None)
         """
-        result = {}
-        data = graphql_response.get("data", {})
+        result: dict[str, _CommitInfo] = {}
+        data = graphql_response.get("data") or {}
 
         for idx, full_path in enumerate(full_paths):
             alias = f"project{idx}"
-            project_data = data.get(alias)
+            project_data = data.get(alias) or {}
 
-            commit_info = {
+            commit_info: _CommitInfo = {
                 "commit_hash": None,
                 "commit_author": None,
                 "commit_date": None,
             }
 
-            if project_data:
-                repository = project_data.get("repository", {})
-                tree = repository.get("tree")
+            # Extract project-level lastActivityAt (ISO 8601 string, pass through as-is)
+            last_activity_at = project_data.get("lastActivityAt")
+            if last_activity_at:
+                commit_info["last_activity"] = last_activity_at
 
-                if tree:
-                    last_commit = tree.get("lastCommit")
+            repository = project_data.get("repository") or {}
+            tree = repository.get("tree") or {}
+            last_commit = tree.get("lastCommit") or {}
 
-                    if last_commit:
-                        # Extract commit hash (7 chars)
-                        sha = last_commit.get("sha")
-                        if sha:
-                            commit_info["commit_hash"] = sha[: self.SHORT_SHA_LENGTH]
+            if last_commit:
+                # Extract commit hash (7 chars)
+                sha = last_commit.get("sha")
+                if sha:
+                    commit_info["commit_hash"] = sha[: self.SHORT_SHA_LENGTH]
 
-                        # Extract author name
-                        author = last_commit.get("author")
-                        if author:
-                            commit_info["commit_author"] = author.get("name")
+                # Extract author name
+                author = last_commit.get("author") or {}
+                commit_info["commit_author"] = author.get("name")
 
-                        # Extract commit date
-                        committed_date = last_commit.get("committedDate")
-                        if committed_date:
-                            try:
-                                commit_info["commit_date"] = datetime.fromisoformat(  # type: ignore[assignment]
-                                    committed_date.replace("Z", "+00:00")
-                                )
-                            except (ValueError, TypeError) as e:
-                                logger.debug(
-                                    f"Failed to parse commit date '{committed_date}' "
-                                    f"for project '{full_path}': {e}"
-                                )
+                # Extract commit date — stored as datetime for DiscoveredRepository model
+                committed_date = last_commit.get("committedDate")
+                if committed_date:
+                    try:
+                        commit_info["commit_date"] = datetime.fromisoformat(
+                            committed_date.replace("Z", "+00:00")
+                        )
+                    except (ValueError, TypeError) as e:
+                        logger.debug(
+                            f"Failed to parse commit date '{committed_date}' "
+                            f"for project '{full_path}': {e}"
+                        )
 
             result[full_path] = commit_info
 
@@ -380,7 +381,7 @@ class GitLabProvider(RepositoryProviderBase):
                     repo.last_commit_author = commit_info.get("commit_author")
                     repo.last_commit_date = commit_info.get("commit_date")
 
-        except Exception as e:
+        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError) as e:
             # Graceful degradation: Log warning but don't fail discovery
             logger.warning(
                 format_error_log(
@@ -455,106 +456,6 @@ class GitLabProvider(RepositoryProviderBase):
             raise GitLabProviderError(f"GitLab API request failed: {e}") from e
         return response
 
-    def _encode_cursor(
-        self, source: Optional[Union[str, int]], skip: int, mode: str = "rest"
-    ) -> str:
-        """
-        Encode a cursor payload as an opaque base64-JSON string.
-
-        Args:
-            source: REST page number (integer) or None for first page
-            skip: Non-negative items to skip within the first fetched batch
-            mode: Must be a recognized cursor mode (always "rest" for GitLab)
-
-        Raises:
-            ValueError: If skip is negative or mode is not recognized
-        """
-        if skip < 0:
-            raise ValueError(f"skip must be non-negative, got {skip}")
-        if mode not in _VALID_CURSOR_MODES:
-            raise ValueError(f"mode {mode!r} is not a recognized cursor mode")
-        payload = {
-            "v": _CURSOR_VERSION,
-            "platform": _CURSOR_PLATFORM,
-            "source": source,
-            "skip": skip,
-            "mode": mode,
-        }
-        return base64.b64encode(json.dumps(payload).encode()).decode()
-
-    def _decode_cursor_payload(self, token: str) -> Optional[dict]:
-        """Decode base64 token to JSON dict; return None on any decode failure."""
-        import binascii
-
-        if not isinstance(token, str):
-            logger.debug(
-                format_error_log("GL-CURSOR-000", "GitLab cursor token is not a string")
-            )
-            return None
-        try:
-            raw = base64.b64decode(token)
-        except (binascii.Error, TypeError, ValueError) as exc:
-            logger.debug(
-                format_error_log("GL-CURSOR-001", f"GitLab cursor base64 failed: {exc}")
-            )
-            return None
-        try:
-            return json.loads(raw)  # type: ignore[no-any-return]  # json.loads returns Any
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            logger.debug(
-                format_error_log("GL-CURSOR-002", f"GitLab cursor JSON failed: {exc}")
-            )
-            return None
-
-    def _validate_cursor_metadata(self, payload: dict) -> bool:
-        """Validate version, platform and mode fields; log and return False on mismatch."""
-        if payload.get("v") != _CURSOR_VERSION:
-            logger.debug(
-                format_error_log(
-                    "GL-CURSOR-003",
-                    f"GitLab cursor version mismatch (got {payload.get('v')!r})",
-                )
-            )
-            return False
-        if payload.get("platform") != _CURSOR_PLATFORM:
-            logger.debug(
-                format_error_log(
-                    "GL-CURSOR-004",
-                    f"GitLab cursor platform mismatch (got {payload.get('platform')!r})",
-                )
-            )
-            return False
-        mode = payload.get("mode", "rest")
-        if mode not in _VALID_CURSOR_MODES:
-            logger.debug(
-                format_error_log(
-                    "GL-CURSOR-007",
-                    f"GitLab cursor mode={mode!r} not recognized",
-                )
-            )
-            return False
-        return True
-
-    def _extract_cursor_fields(self, payload: dict) -> Optional[_CursorState]:
-        """Extract source, skip, mode from a validated payload dict."""
-        try:
-            source = payload["source"]
-            skip = int(payload["skip"])
-            mode = str(payload.get("mode", "rest"))
-        except (KeyError, TypeError, ValueError) as exc:
-            logger.debug(
-                format_error_log("GL-CURSOR-005", f"GitLab cursor field error: {exc}")
-            )
-            return None
-        if skip < 0:
-            logger.debug(
-                format_error_log(
-                    "GL-CURSOR-006", f"GitLab cursor skip={skip} is negative"
-                )
-            )
-            return None
-        return _CursorState(source=source, skip=skip, mode=mode)
-
     def _fetch_batch_rest(
         self, source: Optional[int], batch_size: int, search: Optional[str]
     ) -> Tuple[List[DiscoveredRepository], Optional[int], bool, Optional[int]]:
@@ -587,145 +488,206 @@ class GitLabProvider(RepositoryProviderBase):
         parsed = [self._parse_project(p) for p in projects]
         return parsed, next_source, has_more, source_total
 
-    def _collect_unindexed_from_batch(
-        self,
-        batch: List[DiscoveredRepository],
-        skip: int,
-        kept: List[DiscoveredRepository],
-        target: int,
-        indexed_urls: Set[str],
-        hidden_identifiers: Optional[Set[str]] = None,
-    ) -> Tuple[List[DiscoveredRepository], Optional[int]]:
+    def _fetch_all_pages_rest(self) -> Tuple[List[DiscoveredRepository], int]:
         """
-        Walk batch from skip offset, collect unindexed repos until target reached.
+        Exhaust all GitLab REST pages and return (repos, source_total).
 
-        Returns:
-            (updated_kept, stop_index_or_None)
+        Raises:
+            GitLabProviderError: On HTTP failure or if page cap exceeded.
         """
-        _hidden = hidden_identifiers or set()
-        for i, repo in enumerate(batch):
-            if i < skip:
-                continue
+        if not (isinstance(_DISCOVERY_MAX_PAGES, int) and _DISCOVERY_MAX_PAGES > 0):
+            raise GitLabProviderError("_DISCOVERY_MAX_PAGES must be a positive integer")
+        if not (
+            isinstance(_DISCOVERY_REST_PAGE_SIZE, int) and _DISCOVERY_REST_PAGE_SIZE > 0
+        ):
+            raise GitLabProviderError(
+                "_DISCOVERY_REST_PAGE_SIZE must be a positive integer"
+            )
+        all_repos: List[DiscoveredRepository] = []
+        source_total = 0
+        for page in range(1, _DISCOVERY_MAX_PAGES + 1):
+            batch, _next, has_more, batch_total = self._fetch_batch_rest(
+                source=page, batch_size=_DISCOVERY_REST_PAGE_SIZE, search=None
+            )
+            if batch_total is not None:
+                source_total = batch_total
+            all_repos.extend(batch)
+            if not has_more:
+                return all_repos, source_total
+        raise GitLabProviderError(
+            f"Exhaustive fetch exceeded maximum of {_DISCOVERY_MAX_PAGES} pages"
+        )
+
+    def _map_repos_to_dicts(
+        self,
+        repos: List[DiscoveredRepository],
+        indexed_urls: Set[str],
+        hidden_identifiers: Set[str],
+    ) -> List[dict]:
+        """Filter indexed repos and annotate each remaining repo with is_hidden."""
+        if repos is None:
+            raise ValueError("repos must not be None")
+        if indexed_urls is None:
+            raise ValueError("indexed_urls must not be None")
+        if hidden_identifiers is None:
+            raise ValueError("hidden_identifiers must not be None")
+        out = []
+        for repo in repos:
             if self._is_repo_indexed(
                 repo.clone_url_https, repo.clone_url_ssh, indexed_urls
             ):
                 continue
-            # Story #719: skip hidden repos
-            if _hidden and (
-                f"gitlab:{repo.clone_url_ssh}" in _hidden
-                or f"gitlab:{repo.clone_url_https}" in _hidden
-            ):
-                continue
-            kept.append(repo)
-            if len(kept) == target:
-                return kept, i
-        return kept, None
+            hidden = (
+                f"gitlab:{repo.clone_url_ssh}" in hidden_identifiers
+                or f"gitlab:{repo.clone_url_https}" in hidden_identifiers
+            )
+            out.append(
+                {
+                    "platform": repo.platform,
+                    "name": repo.name,
+                    "description": repo.description,
+                    "clone_url_https": repo.clone_url_https,
+                    "clone_url_ssh": repo.clone_url_ssh,
+                    "default_branch": repo.default_branch,
+                    "is_hidden": hidden,
+                    "is_private": repo.is_private,
+                }
+            )
+        return out
 
-    def _build_result(
+    def discover_all_repositories(
         self,
-        kept: List[DiscoveredRepository],
-        page_size: int,
-        has_next_page: bool,
-        next_cursor: Optional[str],
-        partial_due_to_cap: bool,
-        source_total: Optional[int],
-    ) -> RepositoryDiscoveryResult:
-        """Build a RepositoryDiscoveryResult for GitLab from collected data."""
-        return RepositoryDiscoveryResult(
-            repositories=kept,
-            page_size=page_size,
-            platform="gitlab",
-            has_next_page=has_next_page,
-            next_cursor=next_cursor,
-            partial_due_to_cap=partial_due_to_cap,
-            source_total=source_total,
-        )
-
-    def _decode_cursor(self, token: Optional[str]) -> Optional[_CursorState]:
-        """
-        Decode an opaque cursor string into a _CursorState.
-
-        Returns None for any invalid input, triggering a silent restart.
-        """
-        if token is None:
-            return None
-        payload = self._decode_cursor_payload(token)
-        if payload is None:
-            return None
-        if not self._validate_cursor_metadata(payload):
-            return None
-        return self._extract_cursor_fields(payload)
-
-    def _init_discovery_state(self, cursor: Optional[str]) -> _CursorState:
-        """Return decoded cursor state or a fresh initial state (page 1)."""
-        decoded = self._decode_cursor(cursor)
-        if decoded is not None:
-            return decoded
-        return _CursorState(source=None, skip=0, mode="rest")
-
-    def _result_from_stop(
-        self,
-        kept: List[DiscoveredRepository],
-        page_size: int,
-        stop_idx: int,
-        batch_len: int,
-        has_more: bool,
-        next_source: Optional[Union[str, int]],
-        state: _CursorState,
-        source_total: Optional[int],
-    ) -> RepositoryDiscoveryResult:
-        """Build result when page_size target was hit inside a batch."""
-        is_last_in_batch = stop_idx == batch_len - 1
-        if is_last_in_batch and not has_more:
-            return self._build_result(kept, page_size, False, None, False, source_total)
-        next_skip = 0 if is_last_in_batch else stop_idx + 1
-        next_src = next_source if is_last_in_batch else state.source
-        enc = self._encode_cursor(next_src, next_skip, "rest")
-        return self._build_result(kept, page_size, True, enc, False, source_total)
-
-    def _run_fill_loop(
-        self,
-        state: _CursorState,
-        effective: int,
-        page_size: int,
-        search: Optional[str],
         indexed_urls: Set[str],
-        hidden_identifiers: Optional[Set[str]] = None,
-    ) -> RepositoryDiscoveryResult:
-        """Run the filter-fill loop and return a RepositoryDiscoveryResult."""
-        kept: List[DiscoveredRepository] = []
-        source_total: Optional[int] = None
-        batches_fetched = 0
-        while len(kept) < effective and batches_fetched < _FILL_SAFETY_CAP:
-            batch, next_source, has_more, batch_total = self._fetch_batch_rest(
-                source=state.source if isinstance(state.source, int) else None,
-                batch_size=effective,
-                search=search,
+        hidden_identifiers: Set[str],
+    ) -> dict:
+        """
+        Exhaustively fetch all unregistered GitLab repositories in a single pass.
+
+        Raises:
+            ValueError: If indexed_urls or hidden_identifiers is None.
+            GitLabProviderError: On upstream failure or page cap exceeded.
+        """
+        if indexed_urls is None:
+            raise ValueError("indexed_urls must not be None")
+        if hidden_identifiers is None:
+            raise ValueError("hidden_identifiers must not be None")
+        if not self.is_configured():
+            raise GitLabProviderError(
+                "GitLab token not configured. "
+                "Please configure a GitLab token in the CI Tokens settings."
             )
-            batches_fetched += 1
-            if source_total is None and batch_total is not None:
-                source_total = batch_total
-            kept, stop_idx = self._collect_unindexed_from_batch(
-                batch, state.skip, kept, effective, indexed_urls, hidden_identifiers
+        all_repos, source_total = self._fetch_all_pages_rest()
+        out = self._map_repos_to_dicts(all_repos, indexed_urls, hidden_identifiers)
+        total_unregistered = sum(1 for r in out if not r["is_hidden"])
+        return {
+            "repositories": out,
+            "total_source": source_total,
+            "total_unregistered": total_unregistered,
+        }
+
+    def _resolve_full_path_from_url(self, clone_url: str) -> str:
+        """
+        Extract GitLab project full path from a clone URL.
+
+        Examples:
+            https://gitlab.com/group/project.git  ->  group/project
+            git@gitlab.com:group/project.git      ->  group/project
+
+        Raises:
+            GitLabProviderError: if the derived path is empty.
+        """
+        if not clone_url:
+            raise GitLabProviderError("clone_url must not be empty")
+        url = clone_url
+        # Strip scheme (https:// or similar)
+        for prefix in ("https://", "http://", "git://"):
+            if url.startswith(prefix):
+                url = url[len(prefix) :]
+                break
+        # Handle SSH form: git@host:path
+        if "@" in url and ":" in url:
+            url = url.split(":", 1)[1]
+        else:
+            # Strip host (first path segment after scheme removal)
+            parts = url.split("/", 1)
+            if len(parts) == 2:
+                url = parts[1]
+            else:
+                url = parts[0]
+        # Strip .git suffix and leading/trailing slashes
+        if url.endswith(".git"):
+            url = url[:-4]
+        url = url.strip("/")
+        if not url:
+            raise GitLabProviderError(
+                f"Could not derive full path from clone URL: {clone_url!r}"
             )
-            if stop_idx is not None:
-                return self._result_from_stop(
-                    kept,
-                    page_size,
-                    stop_idx,
-                    len(batch),
-                    has_more,
-                    next_source,
-                    state,
-                    source_total,
-                )
-            state = _CursorState(source=next_source, skip=0, mode="rest")
-            if not has_more:
-                return self._build_result(
-                    kept, page_size, False, None, False, source_total
-                )
-        cap_cursor = self._encode_cursor(state.source, state.skip, "rest")
-        return self._build_result(kept, page_size, True, cap_cursor, True, source_total)
+        return url
+
+    def enrich_repositories(self, clone_urls: List[str]) -> dict:
+        """
+        Enrich repositories with latest commit metadata via GitLab GraphQL.
+
+        Chunks clone_urls into batches of at most 10 and issues one GraphQL
+        multiplex query per batch.  Per-repo failures (null project or errors
+        field) are soft-failed: the repo is omitted from the result but the
+        batch continues.
+
+        Args:
+            clone_urls: List of HTTPS clone URLs to enrich.
+
+        Returns:
+            Dict mapping input clone_url to commit-info dict with keys
+            commit_hash, commit_author, commit_date.  Repos that could not be
+            enriched are absent from the dict.
+        """
+        if clone_urls is None:
+            raise GitLabProviderError("clone_urls must not be None")
+        if not clone_urls:
+            return {}
+
+        result: dict = {}
+
+        for batch_start in range(0, len(clone_urls), _ENRICH_BATCH_SIZE):
+            batch = clone_urls[batch_start : batch_start + _ENRICH_BATCH_SIZE]
+            full_paths = []
+            url_by_path: dict = {}
+            for url in batch:
+                try:
+                    path = self._resolve_full_path_from_url(url)
+                    full_paths.append(path)
+                    url_by_path[path] = url
+                except GitLabProviderError:
+                    logger.warning(f"Could not resolve full path for URL: {url!r}")
+
+            if not full_paths:
+                continue
+
+            query = self._build_multiplex_query(full_paths)
+            try:
+                response = self._make_graphql_request(query)
+                response.raise_for_status()
+                body = response.json()
+            except (
+                httpx.TimeoutException,
+                httpx.HTTPStatusError,
+                httpx.RequestError,
+            ) as exc:
+                logger.warning(f"GitLab GraphQL enrich batch failed: {exc}")
+                continue
+
+            commit_info_by_path = self._parse_multiplex_response(body, full_paths)
+            for path, commit_info in commit_info_by_path.items():
+                original_url = url_by_path.get(path)
+                if original_url:
+                    # Copy and convert commit_date datetime to ISO string for JSON serialization
+                    serializable = dict(commit_info)
+                    raw_date = serializable.get("commit_date")
+                    if raw_date is not None:
+                        serializable["commit_date"] = raw_date.isoformat()
+                    result[original_url] = serializable
+
+        return result
 
     def discover_repositories(
         self,
@@ -735,35 +697,15 @@ class GitLabProvider(RepositoryProviderBase):
         hidden_identifiers: Optional[Set[str]] = None,
     ) -> RepositoryDiscoveryResult:
         """
-        Discover repositories from GitLab using cursor-based pagination.
+        Server-side cursor pagination removed in Story #754.
 
-        Runs a filter-fill loop: fetches source pages until page_size unindexed
-        repositories are collected or the safety cap is reached.
-
-        Args:
-            cursor: Opaque token from a previous call (None for first page)
-            page_size: Target number of unindexed repos to return
-            search: Optional search query (server-side filtering via API)
-
-        Returns:
-            RepositoryDiscoveryResult with cursor fields
+        Use discover_all_repositories() for exhaustive fetch with client-side
+        pagination instead.
 
         Raises:
-            GitLabProviderError: If not configured or API call fails
+            NotImplementedError: Always — cursor pagination removed in Story #754.
         """
-        if not self.is_configured():
-            raise GitLabProviderError(
-                "GitLab token not configured. "
-                "Please configure a GitLab token in the CI Tokens settings."
-            )
-        if page_size < 1:
-            raise GitLabProviderError("page_size must be at least 1")
-        indexed_urls = self._get_indexed_canonical_urls()
-        state = self._init_discovery_state(cursor)
-        result = self._run_fill_loop(
-            state, page_size, page_size, search, indexed_urls, hidden_identifiers
+        raise NotImplementedError(
+            "Server-side cursor pagination removed in Story #754. "
+            "Use discover_all_repositories() instead."
         )
-        # Enrich with commit info via GraphQL (REST doesn't provide it)
-        if result.repositories:
-            self._enrich_repositories_with_commits(result.repositories)
-        return result

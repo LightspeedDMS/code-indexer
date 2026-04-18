@@ -1,6 +1,7 @@
 """ChangeDetector - git change detection for auto-update service."""
 
 from code_indexer.server.middleware.correlation import get_correlation_id
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from pathlib import Path
 import subprocess
 import logging
@@ -33,6 +34,7 @@ class ChangeDetector:
             cwd=self.repo_path,
             capture_output=True,
             text=True,
+            env=build_non_interactive_git_env(),
         )
 
         if result.returncode != 0:

@@ -19,8 +19,10 @@ from urllib.parse import urlparse
 
 from ..middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 
 logger = logging.getLogger(__name__)
+
 
 # Regex pattern for issue-tracker branch names
 # Matches JIRA-style issue keys: uppercase letters followed by hyphen and numbers
@@ -317,7 +319,7 @@ class RemoteBranchService:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                env={"GIT_TERMINAL_PROMPT": "0"},  # Disable interactive prompts
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
@@ -411,7 +413,7 @@ class RemoteBranchService:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                env={"GIT_TERMINAL_PROMPT": "0"},
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode == 0 and result.stdout:

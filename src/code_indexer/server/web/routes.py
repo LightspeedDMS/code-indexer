@@ -46,6 +46,9 @@ UNASSIGNED_CATEGORY_PRIORITY = (
     999999  # Story #686: sentinel sort priority for uncategorised repos
 )
 
+# Discovery enrichment limit (Story #754): max clone_urls per enrich request
+MAX_ENRICH_CLONE_URLS = 50
+
 # Story #198: Settings that require server restart
 # These settings are read during server startup (singleton init, thread pool creation)
 # and changing them has no effect until the server is restarted
@@ -932,7 +935,12 @@ def _create_login_redirect(request: Request) -> RedirectResponse:
 
 def _require_admin_session(request: Request) -> Optional[SessionData]:
     """Check for valid admin session, return None if not authenticated."""
-    session_manager = get_session_manager()
+    try:
+        session_manager = get_session_manager()
+    except RuntimeError:
+        # Session manager not initialized (e.g. in test environments without
+        # full server setup) — treat as unauthenticated.
+        return None
     session = session_manager.get_session(request)
 
     if not session or session.role != "admin":
@@ -6630,6 +6638,148 @@ def auto_discovery_page(request: Request):
     return response
 
 
+def _load_hidden_ids(show_hidden: bool):
+    """Load hidden discovery repo identifiers (Story #719)."""
+    try:
+        all_hidden = _get_hidden_discovery_backend().get_hidden_set()
+    except Exception as e:
+        logger.warning("Failed to load hidden repos: %s", e)
+        all_hidden = set()
+    return (set() if show_hidden else all_hidden), all_hidden
+
+
+def _resolve_provider(request: Request, platform: str):
+    """Authenticate the admin session and resolve the platform provider.
+
+    Handles ONLY auth and platform lookup — does NOT call any provider methods.
+    Returns (provider, None) on success, or (None, JSONResponse) on failure.
+    """
+    session = _require_admin_session(request)
+    if not session:
+        return None, JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+
+    if platform == "gitlab":
+        return _get_gitlab_provider(), None
+    if platform == "github":
+        return _get_github_provider(), None
+
+    return None, JSONResponse(
+        content={"error": f"Unknown platform: {platform}"}, status_code=400
+    )
+
+
+@web_router.get("/api/discovery/{platform}/all")
+def discovery_all(
+    request: Request,
+    platform: str,
+    show_hidden: bool = Query(default=False),
+):
+    """Return all unregistered repositories for the given platform (Story #754).
+
+    Performs an exhaustive fetch from the upstream API and returns every
+    repository not yet registered as a golden repo, annotated with is_hidden.
+    Client-side JS handles pagination, search, and sort.
+    """
+    provider, error = _resolve_provider(request, platform)
+    if error is not None:
+        return error
+
+    try:
+        if not provider.is_configured():
+            return JSONResponse(
+                content={"error": f"{platform.capitalize()} token not configured"},
+                status_code=422,
+            )
+        indexed_urls = provider._get_indexed_canonical_urls()
+        _, all_hidden = _load_hidden_ids(show_hidden)
+        hidden_ids = set() if show_hidden else all_hidden
+        result = provider.discover_all_repositories(
+            indexed_urls=indexed_urls,
+            hidden_identifiers=hidden_ids,
+        )
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-044",
+                f"Unexpected error in {platform} discovery/all: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@web_router.post("/api/discovery/{platform}/enrich")
+async def discovery_enrich(
+    request: Request,
+    platform: str,
+):
+    """Enrich a list of repositories with latest commit metadata (Story #754).
+
+    Accepts JSON body: {"clone_urls": ["https://..."]}
+    Returns a dict mapping each clone_url to its commit info.
+    """
+    provider, error = _resolve_provider(request, platform)
+    if error is not None:
+        return error
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        # Client sent malformed JSON — intentional client-error path, log at debug
+        logger.debug("discovery_enrich: failed to parse JSON body: %s", exc)
+        return JSONResponse(content={"error": "Invalid JSON body"}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            content={"error": "Request body must be a JSON object"}, status_code=400
+        )
+
+    clone_urls = body.get("clone_urls")
+    if not isinstance(clone_urls, list):
+        return JSONResponse(
+            content={"error": "clone_urls must be a list"}, status_code=400
+        )
+
+    invalid = [u for u in clone_urls if not isinstance(u, str) or not u.strip()]
+    if invalid:
+        return JSONResponse(
+            content={"error": "All clone_urls entries must be non-empty strings"},
+            status_code=400,
+        )
+
+    if len(clone_urls) > MAX_ENRICH_CLONE_URLS:
+        return JSONResponse(
+            content={
+                "error": f"clone_urls must contain at most {MAX_ENRICH_CLONE_URLS} entries"
+            },
+            status_code=400,
+        )
+
+    try:
+        if not provider.is_configured():
+            return JSONResponse(
+                content={"error": f"{platform.capitalize()} token not configured"},
+                status_code=422,
+            )
+        result = provider.enrich_repositories(clone_urls=clone_urls)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(
+            format_error_log(
+                "STORE-GENERAL-045",
+                f"Unexpected error in {platform} discovery/enrich: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# =============================================================================
+# Discovery Partial Routes (legacy HTMX partials — kept for backwards compat)
+# =============================================================================
+
+
 @web_router.get("/partials/auto-discovery/gitlab", response_class=HTMLResponse)
 def gitlab_repos_partial(
     request: Request,
@@ -6700,16 +6850,6 @@ def gitlab_repos_partial(
             error_message=f"Unexpected error: {e}",
             search_term=search_term,
         )
-
-
-def _load_hidden_ids(show_hidden):
-    """Load hidden discovery repo identifiers (Story #719)."""
-    try:
-        all_hidden = _get_hidden_discovery_backend().get_hidden_set()
-    except Exception as e:
-        logger.warning("Failed to load hidden repos: %s", e)
-        all_hidden = set()
-    return (set() if show_hidden else all_hidden), all_hidden
 
 
 @web_router.get("/partials/auto-discovery/github", response_class=HTMLResponse)

@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from .git_error_classifier import GitFetchError
+from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
 from .update_strategy import UpdateStrategy
 
 
@@ -56,6 +57,7 @@ class GitPullUpdater(UpdateStrategy):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=build_non_interactive_git_env(),
             )
 
             if fetch_result.returncode != 0:
@@ -159,6 +161,7 @@ class GitPullUpdater(UpdateStrategy):
             capture_output=True,
             text=True,
             timeout=30,
+            env=build_non_interactive_git_env(),
         )
         if fetch_result.returncode != 0:
             raise RuntimeError(
@@ -268,6 +271,7 @@ class GitPullUpdater(UpdateStrategy):
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=build_non_interactive_git_env(),
             )
 
             if result.returncode != 0:
