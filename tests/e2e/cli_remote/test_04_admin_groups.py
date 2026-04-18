@@ -60,7 +60,7 @@ def _parse_group_id(result: CompletedProcess[str], context: str) -> int:
     """
     try:
         data = json.loads(result.stdout)
-        return int(data["id"])
+        return int(data["group_id"])
     except (json.JSONDecodeError, KeyError, ValueError) as exc:
         pytest.fail(
             f"{context}: could not parse group ID from JSON output: {exc}\n"

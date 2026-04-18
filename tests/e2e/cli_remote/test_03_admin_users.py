@@ -28,6 +28,8 @@ Test functions (6):
 
 from __future__ import annotations
 
+import secrets
+import string
 import uuid
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -36,6 +38,29 @@ from typing import Generator
 import pytest
 
 from tests.e2e.helpers import run_cidx
+
+
+def _make_policy_password(length: int = 16) -> str:
+    """Generate a random password that satisfies the CIDX server policy.
+
+    Policy requires at least one uppercase, lowercase, digit, and special
+    character, with minimum length 12. uuid.uuid4().hex produces only
+    lowercase hex — rejected. Bug #752 follow-up.
+    """
+    if length < 12:
+        raise ValueError(f"length must be at least 12 per server policy, got {length}")
+    rng = secrets.SystemRandom()
+    required = [
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice("!@#$%^&*"),
+    ]
+    pool = string.ascii_letters + string.digits + "!@#$%^&*"
+    filler = [secrets.choice(pool) for _ in range(length - 4)]
+    chars = required + filler
+    rng.shuffle(chars)
+    return "".join(chars)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +125,7 @@ def created_user(
     rather than silently ignoring the cleanup result.
     """
     username = f"e2euser_{uuid.uuid4().hex[:8]}"
-    password = uuid.uuid4().hex  # random, satisfies basic length requirements
+    password = _make_policy_password()  # random, satisfies basic length requirements
 
     create_result = run_cidx(
         "admin", "users", "create", username,
@@ -137,7 +162,7 @@ def test_admin_users_create(
     Self-contained: creates and deletes its own user within this test.
     """
     username = f"e2ecreate_{uuid.uuid4().hex[:8]}"
-    password = uuid.uuid4().hex
+    password = _make_policy_password()
 
     result = run_cidx(
         "admin", "users", "create", username,
@@ -219,7 +244,7 @@ def test_admin_users_change_password(
 ) -> None:
     """cidx admin users change-password <username> --password <new> exits 0."""
     username, _ = created_user
-    new_password = uuid.uuid4().hex  # generate at runtime, no hardcoded credentials
+    new_password = _make_policy_password()  # policy-compliant; no hardcoded credentials
 
     result = run_cidx(
         "admin", "users", "change-password", username,
@@ -241,7 +266,7 @@ def test_admin_users_delete(
     with the shared ``created_user`` fixture lifecycle.
     """
     username = f"e2edelete_{uuid.uuid4().hex[:8]}"
-    password = uuid.uuid4().hex
+    password = _make_policy_password()
 
     create_result = run_cidx(
         "admin", "users", "create", username,
