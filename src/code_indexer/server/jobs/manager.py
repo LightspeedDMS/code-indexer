@@ -1347,8 +1347,14 @@ class SyncJobManager:
         """
         if self.is_in_degraded_mode():
             return {
-                "max_concurrent_jobs_per_user": self.degraded_max_concurrent_jobs_per_user,
-                "max_total_concurrent_jobs": self.degraded_max_total_concurrent_jobs,
+                "max_concurrent_jobs_per_user": min(
+                    self.degraded_max_concurrent_jobs_per_user,
+                    self.max_concurrent_jobs_per_user,
+                ),
+                "max_total_concurrent_jobs": min(
+                    self.degraded_max_total_concurrent_jobs,
+                    self.max_total_concurrent_jobs,
+                ),
             }
         else:
             return {
