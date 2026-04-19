@@ -1608,7 +1608,7 @@ def register_repo_routes(
             HTTPException 404: alias not activated, or scoped path does not exist
             HTTPException 500: unexpected filesystem error during scan
         """
-        arm = ActivatedRepoManager()
+        arm = activated_repo_manager
         metadata = arm._load_metadata(current_user.username, user_alias)
         if metadata is None:
             raise HTTPException(
@@ -1677,7 +1677,7 @@ def register_repo_routes(
         Raises:
             HTTPException 404: alias not activated or not found
         """
-        arm = ActivatedRepoManager()
+        arm = activated_repo_manager
         metadata = arm._load_metadata(current_user.username, user_alias)
         if metadata is None:
             raise HTTPException(
