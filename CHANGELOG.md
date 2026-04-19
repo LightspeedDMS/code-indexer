@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.8
+
+### Bug Fixes
+
+- fix(#860): Auto-discovery now uses SSH URL for private repositories. The client-side JavaScript pagination rewrite in v9.20.2 hardcoded `clone_url_https` everywhere, causing silent failures for private repos. Added `preferredCloneUrl()` helper, `data-preferred-url` attribute on checkboxes, and updated `onCheckboxChange` + `toggleSelectAll` to use SSH for private repos.
+
+- fix(#862): Batch-create golden repo registration failures now logged and surfaced in UI. Added `WEB-GENERAL-067` error code, `logger.warning(..., exc_info=True)` on per-repo exceptions, `_sanitize_batch_create_error()` helper, `MAX_BATCH_CREATE_REPOS=50` cap (HTTP 400 on overflow). UI now shows inline per-repo errors in modal instead of generic alert, deselects only successful repos on partial failure, and validates response shape at entry.
+
+- fix(#861): `id_index.bin` write is now crash-durable and self-healing. `save_index()` uses atomic write (temp file + `os.fsync` + `os.replace` + dir fsync). `load_index()` raises typed `CorruptIDIndexError` for zero-byte files, truncated headers, unreasonable entry counts, and EOF mid-entry. `_load_id_index()` in `FilesystemVectorStore` auto-repairs on `CorruptIDIndexError` by calling `rebuild_from_vectors()`. `rebuild_from_vectors()` validates JSON shape and rejects non-string/empty point IDs.
+
 ## v9.20.7
 
 ### Bug Fixes

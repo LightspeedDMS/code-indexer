@@ -61,6 +61,7 @@
         <div id="batch-repo-list" class="batch-repo-list">
             <!-- Populated dynamically with branch dropdowns -->
         </div>
+        <div id="batch-create-status" class="error-banner" style="display:none;"></div>
         <footer>
             <button onclick="closeBatchModal()" class="outline">Cancel</button>
             <button onclick="executeBatchCreate()" class="primary" id="execute-batch-btn">
@@ -107,6 +108,14 @@ var _activePlatform = 'gitlab';
 
 // Compound key selection map: "{platform}:{clone_url_https}" -> repo data
 var selectedRepos = new Map();
+
+// ---------------------------------------------------------------------------
+// URL helpers
+// ---------------------------------------------------------------------------
+
+function preferredCloneUrl(repo) {
+    return repo.is_private ? repo.clone_url_ssh : repo.clone_url_https;
+}
 
 // ---------------------------------------------------------------------------
 // Platform switching
@@ -415,7 +424,7 @@ function renderPanel(platform) {
                 'data-platform="' + escHtml(platform) + '" ' +
                 'data-name="' + escHtml(repo.name || '') + '" ' +
                 'data-branch="' + escHtml(repo.default_branch || 'main') + '" ' +
-                'data-preferred-url="' + escHtml(repo.is_private ? repo.clone_url_ssh : repo.clone_url_https) + '" ' +
+                'data-preferred-url="' + escHtml(preferredCloneUrl(repo)) + '" ' +
                 'value="' + escHtml(repo.clone_url_https) + '" ' +
                 (isSelected ? 'checked' : '') + ' ' +
                 'onchange="onCheckboxChange(\'' + platform + '\', this)"></td>';
@@ -533,7 +542,7 @@ function onCheckboxChange(platform, checkbox) {
             platform: platform,
             name: checkbox.dataset.name,
             branch: checkbox.dataset.branch,
-            clone_url: checkbox.dataset.preferredUrl || url
+            clone_url: checkbox.dataset.preferredUrl
         });
     } else {
         selectedRepos.delete(key);
@@ -554,7 +563,7 @@ function toggleSelectAll(platform, checked) {
                 platform: platform,
                 name: repo.name || '',
                 branch: repo.default_branch || 'main',
-                clone_url: repo.is_private ? repo.clone_url_ssh : repo.clone_url_https
+                clone_url: preferredCloneUrl(repo)
             });
         } else {
             selectedRepos.delete(key);
@@ -719,8 +728,34 @@ function onBranchChange(key, newBranch) {
     }
 }
 
+function removeSuccessfulSelections(results) {
+    results.forEach(function(item) {
+        if (item.status !== 'success') return;
+        selectedRepos.forEach(function(data, key) {
+            if (data.clone_url === item.clone_url) {
+                selectedRepos.delete(key);
+            }
+        });
+    });
+    updateSelectionUI();
+}
+
+function renderBatchCreateFailures(result) {
+    var status = document.getElementById('batch-create-status');
+    var failures = result.results.filter(function(item) { return item.status === 'failed'; });
+    if (!status || failures.length === 0) return;
+    status.innerHTML =
+        '<p class="error-msg"><strong>' + escHtml(result.summary) + '</strong></p>' +
+        failures.map(function(item) {
+            return '<p class="error-msg">' + escHtml(item.alias) + ': ' + escHtml(item.error) + '</p>';
+        }).join('');
+    status.style.display = 'block';
+}
+
 function closeBatchModal() {
     document.getElementById('batch-create-modal').close();
+    var status = document.getElementById('batch-create-status');
+    if (status) { status.style.display = 'none'; status.innerHTML = ''; }
 }
 
 async function executeBatchCreate() {
@@ -751,11 +786,23 @@ async function executeBatchCreate() {
             body: formData
         });
         var result = await response.json();
-        closeBatchModal();
-        clearSelection();
-        alert(result.summary || (result.success ? 'Created successfully.' : 'Some errors occurred.'));
-        // Refresh both platforms
-        fetchAll(_activePlatform, true);
+        if (typeof result.success !== 'boolean' || !Array.isArray(result.results)) {
+            alert('Batch-create response malformed — see browser console');
+            console.error('Malformed batch-create response:', result);
+            return;
+        }
+        if (result.success) {
+            closeBatchModal();
+            clearSelection();
+            alert(result.summary);
+            fetchAll(_activePlatform, true);
+            return;
+        }
+        removeSuccessfulSelections(result.results);
+        renderBatchCreateFailures(result);
+        if (result.results.some(function(item) { return item.status === 'success'; })) {
+            fetchAll(_activePlatform, true);
+        }
     } catch (error) {
         alert('Error creating repositories: ' + error.message);
     } finally {

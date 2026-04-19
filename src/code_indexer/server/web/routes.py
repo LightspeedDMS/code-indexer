@@ -2280,6 +2280,20 @@ def generate_unique_alias(repo_name: str, golden_repo_manager) -> str:
     return f"{base_alias}-{suffix}"
 
 
+MAX_BATCH_CREATE_REPOS = 50
+MAX_BATCH_CREATE_ERROR_LENGTH = 200
+_ERROR_TRUNCATION_SUFFIX = "..."
+
+
+def _sanitize_batch_create_error(error: Exception) -> str:
+    """Trim error message to <=MAX_BATCH_CREATE_ERROR_LENGTH chars, replace newlines."""
+    message = str(error).replace("\n", " ").strip()
+    if len(message) > MAX_BATCH_CREATE_ERROR_LENGTH:
+        cutoff = MAX_BATCH_CREATE_ERROR_LENGTH - len(_ERROR_TRUNCATION_SUFFIX)
+        message = message[:cutoff] + _ERROR_TRUNCATION_SUFFIX
+    return message
+
+
 def _batch_create_repos(
     repos: List[Dict[str, str]],
     submitter_username: str,
@@ -2316,14 +2330,27 @@ def _batch_create_repos(
                     "alias": alias,
                     "status": "success",
                     "job_id": job_id,
+                    "clone_url": repo_data.get("clone_url", ""),
                 }
             )
         except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "WEB-GENERAL-067",
+                    "Batch golden repo create failed",
+                    repo_alias=repo_data.get("alias", "unknown"),
+                    repo_url=repo_data.get("clone_url", "unknown"),
+                    submitter=submitter_username,
+                ),
+                extra=get_log_extra("WEB-GENERAL-067"),
+                exc_info=True,
+            )
             results.append(
                 {
                     "alias": repo_data.get("alias", "unknown"),
                     "status": "failed",
-                    "error": str(e),
+                    "error": _sanitize_batch_create_error(e),
+                    "clone_url": repo_data.get("clone_url", ""),
                 }
             )
 
@@ -2697,6 +2724,15 @@ def batch_create_golden_repos(
     if not isinstance(repo_list, list):
         return JSONResponse(
             {"success": False, "error": "repos must be a JSON array"},
+            status_code=400,
+        )
+
+    if len(repo_list) > MAX_BATCH_CREATE_REPOS:
+        return JSONResponse(
+            {
+                "success": False,
+                "error": f"Maximum batch size is {MAX_BATCH_CREATE_REPOS} repositories",
+            },
             status_code=400,
         )
 
