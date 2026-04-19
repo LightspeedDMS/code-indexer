@@ -596,16 +596,22 @@ class DescriptionRefreshScheduler:
             active_backfill_job_id = self._active_backfill_job_id
 
         if active_backfill_job_id is not None and self._job_tracker is not None:
-            tracked_job = self._job_tracker.get_job(active_backfill_job_id)
-            if tracked_job is not None and tracked_job.status == "cancelled":
+            if self._job_tracker.is_cancelled(active_backfill_job_id):
                 logger.warning(
                     "_run_loop_single_pass: backfill job %s was cancelled, "
                     "stopping repo processing",
                     active_backfill_job_id,
                 )
-                self._job_tracker.fail_job(active_backfill_job_id, "Cancelled by user")
+                # Cancellation is not a failure — use update_status, not fail_job
+                # (Codex Issue 2b)
+                self._job_tracker.update_status(
+                    active_backfill_job_id, status="cancelled"
+                )
+                # Conditional clear: only clear if id still matches this cycle's job
+                # to avoid erasing a new backfill cycle's id (Codex Issue 3)
                 with self._backfill_job_id_lock:
-                    self._active_backfill_job_id = None
+                    if self._active_backfill_job_id == active_backfill_job_id:
+                        self._active_backfill_job_id = None
                 return
 
         stale_repos = self.get_stale_repos()
@@ -1141,14 +1147,81 @@ class DescriptionRefreshScheduler:
             f"{body}"
         )
 
+    def _count_repos_needing_backfill(self) -> int:
+        """
+        Count tracking rows where lifecycle_schema_version IS NULL or stale.
+
+        Matches the update criteria in _self_close_backfill so the "all done"
+        check is consistent with the per-repo update logic.
+        """
+
+        def _count(conn) -> int:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM description_refresh_tracking "
+                "WHERE lifecycle_schema_version IS NULL "
+                "OR lifecycle_schema_version < ?",
+                (LIFECYCLE_SCHEMA_VERSION,),
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+
+        return int(self._tracking_backend._conn_manager.execute_atomic(_count))
+
+    def _maybe_complete_backfill_job(self) -> None:
+        """
+        Complete the aggregate lifecycle_backfill job when all repos are done.
+
+        Called from _self_close_backfill after a successful per-repo update.
+        Checks remaining count, calls complete_job on the active aggregate job
+        if count == 0, and clears _active_backfill_job_id only on success
+        and only when the stored id still matches (conditional clear).
+
+        No-op when _active_backfill_job_id is None or _job_tracker is None.
+        """
+        with self._backfill_job_id_lock:
+            active_job_id = self._active_backfill_job_id
+
+        if active_job_id is None or self._job_tracker is None:
+            return
+
+        try:
+            remaining = self._count_repos_needing_backfill()
+        except Exception as exc:
+            logger.warning(
+                "_maybe_complete_backfill_job: failed to count remaining repos: %s",
+                exc,
+            )
+            return
+
+        if remaining > 0:
+            return
+
+        logger.info(
+            "_maybe_complete_backfill_job: all repos done, completing job %s",
+            active_job_id,
+        )
+        try:
+            self._job_tracker.complete_job(active_job_id)
+            with self._backfill_job_id_lock:
+                if self._active_backfill_job_id == active_job_id:
+                    self._active_backfill_job_id = None
+        except Exception as exc:
+            logger.warning(
+                "_maybe_complete_backfill_job: complete_job failed for %s: %s",
+                active_job_id,
+                exc,
+            )
+
     def _self_close_backfill(self, alias: str) -> None:
         """
         Update lifecycle_schema_version in description_refresh_tracking after
         a successful Phase 2 refresh (Story #728 AC3 self-close).
 
-        Uses a guarded UPDATE (WHERE lifecycle_schema_version < LIFECYCLE_SCHEMA_VERSION)
-        to make the operation idempotent — re-running on a row already at the
-        current version is a no-op.
+        The UPDATE handles both NULL and stale versions so its criteria match
+        the counting logic in _count_repos_needing_backfill (Codex Issue 2a).
+
+        On success, delegates to _maybe_complete_backfill_job() which calls
+        complete_job on the aggregate job when all repos are done.
 
         Args:
             alias: Repository alias whose tracking row to update.
@@ -1160,7 +1233,8 @@ class DescriptionRefreshScheduler:
                     "UPDATE description_refresh_tracking "
                     "SET lifecycle_schema_version = ? "
                     "WHERE repo_alias = ? "
-                    "AND lifecycle_schema_version < ?",
+                    "AND (lifecycle_schema_version IS NULL "
+                    "     OR lifecycle_schema_version < ?)",
                     (LIFECYCLE_SCHEMA_VERSION, alias, LIFECYCLE_SCHEMA_VERSION),
                 )
 
@@ -1176,6 +1250,9 @@ class DescriptionRefreshScheduler:
                 alias,
                 exc,
             )
+            return
+
+        self._maybe_complete_backfill_job()
 
     def _run_two_phase_task(self, alias: str, clone_path: str) -> None:
         """

@@ -438,6 +438,43 @@ class JobTracker:
 
         return self._load_job_from_sqlite(job_id)
 
+    def is_cancelled(self, job_id: str) -> bool:
+        """
+        Return True if the job's 'cancelled' column is set in the DB.
+
+        Reads the persistence layer DIRECTLY, bypassing the in-memory
+        _active_jobs dict.  This is intentional: BackgroundJobManager writes
+        cancelled=True to SQLite without touching JobTracker's memory, so only
+        a direct DB read can observe the cancellation (Bug #853 Codex Issue 1).
+
+        Args:
+            job_id: Job identifier.
+
+        Returns:
+            True if the DB row has cancelled=1, False if 0 or row not found.
+        """
+        if self._backend is not None:
+            try:
+                job_dict = self._backend.get_job(job_id)
+                if job_dict is None:
+                    return False
+                return bool(job_dict.get("cancelled", False))
+            except Exception as e:
+                logger.warning(
+                    "JobTracker.is_cancelled: backend error for %s: %s", job_id, e
+                )
+                return False
+
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT cancelled FROM background_jobs WHERE job_id = ?",
+            (job_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return False
+        return bool(row[0])
+
     def get_active_jobs(self) -> List[TrackedJob]:
         """
         Return a snapshot of all active/pending jobs.

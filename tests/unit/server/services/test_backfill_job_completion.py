@@ -14,10 +14,20 @@ Covered scenarios:
 7. non-owner nodes leave _active_backfill_job_id as None
 """
 
+import sqlite3
+from pathlib import Path
+from typing import Optional, Tuple
 from unittest.mock import MagicMock, Mock
 
+from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
 from code_indexer.server.services.dependency_map_service import DependencyMapService
+from code_indexer.server.services.description_refresh_scheduler import (
+    DescriptionRefreshScheduler,
+)
 from code_indexer.server.services.job_tracker import DuplicateJobError
+from code_indexer.server.storage.sqlite_backends import (
+    DescriptionRefreshTrackingBackend,
+)
 
 _CLUSTER_WIDE_TOTAL = 5
 
@@ -192,3 +202,184 @@ class TestQueueLifecycleBackfillStoresJobId:
         assert call_count == 0, (
             f"register_job must not be called for non-owner, was called {call_count} times"
         )
+
+
+# ---------------------------------------------------------------------------
+# Codex Review Issue 2a — constants and test helpers
+# ---------------------------------------------------------------------------
+
+# One version behind current — repo needs lifecycle backfill
+_OLD_LIFECYCLE_VERSION = LIFECYCLE_SCHEMA_VERSION - 1
+
+_BACKFILL_JOB_ID_2A = "lifecycle-backfill-test-2a-001"
+_ALIAS_SINGLE = "repo-single"
+_ALIAS_A = "repo-a"
+_ALIAS_B = "repo-b"
+
+# Sentinel to distinguish "not provided" from "explicitly None"
+_UNSET = object()
+
+
+def _make_tracking_db_with_repos(
+    tmp_path: Path, aliases: list, lifecycle_version
+) -> str:
+    """
+    Normal function returning db_path. Uses a context manager internally to
+    guarantee the SQLite connection is always closed. Inserts tracking rows for
+    each alias at the given lifecycle_schema_version.
+    """
+    db_path = str(tmp_path / "tracking.db")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS description_refresh_tracking (
+                repo_alias TEXT PRIMARY KEY NOT NULL,
+                last_run TEXT,
+                next_run TEXT,
+                status TEXT DEFAULT 'pending',
+                error TEXT,
+                last_known_commit TEXT,
+                last_known_files_processed INTEGER,
+                last_known_indexed_at TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                lifecycle_schema_version INTEGER DEFAULT NULL
+            )"""
+        )
+        for alias in aliases:
+            conn.execute(
+                "INSERT OR REPLACE INTO description_refresh_tracking "
+                "(repo_alias, status, lifecycle_schema_version) VALUES (?, ?, ?)",
+                (alias, "pending", lifecycle_version),
+            )
+    return db_path
+
+
+def _make_scheduler_with_tracking_db(
+    tmp_path: Path,
+    job_tracker=None,
+    db_path: str = None,
+) -> DescriptionRefreshScheduler:
+    """Build a DescriptionRefreshScheduler backed by a real tracking DB."""
+    effective_db_path = db_path or str(tmp_path / "tracking.db")
+    tracking_backend = DescriptionRefreshTrackingBackend(effective_db_path)
+    golden_backend = Mock()
+    golden_backend.get_repo.return_value = None
+    config_manager = Mock()
+    config_manager.load_config.return_value = None
+    return DescriptionRefreshScheduler(
+        config_manager=config_manager,
+        tracking_backend=tracking_backend,
+        golden_backend=golden_backend,
+        job_tracker=job_tracker,
+    )
+
+
+def _make_test_scheduler_with_backfill_job(
+    tmp_path: Path,
+    aliases: list,
+    job_tracker=_UNSET,
+    optional_job_id: Optional[str] = _BACKFILL_JOB_ID_2A,
+) -> Tuple[DescriptionRefreshScheduler, object]:
+    """
+    Central setup helper for Issue 2a tests.
+
+    job_tracker behaviour:
+    - Not provided (_UNSET): helper creates a MagicMock() internally.
+    - Explicitly None: None is passed through — scheduler gets no tracker.
+    - Anything else: used as-is.
+
+    Sets optional_job_id as active backfill job when provided (not None).
+    Returns (scheduler, effective_tracker).
+    """
+    effective_tracker = MagicMock() if job_tracker is _UNSET else job_tracker
+    db_path = _make_tracking_db_with_repos(
+        tmp_path, aliases, lifecycle_version=_OLD_LIFECYCLE_VERSION
+    )
+    scheduler = _make_scheduler_with_tracking_db(
+        tmp_path, job_tracker=effective_tracker, db_path=db_path
+    )
+    if optional_job_id is not None:
+        scheduler.set_active_backfill_job_id(optional_job_id)
+    return scheduler, effective_tracker
+
+
+# ---------------------------------------------------------------------------
+# Codex Review Issue 2a: complete_job called on happy path
+# ---------------------------------------------------------------------------
+
+
+class TestSelfCloseBackfillLastRepoCompletesJob:
+    """
+    Issue 2a: When the last repo self-closes its backfill, complete_job must be
+    called on the aggregate job, and _active_backfill_job_id must be cleared.
+    """
+
+    def test_complete_job_called_with_correct_id_when_last_repo_closes(self, tmp_path):
+        """complete_job called with active_backfill_job_id when last repo finishes."""
+        scheduler, mock_tracker = _make_test_scheduler_with_backfill_job(
+            tmp_path, [_ALIAS_SINGLE]
+        )
+
+        scheduler._self_close_backfill(_ALIAS_SINGLE)
+
+        assert mock_tracker.complete_job.call_count == 1, (
+            f"complete_job must be called once when last repo self-closes. "
+            f"Was called {mock_tracker.complete_job.call_count} times."
+        )
+        assert mock_tracker.complete_job.call_args[0][0] == _BACKFILL_JOB_ID_2A, (
+            f"complete_job called with wrong job_id: "
+            f"{mock_tracker.complete_job.call_args[0][0]!r}"
+        )
+
+    def test_active_backfill_job_id_cleared_after_complete_job(self, tmp_path):
+        """_active_backfill_job_id cleared to None after complete_job is called."""
+        scheduler, _ = _make_test_scheduler_with_backfill_job(tmp_path, [_ALIAS_SINGLE])
+
+        scheduler._self_close_backfill(_ALIAS_SINGLE)
+
+        with scheduler._backfill_job_id_lock:
+            current_id = scheduler._active_backfill_job_id
+        assert current_id is None, (
+            f"_active_backfill_job_id must be None after last repo completes. "
+            f"Got {current_id!r}."
+        )
+
+    def test_complete_job_not_called_when_second_repo_still_needs_backfill(
+        self, tmp_path
+    ):
+        """complete_job not called when a second repo still needs backfill."""
+        scheduler, mock_tracker = _make_test_scheduler_with_backfill_job(
+            tmp_path, [_ALIAS_A, _ALIAS_B]
+        )
+
+        scheduler._self_close_backfill(_ALIAS_A)
+
+        assert mock_tracker.complete_job.call_count == 0, (
+            f"complete_job must NOT be called when repos still need backfill. "
+            f"Was called {mock_tracker.complete_job.call_count} times."
+        )
+
+
+class TestSelfCloseBackfillGuards:
+    """Issue 2a guards: complete_job skipped when no tracker or no active job_id."""
+
+    def test_complete_job_not_called_when_no_active_backfill_job_id(self, tmp_path):
+        """No aggregate job_id set — complete_job must not be called."""
+        scheduler, mock_tracker = _make_test_scheduler_with_backfill_job(
+            tmp_path, [_ALIAS_SINGLE], optional_job_id=None
+        )
+
+        scheduler._self_close_backfill(_ALIAS_SINGLE)
+
+        assert mock_tracker.complete_job.call_count == 0, (
+            "complete_job must NOT be called when _active_backfill_job_id is None."
+        )
+
+    def test_no_crash_when_job_tracker_is_none(self, tmp_path):
+        """job_tracker explicitly None — _self_close_backfill must not crash."""
+        scheduler, _ = _make_test_scheduler_with_backfill_job(
+            tmp_path, [_ALIAS_SINGLE], job_tracker=None
+        )
+
+        # Must not raise — no job_tracker means no complete_job call possible
+        scheduler._self_close_backfill(_ALIAS_SINGLE)

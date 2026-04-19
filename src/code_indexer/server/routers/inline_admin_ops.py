@@ -726,7 +726,7 @@ def register_admin_ops_routes(
                             JOB_STATUS_RUNNING,
                         ]:
                             cancel_result = background_job_manager.cancel_job(
-                                job["job_id"], current_user.username
+                                job["job_id"], current_user.username, is_admin=True
                             )
                             if cancel_result["success"]:
                                 logging.info(
