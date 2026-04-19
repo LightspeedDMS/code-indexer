@@ -8,6 +8,7 @@ Session-scoped fixtures:
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Generator
 
@@ -15,7 +16,67 @@ import httpx
 import pytest
 
 from tests.e2e.conftest import E2EConfig
-from tests.e2e.helpers import rest_call, run_cidx, wait_for_job
+from tests.e2e.helpers import (
+    GIT_SUBPROCESS_TIMEOUT,
+    rest_call,
+    run_cidx,
+    wait_for_job,
+    wait_for_repo_activation,
+)
+
+
+# ---------------------------------------------------------------------------
+# Private: workspace git initialisation (Bug 4)
+# ---------------------------------------------------------------------------
+
+
+def _init_git_workspace(workspace: Path, remote_url: str) -> None:
+    """Initialise ``workspace`` as a minimal git repo with ``remote_url`` as origin.
+
+    ``cidx query`` in remote mode requires the client workspace to be a git
+    repo so ``GitTopologyService.is_git_available()`` returns True and so
+    ``git config --get remote.origin.url`` returns a URL matching the
+    registered golden repo's ``repo_url`` (repository linking).
+
+    Writes a ``.gitignore`` that excludes ``.code-indexer/`` to avoid staging
+    cidx metadata.  Sets a minimal ``user.name``/``user.email`` so any later
+    commit inside the workspace does not fail on missing identity config.
+
+    Raises ``subprocess.CalledProcessError`` on any non-zero git exit so the
+    fixture fails loudly rather than proceeding with a half-configured repo.
+    """
+    cwd = str(workspace)
+    # 1. git init
+    subprocess.run(
+        ["git", "init"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+        check=True,
+    )
+    # 2. Minimal identity config (scoped to this repo)
+    subprocess.run(
+        ["git", "config", "user.name", "CIDX E2E"],
+        cwd=cwd,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "e2e@cidx.test"],
+        cwd=cwd,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+        check=True,
+    )
+    # 3. Exclude cidx metadata from future commits
+    (workspace / ".gitignore").write_text(".code-indexer/\n", encoding="utf-8")
+    # 4. Add origin remote — repository linking looks up by this URL
+    subprocess.run(
+        ["git", "remote", "add", "origin", remote_url],
+        cwd=cwd,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+        check=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +153,20 @@ def authenticated_workspace(
     Runs ``cidx init --remote <url> --username <user> --password <pass>``.
     The ``--username`` and ``--password`` flags are required by the CLI when
     using ``--remote``; they perform authentication as part of initialisation.
+
+    Before ``cidx init``, the workspace is initialised as a git repo whose
+    ``remote.origin.url`` matches the markupsafe seed path used for the
+    golden-repo registration.  Without this, ``cidx query`` in remote mode
+    fails with ``RepositoryLinkingError: Current directory is not a git
+    repository`` (Bug 4).
     """
     workspace = tmp_path_factory.mktemp("auth_workspace", numbered=False)
     cwd = str(workspace)
+
+    _init_git_workspace(
+        workspace,
+        remote_url=str(e2e_config.seed_cache_dir / "markupsafe"),
+    )
 
     init_result = run_cidx(
         "init", "--remote", e2e_server_url,
@@ -120,6 +192,9 @@ def authenticated_workspace(
 def activated_golden_repo(
     authenticated_workspace: Path,
     registered_golden_repo: str,
+    e2e_config: E2EConfig,
+    e2e_http_client: httpx.Client,
+    e2e_admin_token: str,
     e2e_cli_env: dict[str, str],
 ) -> str:
     """Activate the markupsafe golden repo in the authenticated workspace.
@@ -129,6 +204,11 @@ def activated_golden_repo(
     Session-scoped so activation happens once per test run.  Tests that
     require an active repo depend on this fixture rather than on
     ``test_repos_activate`` having executed first.
+
+    After the CLI command returns rc=0, polls GET /api/repos/<alias> until
+    the server reports 200 (activation complete) within
+    ``e2e_config.repo_activation_timeout`` seconds — fixing the race where
+    the server-side activation job is still running when the fixture returns.
     """
     result = run_cidx(
         "repos", "activate", registered_golden_repo,
@@ -138,5 +218,11 @@ def activated_golden_repo(
     assert result.returncode == 0, (
         f"cidx repos activate failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    wait_for_repo_activation(
+        e2e_http_client,
+        alias=registered_golden_repo,
+        token=e2e_admin_token,
+        timeout=e2e_config.repo_activation_timeout,
     )
     return registered_golden_repo

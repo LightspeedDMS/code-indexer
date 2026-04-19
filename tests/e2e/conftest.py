@@ -56,6 +56,8 @@ class E2EConfig:
     """Maximum seconds to wait for a golden repository indexing job (E2E_GOLDEN_REPO_JOB_TIMEOUT)."""
     golden_repo_job_poll_interval: float
     """Seconds between polls when waiting for a golden repo job (E2E_GOLDEN_REPO_JOB_POLL_INTERVAL)."""
+    repo_activation_timeout: float
+    """Maximum seconds to poll GET /api/repos/<alias> for 200 after activation (E2E_REPO_ACTIVATION_TIMEOUT)."""
 
     @property
     def server_url(self) -> str:
@@ -138,6 +140,9 @@ def e2e_config() -> E2EConfig:
         ),
         golden_repo_job_poll_interval=float(
             os.environ.get("E2E_GOLDEN_REPO_JOB_POLL_INTERVAL", "2.0")
+        ),
+        repo_activation_timeout=float(
+            os.environ.get("E2E_REPO_ACTIVATION_TIMEOUT", "90.0")
         ),
     )
 

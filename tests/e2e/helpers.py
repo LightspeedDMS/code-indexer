@@ -60,6 +60,9 @@ SERVER_READINESS_POLL: float = 1.0
 SERVER_HEALTH_HTTP_TIMEOUT: float = 5.0
 """Per-request timeout when hitting the /health endpoint."""
 
+GIT_SUBPROCESS_TIMEOUT: float = 5.0
+"""Maximum seconds to wait for a git subprocess call (e.g., git config, git init)."""
+
 
 # ---------------------------------------------------------------------------
 # Authorization header construction (RFC 6750 Bearer scheme)
@@ -302,6 +305,54 @@ def wait_for_job(
         time.sleep(poll_interval)
     raise TimeoutError(
         f"Job {job_id!r} did not reach a terminal state within {timeout}s"
+    )
+
+
+def wait_for_repo_activation(
+    client: httpx.Client,
+    alias: str,
+    token: str | None = None,
+    *,
+    timeout: float = 90.0,
+    poll_interval: float = JOB_POLL_INTERVAL,
+) -> None:
+    """Poll GET /api/repos/<alias> until the repo shows as activated (HTTP 200).
+
+    After ``cidx repos activate`` returns rc=0 the activation job may still
+    be running server-side.  This helper blocks until the repo appears in the
+    user's activated repository list (200) or raises TimeoutError.
+
+    Args:
+        client: Shared httpx.Client bound to the server base URL.
+        alias: User-facing alias of the activated repository to wait for.
+        token: JWT access token.
+        timeout: Maximum seconds to wait (must be > 0).
+        poll_interval: Seconds between polls (must be > 0).
+
+    Raises:
+        ValueError: If alias is empty, timeout <= 0, or poll_interval <= 0.
+        TimeoutError: If the repo is not activated within timeout seconds.
+    """
+    if not alias:
+        raise ValueError("alias must not be empty")
+    if timeout <= 0:
+        raise ValueError(f"timeout must be > 0, got {timeout}")
+    if poll_interval <= 0:
+        raise ValueError(f"poll_interval must be > 0, got {poll_interval}")
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.request(
+            "GET",
+            f"/api/repos/{alias}",
+            headers=_auth_headers(token),
+            timeout=JOB_POLL_HTTP_TIMEOUT,
+        )
+        if response.status_code == 200:
+            return
+        time.sleep(poll_interval)
+    raise TimeoutError(
+        f"Repository '{alias}' did not appear as activated within {timeout}s"
     )
 
 
