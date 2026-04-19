@@ -534,7 +534,7 @@ def register_repo_routes(
         """
         try:
             # Initialize repository discovery service
-            from .services.repository_discovery_service import (
+            from ..services.repository_discovery_service import (
                 RepositoryDiscoveryService,
             )
 

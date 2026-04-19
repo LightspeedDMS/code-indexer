@@ -93,6 +93,7 @@ def run_cidx(
     *args: str,
     cwd: str | None = None,
     env: dict[str, str] | None = None,
+    stdin_input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the cidx CLI via subprocess and return the CompletedProcess.
 
@@ -105,6 +106,8 @@ def run_cidx(
         cwd: Working directory for the subprocess. None means inherit caller cwd.
         env: Full environment mapping for the subprocess. None means inherit
              the parent environment.
+        stdin_input: Optional text fed to the subprocess on stdin. Used to
+            answer interactive prompts (e.g. "y\\n" for a y/N confirmation).
 
     Returns:
         CompletedProcess with stdout/stderr captured as text strings.
@@ -118,6 +121,7 @@ def run_cidx(
         text=True,
         cwd=cwd,
         env=env,
+        input=stdin_input,
     )
 
 
