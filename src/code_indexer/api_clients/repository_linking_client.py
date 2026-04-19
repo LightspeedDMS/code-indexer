@@ -90,8 +90,15 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         if not repo_url:
             raise ValueError("Invalid git URL format: empty URL")
 
-        # Basic URL validation - must be HTTP(S) and end with .git
-        if not re.match(r"^https?://.*\.git$", repo_url):
+        # URL validation: HTTP(S) hosted remotes plus local filesystem paths
+        # (git itself accepts `git clone /path` and `file:///path`).
+        _url_patterns = (
+            r"^https?://.*\.git$",
+            r"^file:///.+$",
+            r"^/.+$",
+            r"^~/.+$",
+        )
+        if not any(re.match(p, repo_url) for p in _url_patterns):
             raise ValueError(f"Invalid git URL format: {repo_url}")
 
         discovery_endpoint = f"/api/repos/discover?repo_url={repo_url}"

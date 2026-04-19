@@ -244,7 +244,7 @@ def test_repos_deactivate(
     _assert_ok(activate_result, "cidx repos activate (pre-deactivate setup)")
 
     result = run_cidx(
-        "repos", "deactivate", MARKUPSAFE_ALIAS,
+        "repos", "deactivate", MARKUPSAFE_ALIAS, "--force",
         cwd=str(authenticated_workspace), env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos deactivate")

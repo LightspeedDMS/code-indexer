@@ -11647,12 +11647,14 @@ def available(ctx, search: Optional[str]):
             else:
                 branches_str = ", ".join(branches)
 
+            # GoldenRepository.description is Optional (server may not persist it)
+            description_text = repo.description or ""
             table.add_row(
                 repo.alias,
                 (
-                    repo.description[:47] + "..."
-                    if len(repo.description) > 50
-                    else repo.description
+                    description_text[:47] + "..."
+                    if len(description_text) > 50
+                    else description_text
                 ),
                 repo.default_branch,
                 branches_str,
