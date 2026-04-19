@@ -43,8 +43,26 @@ def _load_remote_config() -> Dict[str, Any]:
         if not server_url:
             raise ValueError("server_url not found in remote config")
 
-        encrypted_creds = config_data.get("encrypted_credentials", {})
-        return {"server_url": server_url, "credentials": encrypted_creds}
+        username = config_data.get("username", "")
+
+        creds_path = project_root / ".code-indexer" / ".creds"
+        if not creds_path.exists():
+            raise FileNotFoundError(
+                f"Credentials file not found at {creds_path}. "
+                "Run 'cidx auth login' to configure remote access."
+            )
+
+        from code_indexer.remote.credential_manager import (
+            load_encrypted_credentials,
+            ProjectCredentialManager,
+        )
+
+        encrypted_creds = load_encrypted_credentials(project_root)
+        credential_manager = ProjectCredentialManager()
+        decrypted = credential_manager.decrypt_credentials(
+            encrypted_creds, username, str(project_root), server_url
+        )
+        return {"server_url": server_url, "credentials": dict(decrypted._asdict())}
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in remote config: {e}")
 

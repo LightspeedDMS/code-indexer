@@ -8,6 +8,7 @@ and service layer integration.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+import os
 import subprocess
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -51,7 +52,10 @@ logger = logging.getLogger(__name__)
 
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
-activated_repo_manager = ActivatedRepoManager()
+_server_data_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+activated_repo_manager = ActivatedRepoManager(
+    data_dir=os.path.join(_server_data_dir, "data") if _server_data_dir else None
+)
 
 
 # Git Status/Inspection Endpoints

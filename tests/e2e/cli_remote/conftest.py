@@ -31,31 +31,79 @@ from tests.e2e.helpers import (
 
 
 def _init_git_workspace(workspace: Path, remote_url: str) -> None:
-    """Initialise ``workspace`` as a minimal git repo with ``remote_url`` as origin.
+    """Clone ``remote_url`` into ``workspace`` so branch matching works for cidx query.
 
-    ``cidx query`` in remote mode requires the client workspace to be a git
-    repo so ``GitTopologyService.is_git_available()`` returns True and so
-    ``git config --get remote.origin.url`` returns a URL matching the
-    registered golden repo's ``repo_url`` (repository linking).
+    ``cidx query`` in remote mode uses exact-branch matching: it reads the
+    workspace's current branch via ``git branch --show-current`` and compares
+    it against the branches available in the activated remote repository.  A
+    bare ``git init`` (no commits) leaves the workspace on an *unborn* branch,
+    so ``git branch --show-current`` returns empty → branch detection returns
+    ``None`` → repository linking fails with ``BranchMatchingError``.
 
-    Writes a ``.gitignore`` that excludes ``.code-indexer/`` to avoid staging
-    cidx metadata.  Sets a minimal ``user.name``/``user.email`` so any later
-    commit inside the workspace does not fail on missing identity config.
+    Using ``git clone <seed_path> .`` ensures the workspace has real commits,
+    is on the same branch as the seed (e.g. ``main``), and already has
+    ``remote.origin.url`` set to the seed path — exactly what repository
+    linking needs.
 
     Raises ``subprocess.CalledProcessError`` on any non-zero git exit so the
-    fixture fails loudly rather than proceeding with a half-configured repo.
+    fixture fails loudly rather than proceeding with a broken repo.
     """
     cwd = str(workspace)
-    # 1. git init
+    # Clone seed into the (empty) workspace directory; sets origin automatically.
     subprocess.run(
-        ["git", "init"],
+        ["git", "clone", remote_url, "."],
         cwd=cwd,
         capture_output=True,
         text=True,
         timeout=GIT_SUBPROCESS_TIMEOUT,
         check=True,
     )
-    # 2. Minimal identity config (scoped to this repo)
+
+    # The seed repo may be in detached HEAD (e.g. after a bare fetch or
+    # checkout of a specific commit).  git clone propagates that state, leaving
+    # the workspace also detached.  cidx query's branch-matching logic calls
+    # ``git branch --show-current`` and treats empty output as "no branch" →
+    # BranchMatchingError.  Fix: if detached, find the first named remote
+    # tracking branch and check it out locally.  Fail loudly if none exists so
+    # the fixture never silently passes a broken workspace.
+    branch_check = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+    )
+    if not branch_check.stdout.strip():
+        remote_refs = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=GIT_SUBPROCESS_TIMEOUT,
+        )
+        remote_branches = [
+            b.strip()
+            for b in remote_refs.stdout.splitlines()
+            if b.strip() and not b.strip().endswith("/HEAD")
+        ]
+        if not remote_branches:
+            raise RuntimeError(
+                f"git clone of {remote_url} left workspace in detached HEAD "
+                "with no remote tracking branches — cannot recover a named branch."
+            )
+        remote_ref = remote_branches[0]  # e.g. "origin/main"
+        local_name = remote_ref.split("/", 1)[-1]  # e.g. "main"
+        subprocess.run(
+            ["git", "checkout", "-b", local_name, "--track", remote_ref],
+            cwd=cwd,
+            capture_output=True,
+            check=True,
+            timeout=GIT_SUBPROCESS_TIMEOUT,
+        )
+
+    # Minimal identity config (scoped to this repo)
     subprocess.run(
         ["git", "config", "user.name", "CIDX E2E"],
         cwd=cwd,
@@ -68,15 +116,9 @@ def _init_git_workspace(workspace: Path, remote_url: str) -> None:
         timeout=GIT_SUBPROCESS_TIMEOUT,
         check=True,
     )
-    # 3. Exclude cidx metadata from future commits
-    (workspace / ".gitignore").write_text(".code-indexer/\n", encoding="utf-8")
-    # 4. Add origin remote — repository linking looks up by this URL
-    subprocess.run(
-        ["git", "remote", "add", "origin", remote_url],
-        cwd=cwd,
-        timeout=GIT_SUBPROCESS_TIMEOUT,
-        check=True,
-    )
+    # Append cidx metadata exclusion (markupsafe already has its own .gitignore)
+    with open(workspace / ".gitignore", "a", encoding="utf-8") as fh:
+        fh.write("\n.code-indexer/\n")
 
 
 # ---------------------------------------------------------------------------

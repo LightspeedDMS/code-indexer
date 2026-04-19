@@ -6,7 +6,7 @@ repository discovery integration, and match confirmation/storage functionality.
 
 import json
 import pytest
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock
 
 from src.code_indexer.remote.repository_linking import (
     ExactBranchMatcher,
@@ -48,7 +48,7 @@ class TestExactBranchMatcher:
     def mock_repository_linking_client(self):
         """Create mock repository linking client."""
         client = Mock(spec=RepositoryLinkingClient)
-        client.discover_repositories = AsyncMock()
+        client.discover_repositories = Mock()
         client.server_url = "https://cidx.example.com"
         return client
 
@@ -149,8 +149,8 @@ class TestExactBranchMatcher:
             discovery_response
         )
 
-        # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        # Execute the method (sync — no await)
+        result = exact_branch_matcher.find_exact_branch_match(
             sample_git_repo, "https://github.com/company/auth-service.git"
         )
 
@@ -187,8 +187,8 @@ class TestExactBranchMatcher:
             discovery_response
         )
 
-        # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        # Execute the method (sync — no await)
+        result = exact_branch_matcher.find_exact_branch_match(
             sample_git_repo, "https://github.com/company/auth-service.git"
         )
 
@@ -231,8 +231,8 @@ class TestExactBranchMatcher:
             discovery_response
         )
 
-        # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        # Execute the method (sync — no await)
+        result = exact_branch_matcher.find_exact_branch_match(
             sample_git_repo, "https://github.com/company/auth-service.git"
         )
 
@@ -286,8 +286,8 @@ class TestExactBranchMatcher:
             discovery_response
         )
 
-        # Execute the method
-        result = await exact_branch_matcher.find_exact_branch_match(
+        # Execute the method (sync — no await)
+        result = exact_branch_matcher.find_exact_branch_match(
             sample_git_repo, "https://github.com/company/isolated.git"
         )
 

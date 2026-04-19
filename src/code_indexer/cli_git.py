@@ -207,7 +207,7 @@ def git_diff(
         if json_output:
             console.print(format_json_success(result))
         else:
-            diff_text = result.get("diff", "")
+            diff_text = result.get("diff_text", "")
             if diff_text:
                 console.print(diff_text)
             else:
@@ -245,7 +245,7 @@ def git_log(
             commits = result.get("commits", [])
             if commits:
                 for c in commits:
-                    hash_short = c.get("hash", "")[:8]
+                    hash_short = c.get("commit_hash", "")[:8]
                     msg = c.get("message", "").split("\n")[0]
                     author_name = c.get("author", "")
                     console.print(
@@ -521,12 +521,15 @@ def git_branches(repository: str, json_output: bool):
             console.print(format_json_success(result))
         else:
             current = result.get("current", "")
-            branches = result.get("branches", [])
-            for branch in branches:
+            local_branches = result.get("local", [])
+            remote_branches = result.get("remote", [])
+            for branch in local_branches:
                 if branch == current:
                     console.print(f"[green]* {branch}[/green]")
                 else:
                     console.print(f"  {branch}")
+            for branch in remote_branches:
+                console.print(f"  [dim]{branch}[/dim]")
 
     except Exception as e:
         _handle_git_error(e, json_output)
@@ -642,8 +645,8 @@ def git_blame(file: str, repository: str, json_output: bool):
         else:
             lines = result.get("lines", [])
             for line_info in lines:
-                line_num = line_info.get("line", "")
-                commit_short = line_info.get("commit", "")[:8]
+                line_num = line_info.get("line_number", "")
+                commit_short = line_info.get("commit_hash", "")[:8]
                 author = line_info.get("author", "")
                 content = line_info.get("content", "")
                 console.print(
@@ -676,7 +679,7 @@ def git_file_history(file: str, repository: str, limit: int, json_output: bool):
             if commits:
                 console.print(f"[bold]History for {file}:[/bold]\n")
                 for c in commits:
-                    hash_short = c.get("hash", "")[:8]
+                    hash_short = c.get("commit_hash", "")[:8]
                     msg = c.get("message", "").split("\n")[0]
                     author = c.get("author", "")
                     console.print(

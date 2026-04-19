@@ -66,9 +66,13 @@ class FileCRUDService:
     def __init__(self):
         """Initialize file CRUD service."""
         # Import here to avoid circular imports
+        import os
         from ..repositories.activated_repo_manager import ActivatedRepoManager
 
-        self.activated_repo_manager = ActivatedRepoManager()
+        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        self.activated_repo_manager = ActivatedRepoManager(
+            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
+        )
         # Write exceptions map: alias -> canonical path (Story #197)
         self._global_write_exceptions: Dict[str, Path] = {}
         # Golden repos directory for write-mode marker lookup (Story #231).

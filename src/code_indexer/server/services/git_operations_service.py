@@ -130,9 +130,13 @@ class GitOperationsService:
 
         # Import ActivatedRepoManager for resolving repo aliases to paths
         # (import here to avoid circular imports)
+        import os
         from ..repositories.activated_repo_manager import ActivatedRepoManager
 
-        self.activated_repo_manager = ActivatedRepoManager()
+        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        self.activated_repo_manager = ActivatedRepoManager(
+            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
+        )
 
     # REST API Wrapper Methods (resolve repo_alias to repo_path)
 

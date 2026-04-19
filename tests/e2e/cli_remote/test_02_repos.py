@@ -8,15 +8,16 @@ stdout/stderr output.
 Fixture dependency rules:
   test_repos_available  -- uses ``registered_golden_repo`` (no activation needed
                            for a repo to appear in the available list)
-  test_repos_deactivate -- uses ``registered_golden_repo`` and performs its own
-                           independent activate (rc=0 required) then deactivate
-                           to avoid mutating shared session state
   all other 10 tests    -- use ``activated_golden_repo`` (session-scoped)
+
+NOTE: test_repos_deactivate was moved to test_06_cleanup.py so it executes
+after test_05_git_files.py.  The deactivation destroys the physical
+activated-repos directory; running it here would break all git/file tests.
 
 Private helper:
   _assert_ok -- asserts rc=0 with an informative failure message
 
-Test functions (12):
+Test functions (11):
   test_repos_available     -- browse available golden repos
   test_repos_activate      -- verify activate is idempotent (rc=0)
   test_repos_list          -- list activated repos
@@ -28,7 +29,6 @@ Test functions (12):
   test_repos_sync          -- sync repo (rc 0 or 1 accepted)
   test_repos_sync_status   -- show sync status
   test_query_via_server    -- cidx query returns results
-  test_repos_deactivate    -- independent activate (rc=0) + deactivate
 """
 
 from __future__ import annotations
@@ -218,25 +218,3 @@ def test_query_via_server(
     assert result.stdout.strip(), "cidx query returned empty output"
 
 
-def test_repos_deactivate(
-    authenticated_workspace: Path,
-    registered_golden_repo: str,
-    e2e_cli_env: dict[str, str],
-) -> None:
-    """cidx repos deactivate markupsafe exits 0.
-
-    Activates the repo independently (rc=0 required) before deactivating
-    to avoid mutating the shared ``activated_golden_repo`` session state.
-    """
-    activate_result = run_cidx(
-        "repos", "activate", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
-    )
-    _assert_ok(activate_result, "cidx repos activate (pre-deactivate setup)")
-
-    result = run_cidx(
-        "repos", "deactivate", MARKUPSAFE_ALIAS, "--force",
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
-        stdin_input="y\n",
-    )
-    _assert_ok(result, "cidx repos deactivate")

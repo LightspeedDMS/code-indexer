@@ -217,7 +217,16 @@ class RemoteQueryClient(CIDXRemoteAPIClient):
             if response.status_code == 200:
                 query_data = response.json()
                 results = query_data.get("results", [])
-                return [QueryResultItem.model_validate(result) for result in results]
+                normalized = []
+                for result in results:
+                    # Server payload-cache truncation removes code_snippet and
+                    # adds preview + total_size + has_more.  Restore the field
+                    # so QueryResultItem validation succeeds.
+                    if "code_snippet" not in result and "preview" in result:
+                        result = dict(result)
+                        result["code_snippet"] = result["preview"]
+                    normalized.append(QueryResultItem.model_validate(result))
+                return normalized
 
             elif response.status_code == 403:
                 error_detail = response.json().get("detail", "Access denied")

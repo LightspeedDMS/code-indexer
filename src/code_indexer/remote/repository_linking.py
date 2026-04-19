@@ -300,36 +300,47 @@ class ExactBranchMatcher:
         """
         exact_matches = []
 
-        # Process discovered repositories and classify by type
-        # Combine all matches from golden and activated repositories
-        all_matches = (
-            discovery_response.golden_repositories
-            + discovery_response.activated_repositories
-        )
-        for repo_match in all_matches:
+        # Use the server-categorised lists directly — the server already knows
+        # which repos are golden vs activated, so we must NOT re-derive the type
+        # from the alias name (heuristics like "no hyphen → golden" fail for
+        # simple activated-repo aliases such as "markupsafe").
+        _typed_matches = [
+            (repo_match, RepositoryType.ACTIVATED, 1)
+            for repo_match in discovery_response.activated_repositories
+        ] + [
+            (repo_match, RepositoryType.GOLDEN, 2)
+            for repo_match in discovery_response.golden_repositories
+        ]
+
+        for repo_match, repository_type, priority in _typed_matches:
             if target_branch in repo_match.available_branches:
-                # Determine repository type based on alias pattern
-                repository_type = self._determine_repository_type(repo_match.alias)
-
-                # Set priority: activated repositories have higher priority
-                priority = 1 if repository_type == RepositoryType.ACTIVATED else 2
-
+                # Activated repos use composite alias "user_alias/golden_alias" in the
+                # discovery response (from repository_matcher._convert_activated_repo_to_match_result).
+                # The server query endpoint only accepts user_alias, so extract the first
+                # component.  Golden repo aliases never contain "/" so this is safe.
+                if (
+                    repository_type == RepositoryType.ACTIVATED
+                    and "/" in repo_match.alias
+                ):
+                    query_alias = repo_match.alias.split("/")[0]
+                else:
+                    query_alias = repo_match.alias
                 match = RepositoryMatch(
-                    alias=repo_match.alias,
+                    alias=query_alias,
                     repository_type=repository_type,
                     branch=target_branch,
                     match_quality=MatchQuality.EXACT,
                     priority=priority,
                     git_url=repo_match.git_url,
-                    display_name=repo_match.alias,  # Use alias as display name
-                    description=f"{repo_match.repository_type.title()} repository: {repo_match.alias}",  # Generate description
+                    display_name=repo_match.alias,
+                    description=f"{repo_match.repository_type.title()} repository: {repo_match.alias}",
                     available_branches=repo_match.available_branches,
                     last_updated=(
                         repo_match.last_indexed.isoformat()
                         if repo_match.last_indexed
                         else "Never"
-                    ),  # Convert datetime to string
-                    access_level="read",  # Default access level
+                    ),
+                    access_level="read",
                 )
                 exact_matches.append(match)
 

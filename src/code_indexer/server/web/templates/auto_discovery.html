@@ -415,6 +415,7 @@ function renderPanel(platform) {
                 'data-platform="' + escHtml(platform) + '" ' +
                 'data-name="' + escHtml(repo.name || '') + '" ' +
                 'data-branch="' + escHtml(repo.default_branch || 'main') + '" ' +
+                'data-preferred-url="' + escHtml(repo.is_private ? repo.clone_url_ssh : repo.clone_url_https) + '" ' +
                 'value="' + escHtml(repo.clone_url_https) + '" ' +
                 (isSelected ? 'checked' : '') + ' ' +
                 'onchange="onCheckboxChange(\'' + platform + '\', this)"></td>';
@@ -532,7 +533,7 @@ function onCheckboxChange(platform, checkbox) {
             platform: platform,
             name: checkbox.dataset.name,
             branch: checkbox.dataset.branch,
-            clone_url: url
+            clone_url: checkbox.dataset.preferredUrl || url
         });
     } else {
         selectedRepos.delete(key);
@@ -553,7 +554,7 @@ function toggleSelectAll(platform, checked) {
                 platform: platform,
                 name: repo.name || '',
                 branch: repo.default_branch || 'main',
-                clone_url: repo.clone_url_https
+                clone_url: repo.is_private ? repo.clone_url_ssh : repo.clone_url_https
             });
         } else {
             selectedRepos.delete(key);

@@ -1005,7 +1005,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/blame",
-                params={"file_path": file_path},
+                params={"path": file_path},
             )
 
             if response.status_code == 200:
@@ -1053,7 +1053,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
             response = self._authenticated_request(
                 "GET",
                 f"/api/v1/repos/{repository_alias}/git/file-history",
-                params={"file_path": file_path, "limit": limit},
+                params={"path": file_path, "limit": limit},
             )
 
             if response.status_code == 200:
@@ -1193,7 +1193,7 @@ class GitAPIClient(CIDXRemoteAPIClient):
         Raises:
             APIClientError: If API request fails
         """
-        params: Dict[str, Any] = {"file_path": file_path}
+        params: Dict[str, Any] = {"path": file_path}
         if revision:
             params["revision"] = revision
 

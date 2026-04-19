@@ -91,9 +91,13 @@ class FileListingService:
     def __init__(self):
         """Initialize the file listing service."""
         # Import here to avoid circular imports
+        import os
         from ..repositories.activated_repo_manager import ActivatedRepoManager
 
-        self.activated_repo_manager = ActivatedRepoManager()
+        _server_dir = os.environ.get("CIDX_SERVER_DATA_DIR")
+        self.activated_repo_manager = ActivatedRepoManager(
+            data_dir=os.path.join(_server_dir, "data") if _server_dir else None
+        )
 
     def _get_file_content_limits_config(self):
         """Get file content limits config from ConfigService."""
