@@ -244,6 +244,34 @@ class TestRebuildFromVectorsValidatesJsonShape:
             "corrupt JSON and missing-id entries must be skipped"
         )
 
+    @pytest.mark.parametrize(
+        "bad_id,description",
+        [
+            ([], "list id"),
+            (123, "int id"),
+            ("", "empty string id"),
+        ],
+    )
+    def test_rebuild_skips_invalid_id_types(
+        self, collection_dir, manager, bad_id, description
+    ):
+        """rebuild_from_vectors must skip entries where 'id' is not a non-empty str."""
+        # Good entry so we confirm rebuild still returns something
+        good_data = {"id": "valid_id", "vector": [0.1] * 8, "payload": {}}
+        (collection_dir / "vector_valid.json").write_text(json.dumps(good_data))
+
+        # Bad id entry
+        bad_data = {"id": bad_id, "vector": [0.2] * 8, "payload": {}}
+        (
+            collection_dir / f"vector_bad_{description.replace(' ', '_')}.json"
+        ).write_text(json.dumps(bad_data))
+
+        # Must not crash even with unhashable/wrong-type id
+        result = manager.rebuild_from_vectors(collection_dir)
+
+        assert "valid_id" in result, "Good entry must survive"
+        assert len(result) == 1, f"Bad id ({description}) must be skipped, not included"
+
 
 # ---------------------------------------------------------------------------
 # Tests: Direct-load callers route through repair path

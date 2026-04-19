@@ -275,7 +275,16 @@ class IDIndexManager:
                 )
                 continue
 
-            id_index[data["id"]] = json_file
+            point_id = data["id"]
+            if not isinstance(point_id, str) or not point_id:
+                logger.warning(
+                    "rebuild_from_vectors: skipping %s — 'id' must be a non-empty str, got %r",
+                    json_file,
+                    point_id,
+                )
+                continue
+
+            id_index[point_id] = json_file
 
         if not id_index and scanned_count > 0:
             logger.error(
