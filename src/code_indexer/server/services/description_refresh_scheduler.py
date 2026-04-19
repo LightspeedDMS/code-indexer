@@ -553,9 +553,22 @@ class DescriptionRefreshScheduler:
             alias = repo["repo_alias"]
             clone_path = repo["clone_path"]
 
-            # Check for changes
-            if not self.has_changes_since_last_run(clone_path, repo):
-                # No changes - reschedule without submitting work
+            # Check for lifecycle backfill need — bypasses change gate if stale.
+            # A missing lifecycle_schema_version (None) or a value below LIFECYCLE_SCHEMA_VERSION
+            # both indicate that lifecycle backfill is required. None means the tracking record
+            # predates the column or the backend didn't expose it; treated as version 0 (stale).
+            # Such repos must be processed even when no code changes have occurred (Bug #835).
+            lifecycle_version = repo.get("lifecycle_schema_version")
+            needs_lifecycle_backfill = (
+                lifecycle_version is None
+                or lifecycle_version < LIFECYCLE_SCHEMA_VERSION
+            )
+
+            # Skip only when lifecycle is current AND no code changes
+            if not needs_lifecycle_backfill and not self.has_changes_since_last_run(
+                clone_path, repo
+            ):
+                # No changes and no lifecycle backfill needed - reschedule without work
                 now = datetime.now(timezone.utc).isoformat()
                 self._tracking_backend.upsert_tracking(
                     repo_alias=alias,

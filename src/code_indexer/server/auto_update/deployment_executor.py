@@ -50,6 +50,10 @@ RESTART_SIGNAL_STALENESS_THRESHOLD = 120
 HNSWLIB_FALLBACK_PATH = Path("/var/tmp/cidx-hnswlib")
 HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
 
+# Bug #839: Claude CLI auto-update timeout constants
+NPM_VERSION_TIMEOUT_SECONDS = 5  # How long to wait for `npm --version` probe
+CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS = 180  # How long to wait for npm global install
+
 
 class DeploymentExecutor:
     """Executes deployment commands: git pull, pip install, systemd restart.
@@ -2509,8 +2513,101 @@ class DeploymentExecutor:
                 )
             )
 
+        # Step 11: Bug #839 - Keep Claude CLI at latest version (non-fatal)
+        if not self._ensure_claude_cli_updated():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-106",
+                    "Claude CLI update skipped or failed - "
+                    "Claude CLI may be running a stale version",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         logger.info(
             "Deployment execution completed successfully",
             extra={"correlation_id": get_correlation_id()},
         )
         return True
+
+    def _is_npm_available(self) -> bool:
+        """Check if npm is installed and runnable.
+
+        Returns True if `npm --version` exits 0 within NPM_VERSION_TIMEOUT_SECONDS.
+        Returns False on any failure (missing binary, timeout, non-zero exit).
+        """
+        try:
+            subprocess.run(
+                ["npm", "--version"],
+                capture_output=True,
+                timeout=NPM_VERSION_TIMEOUT_SECONDS,
+                check=True,
+            )
+            return True
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            FileNotFoundError,
+        ):
+            return False
+
+    def _ensure_claude_cli_updated(self) -> bool:
+        """Ensure Claude CLI is at latest version.
+
+        Runs `npm install -g @anthropic-ai/claude-code@latest`. npm's end state is
+        idempotent (repeated runs converge on the latest version).
+
+        Non-fatal if npm is missing (logs WARNING, returns False, deploy continues).
+        """
+        if not self._is_npm_available():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-101",
+                    "npm not found — Claude CLI update skipped",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        try:
+            subprocess.run(
+                ["npm", "install", "-g", "@anthropic-ai/claude-code@latest"],
+                capture_output=True,
+                text=True,
+                timeout=CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS,
+                check=True,
+            )
+            logger.info(
+                format_error_log(
+                    "DEPLOY-GENERAL-102",
+                    "Claude CLI updated via npm",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-103",
+                    f"Claude CLI update failed: {e.stderr}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except subprocess.TimeoutExpired as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-104",
+                    f"Claude CLI update timed out after {CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS}s: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except OSError as e:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-105",
+                    f"Claude CLI update spawn failed: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False

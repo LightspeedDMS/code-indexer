@@ -26,6 +26,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from code_indexer.global_repos.dependency_map_analyzer import (
+    _strip_leading_yaml_frontmatter,
+)
 from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
 
 from .activity_journal_service import ActivityJournalService
@@ -1565,12 +1568,18 @@ class DependencyMapService:
         """
         # Read existing content from versioned path if provided, else from write path
         source_file = read_file if read_file is not None else domain_file
-        existing_content = source_file.read_text()
+        full_content = source_file.read_text()
+
+        # Bug #834 (Step 1): strip frontmatter at the service boundary so that neither
+        # the prompt nor the temp file seen by Claude contains frontmatter delimiters.
+        # _update_frontmatter_timestamp receives full_content (with frontmatter) to
+        # parse/update the timestamp and reconstruct the final file correctly.
+        existing_body = _strip_leading_yaml_frontmatter(full_content)
 
         # Build delta merge prompt (Story #329: pass journal_path for activity journal appendix)
         merge_prompt = self._analyzer.build_delta_merge_prompt(
             domain_name=domain_name,
-            existing_content=existing_content,
+            existing_content=existing_body,
             changed_repos=changed_repos,
             new_repos=new_repos,
             removed_repos=removed_repos,
@@ -1581,7 +1590,7 @@ class DependencyMapService:
         # Story #715: File-based delta merge — Claude edits temp file in-place
         result = self._analyzer.invoke_delta_merge_file(
             domain_name=domain_name,
-            existing_content=existing_content,
+            existing_content=existing_body,
             merge_prompt=merge_prompt,
             timeout=config.dependency_map_pass_timeout_seconds,
             max_turns=config.dependency_map_delta_max_turns,
@@ -1595,9 +1604,10 @@ class DependencyMapService:
             )
             return
 
-        # Update frontmatter timestamp
+        # Update frontmatter timestamp — needs full_content (with frontmatter) to parse
+        # existing metadata; result is body-only from invoke_delta_merge_file.
         updated_content = self._update_frontmatter_timestamp(
-            existing_content, result, domain_name
+            full_content, result, domain_name
         )
 
         # Story #724 v2: verify BEFORE writing to the live domain_file

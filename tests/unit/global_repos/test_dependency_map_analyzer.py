@@ -926,13 +926,18 @@ class TestIncrementalPass2:
             previous_domain_dir=previous_dir,
         )
 
-        # Verify subprocess was called with prompt containing previous content
+        # Verify subprocess was called with prompt referencing the file (Bug #840:
+        # content is NOT embedded inline; prompt instructs Claude to use Read tool)
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         prompt = call_args[1]["input"]  # Prompt passed via stdin
 
         assert "Previous Analysis (refine and improve)" in prompt
-        assert "Old content here" in prompt
+        # Bug #840 new invariant: content must NOT be embedded inline
+        assert "Old content here" not in prompt
+        # New invariant: prompt must instruct Claude to Read the file at its path
+        assert "Use the Read tool to load that file" in prompt
+        assert "authentication.md" in prompt
 
 
 class TestAllowedToolsPerPass:
@@ -2007,14 +2012,19 @@ class TestIteration11Fix2QualityCheckPrevious:
             previous_domain_dir=previous_dir,
         )
 
-        # Verify subprocess was called with prompt that DOES include previous content
+        # Verify subprocess was called with prompt referencing the file (Bug #840:
+        # content is NOT embedded inline; prompt instructs Claude to use Read tool)
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args
         prompt = call_args[1]["input"]  # Prompt passed via stdin
 
-        # Should contain "Previous Analysis" section
+        # Should contain "Previous Analysis" section header
         assert "Previous Analysis (refine and improve)" in prompt
-        assert "Good quality content here" in prompt
+        # Bug #840 new invariant: content must NOT be embedded inline
+        assert "Good quality content here" not in prompt
+        # New invariant: prompt must instruct Claude to Read the file at its path
+        assert "Use the Read tool to load that file" in prompt
+        assert "test-domain.md" in prompt
 
 
 class TestIteration12Fix3TrailingMetaCommentary:
@@ -2737,7 +2747,11 @@ class TestIteration13OutputFirstPrompt:
         assert "Correct" in prompt
         assert "Extend" in prompt
         assert "Do NOT start from scratch" in prompt
-        assert "Good quality content here" in prompt
+        # Bug #840 new invariant: content must NOT be embedded inline
+        assert "Good quality content here" not in prompt
+        # New invariant: prompt must instruct Claude to Read the file at its path
+        assert "Use the Read tool to load the previous analysis at" in prompt
+        assert "test-domain.md" in prompt
 
 
 class TestIteration14PurposeDrivenHooks:

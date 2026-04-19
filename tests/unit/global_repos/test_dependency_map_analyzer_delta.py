@@ -57,9 +57,12 @@ Existing analysis content.
             domain_list=domain_list,
         )
 
-        # Should include existing content
-        assert "Existing analysis content" in prompt
-        assert existing_content in prompt
+        # Bug #840 new invariant: content must NOT be embedded inline
+        assert "Existing analysis content" not in prompt
+        assert existing_content not in prompt
+        # New invariant: prompt must instruct Claude to Read the file and Edit it in place
+        assert "Use the Read tool to load it" in prompt
+        assert "Edit tool" in prompt
 
     def test_build_delta_merge_prompt_includes_self_correction_rules(self, analyzer):
         """Test that merge prompt includes 5 critical self-correction rules."""
