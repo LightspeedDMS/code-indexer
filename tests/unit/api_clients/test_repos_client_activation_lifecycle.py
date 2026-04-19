@@ -165,7 +165,6 @@ class TestRepositoryActivationAPI:
 
             assert exc_info.value.status_code == 500
 
-
     def test_activate_repository_200_idempotent_already_activated(
         self, repos_client, httpx_mock
     ):

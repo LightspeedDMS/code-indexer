@@ -28,7 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
 
-from ..repositories.activated_repo_manager import ActivatedRepoError  # noqa: E402
+from ..repositories.activated_repo_manager import (  # noqa: E402
+    ActivatedRepoError,
+    ActivatedRepoManager,
+)
 from ..repositories.background_jobs import DuplicateJobError  # noqa: E402
 from ..repositories.repository_listing_manager import (
     RepositoryListingError,
@@ -1581,4 +1584,81 @@ def register_repo_routes(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to retrieve repository information: {str(e)}",
+            )
+
+    @app.get("/api/repos/{user_alias}/files")
+    def list_repository_files(
+        user_alias: str,
+        path: Optional[str] = Query(None, description="Subdirectory path to list"),
+        current_user: dependencies.User = Depends(dependencies.get_current_user),
+    ):
+        """
+        List files in an activated repository (non-recursive, root level by default).
+
+        Args:
+            user_alias: User's alias for the repository
+            path: Optional relative subdirectory to scope the listing
+            current_user: Current authenticated user
+
+        Returns:
+            JSON dict with ``files`` list; each item has name, path, type, size.
+
+        Raises:
+            HTTPException 400: path escapes repo root (traversal) or is not a directory
+            HTTPException 404: alias not activated, or scoped path does not exist
+            HTTPException 500: unexpected filesystem error during scan
+        """
+        arm = ActivatedRepoManager()
+        metadata = arm._load_metadata(current_user.username, user_alias)
+        if metadata is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Repository '{user_alias}' not found or not activated",
+            )
+
+        repo_path = Path(arm.get_activated_repo_path(current_user.username, user_alias))
+        repo_resolved = repo_path.resolve()
+        scan_root = (repo_path / path).resolve() if path else repo_resolved
+
+        # Reject any path that escapes the repository root
+        try:
+            scan_root.relative_to(repo_resolved)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid path: must be a relative path within the repository",
+            )
+
+        if not scan_root.exists():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Path '{path}' does not exist in repository '{user_alias}'",
+            )
+
+        if not scan_root.is_dir():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Path '{path}' is not a directory",
+            )
+
+        try:
+            entries = []
+            with os.scandir(scan_root) as it:
+                for entry in it:
+                    rel = Path(entry.path).relative_to(repo_resolved)
+                    entries.append({
+                        "name": entry.name,
+                        "path": str(rel),
+                        "type": "dir" if entry.is_dir() else "file",
+                        "size": entry.stat().st_size if entry.is_file() else 0,
+                    })
+            return {"files": entries}
+
+        except OSError as e:
+            logger.error(
+                "Failed to list files for %s at %s: %s", user_alias, scan_root, e
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to list files: {str(e)}",
             )
