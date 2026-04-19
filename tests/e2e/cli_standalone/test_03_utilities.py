@@ -25,7 +25,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 
@@ -89,9 +88,7 @@ def test_config_disable_daemon(
     Spec AC3.4 called for --exclude-dir.  --no-daemon reverts the change made
     by test_config_enable_daemon and exercises the config write path.
     """
-    result = run_cidx(
-        "config", "--no-daemon", cwd=indexed_markupsafe, env=e2e_cli_env
-    )
+    result = run_cidx("config", "--no-daemon", cwd=indexed_markupsafe, env=e2e_cli_env)
     assert_cidx_ok(result, context="config --no-daemon")
 
 
@@ -104,8 +101,11 @@ def test_config_set_diff_context(
     config write path for a numeric setting.
     """
     result = run_cidx(
-        "config", "--set-diff-context", "3",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "config",
+        "--set-diff-context",
+        "3",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="config --set-diff-context")
 
@@ -142,9 +142,7 @@ def test_fix_config_dry_run(
 # ---------------------------------------------------------------------------
 
 
-def test_zz_clean_force(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_zz_clean_force(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """cidx clean --force --collection voyage-code-3 exits 0 (clears vectors).
 
     Destructive: removes indexed vectors from the specified collection.
@@ -153,15 +151,17 @@ def test_zz_clean_force(
     collection is named rather than relying on ambient detection.
     """
     result = run_cidx(
-        "clean", "--force", "--collection", "voyage-code-3",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "clean",
+        "--force",
+        "--collection",
+        "voyage-code-3",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="clean --force --collection voyage-code-3")
 
 
-def test_zz_clean_data(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_zz_clean_data(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """cidx clean-data exits 0 (clears project data for current project).
 
     Destructive: removes .code-indexer/index/ for the current project.

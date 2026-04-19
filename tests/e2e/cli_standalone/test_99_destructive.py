@@ -28,7 +28,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 
@@ -68,8 +67,12 @@ def test_zzz_clean_force_on_type_fest(
     """
     type_fest_path: Path = e2e_seed_repo_paths.type_fest
     result = run_cidx(
-        "clean", "--force", "--collection", "voyage-code-3",
-        cwd=type_fest_path, env=e2e_cli_env,
+        "clean",
+        "--force",
+        "--collection",
+        "voyage-code-3",
+        cwd=type_fest_path,
+        env=e2e_cli_env,
     )
     _assert_cidx_ok(
         result,
@@ -93,8 +96,10 @@ def test_zzz_clean_data_all_projects(
     """
     type_fest_path: Path = e2e_seed_repo_paths.type_fest
     result = run_cidx(
-        "clean-data", "--all-projects",
-        cwd=type_fest_path, env=e2e_cli_env,
+        "clean-data",
+        "--all-projects",
+        cwd=type_fest_path,
+        env=e2e_cli_env,
     )
     _assert_cidx_ok(result, context="clean-data --all-projects")
 
@@ -116,7 +121,9 @@ def test_zzz_uninstall_local_confirm(
     """
     markupsafe_path: Path = e2e_seed_repo_paths.markupsafe
     result = run_cidx(
-        "uninstall", "--confirm",
-        cwd=markupsafe_path, env=e2e_cli_env,
+        "uninstall",
+        "--confirm",
+        cwd=markupsafe_path,
+        env=e2e_cli_env,
     )
     _assert_cidx_ok(result, context="uninstall --confirm (markupsafe)")

@@ -179,8 +179,9 @@ def _clean_claude_output(output: str) -> str:
     (lines 596-610) to strip CSI, OSC, ESC, script artifacts, and
     normalize line endings.
     """
-    # CSI sequences: ESC [ ... letter (colors, cursor, modes)
-    output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
+    # CSI sequences: full ECMA-48 grammar — parameter bytes [0-?], intermediate bytes [ -/],
+    # final bytes [@-~] (covers colors, cursor, private modes, intermediate byte variants).
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
     # OSC sequences: ESC ] ... BEL or ST
     output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
     # Other ESC sequences (ESC followed by a single char)
@@ -258,6 +259,7 @@ def invoke_claude_cli(
         if "CLAUDECODE" in os.environ:
             keys_to_drop.add("ANTHROPIC_API_KEY")
         filtered_env = {k: v for k, v in os.environ.items() if k not in keys_to_drop}
+        filtered_env["NO_COLOR"] = "1"
 
         result = subprocess.run(
             full_cmd,
@@ -339,6 +341,7 @@ class RepoAnalyzer:
         mode: str,
         last_analyzed: Optional[str] = None,
         existing_description: Optional[str] = None,
+        temp_file_path: Optional[Path] = None,
     ) -> str:
         """
         Get universal prompt for repository description generation (Story #190 AC1, AC6).
@@ -349,7 +352,12 @@ class RepoAnalyzer:
         Args:
             mode: Either "create" for initial generation or "refresh" for updating
             last_analyzed: ISO 8601 timestamp of last analysis (required for refresh mode)
-            existing_description: Existing description text (required for refresh mode)
+            existing_description: Existing description text (required for refresh mode
+                unless temp_file_path is provided)
+            temp_file_path: Path to a file containing the existing description (Bug #840
+                Site #5). When provided in refresh mode, the prompt instructs Claude to
+                Read the file and Edit it in place rather than embedding the description
+                inline. Mutually exclusive with existing_description for the inline path.
 
         Returns:
             Prompt string to send to Claude CLI
@@ -363,15 +371,78 @@ class RepoAnalyzer:
         if mode == "refresh":
             if last_analyzed is None:
                 raise ValueError("last_analyzed is required for refresh mode")
-            if existing_description is None:
-                raise ValueError("existing_description is required for refresh mode")
+            if temp_file_path is None and existing_description is None:
+                raise ValueError(
+                    "Either existing_description or temp_file_path is required for refresh mode"
+                )
 
         if mode == "create":
             return self._get_create_prompt()
-        else:
-            return self._get_refresh_prompt(
-                last_analyzed or "", existing_description or ""
+
+        if temp_file_path is not None:
+            return self._get_refresh_prompt_via_file(
+                last_analyzed or "", temp_file_path
             )
+
+        return self._get_refresh_prompt(last_analyzed or "", existing_description or "")
+
+    def _get_refresh_prompt_via_file(
+        self, last_analyzed: str, temp_file_path: Path
+    ) -> str:
+        """
+        Get refresh prompt that references an existing description via file path (Bug #840 Site #5).
+
+        Instead of embedding the existing description inline (which bloats the prompt
+        with large content), this method instructs Claude to Read the file at
+        temp_file_path and Edit it in place with the updated description.
+
+        Args:
+            last_analyzed: ISO 8601 timestamp of last analysis.
+            temp_file_path: Absolute path to the temp file containing the existing
+                description. Claude is instructed to Read this file, not receive the
+                content inline.
+
+        Returns:
+            Prompt string that references the file path for Read+Edit workflow.
+        """
+        return f"""Update the repository description based on changes since last analysis.
+
+**Last Analyzed:** {last_analyzed}
+
+**Existing Description File:** {temp_file_path}
+Read the existing description at {temp_file_path} and apply a focused refresh edit.
+
+**Instructions:**
+1. Read the file at {temp_file_path} to get the current description.
+2. Edit the file in place at {temp_file_path} with the updated description.
+3. Do NOT output the full document to stdout — only edit the file directly.
+
+**Repository Type Discovery:**
+Examine the folder structure to determine the repository type:
+- Git repository: Contains a .git directory
+- Langfuse trace repository: Contains UUID-named folders with JSON trace files
+
+**For Git Repositories:**
+1. Run: git log --since="{last_analyzed}" --oneline
+2. If material changes detected (not just cosmetic commits), update the description
+3. If no material changes, return the existing description unchanged
+
+**For Langfuse Trace Repositories:**
+1. Find files modified after {last_analyzed} using file modification timestamps
+2. IMPORTANT: Langfuse traces are immutable once established
+3. Focus on NEW trace files only (files with modification time > last_analyzed)
+4. Extract new findings from new traces and MERGE with existing (do not replace)
+
+**Update Strategy:**
+- Update description only if material changes detected
+- Preserve existing YAML frontmatter structure
+- Update last_analyzed timestamp to current time
+
+**IMPORTANT:**
+- Do NOT output the full document to stdout — edit the file at {temp_file_path} directly
+- Output ONLY a brief status line to stdout (e.g. "Updated" or "No changes")
+- Preserve all existing fields in YAML frontmatter
+"""
 
     def _get_create_prompt(self) -> str:
         """

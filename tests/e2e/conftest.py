@@ -36,6 +36,7 @@ from tests.e2e.helpers import login
 # Configuration dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class E2EConfig:
     """Immutable snapshot of all E2E configuration values.
@@ -100,6 +101,7 @@ def _optional_env(name: str) -> str:
 # Seed repo path container
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class SeedRepoPaths:
     """Paths to the per-run working copies of the three seed repositories."""
@@ -116,6 +118,7 @@ class SeedRepoPaths:
 # ---------------------------------------------------------------------------
 # Session-scoped fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def e2e_config() -> E2EConfig:

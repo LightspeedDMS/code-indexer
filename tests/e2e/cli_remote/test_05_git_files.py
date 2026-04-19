@@ -84,7 +84,9 @@ def test_git_branches(
         env=e2e_cli_env,
     )
     _assert_ok(result, f"cidx git branches {REPO_ALIAS}")
-    assert result.stdout.strip(), f"cidx git branches {REPO_ALIAS} returned empty output"
+    assert result.stdout.strip(), (
+        f"cidx git branches {REPO_ALIAS} returned empty output"
+    )
 
 
 def test_git_diff(

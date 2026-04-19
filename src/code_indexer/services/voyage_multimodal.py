@@ -267,7 +267,12 @@ class VoyageMultimodalClient:
 
         return embeddings
 
-    def get_embedding(self, text: str) -> List[float]:
+    def get_embedding(
+        self,
+        text: str,
+        model: Optional[str] = None,
+        embedding_purpose: Optional[str] = None,
+    ) -> List[float]:
         """Generate text-only embedding for query purposes.
 
         This method enables VoyageMultimodalClient to be used as a standard
@@ -279,6 +284,10 @@ class VoyageMultimodalClient:
 
         Args:
             text: Query text to embed
+            model: Accepted for EmbeddingProvider contract compliance — ignored
+                (multimodal client uses the model it was initialized with)
+            embedding_purpose: Accepted for EmbeddingProvider contract compliance —
+                ignored (multimodal client always uses input_type="query")
 
         Returns:
             1024-dimensional embedding vector as list of floats

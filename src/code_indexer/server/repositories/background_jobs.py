@@ -544,7 +544,9 @@ class BackgroundJobManager:
                 "offset": offset,
             }
 
-    def cancel_job(self, job_id: str, username: str) -> Dict[str, Any]:
+    def cancel_job(
+        self, job_id: str, username: str, is_admin: bool = False
+    ) -> Dict[str, Any]:
         """
         Cancel a running or pending job.
 
@@ -555,6 +557,8 @@ class BackgroundJobManager:
         Args:
             job_id: Job ID to cancel
             username: Username requesting cancellation (for authorization)
+            is_admin: When True, bypasses username ownership check so admin users
+                      can cancel any job including jobs owned by "system" (Bug #853)
 
         Returns:
             Cancellation result dictionary
@@ -564,7 +568,7 @@ class BackgroundJobManager:
 
         if job is not None:
             # Local job — use existing in-memory path
-            if job.username != username:
+            if not is_admin and job.username != username:
                 return {"success": False, "message": "Job not found or not authorized"}
 
             with self._lock:
@@ -593,7 +597,9 @@ class BackgroundJobManager:
         if self._sqlite_backend is not None:
             try:
                 db_job = self._sqlite_backend.get_job(job_id)
-                if db_job is None or db_job.get("username") != username:
+                if db_job is None or (
+                    not is_admin and db_job.get("username") != username
+                ):
                     return {
                         "success": False,
                         "message": "Job not found or not authorized",

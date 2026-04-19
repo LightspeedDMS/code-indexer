@@ -6,6 +6,7 @@ No subprocess, no port binding — faster than Phase 4.
 Admin credentials are read from E2E_ADMIN_USER / E2E_ADMIN_PASS environment
 variables, which e2e-automation.sh sets for every phase before invoking pytest.
 """
+
 from __future__ import annotations
 
 import os

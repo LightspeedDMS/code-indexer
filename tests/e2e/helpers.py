@@ -72,6 +72,7 @@ GIT_SUBPROCESS_TIMEOUT: float = 5.0
 # is prepending the mandatory scheme prefix required by HTTP spec.
 # ---------------------------------------------------------------------------
 
+
 def _auth_headers(token: str | None) -> dict[str, str]:
     """Return Authorization header dict for the given JWT token.
 
@@ -88,6 +89,7 @@ def _auth_headers(token: str | None) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # CLI helper
 # ---------------------------------------------------------------------------
+
 
 def run_cidx(
     *args: str,
@@ -129,6 +131,7 @@ def run_cidx(
 # Authentication helper
 # ---------------------------------------------------------------------------
 
+
 def login(base_url: str, username: str, password: str) -> str:
     """Authenticate with the CIDX server and return a JWT access token.
 
@@ -167,6 +170,7 @@ def login(base_url: str, username: str, password: str) -> str:
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
 
 def mcp_call(
     client: httpx.Client,

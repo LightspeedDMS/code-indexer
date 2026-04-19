@@ -16,6 +16,7 @@ Note: delete_user is not present in the admin MCP tool registry.  The e2e
 user created here is cleaned up when the session-scoped TestClient tears down
 its isolated data directory.
 """
+
 from __future__ import annotations
 
 import os
@@ -253,7 +254,9 @@ def test_mcp_admin_tool(
     )
     if resp.status_code == HTTP_OK:
         body = resp.json()
-        assert FIELD_JSONRPC in body, f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        assert FIELD_JSONRPC in body, (
+            f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        )
         assert FIELD_RESULT in body or FIELD_ERROR in body, (
             f"{label}: JSON-RPC response has neither {FIELD_RESULT!r} nor {FIELD_ERROR!r}"
         )

@@ -56,7 +56,7 @@ class TestRipgrepExitCodeHandling:
     ):
         """Test exit code 0 (matches found) does not log warning."""
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -101,7 +101,7 @@ class TestRipgrepExitCodeHandling:
         "no matches found" which is normal ripgrep behavior, not an error.
         """
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -156,7 +156,7 @@ class TestRipgrepExitCodeHandling:
         so it should still be logged as WARNING.
         """
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -208,7 +208,7 @@ class TestRipgrepExitCodeHandling:
     async def test_exit_code_2_logs_warning(self, ripgrep_service, test_repo, caplog):
         """Test exit code 2+ (actual errors) log at WARNING level."""
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -263,7 +263,7 @@ class TestRipgrepExitCodeHandling:
         Edge case: stderr_output="" (empty string) should be treated same as None.
         """
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -313,7 +313,7 @@ class TestGrepExitCodeHandling:
     async def test_exit_code_0_no_warning_logged(self, grep_service, test_repo, caplog):
         """Test exit code 0 (matches found) does not log warning."""
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -358,7 +358,7 @@ class TestGrepExitCodeHandling:
         "no matches found" which is normal grep behavior, not an error.
         """
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -409,7 +409,7 @@ class TestGrepExitCodeHandling:
     ):
         """Test exit code 1 WITH stderr logs at WARNING level."""
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -458,7 +458,7 @@ class TestGrepExitCodeHandling:
     async def test_exit_code_2_logs_warning(self, grep_service, test_repo, caplog):
         """Test exit code 2+ (actual errors) log at WARNING level."""
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor

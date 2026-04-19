@@ -1263,7 +1263,8 @@ class DescriptionRefreshTrackingBackend:
         cursor = conn.execute(
             """SELECT repo_alias, last_run, next_run, status, error,
                       last_known_commit, last_known_files_processed,
-                      last_known_indexed_at, created_at, updated_at
+                      last_known_indexed_at, created_at, updated_at,
+                      lifecycle_schema_version
                FROM description_refresh_tracking WHERE repo_alias = ?""",
             (repo_alias,),
         )
@@ -1282,6 +1283,7 @@ class DescriptionRefreshTrackingBackend:
             "last_known_indexed_at": row[7],
             "created_at": row[8],
             "updated_at": row[9],
+            "lifecycle_schema_version": row[10],
         }
 
     def get_stale_repos(self, now_iso: str) -> List[Dict[str, Any]]:
@@ -1298,7 +1300,8 @@ class DescriptionRefreshTrackingBackend:
         cursor = conn.execute(
             """SELECT repo_alias, last_run, next_run, status, error,
                       last_known_commit, last_known_files_processed,
-                      last_known_indexed_at, created_at, updated_at
+                      last_known_indexed_at, created_at, updated_at,
+                      lifecycle_schema_version
                FROM description_refresh_tracking
                WHERE next_run <= ? AND status != 'queued'""",
             (now_iso,),
@@ -1318,6 +1321,7 @@ class DescriptionRefreshTrackingBackend:
                     "last_known_indexed_at": row[7],
                     "created_at": row[8],
                     "updated_at": row[9],
+                    "lifecycle_schema_version": row[10],
                 }
             )
 

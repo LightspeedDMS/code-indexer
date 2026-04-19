@@ -83,9 +83,7 @@ def _no_check(_cwd: Path) -> None:
 
 
 @pytest.fixture(scope="session")
-def markupsafe_initialized(
-    e2e_seed_repo_paths, e2e_cli_env: dict[str, str]
-) -> Path:
+def markupsafe_initialized(e2e_seed_repo_paths, e2e_cli_env: dict[str, str]) -> Path:
     """Run ``cidx init`` on the markupsafe working copy once per session.
 
     Returns the path so index tests can use it as ``cwd``.
@@ -100,9 +98,7 @@ def markupsafe_initialized(
 
 
 @pytest.fixture(scope="session")
-def type_fest_initialized(
-    e2e_seed_repo_paths, e2e_cli_env: dict[str, str]
-) -> Path:
+def type_fest_initialized(e2e_seed_repo_paths, e2e_cli_env: dict[str, str]) -> Path:
     """Run ``cidx init`` on the type-fest working copy once per session."""
     path = e2e_seed_repo_paths.type_fest
     if not (path / ".code-indexer").is_dir():

@@ -91,14 +91,19 @@ class TestBuildRefinementPromptContainsExistingBody:
     """build_refinement_prompt includes the existing content for fact-checking."""
 
     def test_existing_body_in_prompt(self, tmp_path):
-        """Prompt must include the existing document body."""
+        """Prompt must NOT embed body inline; must instruct Claude to Read the temp file (Bug #840)."""
         analyzer = _make_analyzer(tmp_path)
         prompt = analyzer.build_refinement_prompt(
             domain_name="auth-domain",
             existing_body=SAMPLE_EXISTING_BODY,
             participating_repos=SAMPLE_REPOS,
         )
-        assert SAMPLE_EXISTING_BODY in prompt
+        # Bug #840 new invariant: body must NOT be embedded inline
+        assert SAMPLE_EXISTING_BODY not in prompt
+        # New invariant: prompt must instruct Claude to Read the file at the path provided
+        assert (
+            "Use the Read tool to load the file at the path provided to you" in prompt
+        )
 
     def test_existing_body_section_labeled(self, tmp_path):
         """Existing content should be clearly labeled in the prompt."""

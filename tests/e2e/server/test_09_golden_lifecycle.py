@@ -38,6 +38,7 @@ Environment variables:
   E2E_GOLDEN_JOB_TIMEOUT     max seconds to wait for a job (default: 120)
   E2E_GOLDEN_JOB_POLL        seconds between job polls (default: 0.5)
 """
+
 from __future__ import annotations
 
 import json
@@ -49,7 +50,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.e2e.server.mcp_helpers import call_mcp_tool
 
 # ---------------------------------------------------------------------------
 # Configuration resolved from environment variables
@@ -136,9 +136,7 @@ def _parse_mcp_tool_result(resp_body: dict[str, Any]) -> dict[str, Any]:
                     return decoded
             except json.JSONDecodeError:
                 continue
-    pytest.fail(
-        f"Could not parse MCP tool result from response: {resp_body!r}"
-    )
+    pytest.fail(f"Could not parse MCP tool result from response: {resp_body!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +209,7 @@ def _run_lifecycle(
     activate()
     query()
     refresh()
-    query()   # re-query: same callable, verifies state survived refresh
+    query()  # re-query: same callable, verifies state survived refresh
     deactivate()
     delete()
 
@@ -245,9 +243,7 @@ def _rest_step(
         kwargs["json"] = json_body
     resp = client.request(method, path, **kwargs)
     if resp.status_code not in ok_statuses:
-        pytest.fail(
-            f"REST {label} failed: HTTP {resp.status_code} — {resp.text[:200]}"
-        )
+        pytest.fail(f"REST {label} failed: HTTP {resp.status_code} — {resp.text[:200]}")
     if resp.status_code in (200, 202):
         body: dict[str, Any] = resp.json()
         _wait_on_job_id(body, client, auth_headers, label)

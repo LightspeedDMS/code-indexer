@@ -23,9 +23,14 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from code_indexer.global_repos.dependency_map_analyzer import (
+    _DELTA_NOOP,
+    _strip_leading_yaml_frontmatter,
+)
 from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
 
 from .activity_journal_service import ActivityJournalService
@@ -40,6 +45,15 @@ THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 _BACKFILL_JOB_ID_SUFFIX_LEN = (
     8  # Story #728: hex suffix length for lifecycle_backfill job IDs
 )
+MAX_DOMAIN_RETRIES = 3  # Bug #849: module-level constant for retry loop
+
+
+class _DomainUpdateResult(Enum):
+    """Result of a single domain file update attempt (Bug #849)."""
+
+    WRITTEN = "written"
+    NOOP = "noop"
+    FAILED = "failed"
 
 
 class DependencyMapService:
@@ -94,6 +108,10 @@ class DependencyMapService:
         # Story #193: Scheduler daemon thread state
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+
+        # Bug #853: track the active lifecycle_backfill aggregate job_id
+        # so complete_job / cancel propagation can reference it
+        self._active_backfill_job_id: Optional[str] = None
 
     @property
     def activity_journal(self) -> ActivityJournalService:
@@ -1551,7 +1569,7 @@ class DependencyMapService:
         domain_list: List[str],
         config,
         read_file: Optional[Path] = None,
-    ) -> None:
+    ) -> "_DomainUpdateResult":
         """
         Update a single domain file with delta analysis (Story #193, AC5).
 
@@ -1568,17 +1586,25 @@ class DependencyMapService:
                        the updated content is written to domain_file (live path).
                        Falls back to domain_file when None.
 
-        Raises:
-            Exception: If Claude CLI invocation or file write fails
+        Returns:
+            _DomainUpdateResult.WRITTEN  — file was updated successfully
+            _DomainUpdateResult.NOOP     — Claude signalled FILE_UNCHANGED (intentional no-op)
+            _DomainUpdateResult.FAILED   — invocation failure; caller may retry
         """
         # Read existing content from versioned path if provided, else from write path
         source_file = read_file if read_file is not None else domain_file
-        existing_content = source_file.read_text()
+        full_content = source_file.read_text()
+
+        # Bug #834 (Step 1): strip frontmatter at the service boundary so that neither
+        # the prompt nor the temp file seen by Claude contains frontmatter delimiters.
+        # _update_frontmatter_timestamp receives full_content (with frontmatter) to
+        # parse/update the timestamp and reconstruct the final file correctly.
+        existing_body = _strip_leading_yaml_frontmatter(full_content)
 
         # Build delta merge prompt (Story #329: pass journal_path for activity journal appendix)
         merge_prompt = self._analyzer.build_delta_merge_prompt(
             domain_name=domain_name,
-            existing_content=existing_content,
+            existing_content=existing_body,
             changed_repos=changed_repos,
             new_repos=new_repos,
             removed_repos=removed_repos,
@@ -1589,7 +1615,7 @@ class DependencyMapService:
         # Story #715: File-based delta merge — Claude edits temp file in-place
         result = self._analyzer.invoke_delta_merge_file(
             domain_name=domain_name,
-            existing_content=existing_content,
+            existing_content=existing_body,
             merge_prompt=merge_prompt,
             timeout=config.dependency_map_pass_timeout_seconds,
             max_turns=config.dependency_map_delta_max_turns,
@@ -1601,11 +1627,18 @@ class DependencyMapService:
                 f"Delta merge returned no changes for domain '{domain_name}', "
                 f"preserving existing content."
             )
-            return
+            return _DomainUpdateResult.FAILED  # invocation failure — caller may retry
 
-        # Update frontmatter timestamp
+        if result == _DELTA_NOOP:
+            logger.info(
+                f"Delta merge confirmed no-op for domain '{domain_name}' — FILE_UNCHANGED signal."
+            )
+            return _DomainUpdateResult.NOOP  # intentional no-op — caller must NOT retry
+
+        # Update frontmatter timestamp — needs full_content (with frontmatter) to parse
+        # existing metadata; result is body-only from invoke_delta_merge_file.
         updated_content = self._update_frontmatter_timestamp(
-            existing_content, result, domain_name
+            full_content, result, domain_name
         )
 
         # Story #724 v2: verify BEFORE writing to the live domain_file
@@ -1641,6 +1674,7 @@ class DependencyMapService:
         domain_file.write_text(final_content)
 
         logger.info(f"Updated domain file in-place: {domain_file}")
+        return _DomainUpdateResult.WRITTEN
 
     def _update_affected_domains(
         self,
@@ -1702,11 +1736,8 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
-            MAX_DOMAIN_RETRIES = 3
-            original_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
-
             for attempt in range(1, MAX_DOMAIN_RETRIES + 1):
-                self._update_domain_file(
+                update_result = self._update_domain_file(
                     domain_name=domain_name,
                     domain_file=domain_file,
                     changed_repos=changed_aliases,
@@ -1716,9 +1747,8 @@ class DependencyMapService:
                     config=config,
                     read_file=read_domain_file,
                 )
-                # Check if file was actually updated (mtime changed)
-                new_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
-                if new_mtime > original_mtime:
+
+                if update_result == _DomainUpdateResult.WRITTEN:
                     try:
                         self._activity_journal.log(
                             f"Delta: domain {domain_idx + 1}/{total_affected} complete"
@@ -1727,28 +1757,31 @@ class DependencyMapService:
                         logger.debug(f"Non-fatal journal log error: {e}")
                     break  # Success
 
-                # File not updated — truncation guard likely fired or 0-char result
-                if attempt < MAX_DOMAIN_RETRIES:
-                    try:
-                        self._activity_journal.log(
-                            f"Delta: domain {domain_idx + 1}/{total_affected} not updated, "
-                            f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES})"
+                if update_result == _DomainUpdateResult.NOOP:
+                    break
+
+                if update_result == _DomainUpdateResult.FAILED:
+                    if attempt < MAX_DOMAIN_RETRIES:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} not updated, "
+                                f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES})"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Delta domain '{domain_name}' not updated on attempt {attempt}/{MAX_DOMAIN_RETRIES}, retrying"
                         )
-                    except Exception as e:
-                        logger.debug(f"Non-fatal journal log error: {e}")
-                    logger.warning(
-                        f"Delta domain '{domain_name}' not updated on attempt {attempt}/{MAX_DOMAIN_RETRIES}, retrying"
-                    )
-                else:
-                    try:
-                        self._activity_journal.log(
-                            f"Delta: domain {domain_idx + 1}/{total_affected} not updated after {MAX_DOMAIN_RETRIES} attempts"
+                    else:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} not updated after {MAX_DOMAIN_RETRIES} attempts"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Delta domain '{domain_name}' not updated after {MAX_DOMAIN_RETRIES} attempts"
                         )
-                    except Exception as e:
-                        logger.debug(f"Non-fatal journal log error: {e}")
-                    logger.warning(
-                        f"Delta domain '{domain_name}' not updated after {MAX_DOMAIN_RETRIES} attempts"
-                    )
 
         return errors
 
@@ -2120,16 +2153,22 @@ class DependencyMapService:
                 )
         return queued
 
-    def _backfill_register_aggregate_job(self, cluster_wide_total: int) -> None:
+    def _backfill_register_aggregate_job(
+        self, cluster_wide_total: int
+    ) -> Optional[str]:
         """
         Register and start the lifecycle_backfill aggregate job with JobTracker.
 
         Builds base_meta once and reuses it across register_job and update_status
         to avoid duplication. No-op when job_tracker is None or total is zero.
         All failures are absorbed as non-fatal warnings.
+
+        Returns:
+            The job_id string on success, or None when no job was registered
+            (tracker absent, total zero, or registration failed).
         """
         if self._job_tracker is None or cluster_wide_total == 0:
-            return
+            return None
         try:
             job_id = (
                 f"lifecycle-backfill-{uuid.uuid4().hex[:_BACKFILL_JOB_ID_SUFFIX_LEN]}"
@@ -2175,11 +2214,13 @@ class DependencyMapService:
                 progress_info=stage_text,
                 metadata={**base_meta, "stage": "processing"},
             )
+            return job_id
         except Exception as exc:
             logger.warning(
                 "lifecycle_backfill: JobTracker registration failed (non-fatal): %s",
                 exc,
             )
+            return None
 
     def _queue_lifecycle_backfill_if_needed(self) -> int:
         """
@@ -2209,7 +2250,13 @@ class DependencyMapService:
         candidates = self._backfill_select_candidates(conn_manager)
         this_node_queued = self._backfill_queue_candidates(conn_manager, candidates)
         if owns_aggregate and cluster_wide_total:
-            self._backfill_register_aggregate_job(cluster_wide_total)
+            self._active_backfill_job_id = self._backfill_register_aggregate_job(
+                cluster_wide_total
+            )
+            if self._refresh_scheduler is not None:
+                self._refresh_scheduler.set_active_backfill_job_id(
+                    self._active_backfill_job_id
+                )
         if this_node_queued > 0:
             logger.info(
                 "lifecycle_backfill: queued %d repos (cluster_wide_total=%s)",

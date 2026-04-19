@@ -31,6 +31,23 @@ from typing import Any, Dict, List, Optional, cast
 
 logger = logging.getLogger(__name__)
 
+# Bug #838: journal hook constants.
+# Maximum characters for the tool-input preview appended to **claude-tool** entries.
+_JOURNAL_HOOK_PREVIEW_LEN: int = 120
+# How often (in tool calls) to emit a STATUS NUDGE prompting Claude to self-report.
+_JOURNAL_HOOK_NUDGE_INTERVAL: int = 10
+
+# Bug #840: threshold for pass-1 description staging.
+# When total description bytes across all repos exceed this value, descriptions
+# are written to a temp JSON file and Claude is instructed to Read it — rather
+# than embedding all content inline in the prompt.
+PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES = 8192
+
+# Bug #849: sentinel returned by invoke_delta_merge_file when Claude signals
+# FILE_UNCHANGED — meaning no edits were needed.  Distinct from None (invocation
+# failure) so callers can suppress retries for intentional no-ops.
+_DELTA_NOOP: str = "__DELTA_NOOP__"
+
 # Structured Cross-Domain schema text used in all 4 prompt variants (AC1-AC5)
 _CROSS_DOMAIN_SCHEMA = """\
 ## Cross-Domain Connections
@@ -125,6 +142,51 @@ def _get_verification_semaphore(max_concurrent: int) -> threading.Semaphore:
         # cast is safe: the only write path sets this key to threading.Semaphore(n);
         # mypy cannot infer the concrete type from Dict[str, Any].
         return cast(threading.Semaphore, _VERIFICATION_SEMAPHORE_STATE["semaphore"])
+
+
+_FRONTMATTER_DELIMITER = "---\n"
+
+
+def _strip_leading_yaml_frontmatter(content: str) -> str:
+    """Strip a leading YAML frontmatter block from markdown content.
+
+    A frontmatter block is a ``---\\n...\\n---\\n`` section at the very start of
+    the string.  An optional blank line immediately after the closing delimiter
+    is also consumed so the returned body does not start with a spurious newline.
+
+    Only a SINGLE leading block is stripped.  If the content does not start
+    with ``---\\n``, or if there is no closing ``---\\n``, the content is
+    returned unchanged (no partial strip, no infinite loop).
+
+    CRLF line endings (``\\r\\n``) are NOT supported.  Content with CRLF does
+    not start with ``---\\n`` so it is returned unchanged — this is the
+    documented safe behaviour.
+
+    Args:
+        content: Markdown string, possibly with a leading YAML frontmatter block.
+
+    Returns:
+        The body portion after the closing ``---`` delimiter (and optional blank
+        line), or *content* unchanged when no valid leading frontmatter is found.
+    """
+    if not content.startswith(_FRONTMATTER_DELIMITER):
+        return content
+    # Search for closing delimiter.  The pattern we look for is "\n---\n".
+    # The earliest it can appear is at index len(_FRONTMATTER_DELIMITER) - 1
+    # (i.e. index 3), which covers the degenerate case "---\n---\nbody" where
+    # the frontmatter body is empty.
+    _CLOSING_PATTERN = "\n" + _FRONTMATTER_DELIMITER
+    _SEARCH_START = len(_FRONTMATTER_DELIMITER) - 1
+    close_idx = content.find(_CLOSING_PATTERN, _SEARCH_START)
+    if close_idx == -1:
+        # No closing delimiter — return unchanged.
+        return content
+    # Position just after the closing "\n---\n"
+    body_start = close_idx + len(_CLOSING_PATTERN)
+    # Consume one optional blank line immediately after the closing delimiter.
+    if content[body_start : body_start + 1] == "\n":
+        body_start += 1
+    return content[body_start:]
 
 
 class VerificationFailed(RuntimeError):
@@ -661,6 +723,7 @@ class DependencyMapAnalyzer:
                 self._has_markdown_headings(existing_content)
                 and len(existing_content.strip()) > 1000
             ):
+                prev_path = previous_domain_dir / f"{domain_name}.md"
                 prompt += "## Previous Analysis (EXTEND, IMPROVE, and CORRECT)\n\n"
                 prompt += "A previous analysis exists for this domain. You MUST:\n"
                 prompt += (
@@ -674,7 +737,10 @@ class DependencyMapAnalyzer:
                 prompt += (
                     "Do NOT start from scratch - build upon the previous work.\n\n"
                 )
-                prompt += existing_content + "\n\n"
+                prompt += (
+                    f"Use the Read tool to load the previous analysis at `{prev_path}` "
+                    "before writing your output.\n\n"
+                )
 
         # Output template
         prompt += "## OUTPUT TEMPLATE (fill in each section)\n\n"
@@ -1034,8 +1100,13 @@ Rules:
                 self._has_markdown_headings(existing_content)
                 and len(existing_content.strip()) > 1000
             ):
+                prev_path = previous_domain_dir / f"{domain_name}.md"
                 prompt += "## Previous Analysis (refine and improve)\n\n"
-                prompt += existing_content + "\n\n"
+                prompt += (
+                    f"A previous analysis exists at `{prev_path}`. "
+                    "Use the Read tool to load that file, then refine and improve it "
+                    "rather than starting from scratch.\n\n"
+                )
             else:
                 logger.info(
                     f"Skipping low-quality previous analysis for domain '{domain_name}' "
@@ -1479,23 +1550,72 @@ Rules:
             )
         )
 
+        total_description_bytes = sum(
+            len(desc.encode("utf-8")) for desc in repo_descriptions.values()
+        )
+        use_staging = total_description_bytes > PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES
+
         prompt = "# Domain Synthesis Task\n\n"
         prompt += self._build_domain_definition_section()
         prompt += "Analyze the following repository descriptions and identify domain clusters.\n\n"
         prompt += self._build_previous_domains_section(previous_domains_dir)
         prompt += "## Repository Descriptions\n\n"
-        for alias, content in repo_descriptions.items():
-            prompt += f"### {alias}\n\n{content}\n\n"
-        prompt += "## Repository Filesystem Locations\n\n"
-        for repo in repo_list:
-            alias = repo.get("alias", "unknown")
-            clone_path = repo.get("clone_path", "unknown")
-            file_count = repo.get("file_count", "?")
-            total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
-            prompt += (
-                f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+
+        if use_staging:
+            import tempfile as _tempfile
+
+            staging_fd, staging_path_str = _tempfile.mkstemp(
+                suffix=".json", prefix="cidx_pass1_descriptions_"
             )
-        prompt += f"\n## Instructions\n\nAIM for {domain_guidance} domains for {repo_count} repositories.\n"
+            with os.fdopen(staging_fd, "w") as fh:
+                json.dump(repo_descriptions, fh, indent=2)
+
+            staging_path = Path(staging_path_str)
+            prompt += (
+                f"Repository descriptions have been written to a staging file at:\n"
+                f"`{staging_path}`\n\n"
+                "Use the Read tool to load that file before performing your analysis. "
+                "The file is a JSON object mapping repo alias to description text.\n\n"
+            )
+
+            # Also stage the filesystem locations to avoid embedding 500-repo lists inline
+            loc_fd, loc_path_str = _tempfile.mkstemp(
+                suffix=".json", prefix="cidx_pass1_locations_"
+            )
+            repo_locations = [
+                {
+                    "alias": repo.get("alias", "unknown"),
+                    "clone_path": repo.get("clone_path", "unknown"),
+                    "file_count": repo.get("file_count", "?"),
+                    "total_mb": round(repo.get("total_bytes", 0) / (1024 * 1024), 1),
+                }
+                for repo in repo_list
+            ]
+            with os.fdopen(loc_fd, "w") as fh:
+                json.dump(repo_locations, fh, indent=2)
+
+            loc_path = Path(loc_path_str)
+            prompt += "## Repository Filesystem Locations\n\n"
+            prompt += (
+                f"Repository filesystem locations have been written to a staging file at:\n"
+                f"`{loc_path}`\n\n"
+                "Use the Read tool to load that file. "
+                "Each entry has alias, clone_path, file_count, and total_mb fields.\n\n"
+            )
+        else:
+            for alias, content in repo_descriptions.items():
+                prompt += f"### {alias}\n\n{content}\n\n"
+
+            prompt += "## Repository Filesystem Locations\n\n"
+            for repo in repo_list:
+                alias = repo.get("alias", "unknown")
+                clone_path = repo.get("clone_path", "unknown")
+                file_count = repo.get("file_count", "?")
+                total_mb = round(repo.get("total_bytes", 0) / (1024 * 1024), 1)
+                prompt += f"- **{alias}**: `{clone_path}` ({file_count} files, {total_mb} MB)\n"
+            prompt += "\n"
+
+        prompt += f"## Instructions\n\nAIM for {domain_guidance} domains for {repo_count} repositories.\n"
         prompt += f"Assign ALL {repo_count} repositories. Missing repos = failed analysis.\n\n"
         prompt += "## Output Format\n\nYour ENTIRE response must be ONLY a valid JSON array.\n"
         prompt += '[\n  {"name": "domain-name", "description": "scope", "participating_repos": ["alias1"]}\n]\n'
@@ -2149,6 +2269,7 @@ Rules:
         post_tool_hook: Optional[str] = None,
         hook_thresholds: Optional[tuple] = None,
         dangerously_skip_permissions: bool = False,
+        journal_path: Optional[Path] = None,
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
@@ -2209,6 +2330,9 @@ Rules:
             # Only add --dangerously-skip-permissions if explicitly requested by caller
             if dangerously_skip_permissions:
                 cmd.append("--dangerously-skip-permissions")
+            # Expand sandbox to include journal dir so Claude can write activity entries
+            if journal_path is not None:
+                cmd.extend(["--add-dir", str(journal_path.parent)])
             # Fix 1 (Iteration 12): Turn-aware PostToolUse hook with counter file.
             # Replaces static echo with bash script that tracks tool call count and
             # escalates urgency messages as turns run out (prevents Claude from
@@ -2228,18 +2352,38 @@ Rules:
                     early_threshold = max(5, int(max_turns * 0.3))
                     late_threshold = max(10, int(max_turns * 0.6))
 
-                # Build bash one-liner that reads/increments counter and escalates messages
-                # Iteration 14: Purpose-driven threshold messages emphasizing conciseness
+                # Build bash script: counter (Bug #838 — F='path' always single-quoted so
+                # test path-rewriting regex ^F='[^']*' matches), STATUS NUDGE at turn 10,
+                # optional journal entries per tool type, and escalating urgency messages.
+                _counter_sq = counter_file.name.replace("'", "'\\''")
+                if journal_path is not None:
+                    _journal_sq = str(journal_path).replace("'", "'\\''")
+                    _journal_block = (
+                        f"JRNL='{_journal_sq}'\n"
+                        'case "$CLAUDE_TOOL_NAME" in\n'
+                        "  Read) NAR='Claude read file' ;;\n"
+                        "  Bash) NAR='Claude ran bash' ;;\n"
+                        "  Grep) NAR='Claude searched' ;;\n"
+                        "  Glob) NAR='Claude listed files' ;;\n"
+                        "  Write|Edit) NAR='Claude wrote file' ;;\n"
+                        '  *) NAR="Claude ran $CLAUDE_TOOL_NAME" ;;\n'
+                        "esac\n"
+                        'echo "**claude-tool** | $(date +%H:%M:%S) | $NAR" >> "$JRNL"\n'
+                    )
+                else:
+                    _journal_block = ""
                 bash_script = (
-                    f"F={shlex.quote(counter_file.name)}; "
-                    f'C=$(cat "$F"); C=$((C+1)); echo "$C" > "$F"; '
-                    f'if [ "$C" -gt {late_threshold} ]; then '
+                    f"F='{_counter_sq}'\n"
+                    'C=$(cat "$F" 2>/dev/null || echo 0)\n'
+                    "C=$((C+1))\n"
+                    'echo "$C" > "$F"\n'
+                    'if [ "$C" -eq 10 ]; then '
+                    "echo 'STATUS NUDGE: Briefly report what you have found so far and what you plan to do next.'; "
+                    "fi\n" + _journal_block + f'if [ "$C" -gt {late_threshold} ]; then '
                     f"echo {shlex.quote('CRITICAL: STOP searching. Write your concise dependency analysis NOW. Document precise inter-repo connections only — no code snippets, no implementation details. Start with # Domain Analysis heading.')}; "
                     f'elif [ "$C" -gt {early_threshold} ]; then '
                     f"echo {shlex.quote('WARNING: Running low on turns. Start writing your concise dependency analysis. Focus on precise inter-repo connections for navigation — no code snippets, no verbose details. Output starts with # Domain Analysis heading.')}; "
-                    f"else "
-                    f"echo {shlex.quote(post_tool_hook)}; "
-                    f"fi"
+                    f"else echo {shlex.quote(post_tool_hook)}; fi"
                 )
 
                 hook_settings = json.dumps(
@@ -2388,7 +2532,11 @@ Rules:
         prompt += "Update the existing domain analysis by incorporating changes from modified repositories.\n\n"
 
         prompt += "## Existing Domain Analysis\n\n"
-        prompt += existing_content + "\n\n"
+        prompt += (
+            "The existing domain analysis is provided as a file you will edit in place. "
+            "Use the Read tool to load it, reason about the delta, then apply surgical edits "
+            "via the Edit tool. Do NOT reproduce the full document inline.\n\n"
+        )
 
         prompt += "## Changed Repositories\n\n"
         if changed_repos:
@@ -2687,7 +2835,8 @@ Rules:
             f"Relative path from your cwd: `./{temp_file_rel}`\n\n"
             f"1. Read the file at the path above\n"
             f"2. Apply your changes using the Edit tool (NOT stdout)\n"
-            f"3. After ALL edits are complete, print exactly this line: FILE_EDIT_COMPLETE\n\n"
+            f"3. After ALL edits are complete, print exactly this line: FILE_EDIT_COMPLETE\n"
+            f"4. If NO changes are needed, print exactly this line instead: FILE_UNCHANGED\n\n"
             f"Do NOT output the full document to stdout. Edit the FILE.\n"
         )
 
@@ -2748,7 +2897,14 @@ Rules:
         safe_name = self._sanitize_domain_name_for_path(domain_name)
         temp_file = temp_dir / f"_delta_merge_{safe_name}.md"
         try:
-            temp_file.write_text(existing_content)
+            # Bug #834: strip YAML frontmatter before handing the file to Claude.
+            # Claude is instructed NOT to add frontmatter; if the temp file already
+            # contains a frontmatter block, Claude would encounter it and the result
+            # would end up with duplicate --- delimiters.  The original
+            # existing_content (with frontmatter) is preserved in the caller for
+            # _update_frontmatter_timestamp to reconstruct the final file.
+            body_only = _strip_leading_yaml_frontmatter(existing_content)
+            temp_file.write_text(body_only)
             original_mtime = temp_file.stat().st_mtime
             prompt = merge_prompt + self._build_file_based_instructions(temp_file)
             try:
@@ -2764,15 +2920,33 @@ Rules:
                     f"Delta merge file invocation failed for '{domain_name}': {e}"
                 )
                 return None
+            if "FILE_UNCHANGED" in (result or ""):
+                logger.info(
+                    f"Delta merge intentional no-op for '{domain_name}' "
+                    f"— FILE_UNCHANGED signal received"
+                )
+                return _DELTA_NOOP
             if not self._verify_file_modified(temp_file, original_mtime, domain_name):
                 return None
             if "FILE_EDIT_COMPLETE" not in (result or ""):
                 logger.warning(
                     f"Completion signal missing for delta merge of '{domain_name}'"
                 )
-            return self._read_file_if_changed(
+            updated = self._read_file_if_changed(
                 temp_file, existing_content, domain_name, "Delta merge"
             )
+            # Bug #834 (Step 3): defensive sanitization — Claude should never add
+            # frontmatter to the body-only temp file, but strip it if it does and
+            # log a WARNING so the violation is visible (Messi Rule #13).
+            if updated is not None:
+                stripped = _strip_leading_yaml_frontmatter(updated)
+                if stripped != updated:
+                    logger.warning(
+                        f"Claude returned frontmatter in body-only path for "
+                        f"'{domain_name}'; stripped it"
+                    )
+                    updated = stripped
+            return updated
         finally:
             self._cleanup_temp_file(temp_file)
 
@@ -2854,13 +3028,14 @@ Rules:
         prompt += "\n"
 
         prompt += "## Existing Document\n\n"
-        prompt += existing_body
-        prompt += "\n"
+        prompt += (
+            "The existing document body has been written to a temp file. "
+            "Use the Read tool to load the file at the path provided to you, "
+            "then review its contents against the actual source code.\n\n"
+        )
 
         prompt += "## Refinement Instructions\n\n"
-        prompt += (
-            "Review the existing document above against the actual source code and:\n\n"
-        )
+        prompt += "Review the existing document (Read the temp file) against the actual source code and:\n\n"
         prompt += "1. **Verify** all stated dependencies against source code evidence\n"
         prompt += "2. **Correct** any inaccurate or outdated information\n"
         prompt += "3. **Preserve** the document structure and all sections\n"

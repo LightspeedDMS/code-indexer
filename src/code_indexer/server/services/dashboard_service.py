@@ -516,9 +516,16 @@ class DashboardService:
                             or result.get("user_alias")
                             or result.get("repository")
                         )
-                # Final fallback to "Unknown"
+                # Final fallback: synthetic label for lifecycle_backfill, else "Unknown"
                 if not repo_name:
-                    repo_name = "Unknown"
+                    op = job.get("operation_type") or ""
+                    if op == "lifecycle_backfill":
+                        total = (job.get("metadata") or {}).get("cluster_wide_total")
+                        repo_name = (
+                            f"{total} repos" if total is not None else "all repos"
+                        )
+                    else:
+                        repo_name = "Unknown"
 
                 recent.append(
                     RecentJob(

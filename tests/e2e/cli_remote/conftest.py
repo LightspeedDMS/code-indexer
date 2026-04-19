@@ -211,9 +211,13 @@ def authenticated_workspace(
     )
 
     init_result = run_cidx(
-        "init", "--remote", e2e_server_url,
-        "--username", e2e_config.admin_user,
-        "--password", e2e_config.admin_pass,
+        "init",
+        "--remote",
+        e2e_server_url,
+        "--username",
+        e2e_config.admin_user,
+        "--password",
+        e2e_config.admin_pass,
         cwd=cwd,
         env=e2e_cli_env,
     )
@@ -253,7 +257,9 @@ def activated_golden_repo(
     the server-side activation job is still running when the fixture returns.
     """
     result = run_cidx(
-        "repos", "activate", registered_golden_repo,
+        "repos",
+        "activate",
+        registered_golden_repo,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )

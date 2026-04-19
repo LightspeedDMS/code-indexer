@@ -27,6 +27,7 @@ from ..models.jobs import (
 )
 
 from ..auth import dependencies
+from ..auth.user_manager import UserRole
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -177,7 +178,11 @@ def register_job_routes(
         Raises:
             HTTPException: If job not found, not authorized, or cannot be cancelled
         """
-        result = background_job_manager.cancel_job(job_id, current_user.username)
+        result = background_job_manager.cancel_job(
+            job_id,
+            current_user.username,
+            is_admin=(current_user.role == UserRole.ADMIN),
+        )
 
         if not result["success"]:
             if "not found or not authorized" in result["message"]:

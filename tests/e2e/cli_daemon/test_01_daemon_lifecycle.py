@@ -128,10 +128,7 @@ def test_02_start(
 
     assert _wait_for_daemon_active(
         daemon_repo, daemon_cli_env, timeout=DAEMON_START_TIMEOUT
-    ), (
-        f"Daemon did not become active within {DAEMON_START_TIMEOUT}s "
-        f"after cidx start"
-    )
+    ), f"Daemon did not become active within {DAEMON_START_TIMEOUT}s after cidx start"
 
 
 def test_03_query(
@@ -140,8 +137,11 @@ def test_03_query(
 ) -> None:
     """cidx query 'escape' --quiet exits 0 and returns results via daemon."""
     result = run_cidx(
-        "query", "escape", "--quiet",
-        cwd=daemon_repo, env=daemon_cli_env,
+        "query",
+        "escape",
+        "--quiet",
+        cwd=daemon_repo,
+        env=daemon_cli_env,
     )
     assert_cidx_ok(result, context="query via daemon")
     assert result.stdout.strip(), (
@@ -199,6 +199,4 @@ def test_06_stop(
 
     assert _wait_for_daemon_inactive(
         daemon_repo, daemon_cli_env, timeout=DAEMON_STOP_TIMEOUT
-    ), (
-        f"Daemon still active after {DAEMON_STOP_TIMEOUT}s following cidx stop"
-    )
+    ), f"Daemon still active after {DAEMON_STOP_TIMEOUT}s following cidx stop"

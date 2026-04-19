@@ -44,13 +44,14 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
         "last_known_indexed_at": row[7],
         "created_at": row[8],
         "updated_at": row[9],
+        "lifecycle_schema_version": row[10],
     }
 
 
 _SELECT_COLUMNS = (
     "repo_alias, last_run, next_run, status, error, "
     "last_known_commit, last_known_files_processed, "
-    "last_known_indexed_at, created_at, updated_at"
+    "last_known_indexed_at, created_at, updated_at, lifecycle_schema_version"
 )
 
 

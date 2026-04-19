@@ -6,6 +6,7 @@ body (tool registered but fails for missing repo/data).  HTTP 5xx is failure.
 
 Tool names sourced from tool_docs/repos/*.md name fields.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -131,7 +132,9 @@ def test_mcp_repos_tool(
     )
     if resp.status_code == HTTP_OK:
         body = resp.json()
-        assert FIELD_JSONRPC in body, f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        assert FIELD_JSONRPC in body, (
+            f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        )
         assert FIELD_RESULT in body or FIELD_ERROR in body, (
             f"{label}: JSON-RPC response has neither {FIELD_RESULT!r} nor {FIELD_ERROR!r}"
         )

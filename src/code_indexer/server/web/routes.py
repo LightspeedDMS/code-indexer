@@ -4039,7 +4039,7 @@ def cancel_job(
 
     # Cancel job
     try:
-        result = job_manager.cancel_job(job_id, session.username)
+        result = job_manager.cancel_job(job_id, session.username, is_admin=True)
         if result.get("success"):
             return _create_jobs_page_response(
                 request,

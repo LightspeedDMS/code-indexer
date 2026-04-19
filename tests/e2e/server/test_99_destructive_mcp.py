@@ -45,7 +45,6 @@ from __future__ import annotations
 import json as _json
 import secrets
 import string
-import uuid
 
 from fastapi.testclient import TestClient
 
@@ -80,7 +79,9 @@ def _make_test_password() -> str:
     lower = secrets.choice(string.ascii_lowercase)
     digit = secrets.choice(string.digits)
     special = secrets.choice("!@#$%^&*")
-    rest = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(8))
+    rest = "".join(
+        secrets.choice(string.ascii_letters + string.digits) for _ in range(8)
+    )
     chars = list(upper + lower + digit + special + rest)
     secrets.SystemRandom().shuffle(chars)
     return "".join(chars)
@@ -182,7 +183,9 @@ def _sweep_by_description(
             resource_id = entry.get(id_field, "")
             if resource_id:
                 _assert_resp(
-                    call_mcp_tool(client, delete_tool, {delete_arg: resource_id}, headers),
+                    call_mcp_tool(
+                        client, delete_tool, {delete_arg: resource_id}, headers
+                    ),
                     label=f"sweep {delete_tool} {resource_id!r}",
                     allow_4xx=True,
                 )
@@ -231,7 +234,9 @@ def test_zzz_mcp_create_and_remove_group(
         )
         return  # Group manager not available; nothing was created, nothing to clean up.
 
-    assert success is True, f"create_group unexpected payload (success={success!r}): {payload}"
+    assert success is True, (
+        f"create_group unexpected payload (success={success!r}): {payload}"
+    )
     assert payload.get("name") == _DESTROY_GROUP, (
         f"create_group name mismatch: {payload.get('name')!r}"
     )
@@ -264,7 +269,9 @@ def test_zzz_mcp_create_and_delete_api_key(
     )
     _assert_resp(create_resp, label="create_api_key E2E_DESTROY_key")
     create_payload = _mcp_result(create_resp)
-    assert create_payload.get("success"), f"create_api_key success=false: {create_payload}"
+    assert create_payload.get("success"), (
+        f"create_api_key success=false: {create_payload}"
+    )
     key_id = create_payload.get("key_id", "")
     assert key_id, f"create_api_key empty key_id: {create_payload}"
 
@@ -293,14 +300,20 @@ def test_zzz_mcp_create_and_delete_mcp_credential(
     )
     _assert_resp(create_resp, label="create_mcp_credential E2E_DESTROY_cred")
     create_payload = _mcp_result(create_resp)
-    assert create_payload.get("success"), f"create_mcp_credential success=false: {create_payload}"
+    assert create_payload.get("success"), (
+        f"create_mcp_credential success=false: {create_payload}"
+    )
     credential_id = create_payload.get("credential_id", "")
     assert credential_id, f"create_mcp_credential empty credential_id: {create_payload}"
 
     list_resp = call_mcp_tool(test_client, "list_mcp_credentials", {}, auth_headers)
     _assert_resp(list_resp, label="list_mcp_credentials after create")
-    listed_ids = [c.get("id", "") for c in _mcp_result(list_resp).get("credentials", [])]
-    assert credential_id in listed_ids, f"credential_id {credential_id!r} not in list: {listed_ids}"
+    listed_ids = [
+        c.get("id", "") for c in _mcp_result(list_resp).get("credentials", [])
+    ]
+    assert credential_id in listed_ids, (
+        f"credential_id {credential_id!r} not in list: {listed_ids}"
+    )
 
     _assert_resp(
         call_mcp_tool(
@@ -339,7 +352,9 @@ def test_zzz_mcp_create_and_verify_user(
 
     list_resp = call_mcp_tool(test_client, "list_users", {}, auth_headers)
     _assert_resp(list_resp, label="list_users after create E2E_DESTROY_user")
-    listed_names = [u.get("username", "") for u in _mcp_result(list_resp).get("users", [])]
+    listed_names = [
+        u.get("username", "") for u in _mcp_result(list_resp).get("users", [])
+    ]
     assert _DESTROY_USERNAME in listed_names, (
         f"{_DESTROY_USERNAME!r} not in list_users: {listed_names}"
     )
@@ -389,7 +404,8 @@ def test_zzz_mcp_delete_remaining_resources(
     )
 
     _sweep_by_description(
-        test_client, auth_headers,
+        test_client,
+        auth_headers,
         list_tool="list_api_keys",
         collection_field="keys",
         id_field="id",
@@ -398,7 +414,8 @@ def test_zzz_mcp_delete_remaining_resources(
     )
 
     _sweep_by_description(
-        test_client, auth_headers,
+        test_client,
+        auth_headers,
         list_tool="list_mcp_credentials",
         collection_field="credentials",
         id_field="id",

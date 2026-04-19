@@ -82,7 +82,9 @@ def _build_claude_env() -> dict:
     keys_to_strip = {"CLAUDECODE"}
     if "CLAUDECODE" in os.environ:
         keys_to_strip.add("ANTHROPIC_API_KEY")
-    return {k: v for k, v in os.environ.items() if k not in keys_to_strip}
+    filtered = {k: v for k, v in os.environ.items() if k not in keys_to_strip}
+    filtered["NO_COLOR"] = "1"
+    return filtered
 
 
 def _normalize_claude_output(raw: str) -> str:
@@ -102,8 +104,9 @@ def _normalize_claude_output(raw: str) -> str:
     import re
 
     output = raw
-    # CSI sequences: ESC [ ... letter (colors, cursor, modes like [?2004l, [?25h)
-    output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
+    # CSI sequences: full ECMA-48 grammar — parameter bytes [0-?], intermediate bytes [ -/],
+    # final bytes [@-~] (covers colors, cursor, private modes, intermediate byte variants).
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
     # OSC sequences: ESC ] ... BEL or ESC ] ... ST
     output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
     # Other ESC sequences (ESC followed by single char)
@@ -204,26 +207,37 @@ class DescriptionRefreshScheduler:
 
     def __init__(
         self,
-        db_path: str,
-        config_manager,
+        db_path: Optional[str] = None,
+        config_manager=None,
         claude_cli_manager=None,
         meta_dir: Optional[Path] = None,
         analysis_model: str = "opus",
         job_tracker=None,
         mcp_registration_service=None,
+        tracking_backend=None,
+        golden_backend=None,
     ) -> None:
         """
         Initialize the scheduler.
 
         Args:
-            db_path: Path to SQLite database
+            db_path: Path to SQLite database. Required unless both tracking_backend and
+                golden_backend are provided directly (injectable backend mode for tests).
             config_manager: ServerConfigManager instance
             claude_cli_manager: Optional ClaudeCliManager instance (for submitting work)
             meta_dir: Path to cidx-meta directory (for reading existing .md files)
             analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
             job_tracker: Optional JobTracker instance for unified job tracking (Story #313)
             mcp_registration_service: Optional MCPSelfRegistrationService instance (Story #727)
+            tracking_backend: Optional pre-constructed DescriptionRefreshTrackingBackend.
+                When provided together with golden_backend, db_path is not required.
+            golden_backend: Optional pre-constructed GoldenRepoMetadataSqliteBackend.
+                When provided together with tracking_backend, db_path is not required.
         """
+        if db_path is None and (tracking_backend is None or golden_backend is None):
+            raise ValueError(
+                "Either db_path or both tracking_backend and golden_backend must be provided"
+            )
         self._db_path = db_path
         self._config_manager = config_manager
         self._claude_cli_manager = claude_cli_manager
@@ -231,8 +245,16 @@ class DescriptionRefreshScheduler:
         self._analysis_model = analysis_model
         self._job_tracker = job_tracker
         self._mcp_registration_service = mcp_registration_service
-        self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
-        self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
+        if tracking_backend is not None:
+            self._tracking_backend = tracking_backend
+        else:
+            assert db_path is not None  # guarded above
+            self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+        if golden_backend is not None:
+            self._golden_backend = golden_backend
+        else:
+            assert db_path is not None  # guarded above
+            self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -242,7 +264,7 @@ class DescriptionRefreshScheduler:
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
         _default_max_workers = ClaudeIntegrationConfig().max_concurrent_claude_cli
-        config = config_manager.load_config()
+        config = config_manager.load_config() if config_manager is not None else None
         _configured = (
             config.claude_integration_config.max_concurrent_claude_cli
             if config and config.claude_integration_config
@@ -251,6 +273,26 @@ class DescriptionRefreshScheduler:
         # Clamp to >= 1: ThreadPoolExecutor raises ValueError for 0 or negative values.
         max_workers = max(1, _configured)
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+
+        # Bug #853: active lifecycle_backfill aggregate job_id for cancellation propagation.
+        # Protected by _backfill_job_id_lock for thread-safe access from the scheduler
+        # thread and the DependencyMapService thread.
+        self._active_backfill_job_id: Optional[str] = None
+        self._backfill_job_id_lock = threading.Lock()
+
+    def set_active_backfill_job_id(self, job_id: Optional[str]) -> None:
+        """
+        Store the active lifecycle_backfill aggregate job_id (thread-safe).
+
+        Called by DependencyMapService after registering the aggregate job so
+        this scheduler can check for cancellation before processing each repo
+        (Bug #853 Fix 5).
+
+        Args:
+            job_id: The job_id to store, or None to clear it.
+        """
+        with self._backfill_job_id_lock:
+            self._active_backfill_job_id = job_id
 
     def start(self) -> None:
         """Start daemon thread if enabled in config."""
@@ -544,8 +586,33 @@ class DescriptionRefreshScheduler:
         Extracted from _run_loop() to enable unit testing of job registration behavior.
         For each stale repo with changes, registers a description_refresh job in the
         job_tracker (if configured) and spawns a background thread (AC2, Story #313).
+
+        Checks for cancellation of the active lifecycle_backfill aggregate job before
+        processing any repo. If cancelled, calls fail_job and returns immediately (Bug #853).
         """
         import uuid
+
+        with self._backfill_job_id_lock:
+            active_backfill_job_id = self._active_backfill_job_id
+
+        if active_backfill_job_id is not None and self._job_tracker is not None:
+            if self._job_tracker.is_cancelled(active_backfill_job_id):
+                logger.warning(
+                    "_run_loop_single_pass: backfill job %s was cancelled, "
+                    "stopping repo processing",
+                    active_backfill_job_id,
+                )
+                # Cancellation is not a failure — use update_status, not fail_job
+                # (Codex Issue 2b)
+                self._job_tracker.update_status(
+                    active_backfill_job_id, status="cancelled"
+                )
+                # Conditional clear: only clear if id still matches this cycle's job
+                # to avoid erasing a new backfill cycle's id (Codex Issue 3)
+                with self._backfill_job_id_lock:
+                    if self._active_backfill_job_id == active_backfill_job_id:
+                        self._active_backfill_job_id = None
+                return
 
         stale_repos = self.get_stale_repos()
 
@@ -553,9 +620,22 @@ class DescriptionRefreshScheduler:
             alias = repo["repo_alias"]
             clone_path = repo["clone_path"]
 
-            # Check for changes
-            if not self.has_changes_since_last_run(clone_path, repo):
-                # No changes - reschedule without submitting work
+            # Check for lifecycle backfill need — bypasses change gate if stale.
+            # A missing lifecycle_schema_version (None) or a value below LIFECYCLE_SCHEMA_VERSION
+            # both indicate that lifecycle backfill is required. None means the tracking record
+            # predates the column or the backend didn't expose it; treated as version 0 (stale).
+            # Such repos must be processed even when no code changes have occurred (Bug #835).
+            lifecycle_version = repo.get("lifecycle_schema_version")
+            needs_lifecycle_backfill = (
+                lifecycle_version is None
+                or lifecycle_version < LIFECYCLE_SCHEMA_VERSION
+            )
+
+            # Skip only when lifecycle is current AND no code changes
+            if not needs_lifecycle_backfill and not self.has_changes_since_last_run(
+                clone_path, repo
+            ):
+                # No changes and no lifecycle backfill needed - reschedule without work
                 now = datetime.now(timezone.utc).isoformat()
                 self._tracking_backend.upsert_tracking(
                     repo_alias=alias,
@@ -724,42 +804,79 @@ class DescriptionRefreshScheduler:
             )
             return None
 
+    def _validate_refresh_inputs(
+        self, repo_alias: str, repo_path: str
+    ) -> Optional[Path]:
+        """Validate refresh inputs; return resolved repo Path or None on failure."""
+        if not repo_alias or not isinstance(repo_alias, str):
+            logger.warning("_get_refresh_prompt: repo_alias must be a non-empty string")
+            return None
+        if not repo_path or not isinstance(repo_path, str):
+            logger.warning("_get_refresh_prompt: repo_path must be a non-empty string")
+            return None
+        resolved = Path(repo_path).resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            logger.warning(
+                "_get_refresh_prompt: repo_path does not resolve to a directory: %s",
+                repo_path,
+            )
+            return None
+        return resolved
+
+    def _stage_and_build_prompt(
+        self, description: str, last_analyzed: str, repo_path_obj: Path
+    ) -> Optional[str]:
+        """
+        Stage *description* to a temp file and build a file-reference refresh prompt.
+
+        Creates a unique temp dir under *repo_path_obj*, writes ``existing_desc.md``,
+        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns the prompt.
+        Cleans up the temp dir on any error; on success the dir persists for the CLI
+        subprocess (caller is responsible for cleanup after the CLI call).
+        """
+        import shutil
+        import tempfile
+        from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
+
+        tmp_dir_str = tempfile.mkdtemp(dir=repo_path_obj)
+        try:
+            temp_file = Path(tmp_dir_str) / "existing_desc.md"
+            temp_file.write_text(description, encoding="utf-8")
+            analyzer = RepoAnalyzer(str(repo_path_obj))
+            return cast(
+                Optional[str],
+                analyzer.get_prompt(
+                    mode="refresh",
+                    last_analyzed=last_analyzed,
+                    temp_file_path=temp_file,
+                ),
+            )
+        except Exception as e:
+            shutil.rmtree(tmp_dir_str, ignore_errors=True)
+            logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
+            return None
+
     def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
         """
-        Get refresh prompt for a repository using RepoAnalyzer.
+        Get refresh prompt staging the existing description to a temp file (Bug #840 Site #5).
 
-        Args:
-            repo_alias: Repository alias
-            repo_path: Path to repository
-
-        Returns:
-            Refresh prompt string, or None if cannot generate
+        Returns a prompt string with the temp file path embedded, or None on failure.
+        The temp dir persists for the CLI subprocess; _run_phase1 cleans up afterwards.
         """
-        # Read existing description
+        repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
+        if repo_path_obj is None:
+            return None
         desc_data = self._read_existing_description(repo_alias)
         if not desc_data or not desc_data.get("last_analyzed"):
             logger.warning(
-                f"Cannot generate refresh prompt for {repo_alias}: missing existing description or last_analyzed"
+                f"Cannot generate refresh prompt for {repo_alias}: missing description or last_analyzed"
             )
             return None
-
-        try:
-            from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
-
-            analyzer = RepoAnalyzer(repo_path)
-            prompt = analyzer.get_prompt(
-                mode="refresh",
-                last_analyzed=desc_data["last_analyzed"],
-                existing_description=desc_data["description"],
-            )
-            return cast(Optional[str], prompt)
-
-        except Exception as e:
-            logger.error(
-                f"Failed to generate refresh prompt for {repo_alias}: {e}",
-                exc_info=True,
-            )
-            return None
+        return self._stage_and_build_prompt(
+            desc_data.get("description") or "",
+            desc_data["last_analyzed"] or "",
+            repo_path_obj,
+        )
 
     def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
         """
@@ -1030,14 +1147,81 @@ class DescriptionRefreshScheduler:
             f"{body}"
         )
 
+    def _count_repos_needing_backfill(self) -> int:
+        """
+        Count tracking rows where lifecycle_schema_version IS NULL or stale.
+
+        Matches the update criteria in _self_close_backfill so the "all done"
+        check is consistent with the per-repo update logic.
+        """
+
+        def _count(conn) -> int:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM description_refresh_tracking "
+                "WHERE lifecycle_schema_version IS NULL "
+                "OR lifecycle_schema_version < ?",
+                (LIFECYCLE_SCHEMA_VERSION,),
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+
+        return int(self._tracking_backend._conn_manager.execute_atomic(_count))
+
+    def _maybe_complete_backfill_job(self) -> None:
+        """
+        Complete the aggregate lifecycle_backfill job when all repos are done.
+
+        Called from _self_close_backfill after a successful per-repo update.
+        Checks remaining count, calls complete_job on the active aggregate job
+        if count == 0, and clears _active_backfill_job_id only on success
+        and only when the stored id still matches (conditional clear).
+
+        No-op when _active_backfill_job_id is None or _job_tracker is None.
+        """
+        with self._backfill_job_id_lock:
+            active_job_id = self._active_backfill_job_id
+
+        if active_job_id is None or self._job_tracker is None:
+            return
+
+        try:
+            remaining = self._count_repos_needing_backfill()
+        except Exception as exc:
+            logger.warning(
+                "_maybe_complete_backfill_job: failed to count remaining repos: %s",
+                exc,
+            )
+            return
+
+        if remaining > 0:
+            return
+
+        logger.info(
+            "_maybe_complete_backfill_job: all repos done, completing job %s",
+            active_job_id,
+        )
+        try:
+            self._job_tracker.complete_job(active_job_id)
+            with self._backfill_job_id_lock:
+                if self._active_backfill_job_id == active_job_id:
+                    self._active_backfill_job_id = None
+        except Exception as exc:
+            logger.warning(
+                "_maybe_complete_backfill_job: complete_job failed for %s: %s",
+                active_job_id,
+                exc,
+            )
+
     def _self_close_backfill(self, alias: str) -> None:
         """
         Update lifecycle_schema_version in description_refresh_tracking after
         a successful Phase 2 refresh (Story #728 AC3 self-close).
 
-        Uses a guarded UPDATE (WHERE lifecycle_schema_version < LIFECYCLE_SCHEMA_VERSION)
-        to make the operation idempotent — re-running on a row already at the
-        current version is a no-op.
+        The UPDATE handles both NULL and stale versions so its criteria match
+        the counting logic in _count_repos_needing_backfill (Codex Issue 2a).
+
+        On success, delegates to _maybe_complete_backfill_job() which calls
+        complete_job on the aggregate job when all repos are done.
 
         Args:
             alias: Repository alias whose tracking row to update.
@@ -1049,7 +1233,8 @@ class DescriptionRefreshScheduler:
                     "UPDATE description_refresh_tracking "
                     "SET lifecycle_schema_version = ? "
                     "WHERE repo_alias = ? "
-                    "AND lifecycle_schema_version < ?",
+                    "AND (lifecycle_schema_version IS NULL "
+                    "     OR lifecycle_schema_version < ?)",
                     (LIFECYCLE_SCHEMA_VERSION, alias, LIFECYCLE_SCHEMA_VERSION),
                 )
 
@@ -1065,6 +1250,9 @@ class DescriptionRefreshScheduler:
                 alias,
                 exc,
             )
+            return
+
+        self._maybe_complete_backfill_job()
 
     def _run_two_phase_task(self, alias: str, clone_path: str) -> None:
         """

@@ -129,7 +129,8 @@ def db_file(tmp_path):
                repo_alias TEXT PRIMARY KEY, last_run TEXT, next_run TEXT,
                status TEXT DEFAULT 'pending', error TEXT,
                last_known_commit TEXT, last_known_files_processed INTEGER,
-               last_known_indexed_at TEXT, created_at TEXT, updated_at TEXT)"""
+               last_known_indexed_at TEXT, created_at TEXT, updated_at TEXT,
+               lifecycle_schema_version INTEGER DEFAULT 0)"""
     )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS golden_repos_metadata (

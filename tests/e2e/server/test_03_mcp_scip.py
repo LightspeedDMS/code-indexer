@@ -6,6 +6,7 @@ body (tool registered but fails for missing SCIP index).  HTTP 5xx is failure.
 
 Tool names sourced from tool_docs/scip/*.md name fields.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -56,32 +57,50 @@ SCIP_TOOLS: list[tuple[str, str, JsonArgs]] = [
     (
         "scip_definition",
         TOOL_SCIP_DEFINITION,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META, ARG_KEY_SYMBOL: ARG_SYMBOL_TEST},
+        {
+            ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META,
+            ARG_KEY_SYMBOL: ARG_SYMBOL_TEST,
+        },
     ),
     (
         "scip_references",
         TOOL_SCIP_REFERENCES,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META, ARG_KEY_SYMBOL: ARG_SYMBOL_TEST},
+        {
+            ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META,
+            ARG_KEY_SYMBOL: ARG_SYMBOL_TEST,
+        },
     ),
     (
         "scip_dependencies",
         TOOL_SCIP_DEPENDENCIES,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META, ARG_KEY_SYMBOL: ARG_SYMBOL_TEST},
+        {
+            ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META,
+            ARG_KEY_SYMBOL: ARG_SYMBOL_TEST,
+        },
     ),
     (
         "scip_dependents",
         TOOL_SCIP_DEPENDENTS,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META, ARG_KEY_SYMBOL: ARG_SYMBOL_TEST},
+        {
+            ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META,
+            ARG_KEY_SYMBOL: ARG_SYMBOL_TEST,
+        },
     ),
     (
         "scip_impact",
         TOOL_SCIP_IMPACT,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META, ARG_KEY_SYMBOL: ARG_SYMBOL_TEST},
+        {
+            ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META,
+            ARG_KEY_SYMBOL: ARG_SYMBOL_TEST,
+        },
     ),
     (
         "scip_context",
         TOOL_SCIP_CONTEXT,
-        {ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META, ARG_KEY_SYMBOL: ARG_SYMBOL_TEST},
+        {
+            ARG_KEY_REPOSITORY_ALIAS: ARG_ALIAS_CIDX_META,
+            ARG_KEY_SYMBOL: ARG_SYMBOL_TEST,
+        },
     ),
     (
         "scip_callchain",
@@ -139,7 +158,9 @@ def test_mcp_scip_tool(
     )
     if resp.status_code == HTTP_OK:
         body = resp.json()
-        assert FIELD_JSONRPC in body, f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        assert FIELD_JSONRPC in body, (
+            f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        )
         assert FIELD_RESULT in body or FIELD_ERROR in body, (
             f"{label}: JSON-RPC response has neither {FIELD_RESULT!r} nor {FIELD_ERROR!r}"
         )
