@@ -52,6 +52,13 @@ _BUG_824_SKIP_REASON = (
     "not yet implemented). Unskip when Bug #824 is fixed."
 )
 
+_BUG_842_SKIP_REASON = (
+    "Query repository-linking rejects filesystem-path URLs — Bug #842 "
+    "(server git_url_normalizer only accepts HTTPS/SSH formats; the E2E "
+    "seed registers the golden repo with a local filesystem path, which "
+    "discovery cannot normalize). Unskip when Bug #842 is fixed."
+)
+
 
 # ---------------------------------------------------------------------------
 # Private helper
@@ -210,6 +217,7 @@ def test_repos_sync_status(
     _assert_ok(result, "cidx repos sync-status")
 
 
+@pytest.mark.skip(reason=_BUG_842_SKIP_REASON)
 def test_query_via_server(
     authenticated_workspace: Path,
     activated_golden_repo: str,

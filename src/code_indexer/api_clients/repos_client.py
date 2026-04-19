@@ -340,14 +340,22 @@ class ReposAPIClient(CIDXRemoteAPIClient):
             "DELETE", f"/api/repos/{user_alias}", json=request_data
         )
 
-        if response.status_code == 200:
+        # Server returns 200 for synchronous completion and 202 (Accepted)
+        # when the deactivation runs asynchronously (mirrors the 200/202 pattern
+        # used by activate — Bug 6 fix, commit 45e1f0ad).
+        if response.status_code in (200, 202):
             try:
                 result: Dict[str, Any] = response.json()
                 return result
             except (TypeError, ValueError) as e:
                 raise APIClientError(f"Invalid response format: {e}")
         else:
-            error_detail = response.json().get("detail", f"HTTP {response.status_code}")
+            try:
+                error_detail = response.json().get(
+                    "detail", f"HTTP {response.status_code}"
+                )
+            except (TypeError, ValueError):
+                error_detail = f"HTTP {response.status_code}"
             raise APIClientError(
                 f"Failed to deactivate repository: {error_detail}", response.status_code
             )
