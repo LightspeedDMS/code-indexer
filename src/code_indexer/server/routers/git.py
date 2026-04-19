@@ -1129,18 +1129,20 @@ def _parse_git_blame_porcelain(stdout: str) -> list:
         if raw[0] == "\t":
             # TAB-prefixed content line ends the current block
             line_number += 1
-            lines.append({
-                "line_number": line_number,
-                "commit_hash": current.get("commit_hash", ""),
-                "author": current.get("author", ""),
-                "date": current.get("date", ""),
-                "content": raw[1:],  # strip leading TAB
-            })
+            lines.append(
+                {
+                    "line_number": line_number,
+                    "commit_hash": current.get("commit_hash", ""),
+                    "author": current.get("author", ""),
+                    "date": current.get("date", ""),
+                    "content": raw[1:],  # strip leading TAB
+                }
+            )
             current = {}
         elif raw.startswith("author "):
-            current["author"] = raw[len("author "):]
+            current["author"] = raw[len("author ") :]
         elif raw.startswith("author-time "):
-            epoch = int(raw[len("author-time "):])
+            epoch = int(raw[len("author-time ") :])
             dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
             current["date"] = dt.isoformat()
         else:

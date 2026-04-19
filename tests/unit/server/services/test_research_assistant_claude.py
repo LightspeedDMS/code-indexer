@@ -206,6 +206,7 @@ class TestResearchAssistantClaude:
             or "cidx CLI commands" in captured_prompt
         ), "Must specify allowed operations"
 
+    @pytest.mark.slow
     def test_subsequent_prompts_no_duplicate_guardrails(self, research_service):
         """Test AC5: Subsequent prompts don't duplicate guardrails (sent to Claude, not stored in DB)."""
         from unittest.mock import patch

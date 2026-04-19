@@ -17,18 +17,14 @@ class TestDashboardApiMetricsIntegration:
     def test_dashboard_stats_includes_api_metrics(self):
         """Test that get_stats_partial includes API metrics in returned data."""
         from src.code_indexer.server.services.dashboard_service import DashboardService
-        from src.code_indexer.server.services.api_metrics_service import (
-            api_metrics_service,
-        )
+        import src.code_indexer.server.services.api_metrics_service as ams_module
 
-        # Reset metrics to known state
-        api_metrics_service.reset()
-
-        # Simulate some API calls
-        api_metrics_service.increment_semantic_search()
-        api_metrics_service.increment_semantic_search()
-        api_metrics_service.increment_other_index_search()
-        api_metrics_service.increment_regex_search()
+        expected_metrics = {
+            "semantic_searches": 2,
+            "other_index_searches": 1,
+            "regex_searches": 1,
+            "other_api_calls": 0,
+        }
 
         # Create dashboard service
         service = DashboardService()
@@ -49,7 +45,8 @@ class TestDashboardApiMetricsIntegration:
         mock_activated_manager = MagicMock()
         mock_activated_manager.list_activated_repositories.return_value = []
 
-        # Patch the service methods
+        # Patch get_metrics_bucketed — production code reads from DB buckets, not
+        # in-memory counters, so patching this is the correct integration seam.
         with (
             patch.object(
                 service, "_get_background_job_manager", return_value=mock_job_manager
@@ -61,6 +58,11 @@ class TestDashboardApiMetricsIntegration:
                 service,
                 "_get_activated_repo_manager",
                 return_value=mock_activated_manager,
+            ),
+            patch.object(
+                ams_module.api_metrics_service,
+                "get_metrics_bucketed",
+                return_value=expected_metrics,
             ),
         ):
             stats_data = service.get_stats_partial("testuser", "24h", "30d")

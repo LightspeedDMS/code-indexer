@@ -177,7 +177,9 @@ def test_git_log_tolerates_commit_message_with_quotes_and_backslashes(
 
     first_message = data["commits"][0]["message"]
     assert isinstance(first_message, str)
-    assert len(first_message) > 0, "Commit message must survive JSON roundtrip non-empty"
+    assert len(first_message) > 0, (
+        "Commit message must survive JSON roundtrip non-empty"
+    )
 
 
 # ---------------------------------------------------------------------------

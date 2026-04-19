@@ -596,12 +596,13 @@ class TestFileUploadService:
     def temp_db(self):
         """Create temporary database for testing."""
         import os
+        import shutil
 
         temp_dir = tempfile.mkdtemp()
         db_path = os.path.join(temp_dir, "test.db")
         yield db_path
         Path(db_path).unlink(missing_ok=True)
-        Path(temp_dir).rmdir()
+        shutil.rmtree(temp_dir)
 
     @pytest.fixture
     def research_service(self, temp_db):

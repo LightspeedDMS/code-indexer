@@ -38,9 +38,7 @@ _COMMIT_KEYS = {"commit_hash", "author", "date", "message"}
 @contextmanager
 def _arm_repo(repo_path: Path):
     """Patch git router's activated_repo_manager to return repo_path."""
-    with patch(
-        "code_indexer.server.routers.git.activated_repo_manager"
-    ) as mock_arm:
+    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
         mock_arm.get_activated_repo_path.return_value = str(repo_path)
         yield mock_arm
 
@@ -48,10 +46,10 @@ def _arm_repo(repo_path: Path):
 @contextmanager
 def _arm_not_found():
     """Patch git router's activated_repo_manager to simulate alias not activated."""
-    with patch(
-        "code_indexer.server.routers.git.activated_repo_manager"
-    ) as mock_arm:
-        mock_arm.get_activated_repo_path.side_effect = FileNotFoundError("not activated")
+    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
+        mock_arm.get_activated_repo_path.side_effect = FileNotFoundError(
+            "not activated"
+        )
         yield mock_arm
 
 
@@ -70,6 +68,7 @@ def mock_user():
 @pytest.fixture()
 def test_client(mock_user):
     """Function-scoped client with guaranteed override cleanup."""
+
     def override():
         return mock_user
 

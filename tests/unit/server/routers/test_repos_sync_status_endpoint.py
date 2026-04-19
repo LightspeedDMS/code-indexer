@@ -14,13 +14,17 @@ Tests:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import app
 from code_indexer.server.auth.dependencies import get_current_user
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    _find_route_handler,
+    _patch_closure,
+)
 
 # Expected keys in the sync-status response
 _EXPECTED_KEYS = {"current_branch", "sync_status", "last_sync_time", "has_conflicts"}
@@ -41,6 +45,7 @@ def mock_user():
 @pytest.fixture()
 def test_client(mock_user):
     """Function-scoped client with guaranteed override cleanup via try/finally."""
+
     def override():
         return mock_user
 
@@ -54,13 +59,11 @@ def test_client(mock_user):
 
 @contextmanager
 def arm_mock(metadata):
-    """Patch ActivatedRepoManager in inline_repos with controlled metadata."""
-    with patch(
-        "code_indexer.server.routers.inline_repos.ActivatedRepoManager"
-    ) as MockARM:
-        mock_arm = Mock()
-        MockARM.return_value = mock_arm
-        mock_arm._load_metadata.return_value = metadata
+    """Patch activated_repo_manager closure in the sync-status handler."""
+    handler = _find_route_handler("/api/repos/{user_alias}/sync-status", "GET")
+    mock_arm = Mock()
+    mock_arm._load_metadata.return_value = metadata
+    with _patch_closure(handler, "activated_repo_manager", mock_arm):
         yield mock_arm
 
 

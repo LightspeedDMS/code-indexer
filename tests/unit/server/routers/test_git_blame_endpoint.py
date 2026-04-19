@@ -42,9 +42,7 @@ _LINE_KEYS = {"line_number", "commit_hash", "author", "date", "content"}
 @contextmanager
 def _arm_repo(repo_path: Path):
     """Patch git router's activated_repo_manager to return repo_path."""
-    with patch(
-        "code_indexer.server.routers.git.activated_repo_manager"
-    ) as mock_arm:
+    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
         mock_arm.get_activated_repo_path.return_value = str(repo_path)
         yield mock_arm
 
@@ -52,10 +50,10 @@ def _arm_repo(repo_path: Path):
 @contextmanager
 def _arm_not_found():
     """Patch git router's activated_repo_manager to simulate alias not activated."""
-    with patch(
-        "code_indexer.server.routers.git.activated_repo_manager"
-    ) as mock_arm:
-        mock_arm.get_activated_repo_path.side_effect = FileNotFoundError("not activated")
+    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
+        mock_arm.get_activated_repo_path.side_effect = FileNotFoundError(
+            "not activated"
+        )
         yield mock_arm
 
 
@@ -74,6 +72,7 @@ def mock_user():
 @pytest.fixture()
 def test_client(mock_user):
     """Function-scoped client with guaranteed override cleanup."""
+
     def override():
         return mock_user
 
@@ -102,9 +101,7 @@ def test_git_blame_happy_path(test_client, git_repo):
     expected_count = len(committed_lines)
 
     with _arm_repo(repo):
-        response = test_client.get(
-            "/api/v1/repos/myrepo/git/blame?path=hello.txt"
-        )
+        response = test_client.get("/api/v1/repos/myrepo/git/blame?path=hello.txt")
 
     assert response.status_code == 200, response.text
     data = response.json()
@@ -137,9 +134,7 @@ def test_git_blame_path_traversal_returns_400(test_client, git_repo):
     repo, _ = git_repo
 
     with _arm_repo(repo):
-        response = test_client.get(
-            "/api/v1/repos/myrepo/git/blame?path=../etc/passwd"
-        )
+        response = test_client.get("/api/v1/repos/myrepo/git/blame?path=../etc/passwd")
 
     assert response.status_code == 400
 
@@ -149,9 +144,7 @@ def test_git_blame_absolute_path_returns_400(test_client, git_repo):
     repo, _ = git_repo
 
     with _arm_repo(repo):
-        response = test_client.get(
-            "/api/v1/repos/myrepo/git/blame?path=/etc/passwd"
-        )
+        response = test_client.get("/api/v1/repos/myrepo/git/blame?path=/etc/passwd")
 
     assert response.status_code == 400
 

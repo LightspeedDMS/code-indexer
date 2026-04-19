@@ -69,7 +69,7 @@ class TestActivateRepositoryIdempotent:
     # Already activated → 200 with job_id=""
     # ------------------------------------------------------------------
 
-    def test_already_activated_returns_200_with_empty_job_id(self, admin_client):
+    def test_already_activated_returns_200_with_empty_job_id(self, admin_client):  # noqa: F811
         """Same user + same alias already activated -> 200, job_id="" (not 409).
 
         job_id="" is the sentinel meaning "activation is already complete;
@@ -83,7 +83,10 @@ class TestActivateRepositoryIdempotent:
             with _patch_closure(handler, "golden_repo_manager", mock_grm):
                 response = admin_client.post(
                     "/api/repos/activate",
-                    json={"golden_repo_alias": "markupsafe", "user_alias": "markupsafe"},
+                    json={
+                        "golden_repo_alias": "markupsafe",
+                        "user_alias": "markupsafe",
+                    },
                 )
 
         assert response.status_code == 200, (
@@ -98,7 +101,7 @@ class TestActivateRepositoryIdempotent:
     # In-flight job → 200 with existing job_id
     # ------------------------------------------------------------------
 
-    def test_in_flight_job_returns_200_with_existing_job_id(self, admin_client):
+    def test_in_flight_job_returns_200_with_existing_job_id(self, admin_client):  # noqa: F811
         """Same user + same alias already activating -> 200, returns existing job_id.
 
         The caller should wait on the existing job_id rather than starting
@@ -113,7 +116,10 @@ class TestActivateRepositoryIdempotent:
             with _patch_closure(handler, "golden_repo_manager", mock_grm):
                 response = admin_client.post(
                     "/api/repos/activate",
-                    json={"golden_repo_alias": "markupsafe", "user_alias": "markupsafe"},
+                    json={
+                        "golden_repo_alias": "markupsafe",
+                        "user_alias": "markupsafe",
+                    },
                 )
 
         assert response.status_code == 200, (
@@ -128,7 +134,7 @@ class TestActivateRepositoryIdempotent:
     # Different alias → 202 (new activation)
     # ------------------------------------------------------------------
 
-    def test_different_alias_same_golden_returns_202(self, admin_client):
+    def test_different_alias_same_golden_returns_202(self, admin_client):  # noqa: F811
         """Different user_alias for same golden repo -> 202 (new activation, not idempotent)."""
         new_job_id = "new-job-xyz789"
         handler = _find_route_handler("/api/repos/activate", "POST")

@@ -30,7 +30,7 @@ from typing import Callable, Dict, Any, Optional
 
 from ..repositories.activated_repo_manager import (  # noqa: E402
     ActivatedRepoError,
-    ActivatedRepoManager,
+    ActivatedRepoManager,  # noqa: F401  -- patch target in unit tests
 )
 from ..repositories.background_jobs import DuplicateJobError  # noqa: E402
 from ..repositories.repository_listing_manager import (
@@ -1646,12 +1646,14 @@ def register_repo_routes(
             with os.scandir(scan_root) as it:
                 for entry in it:
                     rel = Path(entry.path).relative_to(repo_resolved)
-                    entries.append({
-                        "name": entry.name,
-                        "path": str(rel),
-                        "type": "dir" if entry.is_dir() else "file",
-                        "size": entry.stat().st_size if entry.is_file() else 0,
-                    })
+                    entries.append(
+                        {
+                            "name": entry.name,
+                            "path": str(rel),
+                            "type": "dir" if entry.is_dir() else "file",
+                            "size": entry.stat().st_size if entry.is_file() else 0,
+                        }
+                    )
             return {"files": entries}
 
         except OSError as e:

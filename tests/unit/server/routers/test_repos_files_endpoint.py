@@ -13,13 +13,17 @@ Tests:
 from __future__ import annotations
 
 from contextlib import contextmanager
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from code_indexer.server.app import app
 from code_indexer.server.auth.dependencies import get_current_user
+from tests.unit.server.routers.inline_routes_test_helpers import (
+    _find_route_handler,
+    _patch_closure,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,14 +51,12 @@ def test_client(mock_user):
 
 @contextmanager
 def arm_mock(metadata, repo_path: str):
-    """Patch ActivatedRepoManager in inline_repos with controlled metadata and path."""
-    with patch(
-        "code_indexer.server.routers.inline_repos.ActivatedRepoManager"
-    ) as MockARM:
-        mock_arm = Mock()
-        MockARM.return_value = mock_arm
-        mock_arm._load_metadata.return_value = metadata
-        mock_arm.get_activated_repo_path.return_value = repo_path
+    """Patch activated_repo_manager closure in the files handler."""
+    handler = _find_route_handler("/api/repos/{user_alias}/files", "GET")
+    mock_arm = Mock()
+    mock_arm._load_metadata.return_value = metadata
+    mock_arm.get_activated_repo_path.return_value = repo_path
+    with _patch_closure(handler, "activated_repo_manager", mock_arm):
         yield mock_arm
 
 

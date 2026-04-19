@@ -80,6 +80,7 @@ def _make_service(
         Mock(),
         refresh_scheduler=refresh_scheduler,
         job_tracker=job_tracker,
+        description_refresh_tracking_backend=tracking,
     )
 
 

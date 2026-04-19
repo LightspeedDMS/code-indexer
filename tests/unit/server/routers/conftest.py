@@ -15,24 +15,35 @@ def _init_git_repo(repo_path: Path, content: str = "hello world\n") -> str:
     subprocess.run(["git", "init"], cwd=str(repo_path), check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
-        cwd=str(repo_path), check=True, capture_output=True,
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Test User"],
-        cwd=str(repo_path), check=True, capture_output=True,
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
     )
     (repo_path / "hello.txt").write_text(content)
     subprocess.run(
         ["git", "add", "hello.txt"],
-        cwd=str(repo_path), check=True, capture_output=True,
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=str(repo_path), check=True, capture_output=True,
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
     )
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), check=True, capture_output=True, text=True,
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
+        text=True,
     )
     return result.stdout.strip()
 

@@ -246,6 +246,7 @@ class TestRegisterLocalRepo:
                 repo_url="local://test-repo",
                 clone_path=str(test_folder),
                 golden_repos_dir=golden_repo_manager.golden_repos_dir,
+                mcp_registration_service=None,
             )
 
             # Verify group access hook was called

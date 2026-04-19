@@ -36,9 +36,7 @@ _EXPECTED_KEYS = {"content", "path", "size", "rev"}
 @contextmanager
 def _arm_repo(repo_path: Path):
     """Patch git router's activated_repo_manager to return repo_path."""
-    with patch(
-        "code_indexer.server.routers.git.activated_repo_manager"
-    ) as mock_arm:
+    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
         mock_arm.get_activated_repo_path.return_value = str(repo_path)
         yield mock_arm
 
@@ -46,10 +44,10 @@ def _arm_repo(repo_path: Path):
 @contextmanager
 def _arm_not_found():
     """Patch git router's activated_repo_manager to simulate alias not activated."""
-    with patch(
-        "code_indexer.server.routers.git.activated_repo_manager"
-    ) as mock_arm:
-        mock_arm.get_activated_repo_path.side_effect = FileNotFoundError("not activated")
+    with patch("code_indexer.server.routers.git.activated_repo_manager") as mock_arm:
+        mock_arm.get_activated_repo_path.side_effect = FileNotFoundError(
+            "not activated"
+        )
         yield mock_arm
 
 
@@ -68,6 +66,7 @@ def mock_user():
 @pytest.fixture()
 def test_client(mock_user):
     """Function-scoped client with guaranteed override cleanup."""
+
     def override():
         return mock_user
 
@@ -110,9 +109,7 @@ def test_git_cat_path_traversal_returns_400(test_client, git_repo):
     repo, _ = git_repo
 
     with _arm_repo(repo):
-        response = test_client.get(
-            "/api/v1/repos/myrepo/git/cat?path=../etc/passwd"
-        )
+        response = test_client.get("/api/v1/repos/myrepo/git/cat?path=../etc/passwd")
 
     assert response.status_code == 400
 
@@ -122,9 +119,7 @@ def test_git_cat_absolute_path_returns_400(test_client, git_repo):
     repo, _ = git_repo
 
     with _arm_repo(repo):
-        response = test_client.get(
-            "/api/v1/repos/myrepo/git/cat?path=/etc/passwd"
-        )
+        response = test_client.get("/api/v1/repos/myrepo/git/cat?path=/etc/passwd")
 
     assert response.status_code == 400
 
@@ -132,9 +127,7 @@ def test_git_cat_absolute_path_returns_400(test_client, git_repo):
 def test_git_cat_unknown_alias_returns_404(test_client):
     """GET git/cat returns 404 when alias is not activated."""
     with _arm_not_found():
-        response = test_client.get(
-            "/api/v1/repos/no_such_repo/git/cat?path=hello.txt"
-        )
+        response = test_client.get("/api/v1/repos/no_such_repo/git/cat?path=hello.txt")
 
     assert response.status_code == 404
 
@@ -144,9 +137,7 @@ def test_git_cat_file_not_found_returns_404(test_client, git_repo):
     repo, _ = git_repo
 
     with _arm_repo(repo):
-        response = test_client.get(
-            "/api/v1/repos/myrepo/git/cat?path=nonexistent.txt"
-        )
+        response = test_client.get("/api/v1/repos/myrepo/git/cat?path=nonexistent.txt")
 
     assert response.status_code == 404
 

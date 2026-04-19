@@ -6,6 +6,7 @@ and three-tier deduplication algorithm.
 """
 
 import json
+import shutil
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -64,7 +65,7 @@ def temp_db():
         yield str(db_path)
     finally:
         db_path.unlink(missing_ok=True)
-        Path(temp_dir).rmdir()
+        shutil.rmtree(temp_dir)
 
 
 @pytest.fixture

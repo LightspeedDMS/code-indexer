@@ -20,6 +20,8 @@ from code_indexer.server.repositories.background_jobs import BackgroundJobManage
 FIXTURE_CLEANUP_WAIT_SEC = 0.1
 JOB_EXECUTION_WAIT_SEC = 0.3
 JOB_COMPLETION_WAIT_SEC = 0.5
+JOB_STATUS_POLL_TIMEOUT_SEC = 5.0
+JOB_STATUS_POLL_INTERVAL_SEC = 0.05
 
 
 @pytest.fixture
@@ -45,6 +47,7 @@ def make_zero_arg_wrapper():
 class TestSyncJobWrapperParamsKwarg:
     """Test Bug #479: params kwarg must not be forwarded to zero-arg wrapper."""
 
+    @pytest.mark.slow
     def test_submit_job_with_params_kwarg_causes_job_failure(self, job_manager):
         """Bug #479: submit_job with params= kwarg causes TypeError in zero-arg wrapper.
 
@@ -71,8 +74,15 @@ class TestSyncJobWrapperParamsKwarg:
 
         assert job_id is not None
 
-        # Wait for job to execute and fail
-        time.sleep(JOB_EXECUTION_WAIT_SEC)
+        # Poll until job reaches a terminal state (max JOB_STATUS_POLL_TIMEOUT_SEC).
+        # Must wait for "failed" or "completed" — "pending" and "running" are transient.
+        deadline = time.time() + JOB_STATUS_POLL_TIMEOUT_SEC
+        while time.time() < deadline:
+            with job_manager._lock:
+                _poll_job = job_manager.jobs.get(job_id)
+            if _poll_job and _poll_job.status.value in ("failed", "completed"):
+                break
+            time.sleep(JOB_STATUS_POLL_INTERVAL_SEC)
 
         # The job should have FAILED because params= was forwarded to zero-arg wrapper
         # BackgroundJobManager catches TypeError and marks job as failed
