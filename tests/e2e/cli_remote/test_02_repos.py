@@ -46,6 +46,12 @@ MARKUPSAFE_ALIAS = "markupsafe"
 # A file known to exist at the root of markupsafe 2.1.5
 KNOWN_ROOT_FILE = "MANIFEST.in"
 
+_BUG_824_SKIP_REASON = (
+    "Server endpoint missing — Bug #824 "
+    "(GET /api/repos/{alias}/files and GET /api/repos/{alias}/sync-status "
+    "not yet implemented). Unskip when Bug #824 is fixed."
+)
+
 
 # ---------------------------------------------------------------------------
 # Private helper
@@ -131,6 +137,7 @@ def test_repos_info(
     _assert_ok(result, "cidx repos info")
 
 
+@pytest.mark.skip(reason=_BUG_824_SKIP_REASON)
 def test_repos_files(
     authenticated_workspace: Path,
     activated_golden_repo: str,
@@ -189,6 +196,7 @@ def test_repos_sync(
     )
 
 
+@pytest.mark.skip(reason=_BUG_824_SKIP_REASON)
 def test_repos_sync_status(
     authenticated_workspace: Path,
     activated_golden_repo: str,
