@@ -179,8 +179,9 @@ def _clean_claude_output(output: str) -> str:
     (lines 596-610) to strip CSI, OSC, ESC, script artifacts, and
     normalize line endings.
     """
-    # CSI sequences: ESC [ ... letter (colors, cursor, modes)
-    output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
+    # CSI sequences: full ECMA-48 grammar — parameter bytes [0-?], intermediate bytes [ -/],
+    # final bytes [@-~] (covers colors, cursor, private modes, intermediate byte variants).
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
     # OSC sequences: ESC ] ... BEL or ST
     output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
     # Other ESC sequences (ESC followed by a single char)
@@ -258,6 +259,7 @@ def invoke_claude_cli(
         if "CLAUDECODE" in os.environ:
             keys_to_drop.add("ANTHROPIC_API_KEY")
         filtered_env = {k: v for k, v in os.environ.items() if k not in keys_to_drop}
+        filtered_env["NO_COLOR"] = "1"
 
         result = subprocess.run(
             full_cmd,

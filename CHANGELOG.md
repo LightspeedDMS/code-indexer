@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.5
+
+### Bug Fixes
+
+- fix(#849): Delta dep-map retried 3x on intentional no-op. `invoke_delta_merge_file` returned `None` for both invocation failures and Claude-determined no-changes, making the retry loop treat every clean no-op as a failure. Added `FILE_UNCHANGED` sentinel to the prompt instructions; `invoke_delta_merge_file` now detects the signal and returns `_DELTA_NOOP` before the mtime check. `_update_domain_file` returns a `_DomainUpdateResult` enum (WRITTEN/NOOP/FAILED); the retry loop breaks immediately on NOOP, retrying only on FAILED.
+- fix(#850): lifecycle_backfill ANSI cleaning incomplete — `ESC[>4m` (and other CSI private/intermediate sequences) survived cleaning and caused 100% YAML parse failures, leaving the backfill in an infinite retry loop. Extended the CSI regex from `[0-9;?]*[a-zA-Z]` to full ECMA-48 grammar `[0-?]*[ -/]*[@-~]` in both `repo_analyzer.py` and `description_refresh_scheduler.py`. Added `NO_COLOR=1` to `filtered_env` in both Claude CLI subprocess paths to prevent ANSI output at source.
+
 ## v9.20.4
 
 ### Bug Fixes

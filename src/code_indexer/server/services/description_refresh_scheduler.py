@@ -82,7 +82,9 @@ def _build_claude_env() -> dict:
     keys_to_strip = {"CLAUDECODE"}
     if "CLAUDECODE" in os.environ:
         keys_to_strip.add("ANTHROPIC_API_KEY")
-    return {k: v for k, v in os.environ.items() if k not in keys_to_strip}
+    filtered = {k: v for k, v in os.environ.items() if k not in keys_to_strip}
+    filtered["NO_COLOR"] = "1"
+    return filtered
 
 
 def _normalize_claude_output(raw: str) -> str:
@@ -102,8 +104,9 @@ def _normalize_claude_output(raw: str) -> str:
     import re
 
     output = raw
-    # CSI sequences: ESC [ ... letter (colors, cursor, modes like [?2004l, [?25h)
-    output = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", output)
+    # CSI sequences: full ECMA-48 grammar — parameter bytes [0-?], intermediate bytes [ -/],
+    # final bytes [@-~] (covers colors, cursor, private modes, intermediate byte variants).
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
     # OSC sequences: ESC ] ... BEL or ESC ] ... ST
     output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
     # Other ESC sequences (ESC followed by single char)

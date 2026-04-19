@@ -43,6 +43,11 @@ _JOURNAL_HOOK_NUDGE_INTERVAL: int = 10
 # than embedding all content inline in the prompt.
 PASS1_INLINE_DESCRIPTION_THRESHOLD_BYTES = 8192
 
+# Bug #849: sentinel returned by invoke_delta_merge_file when Claude signals
+# FILE_UNCHANGED — meaning no edits were needed.  Distinct from None (invocation
+# failure) so callers can suppress retries for intentional no-ops.
+_DELTA_NOOP: str = "__DELTA_NOOP__"
+
 # Structured Cross-Domain schema text used in all 4 prompt variants (AC1-AC5)
 _CROSS_DOMAIN_SCHEMA = """\
 ## Cross-Domain Connections
@@ -2830,7 +2835,8 @@ Rules:
             f"Relative path from your cwd: `./{temp_file_rel}`\n\n"
             f"1. Read the file at the path above\n"
             f"2. Apply your changes using the Edit tool (NOT stdout)\n"
-            f"3. After ALL edits are complete, print exactly this line: FILE_EDIT_COMPLETE\n\n"
+            f"3. After ALL edits are complete, print exactly this line: FILE_EDIT_COMPLETE\n"
+            f"4. If NO changes are needed, print exactly this line instead: FILE_UNCHANGED\n\n"
             f"Do NOT output the full document to stdout. Edit the FILE.\n"
         )
 
@@ -2914,6 +2920,12 @@ Rules:
                     f"Delta merge file invocation failed for '{domain_name}': {e}"
                 )
                 return None
+            if "FILE_UNCHANGED" in (result or ""):
+                logger.info(
+                    f"Delta merge intentional no-op for '{domain_name}' "
+                    f"— FILE_UNCHANGED signal received"
+                )
+                return _DELTA_NOOP
             if not self._verify_file_modified(temp_file, original_mtime, domain_name):
                 return None
             if "FILE_EDIT_COMPLETE" not in (result or ""):

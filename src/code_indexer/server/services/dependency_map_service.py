@@ -23,10 +23,12 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from code_indexer.global_repos.dependency_map_analyzer import (
+    _DELTA_NOOP,
     _strip_leading_yaml_frontmatter,
 )
 from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
@@ -43,6 +45,15 @@ THREAD_JOIN_TIMEOUT_SECONDS = 5.0  # Story #193: Daemon thread join timeout
 _BACKFILL_JOB_ID_SUFFIX_LEN = (
     8  # Story #728: hex suffix length for lifecycle_backfill job IDs
 )
+MAX_DOMAIN_RETRIES = 3  # Bug #849: module-level constant for retry loop
+
+
+class _DomainUpdateResult(Enum):
+    """Result of a single domain file update attempt (Bug #849)."""
+
+    WRITTEN = "written"
+    NOOP = "noop"
+    FAILED = "failed"
 
 
 class DependencyMapService:
@@ -1546,7 +1557,7 @@ class DependencyMapService:
         domain_list: List[str],
         config,
         read_file: Optional[Path] = None,
-    ) -> None:
+    ) -> "_DomainUpdateResult":
         """
         Update a single domain file with delta analysis (Story #193, AC5).
 
@@ -1563,8 +1574,10 @@ class DependencyMapService:
                        the updated content is written to domain_file (live path).
                        Falls back to domain_file when None.
 
-        Raises:
-            Exception: If Claude CLI invocation or file write fails
+        Returns:
+            _DomainUpdateResult.WRITTEN  — file was updated successfully
+            _DomainUpdateResult.NOOP     — Claude signalled FILE_UNCHANGED (intentional no-op)
+            _DomainUpdateResult.FAILED   — invocation failure; caller may retry
         """
         # Read existing content from versioned path if provided, else from write path
         source_file = read_file if read_file is not None else domain_file
@@ -1602,7 +1615,13 @@ class DependencyMapService:
                 f"Delta merge returned no changes for domain '{domain_name}', "
                 f"preserving existing content."
             )
-            return
+            return _DomainUpdateResult.FAILED  # invocation failure — caller may retry
+
+        if result == _DELTA_NOOP:
+            logger.info(
+                f"Delta merge confirmed no-op for domain '{domain_name}' — FILE_UNCHANGED signal."
+            )
+            return _DomainUpdateResult.NOOP  # intentional no-op — caller must NOT retry
 
         # Update frontmatter timestamp — needs full_content (with frontmatter) to parse
         # existing metadata; result is body-only from invoke_delta_merge_file.
@@ -1643,6 +1662,7 @@ class DependencyMapService:
         domain_file.write_text(final_content)
 
         logger.info(f"Updated domain file in-place: {domain_file}")
+        return _DomainUpdateResult.WRITTEN
 
     def _update_affected_domains(
         self,
@@ -1704,11 +1724,8 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
-            MAX_DOMAIN_RETRIES = 3
-            original_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
-
             for attempt in range(1, MAX_DOMAIN_RETRIES + 1):
-                self._update_domain_file(
+                update_result = self._update_domain_file(
                     domain_name=domain_name,
                     domain_file=domain_file,
                     changed_repos=changed_aliases,
@@ -1718,9 +1735,8 @@ class DependencyMapService:
                     config=config,
                     read_file=read_domain_file,
                 )
-                # Check if file was actually updated (mtime changed)
-                new_mtime = domain_file.stat().st_mtime if domain_file.exists() else 0
-                if new_mtime > original_mtime:
+
+                if update_result == _DomainUpdateResult.WRITTEN:
                     try:
                         self._activity_journal.log(
                             f"Delta: domain {domain_idx + 1}/{total_affected} complete"
@@ -1729,28 +1745,31 @@ class DependencyMapService:
                         logger.debug(f"Non-fatal journal log error: {e}")
                     break  # Success
 
-                # File not updated — truncation guard likely fired or 0-char result
-                if attempt < MAX_DOMAIN_RETRIES:
-                    try:
-                        self._activity_journal.log(
-                            f"Delta: domain {domain_idx + 1}/{total_affected} not updated, "
-                            f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES})"
+                if update_result == _DomainUpdateResult.NOOP:
+                    break
+
+                if update_result == _DomainUpdateResult.FAILED:
+                    if attempt < MAX_DOMAIN_RETRIES:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} not updated, "
+                                f"retrying (attempt {attempt + 1}/{MAX_DOMAIN_RETRIES})"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Delta domain '{domain_name}' not updated on attempt {attempt}/{MAX_DOMAIN_RETRIES}, retrying"
                         )
-                    except Exception as e:
-                        logger.debug(f"Non-fatal journal log error: {e}")
-                    logger.warning(
-                        f"Delta domain '{domain_name}' not updated on attempt {attempt}/{MAX_DOMAIN_RETRIES}, retrying"
-                    )
-                else:
-                    try:
-                        self._activity_journal.log(
-                            f"Delta: domain {domain_idx + 1}/{total_affected} not updated after {MAX_DOMAIN_RETRIES} attempts"
+                    else:
+                        try:
+                            self._activity_journal.log(
+                                f"Delta: domain {domain_idx + 1}/{total_affected} not updated after {MAX_DOMAIN_RETRIES} attempts"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Non-fatal journal log error: {e}")
+                        logger.warning(
+                            f"Delta domain '{domain_name}' not updated after {MAX_DOMAIN_RETRIES} attempts"
                         )
-                    except Exception as e:
-                        logger.debug(f"Non-fatal journal log error: {e}")
-                    logger.warning(
-                        f"Delta domain '{domain_name}' not updated after {MAX_DOMAIN_RETRIES} attempts"
-                    )
 
         return errors
 
