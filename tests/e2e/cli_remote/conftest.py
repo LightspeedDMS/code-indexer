@@ -101,9 +101,13 @@ def authenticated_workspace(
     cwd = str(workspace)
 
     init_result = run_cidx(
-        "init", "--remote", e2e_server_url,
-        "--username", e2e_config.admin_user,
-        "--password", e2e_config.admin_pass,
+        "init",
+        "--remote",
+        e2e_server_url,
+        "--username",
+        e2e_config.admin_user,
+        "--password",
+        e2e_config.admin_pass,
         cwd=cwd,
         env=e2e_cli_env,
     )
@@ -135,7 +139,9 @@ def activated_golden_repo(
     ``test_repos_activate`` having executed first.
     """
     result = run_cidx(
-        "repos", "activate", registered_golden_repo,
+        "repos",
+        "activate",
+        registered_golden_repo,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )

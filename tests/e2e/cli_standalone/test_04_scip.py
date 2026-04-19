@@ -118,8 +118,7 @@ def _ensure_initialized(path: Path, env: dict[str, str]) -> None:
         return
     result = run_cidx("init", cwd=path, env=env)
     assert result.returncode == 0, (
-        f"cidx init failed for {path}\n"
-        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        f"cidx init failed for {path}\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
@@ -140,7 +139,8 @@ def scip_markupsafe(
     Returns the markupsafe working-copy path for use by AC1 and AC2 tests.
     """
     result = run_cidx_with_timeout(
-        "scip", "generate",
+        "scip",
+        "generate",
         cwd=indexed_markupsafe,
         env=e2e_cli_env,
         timeout=SCIP_GENERATE_TIMEOUT,
@@ -168,7 +168,8 @@ def scip_typefest(
     _ensure_initialized(path, e2e_cli_env)
 
     result = run_cidx_with_timeout(
-        "scip", "generate",
+        "scip",
+        "generate",
         cwd=path,
         env=e2e_cli_env,
         timeout=SCIP_GENERATE_TIMEOUT,
@@ -248,7 +249,9 @@ def test_scip_definition_markup(
     'Markup' is a real class defined in markupsafe/__init__.py.
     """
     result = run_cidx(
-        "scip", "definition", "Markup",
+        "scip",
+        "definition",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -267,7 +270,9 @@ def test_scip_references_markup(
     'Markup' is widely referenced throughout the markupsafe codebase.
     """
     result = run_cidx(
-        "scip", "references", "Markup",
+        "scip",
+        "references",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -287,7 +292,9 @@ def test_scip_dependencies_markup(
     empty output is valid.  We only assert rc=0 (no crash, no traceback).
     """
     result = run_cidx(
-        "scip", "dependencies", "Markup",
+        "scip",
+        "dependencies",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -300,7 +307,9 @@ def test_scip_dependents_markup(
 ) -> None:
     """scip dependents Markup exits 0."""
     result = run_cidx(
-        "scip", "dependents", "Markup",
+        "scip",
+        "dependents",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -317,7 +326,9 @@ def test_scip_impact_markup(
     that is valid CLI behaviour.  We assert rc=0 only.
     """
     result = run_cidx(
-        "scip", "impact", "Markup",
+        "scip",
+        "impact",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -334,7 +345,10 @@ def test_scip_callchain_escape_markup(
     during probe run: 228 chains found).  We assert rc=0 and non-empty output.
     """
     result = run_cidx(
-        "scip", "callchain", "escape", "Markup",
+        "scip",
+        "callchain",
+        "escape",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -354,7 +368,9 @@ def test_scip_context_markup(
     file list — always non-empty for a class that exists in the codebase.
     """
     result = run_cidx(
-        "scip", "context", "Markup",
+        "scip",
+        "context",
+        "Markup",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -379,7 +395,9 @@ def test_scip_rebuild_failed_noop(
     CLI outputs 'No failed projects to rebuild'.
     """
     result = run_cidx(
-        "scip", "rebuild", "--failed",
+        "scip",
+        "rebuild",
+        "--failed",
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -405,7 +423,9 @@ def test_scip_verify_graceful(
     db_path = db_files[0]
 
     result = run_cidx(
-        "scip", "verify", str(db_path),
+        "scip",
+        "verify",
+        str(db_path),
         cwd=scip_markupsafe,
         env=e2e_cli_env,
     )
@@ -442,7 +462,8 @@ def test_scip_generate_tries_pascal_graceful(
     _ensure_initialized(path, e2e_cli_env)
 
     result = run_cidx_with_timeout(
-        "scip", "generate",
+        "scip",
+        "generate",
         cwd=path,
         env=e2e_cli_env,
         timeout=SCIP_GENERATE_TRIES_TIMEOUT,

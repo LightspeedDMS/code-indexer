@@ -27,6 +27,7 @@ Endpoint groups covered:
     diagnostics  — /admin/diagnostics
     openapi      — /openapi.json, /docs
 """
+
 from __future__ import annotations
 
 import os
@@ -111,10 +112,25 @@ REST_ENDPOINTS = [
     # -- Maintenance ---------------------------------------------------------
     ("maintenance_status", "GET", "/api/admin/maintenance/status", None),
     # -- SCIP (no index in fresh data dir → 4xx, not 5xx) --------------------
-    ("scip_definition", "GET", "/scip/definition?symbol=foo&repository_alias=cidx-meta", None),
-    ("scip_references", "GET", "/scip/references?symbol=foo&repository_alias=cidx-meta", None),
+    (
+        "scip_definition",
+        "GET",
+        "/scip/definition?symbol=foo&repository_alias=cidx-meta",
+        None,
+    ),
+    (
+        "scip_references",
+        "GET",
+        "/scip/references?symbol=foo&repository_alias=cidx-meta",
+        None,
+    ),
     # -- Provider indexes ----------------------------------------------------
-    ("provider_indexes_providers", "GET", "/api/admin/provider-indexes/providers", None),
+    (
+        "provider_indexes_providers",
+        "GET",
+        "/api/admin/provider-indexes/providers",
+        None,
+    ),
     # -- Provider health -----------------------------------------------------
     ("admin_provider_health", "GET", "/admin/provider-health", None),
     # -- LLM credentials -----------------------------------------------------

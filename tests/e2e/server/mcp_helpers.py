@@ -4,6 +4,7 @@ All protocol-level string and numeric literals live here so test files
 contain no inline magic values for endpoints, field names, status codes,
 or pytest parametrize infrastructure.
 """
+
 from __future__ import annotations
 
 from typing import Union
@@ -15,7 +16,9 @@ from fastapi.testclient import TestClient
 # JsonValue is a recursive JSON-compatible type.  'Any' is avoided; the
 # recursive structure accurately models the MCP arguments schema.
 # ---------------------------------------------------------------------------
-JsonValue = Union[str, int, float, bool, None, "list[JsonValue]", "dict[str, JsonValue]"]
+JsonValue = Union[
+    str, int, float, bool, None, "list[JsonValue]", "dict[str, JsonValue]"
+]
 JsonArgs = dict[str, JsonValue]
 
 # ---------------------------------------------------------------------------
@@ -85,17 +88,11 @@ def call_mcp_tool(
             f"client must be a TestClient instance, got {type(client).__name__}"
         )
     if not isinstance(tool_name, str) or not tool_name.strip():
-        raise ValueError(
-            f"tool_name must be a non-empty string, got {tool_name!r}"
-        )
+        raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
     if not isinstance(arguments, dict):
-        raise ValueError(
-            f"arguments must be a dict, got {type(arguments).__name__}"
-        )
+        raise ValueError(f"arguments must be a dict, got {type(arguments).__name__}")
     if not isinstance(headers, dict):
-        raise ValueError(
-            f"headers must be a dict, got {type(headers).__name__}"
-        )
+        raise ValueError(f"headers must be a dict, got {type(headers).__name__}")
 
     return client.post(
         MCP_ENDPOINT,

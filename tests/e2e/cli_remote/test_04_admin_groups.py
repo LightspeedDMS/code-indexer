@@ -80,7 +80,10 @@ def _delete_group_best_effort(
     Any other failure is re-raised so cleanup errors are not silently discarded.
     """
     result = run_cidx(
-        "admin", "groups", "delete", str(group_id),
+        "admin",
+        "groups",
+        "delete",
+        str(group_id),
         "--confirm",
         cwd=str(workspace),
         env=cli_env,
@@ -112,9 +115,13 @@ def created_group(
     group_name = f"e2egrp_{uuid.uuid4().hex[:8]}"
 
     create_result = run_cidx(
-        "admin", "groups", "create",
-        "--name", group_name,
-        "--description", "E2E test group",
+        "admin",
+        "groups",
+        "create",
+        "--name",
+        group_name,
+        "--description",
+        "E2E test group",
         "--json",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
@@ -130,7 +137,9 @@ def created_group(
     yield group_id, group_name
 
     _delete_group_best_effort(
-        group_id, authenticated_workspace, e2e_cli_env,
+        group_id,
+        authenticated_workspace,
+        e2e_cli_env,
         label="created_group fixture teardown",
     )
 
@@ -152,8 +161,11 @@ def test_admin_groups_create(
     group_name = f"e2ecreate_{uuid.uuid4().hex[:8]}"
 
     create_result = run_cidx(
-        "admin", "groups", "create",
-        "--name", group_name,
+        "admin",
+        "groups",
+        "create",
+        "--name",
+        group_name,
         "--json",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
@@ -168,7 +180,9 @@ def test_admin_groups_create(
         assert group_id > 0, f"Expected positive group ID, got {group_id}"
     finally:
         _delete_group_best_effort(
-            group_id, authenticated_workspace, e2e_cli_env,
+            group_id,
+            authenticated_workspace,
+            e2e_cli_env,
             label="test_admin_groups_create cleanup",
         )
 
@@ -181,7 +195,9 @@ def test_admin_groups_list(
     """cidx admin groups list exits 0 and contains the created group name."""
     group_id, group_name = created_group
     result = run_cidx(
-        "admin", "groups", "list",
+        "admin",
+        "groups",
+        "list",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -200,7 +216,10 @@ def test_admin_groups_show(
     """cidx admin groups show <group_id> exits 0 and contains the group name."""
     group_id, group_name = created_group
     result = run_cidx(
-        "admin", "groups", "show", str(group_id),
+        "admin",
+        "groups",
+        "show",
+        str(group_id),
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -220,8 +239,12 @@ def test_admin_groups_update(
     new_description = "Updated E2E test group description"
 
     update_result = run_cidx(
-        "admin", "groups", "update", str(group_id),
-        "--description", new_description,
+        "admin",
+        "groups",
+        "update",
+        str(group_id),
+        "--description",
+        new_description,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -229,7 +252,10 @@ def test_admin_groups_update(
 
     # Verify the update was persisted by reading back the group
     show_result = run_cidx(
-        "admin", "groups", "show", str(group_id),
+        "admin",
+        "groups",
+        "show",
+        str(group_id),
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -249,8 +275,12 @@ def test_admin_groups_add_member(
     group_id, _ = created_group
 
     add_result = run_cidx(
-        "admin", "groups", "add-member", str(group_id),
-        "--user", "admin",
+        "admin",
+        "groups",
+        "add-member",
+        str(group_id),
+        "--user",
+        "admin",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -258,7 +288,10 @@ def test_admin_groups_add_member(
 
     # Verify the membership was persisted by reading back the group
     show_result = run_cidx(
-        "admin", "groups", "show", str(group_id),
+        "admin",
+        "groups",
+        "show",
+        str(group_id),
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -283,8 +316,11 @@ def test_admin_groups_delete(
     group_name = f"e2edelete_{uuid.uuid4().hex[:8]}"
 
     create_result = run_cidx(
-        "admin", "groups", "create",
-        "--name", group_name,
+        "admin",
+        "groups",
+        "create",
+        "--name",
+        group_name,
         "--json",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
@@ -299,7 +335,10 @@ def test_admin_groups_delete(
     delete_failed = False
     try:
         delete_result = run_cidx(
-            "admin", "groups", "delete", str(group_id),
+            "admin",
+            "groups",
+            "delete",
+            str(group_id),
             "--confirm",
             cwd=str(authenticated_workspace),
             env=e2e_cli_env,
@@ -315,7 +354,9 @@ def test_admin_groups_delete(
         if delete_failed:
             # Best-effort cleanup since the primary delete did not succeed
             _delete_group_best_effort(
-                group_id, authenticated_workspace, e2e_cli_env,
+                group_id,
+                authenticated_workspace,
+                e2e_cli_env,
                 label="test_admin_groups_delete fallback cleanup",
             )
 

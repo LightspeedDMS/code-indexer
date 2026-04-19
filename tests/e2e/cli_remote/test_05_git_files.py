@@ -63,7 +63,9 @@ def test_git_log(
 ) -> None:
     """cidx git log <alias> exits 0 and returns non-empty commit history."""
     result = run_cidx(
-        "git", "log", REPO_ALIAS,
+        "git",
+        "log",
+        REPO_ALIAS,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -78,12 +80,16 @@ def test_git_branches(
 ) -> None:
     """cidx git branches <alias> exits 0 and returns non-empty branch listing."""
     result = run_cidx(
-        "git", "branches", REPO_ALIAS,
+        "git",
+        "branches",
+        REPO_ALIAS,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
     _assert_ok(result, f"cidx git branches {REPO_ALIAS}")
-    assert result.stdout.strip(), f"cidx git branches {REPO_ALIAS} returned empty output"
+    assert result.stdout.strip(), (
+        f"cidx git branches {REPO_ALIAS} returned empty output"
+    )
 
 
 def test_git_diff(
@@ -93,7 +99,9 @@ def test_git_diff(
 ) -> None:
     """cidx git diff <alias> exits 0 (empty diff on a clean clone is acceptable)."""
     result = run_cidx(
-        "git", "diff", REPO_ALIAS,
+        "git",
+        "diff",
+        REPO_ALIAS,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -107,7 +115,10 @@ def test_git_blame(
 ) -> None:
     """cidx git blame <alias> <file> exits 0 for a known file."""
     result = run_cidx(
-        "git", "blame", REPO_ALIAS, KNOWN_ROOT_FILE,
+        "git",
+        "blame",
+        REPO_ALIAS,
+        KNOWN_ROOT_FILE,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -124,7 +135,10 @@ def test_git_file_history(
 ) -> None:
     """cidx git file-history <alias> <file> exits 0 and returns non-empty history."""
     result = run_cidx(
-        "git", "file-history", REPO_ALIAS, KNOWN_ROOT_FILE,
+        "git",
+        "file-history",
+        REPO_ALIAS,
+        KNOWN_ROOT_FILE,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -141,7 +155,10 @@ def test_git_cat(
 ) -> None:
     """cidx git cat <alias> <file> exits 0 and returns file contents."""
     result = run_cidx(
-        "git", "cat", REPO_ALIAS, KNOWN_ROOT_FILE,
+        "git",
+        "cat",
+        REPO_ALIAS,
+        KNOWN_ROOT_FILE,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -171,8 +188,12 @@ def test_files_create_and_delete(
     file_content = "E2E test file content from Story #706"
 
     create_result = run_cidx(
-        "files", "create", REPO_ALIAS, file_path,
-        "--content", file_content,
+        "files",
+        "create",
+        REPO_ALIAS,
+        file_path,
+        "--content",
+        file_content,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -181,7 +202,10 @@ def test_files_create_and_delete(
     try:
         # Verify the file was created by reading it back
         cat_result = run_cidx(
-            "git", "cat", REPO_ALIAS, file_path,
+            "git",
+            "cat",
+            REPO_ALIAS,
+            file_path,
             cwd=str(authenticated_workspace),
             env=e2e_cli_env,
         )
@@ -193,7 +217,10 @@ def test_files_create_and_delete(
     finally:
         # Always delete -- cleanup must run regardless of assertion outcome
         delete_result = run_cidx(
-            "files", "delete", REPO_ALIAS, file_path,
+            "files",
+            "delete",
+            REPO_ALIAS,
+            file_path,
             cwd=str(authenticated_workspace),
             env=e2e_cli_env,
         )

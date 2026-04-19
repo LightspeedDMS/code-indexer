@@ -51,9 +51,15 @@ def _init_remote(
     when using ``--remote`` mode.
     """
     return run_cidx(
-        "init", "--remote", server_url,
-        "--username", username, "--password", password,
-        cwd=str(workspace), env=cli_env,
+        "init",
+        "--remote",
+        server_url,
+        "--username",
+        username,
+        "--password",
+        password,
+        cwd=str(workspace),
+        env=cli_env,
     )
 
 
@@ -65,8 +71,14 @@ def _login(
 ) -> CompletedProcess[str]:
     """Run ``cidx auth login`` and return the CompletedProcess."""
     return run_cidx(
-        "auth", "login", "--username", username, "--password", password,
-        cwd=str(workspace), env=cli_env,
+        "auth",
+        "login",
+        "--username",
+        username,
+        "--password",
+        password,
+        cwd=str(workspace),
+        env=cli_env,
     )
 
 
@@ -83,8 +95,11 @@ def test_init_remote(
 ) -> None:
     """cidx init --remote <url> exits 0 and creates .code-indexer/."""
     result = _init_remote(
-        e2e_server_url, tmp_path, e2e_cli_env,
-        e2e_config.admin_user, e2e_config.admin_pass,
+        e2e_server_url,
+        tmp_path,
+        e2e_cli_env,
+        e2e_config.admin_user,
+        e2e_config.admin_pass,
     )
     assert result.returncode == 0, (
         f"cidx init --remote failed (rc={result.returncode}):\n"
@@ -102,8 +117,10 @@ def test_auth_login(
 ) -> None:
     """cidx auth login with valid credentials exits 0 (idempotent re-login)."""
     result = _login(
-        e2e_config.admin_user, e2e_config.admin_pass,
-        authenticated_workspace, e2e_cli_env,
+        e2e_config.admin_user,
+        e2e_config.admin_pass,
+        authenticated_workspace,
+        e2e_cli_env,
     )
     assert result.returncode == 0, (
         f"cidx auth login failed (rc={result.returncode}):\n"
@@ -117,7 +134,9 @@ def test_auth_status(
     e2e_cli_env: dict[str, str],
 ) -> None:
     """cidx auth status exits 0 in an authenticated workspace."""
-    result = run_cidx("auth", "status", cwd=str(authenticated_workspace), env=e2e_cli_env)
+    result = run_cidx(
+        "auth", "status", cwd=str(authenticated_workspace), env=e2e_cli_env
+    )
     assert result.returncode == 0, (
         f"cidx auth status failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
@@ -130,27 +149,35 @@ def test_auth_validate(
     e2e_cli_env: dict[str, str],
 ) -> None:
     """cidx auth validate exits 0 with a valid token."""
-    result = run_cidx("auth", "validate", cwd=str(authenticated_workspace), env=e2e_cli_env)
+    result = run_cidx(
+        "auth", "validate", cwd=str(authenticated_workspace), env=e2e_cli_env
+    )
     assert result.returncode == 0, (
         f"cidx auth validate failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
-@pytest.mark.skip(reason="Known server bug: token refresh returns 'Field required' validation error")
+@pytest.mark.skip(
+    reason="Known server bug: token refresh returns 'Field required' validation error"
+)
 def test_auth_refresh(
     authenticated_workspace: Path,
     e2e_cli_env: dict[str, str],
 ) -> None:
     """cidx auth refresh exits 0 and obtains a new token."""
-    result = run_cidx("auth", "refresh", cwd=str(authenticated_workspace), env=e2e_cli_env)
+    result = run_cidx(
+        "auth", "refresh", cwd=str(authenticated_workspace), env=e2e_cli_env
+    )
     assert result.returncode == 0, (
         f"cidx auth refresh failed (rc={result.returncode}):\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
-@pytest.mark.skip(reason="cidx auth update --url flag behavior needs verification before enabling")
+@pytest.mark.skip(
+    reason="cidx auth update --url flag behavior needs verification before enabling"
+)
 def test_auth_update(
     authenticated_workspace: Path,
     e2e_server_url: str,
@@ -158,8 +185,12 @@ def test_auth_update(
 ) -> None:
     """cidx auth update --url <url> exits 0 (skipped pending flag verification)."""
     result = run_cidx(
-        "auth", "update", "--url", e2e_server_url,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "auth",
+        "update",
+        "--url",
+        e2e_server_url,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     assert result.returncode == 0, (
         f"cidx auth update failed (rc={result.returncode}):\n"
@@ -180,8 +211,11 @@ def test_auth_login_wrong_password(
 ) -> None:
     """cidx auth login with wrong password exits non-zero with an auth error message."""
     init_result = _init_remote(
-        e2e_server_url, tmp_path, e2e_cli_env,
-        e2e_config.admin_user, e2e_config.admin_pass,
+        e2e_server_url,
+        tmp_path,
+        e2e_cli_env,
+        e2e_config.admin_user,
+        e2e_config.admin_pass,
     )
     assert init_result.returncode == 0, (
         f"cidx init --remote failed in setup:\n"
@@ -196,7 +230,13 @@ def test_auth_login_wrong_password(
     )
     combined_output = (result.stdout + result.stderr).lower()
     auth_error_indicators = {
-        "invalid", "unauthorized", "401", "denied", "incorrect", "failed", "error",
+        "invalid",
+        "unauthorized",
+        "401",
+        "denied",
+        "incorrect",
+        "failed",
+        "error",
     }
     assert any(indicator in combined_output for indicator in auth_error_indicators), (
         f"Expected auth error message in output but got:\n"
@@ -212,8 +252,11 @@ def test_auth_logout_then_ops_fail(
 ) -> None:
     """After cidx auth logout, authenticated operations exit non-zero."""
     init_result = _init_remote(
-        e2e_server_url, tmp_path, e2e_cli_env,
-        e2e_config.admin_user, e2e_config.admin_pass,
+        e2e_server_url,
+        tmp_path,
+        e2e_cli_env,
+        e2e_config.admin_user,
+        e2e_config.admin_pass,
     )
     assert init_result.returncode == 0, (
         f"cidx init --remote failed:\n"
@@ -250,8 +293,11 @@ def test_auth_register_and_login(
     Any other failure is a real test failure.
     """
     init_result = _init_remote(
-        e2e_server_url, tmp_path, e2e_cli_env,
-        e2e_config.admin_user, e2e_config.admin_pass,
+        e2e_server_url,
+        tmp_path,
+        e2e_cli_env,
+        e2e_config.admin_user,
+        e2e_config.admin_pass,
     )
     assert init_result.returncode == 0, (
         f"cidx init --remote failed:\n"
@@ -262,9 +308,12 @@ def test_auth_register_and_login(
     test_password = uuid.uuid4().hex
 
     register_result = run_cidx(
-        "auth", "register",
-        "--username", test_username,
-        "--password", test_password,
+        "auth",
+        "register",
+        "--username",
+        test_username,
+        "--password",
+        test_password,
         cwd=str(tmp_path),
         env=e2e_cli_env,
     )
@@ -272,9 +321,9 @@ def test_auth_register_and_login(
     if register_result.returncode != 0:
         combined = (register_result.stdout + register_result.stderr).lower()
         skip_indicators = {
-            "no such command",              # command absent in this build
-            "'loc': ['body', 'email']",     # server requires email field not exposed by CLI
-            "password must be at least",    # server password complexity requirement
+            "no such command",  # command absent in this build
+            "'loc': ['body', 'email']",  # server requires email field not exposed by CLI
+            "password must be at least",  # server password complexity requirement
         }
         if any(indicator in combined for indicator in skip_indicators):
             pytest.skip(

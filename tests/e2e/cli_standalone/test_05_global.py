@@ -226,7 +226,9 @@ def test_global_activate_markupsafe(
     this test exercises the activate command on a clean slate.
     """
     result = run_cidx(
-        "global", "activate", "markupsafe",
+        "global",
+        "activate",
+        "markupsafe",
         env=golden_repos_env,
     )
     assert_cidx_ok(result, context="global activate markupsafe")
@@ -237,13 +239,12 @@ def test_global_list(
 ) -> None:
     """cidx global list exits 0 and returns non-empty output after activation."""
     result = run_cidx(
-        "global", "list",
+        "global",
+        "list",
         env=activated_global_env,
     )
     assert_cidx_ok(result, context="global list")
-    assert (result.stdout + result.stderr).strip(), (
-        "global list produced no output"
-    )
+    assert (result.stdout + result.stderr).strip(), "global list produced no output"
 
 
 def test_global_status_markupsafe(
@@ -251,7 +252,9 @@ def test_global_status_markupsafe(
 ) -> None:
     """cidx global status markupsafe-global exits 0 and shows metadata."""
     result = run_cidx(
-        "global", "status", "markupsafe-global",
+        "global",
+        "status",
+        "markupsafe-global",
         env=activated_global_env,
     )
     assert_cidx_ok(result, context="global status markupsafe-global")
@@ -262,7 +265,10 @@ def test_global_regex_search_escape(
 ) -> None:
     """cidx global regex-search markupsafe-global 'escape' exits 0."""
     result = run_cidx(
-        "global", "regex-search", "markupsafe-global", "escape",
+        "global",
+        "regex-search",
+        "markupsafe-global",
+        "escape",
         env=activated_global_env,
     )
     assert_cidx_ok(result, context="global regex-search escape")
@@ -277,9 +283,7 @@ def test_show_global(
         env=golden_repos_env,
     )
     assert_cidx_ok(result, context="show-global")
-    assert (result.stdout + result.stderr).strip(), (
-        "show-global produced no output"
-    )
+    assert (result.stdout + result.stderr).strip(), "show-global produced no output"
 
 
 def test_set_global_refresh_120(
@@ -287,7 +291,8 @@ def test_set_global_refresh_120(
 ) -> None:
     """cidx set-global-refresh 120 exits 0 and updates refresh interval."""
     result = run_cidx(
-        "set-global-refresh", "120",
+        "set-global-refresh",
+        "120",
         env=golden_repos_env,
     )
     assert_cidx_ok(result, context="set-global-refresh 120")

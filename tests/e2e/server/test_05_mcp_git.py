@@ -11,6 +11,7 @@ on a freshly started test server.  Many git operations will return 4xx
 on cidx-meta (not a real git workspace) which is acceptable — the goal
 is to verify the MCP tool surface exists and responds cleanly.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -259,7 +260,9 @@ def test_mcp_git_tool(
     )
     if resp.status_code == HTTP_OK:
         body = resp.json()
-        assert FIELD_JSONRPC in body, f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        assert FIELD_JSONRPC in body, (
+            f"{label}: missing {FIELD_JSONRPC!r} key in response"
+        )
         assert FIELD_RESULT in body or FIELD_ERROR in body, (
             f"{label}: JSON-RPC response has neither {FIELD_RESULT!r} nor {FIELD_ERROR!r}"
         )

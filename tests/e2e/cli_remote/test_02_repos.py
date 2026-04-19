@@ -75,7 +75,9 @@ def test_repos_available(
     Uses ``registered_golden_repo`` because a repo need not be activated
     to appear in the available list.
     """
-    result = run_cidx("repos", "available", cwd=str(authenticated_workspace), env=e2e_cli_env)
+    result = run_cidx(
+        "repos", "available", cwd=str(authenticated_workspace), env=e2e_cli_env
+    )
     _assert_ok(result, "cidx repos available")
     assert MARKUPSAFE_ALIAS in result.stdout, (
         f"Expected '{MARKUPSAFE_ALIAS}' in repos available output but got:\n{result.stdout}"
@@ -89,8 +91,11 @@ def test_repos_activate(
 ) -> None:
     """cidx repos activate markupsafe exits 0 when re-run on an already-active repo."""
     result = run_cidx(
-        "repos", "activate", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "activate",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos activate")
 
@@ -101,7 +106,9 @@ def test_repos_list(
     e2e_cli_env: dict[str, str],
 ) -> None:
     """cidx repos list exits 0 and contains markupsafe."""
-    result = run_cidx("repos", "list", cwd=str(authenticated_workspace), env=e2e_cli_env)
+    result = run_cidx(
+        "repos", "list", cwd=str(authenticated_workspace), env=e2e_cli_env
+    )
     _assert_ok(result, "cidx repos list")
     assert MARKUPSAFE_ALIAS in result.stdout, (
         f"Expected '{MARKUPSAFE_ALIAS}' in repos list output but got:\n{result.stdout}"
@@ -114,7 +121,9 @@ def test_repos_status(
     e2e_cli_env: dict[str, str],
 ) -> None:
     """cidx repos status exits 0."""
-    result = run_cidx("repos", "status", cwd=str(authenticated_workspace), env=e2e_cli_env)
+    result = run_cidx(
+        "repos", "status", cwd=str(authenticated_workspace), env=e2e_cli_env
+    )
     _assert_ok(result, "cidx repos status")
 
 
@@ -125,8 +134,11 @@ def test_repos_info(
 ) -> None:
     """cidx repos info markupsafe exits 0."""
     result = run_cidx(
-        "repos", "info", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "info",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos info")
 
@@ -138,8 +150,11 @@ def test_repos_files(
 ) -> None:
     """cidx repos files markupsafe exits 0 and returns non-empty output."""
     result = run_cidx(
-        "repos", "files", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "files",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos files")
     assert result.stdout.strip(), "cidx repos files returned empty output"
@@ -152,11 +167,17 @@ def test_repos_cat(
 ) -> None:
     """cidx repos cat markupsafe MANIFEST.in exits 0 and returns file contents."""
     result = run_cidx(
-        "repos", "cat", MARKUPSAFE_ALIAS, KNOWN_ROOT_FILE,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "cat",
+        MARKUPSAFE_ALIAS,
+        KNOWN_ROOT_FILE,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, f"cidx repos cat {KNOWN_ROOT_FILE}")
-    assert result.stdout.strip(), f"cidx repos cat returned empty output for {KNOWN_ROOT_FILE}"
+    assert result.stdout.strip(), (
+        f"cidx repos cat returned empty output for {KNOWN_ROOT_FILE}"
+    )
 
 
 @pytest.mark.skip(reason="requires a known branch name in the markupsafe golden repo")
@@ -167,8 +188,12 @@ def test_repos_switch_branch(
 ) -> None:
     """cidx repos switch-branch markupsafe main exits 0 (skipped -- branch unknown)."""
     result = run_cidx(
-        "repos", "switch-branch", MARKUPSAFE_ALIAS, "main",
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "switch-branch",
+        MARKUPSAFE_ALIAS,
+        "main",
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos switch-branch")
 
@@ -180,8 +205,11 @@ def test_repos_sync(
 ) -> None:
     """cidx repos sync markupsafe exits 0 or 1 (nothing-to-sync is acceptable)."""
     result = run_cidx(
-        "repos", "sync", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "sync",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     assert result.returncode in (0, 1), (
         f"cidx repos sync returned unexpected rc={result.returncode}:\n"
@@ -196,8 +224,11 @@ def test_repos_sync_status(
 ) -> None:
     """cidx repos sync-status markupsafe exits 0."""
     result = run_cidx(
-        "repos", "sync-status", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "sync-status",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos sync-status")
 
@@ -212,8 +243,10 @@ def test_query_via_server(
     Requires ``activated_golden_repo`` to ensure markupsafe is active.
     """
     result = run_cidx(
-        "query", "escape",
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "query",
+        "escape",
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx query")
     assert result.stdout.strip(), "cidx query returned empty output"
@@ -230,13 +263,19 @@ def test_repos_deactivate(
     to avoid mutating the shared ``activated_golden_repo`` session state.
     """
     activate_result = run_cidx(
-        "repos", "activate", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "activate",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(activate_result, "cidx repos activate (pre-deactivate setup)")
 
     result = run_cidx(
-        "repos", "deactivate", MARKUPSAFE_ALIAS,
-        cwd=str(authenticated_workspace), env=e2e_cli_env,
+        "repos",
+        "deactivate",
+        MARKUPSAFE_ALIAS,
+        cwd=str(authenticated_workspace),
+        env=e2e_cli_env,
     )
     _assert_ok(result, "cidx repos deactivate")

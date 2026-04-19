@@ -24,7 +24,6 @@ import re
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 
@@ -60,13 +59,14 @@ def _count_results(output: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_query_semantic(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_query_semantic(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """Semantic query 'escape HTML' exits 0 and returns non-empty output."""
     result = run_cidx(
-        "query", "escape HTML", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape HTML",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query semantic")
     assert result.stdout.strip(), (
@@ -74,13 +74,15 @@ def test_query_semantic(
     )
 
 
-def test_query_fts(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_query_fts(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """FTS query for 'Markup' exits 0 and returns non-empty output."""
     result = run_cidx(
-        "query", "Markup", "--fts", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "Markup",
+        "--fts",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query fts")
     assert result.stdout.strip(), (
@@ -88,13 +90,16 @@ def test_query_fts(
     )
 
 
-def test_query_fts_regex(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_query_fts_regex(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """FTS regex query 'def.*escape' exits 0 (empty results acceptable since regex may not match)."""
     result = run_cidx(
-        "query", "def.*escape", "--fts", "--regex", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "def.*escape",
+        "--fts",
+        "--regex",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query fts regex")
 
@@ -104,8 +109,12 @@ def test_query_time_range_all(
 ) -> None:
     """Query with --time-range-all exits 0 (queries entire temporal history)."""
     result = run_cidx(
-        "query", "escape", "--time-range-all", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape",
+        "--time-range-all",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query time-range-all")
 
@@ -115,8 +124,13 @@ def test_query_language_python(
 ) -> None:
     """Query filtered to Python files exits 0 and returns non-empty output."""
     result = run_cidx(
-        "query", "escape", "--language", "python", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape",
+        "--language",
+        "python",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query language python")
     assert result.stdout.strip(), (
@@ -129,26 +143,32 @@ def test_query_path_filter(
 ) -> None:
     """Query with --path-filter '*/tests/*' exits 0."""
     result = run_cidx(
-        "query", "escape", "--path-filter", "*/tests/*", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape",
+        "--path-filter",
+        "*/tests/*",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query path-filter")
 
 
-def test_query_min_score(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_query_min_score(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """Query with --min-score 0.5 exits 0."""
     result = run_cidx(
-        "query", "escape", "--min-score", "0.5", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape",
+        "--min-score",
+        "0.5",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query min-score")
 
 
-def test_query_limit(
-    indexed_markupsafe: Path, e2e_cli_env: dict[str, str]
-) -> None:
+def test_query_limit(indexed_markupsafe: Path, e2e_cli_env: dict[str, str]) -> None:
     """Query with --limit 3 exits 0 and returns at most 3 results.
 
     Result entries in --quiet mode start with ``N. 0.NNN ...`` lines.
@@ -158,8 +178,13 @@ def test_query_limit(
     changes early.
     """
     result = run_cidx(
-        "query", "escape", "--limit", "3", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape",
+        "--limit",
+        "3",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query limit")
 
@@ -182,7 +207,12 @@ def test_query_accuracy_high(
 ) -> None:
     """Query with --accuracy high exits 0."""
     result = run_cidx(
-        "query", "escape", "--accuracy", "high", "--quiet",
-        cwd=indexed_markupsafe, env=e2e_cli_env,
+        "query",
+        "escape",
+        "--accuracy",
+        "high",
+        "--quiet",
+        cwd=indexed_markupsafe,
+        env=e2e_cli_env,
     )
     assert_cidx_ok(result, context="query accuracy high")

@@ -39,6 +39,7 @@ Design notes
   avoid masking the primary test assertion while still surfacing cleanup
   failures to the developer.
 """
+
 from __future__ import annotations
 
 import logging
@@ -49,7 +50,6 @@ from contextlib import contextmanager
 from typing import Iterator
 
 import jwt
-import pytest
 from fastapi.testclient import TestClient
 
 from tests.e2e.helpers import _auth_headers
@@ -213,7 +213,11 @@ def _provision_normal_user(
 
     create_resp = client.post(
         "/api/admin/users",
-        json={"username": username, "password": _normal_user_password(), "role": _ROLE_NORMAL_USER},
+        json={
+            "username": username,
+            "password": _normal_user_password(),
+            "role": _ROLE_NORMAL_USER,
+        },
         headers=admin_headers,
     )
     assert create_resp.status_code == HTTP_CREATED, (

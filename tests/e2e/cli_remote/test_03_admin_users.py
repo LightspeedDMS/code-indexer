@@ -64,7 +64,10 @@ def _delete_user_best_effort(
     cleanup errors are not silently discarded.
     """
     result = run_cidx(
-        "admin", "users", "delete", username,
+        "admin",
+        "users",
+        "delete",
+        username,
         "--force",
         cwd=str(workspace),
         env=cli_env,
@@ -103,8 +106,12 @@ def created_user(
     password = uuid.uuid4().hex  # random, satisfies basic length requirements
 
     create_result = run_cidx(
-        "admin", "users", "create", username,
-        "--password", password,
+        "admin",
+        "users",
+        "create",
+        username,
+        "--password",
+        password,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -118,7 +125,9 @@ def created_user(
 
     # Teardown: delete the user with explicit error handling (not silent discard)
     _delete_user_best_effort(
-        username, authenticated_workspace, e2e_cli_env,
+        username,
+        authenticated_workspace,
+        e2e_cli_env,
         label="created_user fixture teardown",
     )
 
@@ -140,8 +149,12 @@ def test_admin_users_create(
     password = uuid.uuid4().hex
 
     result = run_cidx(
-        "admin", "users", "create", username,
-        "--password", password,
+        "admin",
+        "users",
+        "create",
+        username,
+        "--password",
+        password,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -149,7 +162,9 @@ def test_admin_users_create(
 
     # Cleanup: explicitly handle return value, not silent discard
     _delete_user_best_effort(
-        username, authenticated_workspace, e2e_cli_env,
+        username,
+        authenticated_workspace,
+        e2e_cli_env,
         label="test_admin_users_create cleanup",
     )
 
@@ -162,7 +177,9 @@ def test_admin_users_list(
     """cidx admin users list exits 0 and contains both admin and the created user."""
     username, _ = created_user
     result = run_cidx(
-        "admin", "users", "list",
+        "admin",
+        "users",
+        "list",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -186,7 +203,10 @@ def test_admin_users_show(
     """cidx admin users show <username> exits 0 for the created test user."""
     username, _ = created_user
     result = run_cidx(
-        "admin", "users", "show", username,
+        "admin",
+        "users",
+        "show",
+        username,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -204,8 +224,12 @@ def test_admin_users_update(
     """cidx admin users update <username> --role power_user exits 0."""
     username, _ = created_user
     result = run_cidx(
-        "admin", "users", "update", username,
-        "--role", "power_user",
+        "admin",
+        "users",
+        "update",
+        username,
+        "--role",
+        "power_user",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -222,8 +246,12 @@ def test_admin_users_change_password(
     new_password = uuid.uuid4().hex  # generate at runtime, no hardcoded credentials
 
     result = run_cidx(
-        "admin", "users", "change-password", username,
-        "--password", new_password,
+        "admin",
+        "users",
+        "change-password",
+        username,
+        "--password",
+        new_password,
         "--force",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
@@ -244,8 +272,12 @@ def test_admin_users_delete(
     password = uuid.uuid4().hex
 
     create_result = run_cidx(
-        "admin", "users", "create", username,
-        "--password", password,
+        "admin",
+        "users",
+        "create",
+        username,
+        "--password",
+        password,
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
     )
@@ -255,7 +287,10 @@ def test_admin_users_delete(
     )
 
     delete_result = run_cidx(
-        "admin", "users", "delete", username,
+        "admin",
+        "users",
+        "delete",
+        username,
         "--force",
         cwd=str(authenticated_workspace),
         env=e2e_cli_env,
