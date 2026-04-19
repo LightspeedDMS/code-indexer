@@ -38,6 +38,7 @@ repos:
         name: trim trailing whitespace
       - id: end-of-file-fixer
         name: fix end of files
+        exclude: src/code_indexer/global_repos/prompts/repo_description_extract_json\.md
       - id: check-yaml
         name: check yaml syntax
       - id: check-added-large-files

@@ -31,6 +31,12 @@ from typing import Any, Dict, List, Optional, cast
 
 logger = logging.getLogger(__name__)
 
+# Bug #838: journal hook constants.
+# Maximum characters for the tool-input preview appended to **claude-tool** entries.
+_JOURNAL_HOOK_PREVIEW_LEN: int = 120
+# How often (in tool calls) to emit a STATUS NUDGE prompting Claude to self-report.
+_JOURNAL_HOOK_NUDGE_INTERVAL: int = 10
+
 # Bug #840: threshold for pass-1 description staging.
 # When total description bytes across all repos exceed this value, descriptions
 # are written to a temp JSON file and Claude is instructed to Read it — rather
@@ -2258,6 +2264,7 @@ Rules:
         post_tool_hook: Optional[str] = None,
         hook_thresholds: Optional[tuple] = None,
         dangerously_skip_permissions: bool = False,
+        journal_path: Optional[Path] = None,
     ) -> str:
         """
         Invoke Claude CLI with direct subprocess (AC1).
@@ -2337,18 +2344,38 @@ Rules:
                     early_threshold = max(5, int(max_turns * 0.3))
                     late_threshold = max(10, int(max_turns * 0.6))
 
-                # Build bash one-liner that reads/increments counter and escalates messages
-                # Iteration 14: Purpose-driven threshold messages emphasizing conciseness
+                # Build bash script: counter (Bug #838 — F='path' always single-quoted so
+                # test path-rewriting regex ^F='[^']*' matches), STATUS NUDGE at turn 10,
+                # optional journal entries per tool type, and escalating urgency messages.
+                _counter_sq = counter_file.name.replace("'", "'\\''")
+                if journal_path is not None:
+                    _journal_sq = str(journal_path).replace("'", "'\\''")
+                    _journal_block = (
+                        f"JRNL='{_journal_sq}'\n"
+                        'case "$CLAUDE_TOOL_NAME" in\n'
+                        "  Read) NAR='Claude read file' ;;\n"
+                        "  Bash) NAR='Claude ran bash' ;;\n"
+                        "  Grep) NAR='Claude searched' ;;\n"
+                        "  Glob) NAR='Claude listed files' ;;\n"
+                        "  Write|Edit) NAR='Claude wrote file' ;;\n"
+                        '  *) NAR="Claude ran $CLAUDE_TOOL_NAME" ;;\n'
+                        "esac\n"
+                        'echo "**claude-tool** | $(date +%H:%M:%S) | $NAR" >> "$JRNL"\n'
+                    )
+                else:
+                    _journal_block = ""
                 bash_script = (
-                    f"F={shlex.quote(counter_file.name)}; "
-                    f'C=$(cat "$F"); C=$((C+1)); echo "$C" > "$F"; '
-                    f'if [ "$C" -gt {late_threshold} ]; then '
+                    f"F='{_counter_sq}'\n"
+                    'C=$(cat "$F" 2>/dev/null || echo 0)\n'
+                    "C=$((C+1))\n"
+                    'echo "$C" > "$F"\n'
+                    'if [ "$C" -eq 10 ]; then '
+                    "echo 'STATUS NUDGE: Briefly report what you have found so far and what you plan to do next.'; "
+                    "fi\n" + _journal_block + f'if [ "$C" -gt {late_threshold} ]; then '
                     f"echo {shlex.quote('CRITICAL: STOP searching. Write your concise dependency analysis NOW. Document precise inter-repo connections only — no code snippets, no implementation details. Start with # Domain Analysis heading.')}; "
                     f'elif [ "$C" -gt {early_threshold} ]; then '
                     f"echo {shlex.quote('WARNING: Running low on turns. Start writing your concise dependency analysis. Focus on precise inter-repo connections for navigation — no code snippets, no verbose details. Output starts with # Domain Analysis heading.')}; "
-                    f"else "
-                    f"echo {shlex.quote(post_tool_hook)}; "
-                    f"fi"
+                    f"else echo {shlex.quote(post_tool_hook)}; fi"
                 )
 
                 hook_settings = json.dumps(

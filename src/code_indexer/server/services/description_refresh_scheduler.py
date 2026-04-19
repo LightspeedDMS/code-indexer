@@ -204,26 +204,37 @@ class DescriptionRefreshScheduler:
 
     def __init__(
         self,
-        db_path: str,
-        config_manager,
+        db_path: Optional[str] = None,
+        config_manager=None,
         claude_cli_manager=None,
         meta_dir: Optional[Path] = None,
         analysis_model: str = "opus",
         job_tracker=None,
         mcp_registration_service=None,
+        tracking_backend=None,
+        golden_backend=None,
     ) -> None:
         """
         Initialize the scheduler.
 
         Args:
-            db_path: Path to SQLite database
+            db_path: Path to SQLite database. Required unless both tracking_backend and
+                golden_backend are provided directly (injectable backend mode for tests).
             config_manager: ServerConfigManager instance
             claude_cli_manager: Optional ClaudeCliManager instance (for submitting work)
             meta_dir: Path to cidx-meta directory (for reading existing .md files)
             analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
             job_tracker: Optional JobTracker instance for unified job tracking (Story #313)
             mcp_registration_service: Optional MCPSelfRegistrationService instance (Story #727)
+            tracking_backend: Optional pre-constructed DescriptionRefreshTrackingBackend.
+                When provided together with golden_backend, db_path is not required.
+            golden_backend: Optional pre-constructed GoldenRepoMetadataSqliteBackend.
+                When provided together with tracking_backend, db_path is not required.
         """
+        if db_path is None and (tracking_backend is None or golden_backend is None):
+            raise ValueError(
+                "Either db_path or both tracking_backend and golden_backend must be provided"
+            )
         self._db_path = db_path
         self._config_manager = config_manager
         self._claude_cli_manager = claude_cli_manager
@@ -231,8 +242,16 @@ class DescriptionRefreshScheduler:
         self._analysis_model = analysis_model
         self._job_tracker = job_tracker
         self._mcp_registration_service = mcp_registration_service
-        self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
-        self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
+        if tracking_backend is not None:
+            self._tracking_backend = tracking_backend
+        else:
+            assert db_path is not None  # guarded above
+            self._tracking_backend = DescriptionRefreshTrackingBackend(db_path)
+        if golden_backend is not None:
+            self._golden_backend = golden_backend
+        else:
+            assert db_path is not None  # guarded above
+            self._golden_backend = GoldenRepoMetadataSqliteBackend(db_path)
         self._shutdown_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -242,7 +261,7 @@ class DescriptionRefreshScheduler:
         from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
         _default_max_workers = ClaudeIntegrationConfig().max_concurrent_claude_cli
-        config = config_manager.load_config()
+        config = config_manager.load_config() if config_manager is not None else None
         _configured = (
             config.claude_integration_config.max_concurrent_claude_cli
             if config and config.claude_integration_config
@@ -737,42 +756,79 @@ class DescriptionRefreshScheduler:
             )
             return None
 
+    def _validate_refresh_inputs(
+        self, repo_alias: str, repo_path: str
+    ) -> Optional[Path]:
+        """Validate refresh inputs; return resolved repo Path or None on failure."""
+        if not repo_alias or not isinstance(repo_alias, str):
+            logger.warning("_get_refresh_prompt: repo_alias must be a non-empty string")
+            return None
+        if not repo_path or not isinstance(repo_path, str):
+            logger.warning("_get_refresh_prompt: repo_path must be a non-empty string")
+            return None
+        resolved = Path(repo_path).resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            logger.warning(
+                "_get_refresh_prompt: repo_path does not resolve to a directory: %s",
+                repo_path,
+            )
+            return None
+        return resolved
+
+    def _stage_and_build_prompt(
+        self, description: str, last_analyzed: str, repo_path_obj: Path
+    ) -> Optional[str]:
+        """
+        Stage *description* to a temp file and build a file-reference refresh prompt.
+
+        Creates a unique temp dir under *repo_path_obj*, writes ``existing_desc.md``,
+        calls RepoAnalyzer.get_prompt with ``temp_file_path``, and returns the prompt.
+        Cleans up the temp dir on any error; on success the dir persists for the CLI
+        subprocess (caller is responsible for cleanup after the CLI call).
+        """
+        import shutil
+        import tempfile
+        from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
+
+        tmp_dir_str = tempfile.mkdtemp(dir=repo_path_obj)
+        try:
+            temp_file = Path(tmp_dir_str) / "existing_desc.md"
+            temp_file.write_text(description, encoding="utf-8")
+            analyzer = RepoAnalyzer(str(repo_path_obj))
+            return cast(
+                Optional[str],
+                analyzer.get_prompt(
+                    mode="refresh",
+                    last_analyzed=last_analyzed,
+                    temp_file_path=temp_file,
+                ),
+            )
+        except Exception as e:
+            shutil.rmtree(tmp_dir_str, ignore_errors=True)
+            logger.error("_stage_and_build_prompt failed: %s", e, exc_info=True)
+            return None
+
     def _get_refresh_prompt(self, repo_alias: str, repo_path: str) -> Optional[str]:
         """
-        Get refresh prompt for a repository using RepoAnalyzer.
+        Get refresh prompt staging the existing description to a temp file (Bug #840 Site #5).
 
-        Args:
-            repo_alias: Repository alias
-            repo_path: Path to repository
-
-        Returns:
-            Refresh prompt string, or None if cannot generate
+        Returns a prompt string with the temp file path embedded, or None on failure.
+        The temp dir persists for the CLI subprocess; _run_phase1 cleans up afterwards.
         """
-        # Read existing description
+        repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
+        if repo_path_obj is None:
+            return None
         desc_data = self._read_existing_description(repo_alias)
         if not desc_data or not desc_data.get("last_analyzed"):
             logger.warning(
-                f"Cannot generate refresh prompt for {repo_alias}: missing existing description or last_analyzed"
+                f"Cannot generate refresh prompt for {repo_alias}: missing description or last_analyzed"
             )
             return None
-
-        try:
-            from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
-
-            analyzer = RepoAnalyzer(repo_path)
-            prompt = analyzer.get_prompt(
-                mode="refresh",
-                last_analyzed=desc_data["last_analyzed"],
-                existing_description=desc_data["description"],
-            )
-            return cast(Optional[str], prompt)
-
-        except Exception as e:
-            logger.error(
-                f"Failed to generate refresh prompt for {repo_alias}: {e}",
-                exc_info=True,
-            )
-            return None
+        return self._stage_and_build_prompt(
+            desc_data.get("description") or "",
+            desc_data["last_analyzed"] or "",
+            repo_path_obj,
+        )
 
     def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
         """

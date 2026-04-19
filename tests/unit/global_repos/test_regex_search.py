@@ -9,7 +9,7 @@ GOAL: Test RegexSearchService init and error handling
 import pytest
 import json
 import shutil
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from code_indexer.global_repos.regex_search import (
     RegexSearchService,
     RegexMatch,
@@ -1208,7 +1208,7 @@ class TestRipgrepInternalDirectoryExclusion:
         (code_indexer_dir / "index.json").write_text('{"test": "data"}')
 
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -1217,24 +1217,21 @@ class TestRipgrepInternalDirectoryExclusion:
             mock_result = MagicMock()
             mock_result.timed_out = False
             mock_result.status = "success"
-            mock_executor.execute_with_limits.return_value = mock_result
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
 
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                try:
-                    await ripgrep_service._search_ripgrep(
-                        pattern="test",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
-                except Exception:
-                    pass  # We only care about command construction
+                await ripgrep_service._search_ripgrep(
+                    pattern="test",
+                    search_path=test_repo,
+                    include_patterns=None,
+                    exclude_patterns=None,
+                    case_sensitive=True,
+                    context_lines=0,
+                    max_results=100,
+                    timeout_seconds=10,
+                )
 
         # Verify command includes .code-indexer exclusion
         call_args = mock_executor.execute_with_limits.call_args
@@ -1253,7 +1250,7 @@ class TestRipgrepInternalDirectoryExclusion:
         (git_dir / "config").write_text("[core]\n    repositoryformatversion = 0\n")
 
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -1262,24 +1259,21 @@ class TestRipgrepInternalDirectoryExclusion:
             mock_result = MagicMock()
             mock_result.timed_out = False
             mock_result.status = "success"
-            mock_executor.execute_with_limits.return_value = mock_result
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
 
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                try:
-                    await ripgrep_service._search_ripgrep(
-                        pattern="core",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
-                except Exception:
-                    pass  # We only care about command construction
+                await ripgrep_service._search_ripgrep(
+                    pattern="core",
+                    search_path=test_repo,
+                    include_patterns=None,
+                    exclude_patterns=None,
+                    case_sensitive=True,
+                    context_lines=0,
+                    max_results=100,
+                    timeout_seconds=10,
+                )
 
         # Verify command includes .git exclusion
         call_args = mock_executor.execute_with_limits.call_args
@@ -1295,7 +1289,7 @@ class TestRipgrepInternalDirectoryExclusion:
         from unittest.mock import AsyncMock
 
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -1567,7 +1561,7 @@ class TestGrepInternalDirectoryExclusion:
         (code_indexer_dir / "index.json").write_text('{"test": "data"}')
 
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -1576,24 +1570,21 @@ class TestGrepInternalDirectoryExclusion:
             mock_result = MagicMock()
             mock_result.timed_out = False
             mock_result.status = "success"
-            mock_executor.execute_with_limits.return_value = mock_result
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
 
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                try:
-                    await grep_service._search_grep(
-                        pattern="test",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
-                except Exception:
-                    pass  # We only care about command construction
+                await grep_service._search_grep(
+                    pattern="test",
+                    search_path=test_repo,
+                    include_patterns=None,
+                    exclude_patterns=None,
+                    case_sensitive=True,
+                    context_lines=0,
+                    max_results=100,
+                    timeout_seconds=10,
+                )
 
         # Verify command includes .code-indexer exclusion
         call_args = mock_executor.execute_with_limits.call_args
@@ -1612,7 +1603,7 @@ class TestGrepInternalDirectoryExclusion:
         (git_dir / "config").write_text("[core]\n    repositoryformatversion = 0\n")
 
         with patch(
-            "code_indexer.server.services.subprocess_executor.SubprocessExecutor"
+            "code_indexer.global_repos.regex_search.SubprocessExecutor"
         ) as mock_executor_class:
             mock_executor = MagicMock()
             mock_executor_class.return_value = mock_executor
@@ -1621,24 +1612,21 @@ class TestGrepInternalDirectoryExclusion:
             mock_result = MagicMock()
             mock_result.timed_out = False
             mock_result.status = "success"
-            mock_executor.execute_with_limits.return_value = mock_result
+            mock_executor.execute_with_limits = AsyncMock(return_value=mock_result)
 
             with patch("builtins.open", create=True) as mock_open:
                 mock_open.return_value.__enter__.return_value.read.return_value = ""
 
-                try:
-                    await grep_service._search_grep(
-                        pattern="core",
-                        search_path=test_repo,
-                        include_patterns=None,
-                        exclude_patterns=None,
-                        case_sensitive=True,
-                        context_lines=0,
-                        max_results=100,
-                        timeout_seconds=10,
-                    )
-                except Exception:
-                    pass  # We only care about command construction
+                await grep_service._search_grep(
+                    pattern="core",
+                    search_path=test_repo,
+                    include_patterns=None,
+                    exclude_patterns=None,
+                    case_sensitive=True,
+                    context_lines=0,
+                    max_results=100,
+                    timeout_seconds=10,
+                )
 
         # Verify command includes .git exclusion
         call_args = mock_executor.execute_with_limits.call_args
