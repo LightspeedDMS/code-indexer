@@ -1023,10 +1023,14 @@ class GitOperationsService:
             )
             total_commits = int(count_result.stdout.strip())
 
-            # Build log command
-            format_str = (
-                '{"commit_hash": "%H", "author": "%an", "date": "%ai", "message": "%s"}'
-            )
+            # Build log command.
+            # ASCII Unit Separator (\x1f) is not valid in git refs or commit
+            # messages, so it is safe as an inter-field delimiter. Using JSON
+            # as the format string (former behavior) silently dropped commits
+            # whose subject contained `"` or `\` because json.loads raised
+            # JSONDecodeError per-line and the except branch swallowed it.
+            # Fields order: hash, author, date, message.  Bug #825 fix.
+            format_str = "%H\x1f%an\x1f%ai\x1f%s"
             cmd = ["git", "log", f"--format={format_str}", f"-n{effective_limit}"]
 
             # Story #686: Add offset via --skip
@@ -1055,12 +1059,34 @@ class GitOperationsService:
 
             commits = []
             for line in result.stdout.splitlines():
-                if line.strip():
-                    try:
-                        commit = json.loads(line)
-                        commits.append(commit)
-                    except json.JSONDecodeError:
-                        continue
+                # Skip blank lines only. Do NOT strip the raw payload —
+                # leading/trailing whitespace inside a commit subject must
+                # be preserved.
+                if not line.strip():
+                    continue
+                # maxsplit=3 preserves any stray \x1f inside the subject
+                # (git won't emit one there, but stay strict).
+                parts = line.split("\x1f", 3)
+                if len(parts) != 4:
+                    # Malformed output shouldn't happen with this format
+                    # string; surface it at WARNING instead of silent drop.
+                    logger.warning(
+                        "git log produced malformed line for %s (expected 4 "
+                        "fields separated by \\x1f, got %d): %r",
+                        repo_path,
+                        len(parts),
+                        line,
+                    )
+                    continue
+                commit_hash, commit_author, commit_date, commit_message = parts
+                commits.append(
+                    {
+                        "commit_hash": commit_hash,
+                        "author": commit_author,
+                        "date": commit_date,
+                        "message": commit_message,
+                    }
+                )
 
             # Story #686: Calculate pagination metadata
             commits_returned = len(commits)
