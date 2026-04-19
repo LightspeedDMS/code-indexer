@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.7
+
+### Bug Fixes
+
+- fix(#853): Four additional fixes from code-review of v9.20.6 implementation:
+  1. `JobTracker.is_cancelled(job_id)` added — queries the DB `cancelled` column directly, bypassing the stale in-memory cache, so the scheduler observes cancellations written by `BackgroundJobManager.cancel_job`.
+  2. `DescriptionRefreshScheduler._self_close_backfill` now calls `complete_job` on the aggregate job when the last repo finishes (via `_count_repos_needing_backfill()` + `_maybe_complete_backfill_job()`); cancel path uses `update_status("cancelled")` instead of `fail_job`.
+  3. Conditional clear: `_active_backfill_job_id` only set to `None` when the stored id matches the id being closed, preventing a race condition with a concurrent new backfill cycle.
+  4. `is_admin=True` added to `cancel_job()` calls in `web/routes.py` and `inline_admin_ops.py` so admin-authenticated flows can cancel system-owned jobs consistently.
+
 ## v9.20.6
 
 ### Bug Fixes
