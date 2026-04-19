@@ -731,9 +731,8 @@ function onBranchChange(key, newBranch) {
 function removeSuccessfulSelections(results) {
     results.forEach(function(item) {
         if (item.status !== 'success') return;
-        Array.from(selectedRepos.entries()).forEach(function(entry) {
-            var key = entry[0]; var data = entry[1];
-            if (data.name === item.alias || key.endsWith(':' + data.clone_url)) {
+        selectedRepos.forEach(function(data, key) {
+            if (data.clone_url === item.clone_url) {
                 selectedRepos.delete(key);
             }
         });
@@ -743,12 +742,12 @@ function removeSuccessfulSelections(results) {
 
 function renderBatchCreateFailures(result) {
     var status = document.getElementById('batch-create-status');
-    var failures = (result.results || []).filter(function(item) { return item.status === 'failed'; });
+    var failures = result.results.filter(function(item) { return item.status === 'failed'; });
     if (!status || failures.length === 0) return;
     status.innerHTML =
-        '<p class="error-msg"><strong>' + escHtml(result.summary || 'Batch failed') + '</strong></p>' +
+        '<p class="error-msg"><strong>' + escHtml(result.summary) + '</strong></p>' +
         failures.map(function(item) {
-            return '<p class="error-msg">' + escHtml(item.alias) + ': ' + escHtml(item.error || 'Unknown error') + '</p>';
+            return '<p class="error-msg">' + escHtml(item.alias) + ': ' + escHtml(item.error) + '</p>';
         }).join('');
     status.style.display = 'block';
 }
@@ -787,16 +786,21 @@ async function executeBatchCreate() {
             body: formData
         });
         var result = await response.json();
+        if (typeof result.success !== 'boolean' || !Array.isArray(result.results)) {
+            alert('Batch-create response malformed — see browser console');
+            console.error('Malformed batch-create response:', result);
+            return;
+        }
         if (result.success) {
             closeBatchModal();
             clearSelection();
-            alert(result.summary || 'Created successfully.');
+            alert(result.summary);
             fetchAll(_activePlatform, true);
             return;
         }
-        removeSuccessfulSelections(result.results || []);
+        removeSuccessfulSelections(result.results);
         renderBatchCreateFailures(result);
-        if ((result.results || []).some(function(item) { return item.status === 'success'; })) {
+        if (result.results.some(function(item) { return item.status === 'success'; })) {
             fetchAll(_activePlatform, true);
         }
     } catch (error) {

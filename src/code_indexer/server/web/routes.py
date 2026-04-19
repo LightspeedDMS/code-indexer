@@ -2330,6 +2330,7 @@ def _batch_create_repos(
                     "alias": alias,
                     "status": "success",
                     "job_id": job_id,
+                    "clone_url": repo_data.get("clone_url", ""),
                 }
             )
         except Exception as e:
@@ -2349,6 +2350,7 @@ def _batch_create_repos(
                     "alias": repo_data.get("alias", "unknown"),
                     "status": "failed",
                     "error": _sanitize_batch_create_error(e),
+                    "clone_url": repo_data.get("clone_url", ""),
                 }
             )
 

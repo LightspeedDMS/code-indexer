@@ -99,6 +99,36 @@ def _function_slice(html: str, function_name: str) -> str:
     return html[start:end]
 
 
+# ---------------------------------------------------------------------------
+# Template assertion helpers — eliminate repeated _function_slice boilerplate
+# ---------------------------------------------------------------------------
+
+
+def _assert_template_contains(
+    function_name: str, pattern: re.Pattern, msg: str
+) -> None:
+    """Assert that the named JS function body matches the given compiled regex.
+
+    Raises AssertionError with `msg` if the function is not found or pattern
+    does not match.
+    """
+    body = _function_slice(_read_template(), function_name)
+    assert body, f"{function_name} function must exist in auto_discovery.html"
+    assert pattern.search(body), msg
+
+
+def _assert_template_not_contains(
+    function_name: str, pattern: re.Pattern, msg: str
+) -> None:
+    """Assert that the named JS function body does NOT match the given compiled regex.
+
+    Raises AssertionError with `msg` if the function is not found or pattern matches.
+    """
+    body = _function_slice(_read_template(), function_name)
+    assert body, f"{function_name} function must exist in auto_discovery.html"
+    assert not pattern.search(body), msg
+
+
 # Compiled pattern: var/let/const <name> = document.getElementById('batch-create-status')
 _GEBI_ASSIGN_PATTERN = re.compile(
     r"(?:var|let|const)\s+(\w+)\s*=\s*document\.getElementById\(['\"]batch-create-status['\"]\)"
@@ -550,4 +580,210 @@ class TestCloseBatchModalClearsBanner:
         assert inner_html_pattern.search(body), (
             f"closeBatchModal must set {var_name}.innerHTML = '' after "
             "assigning the batch-create-status element"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding #1 (routes.py): _batch_create_repos must include clone_url in results
+# ---------------------------------------------------------------------------
+
+
+class TestBatchCreateResultsIncludeCloneUrl:
+    """Finding #1 fix: _batch_create_repos must include clone_url in both success
+    and failure result dicts so the frontend can match by clone_url."""
+
+    def test_success_result_includes_clone_url(self):
+        """Success result dict must contain clone_url field matching repo_data clone_url."""
+        from src.code_indexer.server.web.routes import _batch_create_repos
+
+        mock_manager = MagicMock()
+        mock_manager.list_golden_repos.return_value = []
+        mock_manager.add_golden_repo.return_value = "job-id-001"
+
+        repos = [{"clone_url": "https://github.com/org/repo-a", "alias": "repo-a"}]
+
+        with patch("src.code_indexer.server.web.routes.logger"):
+            result = _batch_create_repos(repos, "admin", mock_manager)
+
+        assert result["results"][0]["status"] == "success"
+        assert "clone_url" in result["results"][0], (
+            "Success result must include clone_url field"
+        )
+        assert result["results"][0]["clone_url"] == "https://github.com/org/repo-a"
+
+    def test_failure_result_includes_clone_url(self):
+        """Failure result dict must contain clone_url field matching repo_data clone_url."""
+        from src.code_indexer.server.web.routes import _batch_create_repos
+
+        mock_manager = MagicMock()
+        mock_manager.list_golden_repos.return_value = []
+        mock_manager.add_golden_repo.side_effect = RuntimeError("Network error")
+
+        repos = [{"clone_url": "https://github.com/org/repo-b", "alias": "repo-b"}]
+
+        with patch("src.code_indexer.server.web.routes.logger"):
+            result = _batch_create_repos(repos, "admin", mock_manager)
+
+        assert result["results"][0]["status"] == "failed"
+        assert "clone_url" in result["results"][0], (
+            "Failure result must include clone_url field"
+        )
+        assert result["results"][0]["clone_url"] == "https://github.com/org/repo-b"
+
+    def test_partial_success_both_results_include_clone_url(self):
+        """When one repo succeeds and one fails, both results include clone_url."""
+        from src.code_indexer.server.web.routes import _batch_create_repos
+
+        mock_manager = MagicMock()
+        mock_manager.list_golden_repos.return_value = []
+        mock_manager.add_golden_repo.side_effect = [
+            "job-id-001",
+            RuntimeError("Failed"),
+        ]
+
+        repos = [
+            {"clone_url": "https://github.com/org/repo-a", "alias": "repo-a"},
+            {"clone_url": "https://github.com/org/repo-b", "alias": "repo-b"},
+        ]
+
+        with patch("src.code_indexer.server.web.routes.logger"):
+            result = _batch_create_repos(repos, "admin", mock_manager)
+
+        assert result["results"][0]["status"] == "success"
+        assert result["results"][0]["clone_url"] == "https://github.com/org/repo-a"
+        assert result["results"][1]["status"] == "failed"
+        assert result["results"][1]["clone_url"] == "https://github.com/org/repo-b"
+
+
+# ---------------------------------------------------------------------------
+# Finding #1 (template): removeSuccessfulSelections partial-success regression
+# ---------------------------------------------------------------------------
+
+_CLONE_URL_MATCH_PATTERN = re.compile(
+    r"data\.clone_url\s*===\s*item\.clone_url"
+    r"|item\.clone_url\s*===\s*data\.clone_url",
+    re.DOTALL,
+)
+_BUGGY_ENDS_WITH_PATTERN = re.compile(
+    r"key\.endsWith\s*\(\s*['\"]:\s*['\"\s]*\+\s*data\.clone_url\s*\)",
+    re.DOTALL,
+)
+
+
+class TestRemoveSuccessfulSelectionsPartialSuccess:
+    """Finding #1 fix: removeSuccessfulSelections must compare data.clone_url against
+    item.clone_url (the result item's field).
+
+    Partial-success regression: when A succeeds and B fails on the same platform,
+    B must not be deleted. The old key.endsWith(':' + data.clone_url) predicate
+    deleted B because it evaluated data.clone_url from B's own map entry, which
+    always satisfied the condition. The fix matches on item.clone_url instead.
+    """
+
+    def test_remove_successful_selections_compares_data_clone_url_to_item_clone_url(
+        self,
+    ):
+        """removeSuccessfulSelections must compare data.clone_url === item.clone_url.
+
+        This is the correct predicate: item.clone_url comes from the batch result,
+        not from the selectedRepos entry being iterated. Only the exact matching
+        entry is removed, leaving failed repos intact.
+        """
+        _assert_template_contains(
+            "removeSuccessfulSelections",
+            _CLONE_URL_MATCH_PATTERN,
+            "removeSuccessfulSelections must compare data.clone_url === item.clone_url "
+            "so only the exact successful entry is removed from selectedRepos",
+        )
+
+    def test_remove_successful_selections_no_ends_with_data_clone_url(self):
+        """removeSuccessfulSelections must NOT use key.endsWith(':' + data.clone_url).
+
+        Partial-success regression: with A (success, url_a) and B (failed, url_b)
+        both selected on the same platform, the buggy predicate evaluates
+        data.clone_url from B's own entry — endsWith(':' + url_b) is true for B's
+        key — so B is incorrectly deleted. The fix removes this predicate entirely.
+        """
+        _assert_template_not_contains(
+            "removeSuccessfulSelections",
+            _BUGGY_ENDS_WITH_PATTERN,
+            "removeSuccessfulSelections must NOT use key.endsWith(':' + data.clone_url). "
+            "This predicate incorrectly deletes failed repos sharing the same platform.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Finding #2 (template): executeBatchCreate shape validation
+# ---------------------------------------------------------------------------
+
+_TYPEOF_SUCCESS_PATTERN = re.compile(
+    r"typeof\s+result\.success\s*!==\s*['\"]boolean['\"]",
+    re.DOTALL,
+)
+_ARRAY_IS_ARRAY_PATTERN = re.compile(
+    r"Array\.isArray\s*\(\s*result\.results\s*\)",
+    re.DOTALL,
+)
+_RESULTS_OR_FALLBACK_PATTERN = re.compile(r"result\.results\s*\|\|\s*\[\]", re.DOTALL)
+_SUMMARY_OR_FALLBACK_PATTERN = re.compile(r"result\.summary\s*\|\|", re.DOTALL)
+_ITEM_ERROR_OR_FALLBACK_PATTERN = re.compile(r"item\.error\s*\|\|", re.DOTALL)
+
+
+class TestExecuteBatchCreateNoFallbacks:
+    """Finding #2 fix: executeBatchCreate must validate response shape explicitly
+    and remove || fallback chains that mask contract violations (Messi Rule #2)."""
+
+    def test_execute_batch_create_validates_response_shape(self):
+        """executeBatchCreate must check typeof result.success !== 'boolean'.
+
+        Malformed response must trigger alert + early return, not silent misbehaviour.
+        """
+        _assert_template_contains(
+            "executeBatchCreate",
+            _TYPEOF_SUCCESS_PATTERN,
+            "executeBatchCreate must validate typeof result.success !== 'boolean' "
+            "to detect malformed responses and fail loudly",
+        )
+
+    def test_execute_batch_create_validates_results_is_array(self):
+        """executeBatchCreate must check Array.isArray(result.results)."""
+        _assert_template_contains(
+            "executeBatchCreate",
+            _ARRAY_IS_ARRAY_PATTERN,
+            "executeBatchCreate must validate Array.isArray(result.results)",
+        )
+
+    def test_no_results_or_fallback_in_execute_or_render(self):
+        """Neither executeBatchCreate nor renderBatchCreateFailures may use result.results || []."""
+        _assert_template_not_contains(
+            "executeBatchCreate",
+            _RESULTS_OR_FALLBACK_PATTERN,
+            "executeBatchCreate must not use result.results || [] after shape validation",
+        )
+        _assert_template_not_contains(
+            "renderBatchCreateFailures",
+            _RESULTS_OR_FALLBACK_PATTERN,
+            "renderBatchCreateFailures must not use result.results || []",
+        )
+
+    def test_no_summary_or_fallback_in_execute_or_render(self):
+        """Neither executeBatchCreate nor renderBatchCreateFailures may use result.summary || fallback."""
+        _assert_template_not_contains(
+            "executeBatchCreate",
+            _SUMMARY_OR_FALLBACK_PATTERN,
+            "executeBatchCreate must not use result.summary || fallback",
+        )
+        _assert_template_not_contains(
+            "renderBatchCreateFailures",
+            _SUMMARY_OR_FALLBACK_PATTERN,
+            "renderBatchCreateFailures must not use result.summary || fallback",
+        )
+
+    def test_no_item_error_or_fallback_in_render(self):
+        """renderBatchCreateFailures must not use item.error || fallback."""
+        _assert_template_not_contains(
+            "renderBatchCreateFailures",
+            _ITEM_ERROR_OR_FALLBACK_PATTERN,
+            "renderBatchCreateFailures must not use item.error || fallback — "
+            "backend always populates error field for failed items",
         )
