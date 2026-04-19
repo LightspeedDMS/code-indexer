@@ -1427,9 +1427,13 @@ class FilesystemVectorStore:
     def _load_id_index(self, collection_name: str) -> Dict[str, Path]:
         """Load ID index from persistent binary file for fast loading.
 
-        Uses IDIndexManager to load from id_index.bin binary file which contains
-        all vector ID to file path mappings. Falls back to directory scan only
-        if binary index doesn't exist (for backward compatibility).
+        Uses IDIndexManager to load from id_index.bin binary file.  If the
+        file is corrupt (CorruptIDIndexError), automatically repairs it by
+        calling rebuild_from_vectors() and returns the rebuilt map.  Any other
+        exception propagates unchanged.
+
+        Falls back to directory scan only when id_index.bin does not exist
+        (backward compatibility with indexes created before the binary index).
 
         Args:
             collection_name: Name of the collection
@@ -1437,30 +1441,34 @@ class FilesystemVectorStore:
         Returns:
             Dictionary mapping point IDs to file paths
         """
-        from .id_index_manager import IDIndexManager
+        from .id_index_manager import CorruptIDIndexError, IDIndexManager
 
         collection_path = self.base_path / collection_name
         index_manager = IDIndexManager()
 
-        # Try loading from persistent binary index first (FAST - O(1) file read)
-        index = index_manager.load_index(collection_path)
+        try:
+            index = index_manager.load_index(collection_path)
+        except CorruptIDIndexError as exc:
+            self.logger.warning(
+                "id_index.bin corrupt for collection '%s' (%s); "
+                "auto-repairing via rebuild_from_vectors()",
+                collection_name,
+                exc,
+            )
+            return index_manager.rebuild_from_vectors(collection_path)
 
         if index:
-            # Binary index loaded successfully
             return index
 
-        # Fallback: Scan vector files by filename pattern (SLOW - O(n) directory traversal)
-        # Only used for backward compatibility with indexes created before binary index
-        index = {}
+        # Fallback: scan by filename pattern — only when binary index absent
+        fallback: Dict[str, Path] = {}
         for json_file in collection_path.rglob("vector_*.json"):
-            # Extract point ID from filename: vector_POINTID.json
             filename = json_file.name
             if filename.startswith("vector_") and filename.endswith(".json"):
-                # Remove "vector_" prefix (7 chars) and ".json" suffix (5 chars)
                 point_id = filename[7:-5]
-                index[point_id] = json_file
+                fallback[point_id] = json_file
 
-        return index
+        return fallback
 
     def _load_file_paths(self, collection_name: str, id_index: Dict[str, Path]) -> set:
         """Load file paths from JSON files using ID index.
@@ -2429,11 +2437,8 @@ class FilesystemVectorStore:
             t_id = time.time()
             with self._id_index_lock:
                 if collection_name not in self._id_index:
-                    from .id_index_manager import IDIndexManager
-
-                    id_manager = IDIndexManager()
-                    self._id_index[collection_name] = id_manager.load_index(
-                        collection_path
+                    self._id_index[collection_name] = self._load_id_index(
+                        collection_name
                     )
                 id_index = self._id_index[collection_name]
             id_load_ms = (time.time() - t_id) * 1000
@@ -3584,10 +3589,7 @@ class FilesystemVectorStore:
                         collection_path, max_elements=100000
                     )
 
-                    from .id_index_manager import IDIndexManager
-
-                    id_manager = IDIndexManager()
-                    cache_entry.id_mapping = id_manager.load_index(collection_path)
+                    cache_entry.id_mapping = self._load_id_index(collection_name)
 
                 # Use cache references
                 index = cache_entry.hnsw_index
