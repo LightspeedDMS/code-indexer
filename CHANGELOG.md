@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.3
+
+### Bug Fixes
+
+- fix(#834): Delta merge produced staging files with 4 YAML frontmatter markers. Root cause: prompt seeded Claude's temp file with frontmatter while also instructing it not to emit frontmatter — model resolved the conflict by duplicating. Fix strips frontmatter at the service boundary, sanitizes Claude's returned body with a WARNING if it re-emits frontmatter, and keeps a defensive strip inside `invoke_delta_merge_file`.
+- fix(#835): `lifecycle_backfill` jobs stayed pending forever. `get_stale_repos()` didn't surface `lifecycle_schema_version`, and `_run_loop_single_pass` rejected lifecycle-stale repos via the `has_changes_since_last_run` gate. Fix exposes the column on both SQLite and PostgreSQL backends and bypasses the change gate when `lifecycle_schema_version < LIFECYCLE_SCHEMA_VERSION`.
+- fix(#836): `lifecycle_backfill` jobs displayed "Unknown" as the Repository column in the dashboard. Now labels aggregate jobs as "N repos" or "all repos".
+- fix(#838): PostToolUse hook bash script had unquoted `F=path` (one-liner) preventing test path-rewriting, missing journal-writing logic, and no STATUS NUDGE at turn 10. Fix: single-quoted `F='path'` on own line, STATUS NUDGE at C==10, per-tool narrative block writing `**claude-tool**` entries to journal when `journal_path` provided.
+- fix(#839): Auto-updater never refreshed the Claude CLI binary, pinning production servers to stale versions. Adds `_ensure_claude_cli_updated()` to `DeploymentExecutor` running `npm install -g @anthropic-ai/claude-code@latest` on every deploy, non-fatal on all error conditions.
+- fix(#840): Systemic prompt-duplication antipattern across 6 sites in the dependency-analysis pipeline. Prompts embedded large content (domain docs up to 37KB) that was also delivered via file-based Read/Edit instructions, causing 116 compactions with no forward progress on large domains. All 6 sites now reference file paths instead of embedding content inline.
+- fix(#841): `VoyageMultimodalClient.get_embedding` violated the `EmbeddingProvider` contract — missing `embedding_purpose` and `model` kwargs caused `MultiIndexQueryService` to silently drop the multimodal half of every RRF query via a caught TypeError. Signature now conforms to the base contract.
+
 ## v9.20.2
 
 > Note: tags v9.20.0 and v9.20.1 were pushed to origin pointing at earlier commits (pre-commit mypy hook blocked the intended commits but the tag pushes succeeded). Per CLAUDE.md tag-immutability policy ("NEVER replace a tag on a remote"), the release is re-cut as v9.20.2. Content identical to what v9.20.0 was intended to deliver, plus two mypy fixes: `git_subprocess_env.py` now uses `dict(os.environ)` instead of `os.environ.copy()` for a proper `dict[str, str]` return type, and `git_runner.py:41` carries an explicit `env: Dict[str, str]` annotation so the inferred type propagates through the helper chain.
