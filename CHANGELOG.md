@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.4
+
+### Bug Fixes
+
+- fix: Add `--add-dir <journal_path.parent>` to Claude CLI invocation when `journal_path` is set. `--dangerously-skip-permissions` only disables interactive permission prompts — it does not expand the path sandbox. Without `--add-dir`, Claude could not write journal activity entries to `.tmp/depmap-delta-journal/` when the cwd was a different directory (e.g. `/mnt/codeindexer-data/...`). Journal writes are now unblocked on all deployments.
+
 ## v9.20.3
 
 ### Bug Fixes
