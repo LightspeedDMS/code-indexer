@@ -2325,6 +2325,9 @@ Rules:
             # Only add --dangerously-skip-permissions if explicitly requested by caller
             if dangerously_skip_permissions:
                 cmd.append("--dangerously-skip-permissions")
+            # Expand sandbox to include journal dir so Claude can write activity entries
+            if journal_path is not None:
+                cmd.extend(["--add-dir", str(journal_path.parent)])
             # Fix 1 (Iteration 12): Turn-aware PostToolUse hook with counter file.
             # Replaces static echo with bash script that tracks tool call count and
             # escalates urgency messages as turns run out (prevents Claude from
