@@ -507,6 +507,7 @@ For complete configuration reference including environment variables, daemon set
 - [Auto-Update Guide](docs/auto-update.md) - Job-aware auto-update with graceful drain mode
 - [Cluster Architecture Guide](docs/cluster-architecture.md) - Multi-node cluster design, storage abstraction, leader election, and services
 - [Cluster Setup Guide](docs/cluster-setup.md) - Install and operate a CIDX Server cluster with PostgreSQL
+- [Fault Injection Operator Guide](docs/fault-injection-operator-guide.md) - Configure and operate the fault injection harness for non-production resilience testing
 
 ### Advanced
 - [Architecture Guide](docs/architecture.md) - System design and storage architecture

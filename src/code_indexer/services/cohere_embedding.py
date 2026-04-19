@@ -11,12 +11,34 @@ import time
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from typing import Protocol, runtime_checkable
 
+import httpx
 from rich.console import Console
 
 from code_indexer.services.embedding_provider import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class SyncClientFactory(Protocol):
+    """Protocol satisfied by HttpClientFactory for sync HTTP client creation.
+
+    Defined here (CLI layer) so that cohere_embedding.py can accept the
+    server-side HttpClientFactory without importing it directly (which would
+    create a CLI->server layer violation).  Any object with a
+    create_sync_client() method that returns httpx.Client satisfies this
+    protocol.
+    """
+
+    def create_sync_client(
+        self,
+        *,
+        transport: Optional[httpx.BaseTransport] = None,
+        **kwargs: Any,
+    ) -> httpx.Client: ...
+
 
 # Number of embedding values shown in error messages when validating None values
 _EMBED_PREVIEW_LEN = 10
@@ -31,13 +53,22 @@ _PROBE_TIMEOUT_S: float = 5.0
 class CohereEmbeddingProvider(EmbeddingProvider):
     """Cohere Embed v4 embedding provider."""
 
-    def __init__(self, config: Any, console: Optional[Console] = None):
+    def __init__(
+        self,
+        config: Any,
+        console: Optional[Console] = None,
+        http_client_factory: Optional[SyncClientFactory] = None,
+    ):
         """Initialize with CohereConfig.
 
         Args:
             config: Configuration object with api_key, model, api_endpoint,
                     max_retries, retry_delay, timeout attributes.
             console: Optional Rich console for output.
+            http_client_factory: An object satisfying the SyncClientFactory
+                Protocol (typically HttpClientFactory or NullFaultFactory).
+                Use NullFaultFactory() if you do not need fault injection;
+                there is no fallback to direct httpx.Client construction.
 
         Raises:
             ValueError: If no API key is available from config or environment.
@@ -45,6 +76,16 @@ class CohereEmbeddingProvider(EmbeddingProvider):
         super().__init__(console)
         self.config = config
         self.console = console or Console()
+        # Factory for outbound HTTP clients (Story #746 CRITICAL fix).
+        # Normalized to NullFaultFactory at construction so self._http_client_factory
+        # is always a concrete factory — no if-None branches needed at call sites.
+        if http_client_factory is None:
+            from code_indexer.server.fault_injection.null_factory import (
+                NullFaultFactory,
+            )
+
+            http_client_factory = NullFaultFactory()
+        self._http_client_factory: SyncClientFactory = http_client_factory
 
         # API key: config first, then env var
         self.api_key = config.api_key or os.getenv("CO_API_KEY", "")
@@ -185,12 +226,10 @@ class CohereEmbeddingProvider(EmbeddingProvider):
                     write=self.config.timeout,
                     pool=self.config.timeout,
                 )
-                if _latency_transport is not None:
-                    _client_ctx = httpx.Client(
-                        timeout=_timeout, transport=_latency_transport
-                    )
-                else:
-                    _client_ctx = httpx.Client(timeout=_timeout)
+                _client_ctx = self._http_client_factory.create_sync_client(
+                    transport=_latency_transport,
+                    timeout=_timeout,
+                )
                 with _client_ctx as client:
                     response = client.post(
                         self.config.api_endpoint,
@@ -313,7 +352,10 @@ class CohereEmbeddingProvider(EmbeddingProvider):
             pool=_PROBE_TIMEOUT_S,
         )
         try:
-            with httpx.Client(timeout=probe_timeout) as client:
+            client_ctx = self._http_client_factory.create_sync_client(
+                timeout=probe_timeout
+            )
+            with client_ctx as client:
                 response = client.options(self.config.api_endpoint)
                 return bool(response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR)
         except httpx.HTTPError as exc:

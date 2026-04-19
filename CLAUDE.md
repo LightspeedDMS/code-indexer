@@ -1032,3 +1032,42 @@ Log audit: new ERRORs/WARNINGs?
 
 - **Architecture**: `/docs/architecture.md`
 - **This file**: Day-to-day development essentials and mode-specific context
+
+---
+
+## 13. Fault Injection Harness
+
+**Full operator reference**: `docs/fault-injection-operator-guide.md`
+
+The fault injection harness intercepts outbound HTTP at the transport layer (httpx) to simulate provider failures for resilience testing. It is disabled by default and strictly non-production only.
+
+### Bootstrap Config Keys (config.json only — never DB)
+
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `fault_injection_enabled` | bool | false | Master on/off switch |
+| `fault_injection_nonprod_ack` | bool | false | Required acknowledgement for non-production use |
+
+### 4 Startup Scenarios
+
+| Scenario | enabled | nonprod_ack | env | Outcome |
+|----------|---------|-------------|-----|---------|
+| 1 | false | any | any | Harness absent; /admin/fault-injection/status returns 404 |
+| 2 | true | false | any | CRITICAL log + sys.exit(1) — ack required |
+| 3 | true | true | production | CRITICAL log + sys.exit(1) — forbidden in production |
+| 4 | true | true | non-prod | Harness live; WARNING logged; /admin/fault-injection/* active |
+
+### Key Implementation Files
+
+- `src/code_indexer/server/fault_injection/` — harness package
+- `src/code_indexer/server/fault_injection/startup.py` — wire_fault_injection() called from lifespan
+- `src/code_indexer/server/fault_injection/fault_injection_service.py` — registry + counters + ring buffer
+- `src/code_indexer/server/fault_injection/fault_injecting_transport.py` — httpx transport wrapper
+- `src/code_indexer/server/fault_injection/http_client_factory.py` — enforced AsyncClient construction path
+- `tests/unit/server/fault_injection/` — 206 unit tests covering all scenarios
+
+### CRITICAL: All outbound async HTTP to embedding/reranking providers MUST go through HttpClientFactory
+
+Direct `httpx.AsyncClient()` construction outside the factory is caught by Scenario 18 anti-regression test in `test_http_client_factory.py`. Infrastructure/auth clients are excluded — see `_EXCLUDED_PATHS` in that test file.
+
+*Recorded 2026-04-18 (Story #746)*

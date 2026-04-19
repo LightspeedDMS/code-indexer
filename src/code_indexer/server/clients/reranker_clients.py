@@ -18,7 +18,9 @@ from typing import Dict, List, Optional, cast
 
 import httpx
 
+from code_indexer.server.fault_injection.http_client_factory import HttpClientFactory
 from code_indexer.server.services.config_service import get_config_service
+
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +99,7 @@ class VoyageRerankerClient(RerankerClient):
         timeout: float = 15.0,
         max_chars: int = 4000,
         base_url: Optional[str] = None,
+        http_client_factory: Optional[HttpClientFactory] = None,
     ) -> None:
         """
         Args:
@@ -106,6 +109,9 @@ class VoyageRerankerClient(RerankerClient):
             base_url: Override the Voyage AI rerank endpoint. Defaults to
                       VOYAGE_RERANK_URL. Primarily used in tests to redirect
                       traffic to a local mock server.
+            http_client_factory: Factory for outbound HTTP clients (Story #746
+                CRITICAL fix).  Normalized to NullFaultFactory at construction
+                so self._http_client_factory is always a concrete factory.
         """
         if timeout <= 0:
             raise ValueError(f"timeout must be positive, got {timeout}")
@@ -115,6 +121,13 @@ class VoyageRerankerClient(RerankerClient):
         self.timeout = timeout
         self.max_chars = max_chars
         self._base_url = base_url if base_url is not None else VOYAGE_RERANK_URL
+        if http_client_factory is None:
+            from code_indexer.server.fault_injection.null_factory import (
+                NullFaultFactory,
+            )
+
+            http_client_factory = NullFaultFactory()
+        self._http_client_factory: HttpClientFactory = http_client_factory
 
         # Register lightweight health probe with ProviderHealthMonitor.
         try:
@@ -294,12 +307,16 @@ class VoyageRerankerClient(RerankerClient):
         )
 
         latency_transport = build_latency_transport()
-        if latency_transport is not None:
-            client_ctx = httpx.Client(timeout=self.timeout, transport=latency_transport)
-        else:
-            client_ctx = httpx.Client(timeout=self.timeout)
+        client_ctx = self._http_client_factory.create_sync_client(
+            transport=latency_transport,
+            timeout=self.timeout,
+        )
         with client_ctx as client:
-            return client.post(self._base_url, json=body, headers=headers)
+            # cast: httpx.Client.post() returns httpx.Response at runtime; mypy
+            # infers Any here because create_sync_client uses **kwargs forwarding.
+            return cast(
+                httpx.Response, client.post(self._base_url, json=body, headers=headers)
+            )
 
     def _parse_response(self, response: httpx.Response) -> List[RerankResult]:
         """Parse Voyage API response into a list of RerankResult sorted descending."""
@@ -372,6 +389,7 @@ class CohereRerankerClient(RerankerClient):
         timeout: float = 15.0,
         max_chars: int = 4000,
         base_url: Optional[str] = None,
+        http_client_factory: Optional[HttpClientFactory] = None,
     ) -> None:
         """
         Args:
@@ -381,6 +399,9 @@ class CohereRerankerClient(RerankerClient):
             base_url: Override the Cohere rerank endpoint. Defaults to
                       COHERE_RERANK_URL. Primarily used in tests to redirect
                       traffic to a local mock server.
+            http_client_factory: Factory for outbound HTTP clients (Story #746
+                CRITICAL fix).  Normalized to NullFaultFactory at construction
+                so self._http_client_factory is always a concrete factory.
         """
         if timeout <= 0:
             raise ValueError(f"timeout must be positive, got {timeout}")
@@ -390,6 +411,13 @@ class CohereRerankerClient(RerankerClient):
         self.timeout = timeout
         self.max_chars = max_chars
         self._base_url = base_url if base_url is not None else COHERE_RERANK_URL
+        if http_client_factory is None:
+            from code_indexer.server.fault_injection.null_factory import (
+                NullFaultFactory,
+            )
+
+            http_client_factory = NullFaultFactory()
+        self._http_client_factory: HttpClientFactory = http_client_factory
 
         # Register lightweight health probe with ProviderHealthMonitor.
         try:
@@ -598,12 +626,16 @@ class CohereRerankerClient(RerankerClient):
         )
 
         latency_transport = build_latency_transport()
-        if latency_transport is not None:
-            client_ctx = httpx.Client(timeout=self.timeout, transport=latency_transport)
-        else:
-            client_ctx = httpx.Client(timeout=self.timeout)
+        client_ctx = self._http_client_factory.create_sync_client(
+            transport=latency_transport,
+            timeout=self.timeout,
+        )
         with client_ctx as client:
-            return client.post(self._base_url, json=body, headers=headers)
+            # cast: httpx.Client.post() returns httpx.Response at runtime; mypy
+            # infers Any here because create_sync_client uses **kwargs forwarding.
+            return cast(
+                httpx.Response, client.post(self._base_url, json=body, headers=headers)
+            )
 
     def _parse_response(self, response: httpx.Response) -> List[RerankResult]:
         """Parse Cohere API response into a list of RerankResult sorted descending.

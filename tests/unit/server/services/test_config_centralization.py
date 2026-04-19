@@ -492,6 +492,93 @@ class TestSaveConfigSqlite:
         assert any("UPDATE server_config" in c for c in calls)
 
 
+class TestFaultInjectionBootstrapKeys:
+    """Story #746: fault_injection_enabled and fault_injection_nonprod_ack must
+    survive _strip_config_file_to_bootstrap() because the harness reads them at
+    lifespan startup time, before any DB is available."""
+
+    @staticmethod
+    def _write_fault_injection_config(tmp_server_dir: str) -> str:
+        """Write a config.json with fault-injection keys enabled.
+
+        Returns the path to the written config file.
+        """
+        config_path = os.path.join(tmp_server_dir, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(
+                {
+                    "server_dir": tmp_server_dir,
+                    "host": "127.0.0.1",
+                    "port": 8099,
+                    "fault_injection_enabled": True,
+                    "fault_injection_nonprod_ack": True,
+                },
+                f,
+            )
+        return config_path
+
+    def test_fault_injection_keys_survive_strip(self, tmp_server_dir):
+        """Both fault-injection keys must remain in config.json after the strip.
+
+        Regression test for the bug where BOOTSTRAP_KEYS was missing both keys,
+        causing ConfigService to erase them from config.json at startup and
+        making wire_fault_injection() always take the disabled branch.
+        """
+        import sqlite3
+
+        config_path = self._write_fault_injection_config(tmp_server_dir)
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+
+        # Trigger the bootstrap-strip path via initialize_runtime_db
+        db_path = os.path.join(tmp_server_dir, "data", "cidx_server.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS server_config ("
+                "config_key TEXT PRIMARY KEY DEFAULT 'runtime', "
+                "config_json TEXT NOT NULL, "
+                "version INTEGER NOT NULL DEFAULT 1, "
+                "updated_at TEXT DEFAULT (datetime('now')), "
+                "updated_by TEXT)"
+            )
+            conn.commit()
+
+        svc.initialize_runtime_db(db_path)
+
+        # Both fault-injection keys must still be present on disk after the strip.
+        with open(config_path) as f:
+            saved = json.load(f)
+
+        assert "fault_injection_enabled" in saved, (
+            "fault_injection_enabled was stripped from config.json — "
+            "it must be in BOOTSTRAP_KEYS"
+        )
+        assert "fault_injection_nonprod_ack" in saved, (
+            "fault_injection_nonprod_ack was stripped from config.json — "
+            "it must be in BOOTSTRAP_KEYS"
+        )
+        assert saved["fault_injection_enabled"] is True
+        assert saved["fault_injection_nonprod_ack"] is True
+
+    def test_fault_injection_enabled_loaded_from_config(self, tmp_server_dir):
+        """After load_config, fault_injection_enabled must reflect what is in
+        config.json — True when the file says True."""
+        self._write_fault_injection_config(tmp_server_dir)
+
+        svc = ConfigService(server_dir_path=tmp_server_dir)
+        svc.load_config()
+        config = svc.get_config()
+
+        assert config.fault_injection_enabled is True, (
+            "fault_injection_enabled should be True after loading from config.json"
+        )
+        assert config.fault_injection_nonprod_ack is True, (
+            "fault_injection_nonprod_ack should be True after loading from config.json"
+        )
+
+
 class TestAutoMigrationBackup:
     """Verify backup is created only once during migration."""
 

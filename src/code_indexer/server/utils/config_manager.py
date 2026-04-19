@@ -997,6 +997,11 @@ class ServerConfig:
     clone_backend: str = "local"  # Story #510: "local", "ontap", or "cow-daemon"
     cow_daemon: Optional[CowDaemonConfig] = None  # Story #510: CoW daemon settings
 
+    # Story #746 - Fault injection harness (bootstrap-only, never DB)
+    # Stays False in production. Both must be True together to enable harness.
+    fault_injection_enabled: bool = False
+    fault_injection_nonprod_ack: bool = False
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

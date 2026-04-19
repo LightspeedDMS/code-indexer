@@ -221,7 +221,6 @@ class ApiKeysStatusResponse(BaseModel):
 
 # Singleton service instances
 _api_key_sync_service: Optional[ApiKeySyncService] = None
-_api_key_connectivity_tester: Optional[ApiKeyConnectivityTester] = None
 
 
 def get_api_key_sync_service() -> ApiKeySyncService:
@@ -232,12 +231,20 @@ def get_api_key_sync_service() -> ApiKeySyncService:
     return _api_key_sync_service
 
 
-def get_api_key_connectivity_tester() -> ApiKeyConnectivityTester:
-    """Get or create the API key connectivity tester instance."""
-    global _api_key_connectivity_tester
-    if _api_key_connectivity_tester is None:
-        _api_key_connectivity_tester = ApiKeyConnectivityTester()
-    return _api_key_connectivity_tester
+def _make_tester(http_request: Request) -> ApiKeyConnectivityTester:
+    """Create a per-request ApiKeyConnectivityTester wired to the app factory.
+
+    Reads http_client_factory from app.state, which is always set by
+    wire_fault_injection() at startup (Story #746) — plain factory when the
+    harness is disabled, fault-aware factory when enabled.  Fresh instance per
+    request avoids shared mutable state.
+    """
+    from code_indexer.server.fault_injection.http_client_factory import (
+        HttpClientFactory,
+    )
+
+    factory: HttpClientFactory = http_request.app.state.http_client_factory
+    return ApiKeyConnectivityTester(http_client_factory=factory)
 
 
 def get_config_service() -> ConfigService:
@@ -411,7 +418,7 @@ async def test_anthropic_key(
         raise HTTPException(status_code=400, detail=validation.error)
 
     # Test connectivity
-    tester = get_api_key_connectivity_tester()
+    tester = _make_tester(http_request)
     result = await tester.test_anthropic_connectivity(request.api_key)
 
     return TestApiKeyResponse(
@@ -439,7 +446,7 @@ async def test_voyageai_key(
         raise HTTPException(status_code=400, detail=validation.error)
 
     # Test connectivity
-    tester = get_api_key_connectivity_tester()
+    tester = _make_tester(http_request)
     result = await tester.test_voyageai_connectivity(request.api_key)
 
     return TestApiKeyResponse(
@@ -473,7 +480,7 @@ async def test_configured_anthropic_key(
         )
 
     # Test connectivity
-    tester = get_api_key_connectivity_tester()
+    tester = _make_tester(http_request)
     result = await tester.test_anthropic_connectivity(api_key)
 
     return TestApiKeyResponse(
@@ -507,7 +514,7 @@ async def test_configured_voyageai_key(
         )
 
     # Test connectivity
-    tester = get_api_key_connectivity_tester()
+    tester = _make_tester(http_request)
     result = await tester.test_voyageai_connectivity(api_key)
 
     return TestApiKeyResponse(
@@ -602,7 +609,7 @@ async def test_cohere_key(
         raise HTTPException(status_code=400, detail=validation.error)
 
     # Test connectivity
-    tester = get_api_key_connectivity_tester()
+    tester = _make_tester(http_request)
     result = await tester.test_cohere_connectivity(request.api_key)
 
     return TestApiKeyResponse(
@@ -636,7 +643,7 @@ async def test_configured_cohere_key(
         )
 
     # Test connectivity
-    tester = get_api_key_connectivity_tester()
+    tester = _make_tester(http_request)
     result = await tester.test_cohere_connectivity(api_key)
 
     return TestApiKeyResponse(

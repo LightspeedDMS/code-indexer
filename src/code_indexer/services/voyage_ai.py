@@ -6,6 +6,7 @@ import os
 import time
 from http import HTTPStatus
 from typing import List, Dict, Any, Optional
+from typing import Protocol, runtime_checkable
 import httpx
 from rich.console import Console
 import yaml  # type: ignore[import-untyped]
@@ -15,6 +16,25 @@ from ..config import VoyageAIConfig
 from .embedding_provider import EmbeddingProvider, EmbeddingResult, BatchEmbeddingResult
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class SyncClientFactory(Protocol):
+    """Protocol satisfied by HttpClientFactory for sync HTTP client creation.
+
+    Defined here (CLI layer) so that voyage_ai.py can accept the server-side
+    HttpClientFactory without importing it directly (which would create a
+    CLI→server layer violation).  Any object with a create_sync_client() method
+    that returns httpx.Client satisfies this protocol.
+    """
+
+    def create_sync_client(
+        self,
+        *,
+        transport: Optional[httpx.BaseTransport] = None,
+        **kwargs: Any,
+    ) -> httpx.Client: ...
+
 
 # Timeout (seconds) used by the lightweight health probe (Story #619 HIGH-2)
 _PROBE_TIMEOUT_S: float = 5.0
@@ -39,10 +59,25 @@ _VOYAGE_MODEL_DIMENSIONS: Dict[str, int] = {
 class VoyageAIClient(EmbeddingProvider):
     """Client for interacting with VoyageAI API."""
 
-    def __init__(self, config: VoyageAIConfig, console: Optional[Console] = None):
+    def __init__(
+        self,
+        config: VoyageAIConfig,
+        console: Optional[Console] = None,
+        http_client_factory: Optional[SyncClientFactory] = None,
+    ):
         super().__init__(console)
         self.config = config
         self.console = console or Console()
+        # Factory for outbound HTTP clients (Story #746 CRITICAL fix).
+        # Normalized to NullFaultFactory at construction so self._http_client_factory
+        # is always a concrete factory — no if-None branches needed at call sites.
+        if http_client_factory is None:
+            from code_indexer.server.fault_injection.null_factory import (
+                NullFaultFactory,
+            )
+
+            http_client_factory = NullFaultFactory()
+        self._http_client_factory: SyncClientFactory = http_client_factory
 
         # Get API key from environment
         self.api_key = os.getenv("VOYAGE_API_KEY")
@@ -149,7 +184,10 @@ class VoyageAIClient(EmbeddingProvider):
             pool=_PROBE_TIMEOUT_S,
         )
         try:
-            with httpx.Client(timeout=probe_timeout) as client:
+            client_ctx = self._http_client_factory.create_sync_client(
+                timeout=probe_timeout
+            )
+            with client_ctx as client:
                 response = client.options(self.config.api_endpoint)
                 return bool(response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR)
         except httpx.HTTPError as exc:
@@ -228,14 +266,11 @@ class VoyageAIClient(EmbeddingProvider):
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 }
-                if _latency_transport is not None:
-                    _client_ctx = httpx.Client(
-                        headers=_headers,
-                        timeout=_timeout,
-                        transport=_latency_transport,
-                    )
-                else:
-                    _client_ctx = httpx.Client(headers=_headers, timeout=_timeout)
+                _client_ctx = self._http_client_factory.create_sync_client(
+                    transport=_latency_transport,
+                    headers=_headers,
+                    timeout=_timeout,
+                )
                 with _client_ctx as client:
                     response = client.post(self.config.api_endpoint, json=payload)
                 response.raise_for_status()

@@ -81,11 +81,17 @@ def _make_config(
 @pytest.fixture
 def app_with_router():
     """Isolated FastAPI app that includes only the api_keys router."""
+    from code_indexer.server.fault_injection.http_client_factory import (
+        HttpClientFactory,
+    )
     from code_indexer.server.routers.api_keys import router
 
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_current_admin_user_hybrid] = _admin_user
+    # Story #746: _make_tester reads app.state.http_client_factory; set a plain
+    # factory so endpoints do not raise AttributeError in tests.
+    app.state.http_client_factory = HttpClientFactory(fault_injection_service=None)
     return app
 
 
@@ -226,9 +232,7 @@ class TestTestAnthropicKey:
         connectivity_result.error = None
         connectivity_result.response_time_ms = 123
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-        ) as mock_tester:
+        with patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester:
             mock_tester.return_value.test_anthropic_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -252,9 +256,7 @@ class TestTestAnthropicKey:
         connectivity_result.error = "Connection refused"
         connectivity_result.response_time_ms = None
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-        ) as mock_tester:
+        with patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester:
             mock_tester.return_value.test_anthropic_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -302,9 +304,7 @@ class TestTestVoyageaiKey:
         connectivity_result.error = None
         connectivity_result.response_time_ms = 99
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-        ) as mock_tester:
+        with patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester:
             mock_tester.return_value.test_voyageai_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -328,9 +328,7 @@ class TestTestVoyageaiKey:
         connectivity_result.error = "Unauthorized"
         connectivity_result.response_time_ms = None
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-        ) as mock_tester:
+        with patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester:
             mock_tester.return_value.test_voyageai_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -381,9 +379,7 @@ class TestTestConfiguredAnthropicKey:
 
         with (
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
-            patch(
-                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-            ) as mock_tester,
+            patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
             mock_cs.return_value.load_config.return_value = cfg
             mock_tester.return_value.test_anthropic_connectivity = AsyncMock(
@@ -442,9 +438,7 @@ class TestTestConfiguredVoyageaiKey:
 
         with (
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
-            patch(
-                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-            ) as mock_tester,
+            patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
             mock_cs.return_value.load_config.return_value = cfg
             mock_tester.return_value.test_voyageai_connectivity = AsyncMock(
@@ -487,9 +481,7 @@ class TestTestConfiguredVoyageaiKey:
 
         with (
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
-            patch(
-                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-            ) as mock_tester,
+            patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
             mock_cs.return_value.load_config.return_value = cfg
             mock_tester.return_value.test_voyageai_connectivity = AsyncMock(
@@ -839,9 +831,7 @@ class TestTestCohereKey:
         connectivity_result.error = None
         connectivity_result.response_time_ms = 88
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-        ) as mock_tester:
+        with patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester:
             mock_tester.return_value.test_cohere_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -865,9 +855,7 @@ class TestTestCohereKey:
         connectivity_result.error = "Connection refused"
         connectivity_result.response_time_ms = None
 
-        with patch(
-            "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-        ) as mock_tester:
+        with patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester:
             mock_tester.return_value.test_cohere_connectivity = AsyncMock(
                 return_value=connectivity_result
             )
@@ -918,9 +906,7 @@ class TestTestConfiguredCohereKey:
 
         with (
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
-            patch(
-                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-            ) as mock_tester,
+            patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
             mock_cs.return_value.load_config.return_value = cfg
             mock_tester.return_value.test_cohere_connectivity = AsyncMock(
@@ -963,9 +949,7 @@ class TestTestConfiguredCohereKey:
 
         with (
             patch("code_indexer.server.routers.api_keys.get_config_service") as mock_cs,
-            patch(
-                "code_indexer.server.routers.api_keys.get_api_key_connectivity_tester"
-            ) as mock_tester,
+            patch("code_indexer.server.routers.api_keys._make_tester") as mock_tester,
         ):
             mock_cs.return_value.load_config.return_value = cfg
             mock_tester.return_value.test_cohere_connectivity = AsyncMock(

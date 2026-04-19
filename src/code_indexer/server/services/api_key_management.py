@@ -18,10 +18,15 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import httpx
 from code_indexer.server.logging_utils import format_error_log
+
+if TYPE_CHECKING:
+    from code_indexer.server.fault_injection.http_client_factory import (
+        HttpClientFactory,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -320,14 +325,34 @@ class ApiKeyConnectivityTester:
     VOYAGEAI_API_ENDPOINT = "https://api.voyageai.com/v1/embeddings"
     VOYAGEAI_TEST_MODEL = "voyage-3"
 
-    def __init__(self, timeout_seconds: int = 30):
+    def __init__(
+        self,
+        timeout_seconds: int = 30,
+        http_client_factory: "Optional[HttpClientFactory]" = None,
+    ):
         """
         Initialize ApiKeyConnectivityTester.
 
         Args:
             timeout_seconds: Timeout for connectivity tests (default: 30s)
+            http_client_factory: Optional HttpClientFactory for outbound HTTP
+                clients.  When provided, all outbound AsyncClient construction
+                goes through the factory so that FaultInjectingTransport can
+                be transparently installed (Story #746).  When None, a plain
+                factory with no fault injection is created on first use.
         """
         self._timeout_seconds = timeout_seconds
+        self._http_client_factory = http_client_factory
+
+    def _get_http_client_factory(self) -> "HttpClientFactory":
+        """Return the configured factory or create a plain one on demand."""
+        if self._http_client_factory is not None:
+            return self._http_client_factory
+        from code_indexer.server.fault_injection.http_client_factory import (
+            HttpClientFactory,
+        )
+
+        return HttpClientFactory(fault_injection_service=None)
 
     async def test_anthropic_connectivity(self, api_key: str) -> ConnectivityTestResult:
         """
@@ -413,7 +438,9 @@ class ApiKeyConnectivityTester:
         start_time = time.time()
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            async with self._get_http_client_factory().create_client(
+                timeout=self._timeout_seconds
+            ) as client:
                 response = await client.post(
                     self.VOYAGEAI_API_ENDPOINT,
                     headers={
@@ -477,7 +504,9 @@ class ApiKeyConnectivityTester:
         start_time = time.time()
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+            async with self._get_http_client_factory().create_client(
+                timeout=self._timeout_seconds
+            ) as client:
                 response = await client.post(
                     "https://api.cohere.com/v2/embed",
                     headers={

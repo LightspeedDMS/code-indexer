@@ -15,6 +15,28 @@ from code_indexer.server.startup.bootstrap import _detect_repo_root
 logger = logging.getLogger(__name__)
 
 
+def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
+    """Wire fault injection state on app.state for both normal and degraded startup.
+
+    Story #746 — Codex architectural review MAJOR finding:
+    Previously, the degraded-startup branch (startup_config is None) only set
+    app.state.fault_injection_service and forgot app.state.http_client_factory,
+    causing AttributeError at request time in api_keys._make_tester() which
+    unconditionally reads http_request.app.state.http_client_factory.
+
+    This helper guarantees BOTH attributes are set on every path.
+    """
+    from code_indexer.server.fault_injection.http_client_factory import HttpClientFactory
+    from code_indexer.server.fault_injection.startup import wire_fault_injection
+
+    if startup_config is None:
+        app.state.fault_injection_service = None
+        app.state.http_client_factory = HttpClientFactory(fault_injection_service=None)
+        return
+
+    wire_fault_injection(app, startup_config)
+
+
 def make_lifespan(
     background_job_manager: Any,
     job_tracker: Any,
@@ -63,6 +85,7 @@ def make_lifespan(
             "Server startup: Initializing SQLite log handler",
             extra={"correlation_id": get_correlation_id()},
         )
+        startup_config = None  # Story #746: ensure always defined before try block
         try:
             # Load config to get configured log level (Story #38: respect log_level setting)
             from code_indexer.server.utils.config_manager import ServerConfigManager
@@ -1949,6 +1972,9 @@ def make_lifespan(
             )
             app.state.node_metrics_writer = None
             app.state.node_metrics_backend = None
+
+        # Story #746: wire fault injection harness from bootstrap config
+        _apply_fault_injection_state(app, startup_config)
 
         yield  # Server is now running
 
