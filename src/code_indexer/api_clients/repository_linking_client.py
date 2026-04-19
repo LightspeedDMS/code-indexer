@@ -5,6 +5,7 @@ with clean API abstractions and no raw HTTP calls in business logic.
 """
 
 import re
+import urllib.parse
 from typing import List, Dict, Any, cast
 from pydantic import BaseModel, Field
 
@@ -101,7 +102,12 @@ class RepositoryLinkingClient(CIDXRemoteAPIClient):
         if not any(re.match(p, repo_url) for p in _url_patterns):
             raise ValueError(f"Invalid git URL format: {repo_url}")
 
-        discovery_endpoint = f"/api/repos/discover?repo_url={repo_url}"
+        # Server handler (inline_repos.py discover_repositories) declares
+        # `source: str` as the query parameter name, not repo_url. quote() with
+        # safe='' encodes filesystem-path slashes and other reserved chars.
+        discovery_endpoint = (
+            f"/api/repos/discover?source={urllib.parse.quote(repo_url, safe='')}"
+        )
 
         try:
             response = self._authenticated_request("GET", discovery_endpoint)
