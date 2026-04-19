@@ -101,7 +101,6 @@ def test_git_diff(
     _assert_ok(result, f"cidx git diff {REPO_ALIAS}")
 
 
-@pytest.mark.skip(reason="Server endpoint /api/v1/repos/{alias}/git/blame not implemented — Bug #824")
 def test_git_blame(
     authenticated_workspace: Path,
     activated_golden_repo: str,
@@ -119,7 +118,6 @@ def test_git_blame(
     )
 
 
-@pytest.mark.skip(reason="Server endpoint /api/v1/repos/{alias}/git/file-history not implemented — Bug #824")
 def test_git_file_history(
     authenticated_workspace: Path,
     activated_golden_repo: str,
@@ -137,7 +135,6 @@ def test_git_file_history(
     )
 
 
-@pytest.mark.skip(reason="Server endpoint /api/v1/repos/{alias}/git/cat not implemented — Bug #824")
 def test_git_cat(
     authenticated_workspace: Path,
     activated_golden_repo: str,
@@ -160,7 +157,6 @@ def test_git_cat(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="Server endpoints POST/DELETE /api/v1/repos/{alias}/files/* not implemented — Bug #824")
 def test_files_create_and_delete(
     authenticated_workspace: Path,
     activated_golden_repo: str,

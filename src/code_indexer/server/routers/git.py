@@ -8,12 +8,14 @@ and service layer integration.
 from code_indexer.server.middleware.correlation import get_correlation_id
 
 import logging
+import subprocess
 from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from code_indexer.server.auth.dependencies import get_current_user
 from code_indexer.server.auth.user_manager import User
 from code_indexer.server.services.git_operations_service import git_operations_service
+from code_indexer.server.repositories.activated_repo_manager import ActivatedRepoManager
 from code_indexer.server.routers.git_models import (
     GitStatusResponse,
     GitDiffResponse,
@@ -49,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 # Create router with prefix and tags
 router = APIRouter(prefix="/api/v1/repos/{alias}/git", tags=["git"])
+activated_repo_manager = ActivatedRepoManager()
 
 
 # Git Status/Inspection Endpoints
@@ -1019,3 +1022,311 @@ def git_branch_delete(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
         )
+
+
+@router.get(
+    "/cat",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "File content retrieved successfully"},
+        400: {"description": "Invalid path (traversal or absolute)"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository or file/revision not found"},
+    },
+    summary="Get file content at a revision",
+    description="Return utf-8 decoded content of a file at a given git revision",
+)
+def git_cat(
+    alias: str,
+    path: str = Query(..., description="Relative file path within the repository"),
+    rev: str = Query("HEAD", description="Git revision (branch, tag, or commit SHA)"),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Return the content of a file at the given revision."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: must be a relative path with no traversal components",
+        )
+
+    try:
+        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+    except FileNotFoundError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-CAT-001",
+                f"Repository not found for alias '{alias}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    try:
+        rev_result = subprocess.run(
+            ["git", "rev-parse", rev],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+        resolved_sha = rev_result.stdout.decode("utf-8", errors="replace").strip()
+
+        show_result = subprocess.run(
+            ["git", "show", f"{rev}:{path}"],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+        content = show_result.stdout.decode("utf-8", errors="replace")
+        return {
+            "content": content,
+            "path": path,
+            "size": len(show_result.stdout),
+            "rev": resolved_sha,
+        }
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-CAT-002",
+                f"git show/rev-parse failed for '{alias}' path='{path}' rev='{rev}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File or revision not found: {path}@{rev}",
+        )
+
+
+# Length of a full Git SHA-1 hex string (40 lowercase hex characters)
+_GIT_SHA_HEX_LENGTH = 40
+
+
+def _parse_git_blame_porcelain(stdout: str) -> list:
+    """Parse output of `git blame --porcelain` into a list of line dicts.
+
+    Porcelain block structure per line of the blamed file:
+      <sha40> <orig_lineno> <final_lineno> [<group_count>]
+      author <name>
+      author-time <unix_epoch>
+      ... (other headers) ...
+      \t<content>   (TAB prefix marks the content line, ends the block)
+
+    Returns list of dicts: line_number, commit_hash, author, date, content.
+    """
+    from datetime import datetime, timezone
+
+    lines = []
+    line_number = 0
+    current: dict = {}
+
+    for raw in stdout.splitlines():
+        if not raw:
+            continue
+        if raw[0] == "\t":
+            # TAB-prefixed content line ends the current block
+            line_number += 1
+            lines.append({
+                "line_number": line_number,
+                "commit_hash": current.get("commit_hash", ""),
+                "author": current.get("author", ""),
+                "date": current.get("date", ""),
+                "content": raw[1:],  # strip leading TAB
+            })
+            current = {}
+        elif raw.startswith("author "):
+            current["author"] = raw[len("author "):]
+        elif raw.startswith("author-time "):
+            epoch = int(raw[len("author-time "):])
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            current["date"] = dt.isoformat()
+        else:
+            # Header line: first token is the 40-char commit SHA
+            parts = raw.split()
+            if parts and len(parts[0]) == _GIT_SHA_HEX_LENGTH:
+                current["commit_hash"] = parts[0]
+
+    return lines
+
+
+@router.get(
+    "/blame",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Blame output retrieved successfully"},
+        400: {"description": "Invalid path (traversal or absolute)"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository or file not found"},
+    },
+    summary="Get git blame for a file",
+    description="Return per-line blame information for a file at a given revision",
+)
+def git_blame(
+    alias: str,
+    path: str = Query(..., description="Relative file path within the repository"),
+    rev: str = Query("HEAD", description="Git revision (branch, tag, or commit SHA)"),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Return blame information for each line of a file."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: must be a relative path with no traversal components",
+        )
+
+    try:
+        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+    except FileNotFoundError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-BLAME-001",
+                f"Repository not found for alias '{alias}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    try:
+        result = subprocess.run(
+            ["git", "blame", "--porcelain", rev, "--", path],
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+        stdout = result.stdout.decode("utf-8", errors="replace")
+        blame_lines = _parse_git_blame_porcelain(stdout)
+        return {"lines": blame_lines}
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-BLAME-002",
+                f"git blame failed for '{alias}' path='{path}' rev='{rev}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File or revision not found: {path}@{rev}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# git/file-history — commit history for a single file (Bug #824)
+# ---------------------------------------------------------------------------
+
+
+_FILE_HISTORY_DEFAULT_LIMIT = 50
+_FILE_HISTORY_MAX_LIMIT = 500
+
+
+def _parse_unit_separated_commits(stdout: str) -> list[dict]:
+    """Parse git log output formatted with "%H\\x1f%an\\x1f%ai\\x1f%s".
+
+    Each non-blank line is split on ASCII Unit Separator (\\x1f) with
+    maxsplit=3 into 4 fields: commit_hash, author, date, message.
+    Malformed lines (shouldn't occur with this format) are logged at
+    WARNING and skipped.  Mirrors Bug #825 fix in git_operations_service.
+    """
+    commits: list[dict] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\x1f", 3)
+        if len(parts) != 4:
+            logger.warning(
+                "git log produced malformed line (expected 4 unit-separated "
+                "fields, got %d): %r",
+                len(parts),
+                line,
+            )
+            continue
+        commit_hash, commit_author, commit_date, commit_message = parts
+        commits.append(
+            {
+                "commit_hash": commit_hash,
+                "author": commit_author,
+                "date": commit_date,
+                "message": commit_message,
+            }
+        )
+    return commits
+
+
+@router.get(
+    "/file-history",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "File commit history retrieved successfully"},
+        400: {"description": "Invalid path (traversal or absolute)"},
+        401: {"description": "Missing or invalid authentication"},
+        404: {"description": "Repository not found"},
+    },
+    summary="Get commit history for a file",
+    description=(
+        "Return the commit history for a single file within the repository, "
+        "following renames via --follow."
+    ),
+)
+def git_file_history(
+    alias: str,
+    path: str = Query(..., description="Relative file path within the repository"),
+    rev: Optional[str] = Query(None, description="Optional git revision to start from"),
+    limit: int = Query(
+        _FILE_HISTORY_DEFAULT_LIMIT,
+        ge=1,
+        le=_FILE_HISTORY_MAX_LIMIT,
+        description="Maximum commits to return (1..500)",
+    ),
+    user: User = Depends(get_current_user),
+) -> dict:
+    """Return commit history for a single file (follows renames)."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid path: must be a relative path with no traversal components",
+        )
+
+    try:
+        repo_path = activated_repo_manager.get_activated_repo_path(user.username, alias)
+    except FileNotFoundError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-FILE-HISTORY-001",
+                f"Repository not found for alias '{alias}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    cmd: list[str] = [
+        "git",
+        "log",
+        "--follow",
+        "--format=%H\x1f%an\x1f%ai\x1f%s",
+        f"-n{limit}",
+    ]
+    if rev:
+        cmd.append(rev)
+    cmd.extend(["--", path])
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            format_error_log(
+                "GIT-FILE-HISTORY-002",
+                f"git log --follow failed for '{alias}' path='{path}': {exc}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"File or revision not found: {path}",
+        )
+
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    return {"commits": _parse_unit_separated_commits(stdout)}

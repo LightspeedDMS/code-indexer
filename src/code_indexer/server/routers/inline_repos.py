@@ -1662,3 +1662,37 @@ def register_repo_routes(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to list files: {str(e)}",
             )
+
+    @app.get("/api/repos/{user_alias}/sync-status")
+    def get_repository_sync_status(
+        user_alias: str,
+        current_user: dependencies.User = Depends(dependencies.get_current_user),
+    ):
+        """
+        Return sync status for an activated repository.
+
+        Returns:
+            JSON dict with current_branch, sync_status, last_sync_time, has_conflicts.
+
+        Raises:
+            HTTPException 404: alias not activated or not found
+        """
+        arm = ActivatedRepoManager()
+        metadata = arm._load_metadata(current_user.username, user_alias)
+        if metadata is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Repository '{user_alias}' not found or not activated",
+            )
+
+        sync_status = metadata.get("sync_status") or "synced"
+        conflict_details = metadata.get("conflict_details")
+        has_conflicts = bool(conflict_details)
+        last_sync_time = metadata.get("last_accessed")
+
+        return {
+            "current_branch": metadata.get("current_branch"),
+            "sync_status": sync_status,
+            "last_sync_time": last_sync_time,
+            "has_conflicts": has_conflicts,
+        }
