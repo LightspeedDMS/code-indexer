@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.6
+
+### Bug Fixes
+
+- fix(#853): Cancel API failed for `lifecycle_backfill` jobs — "Job not found or not authorized". Five root causes fixed:
+  1. `BackgroundJobManager.cancel_job` now accepts `is_admin: bool = False`; admin users bypass the username ownership check, allowing admins to cancel system-owned jobs.
+  2. `inline_jobs.py` router now passes `is_admin=(current_user.role == UserRole.ADMIN)` so admin status reaches the cancel logic.
+  3. `DependencyMapService._backfill_register_aggregate_job` now returns the registered `job_id` instead of discarding it; `_queue_lifecycle_backfill_if_needed` stores the result in `self._active_backfill_job_id` and propagates it to the scheduler via `set_active_backfill_job_id`.
+  4. `DescriptionRefreshScheduler` gains `_active_backfill_job_id` (thread-safe via `threading.Lock`) and `set_active_backfill_job_id()` method.
+  5. `DescriptionRefreshScheduler._run_loop_single_pass` checks the active backfill job status at the start of each pass; when the job is cancelled it calls `fail_job` with the correct `job_id` and returns early, stopping all further repo processing.
+
 ## v9.20.5
 
 ### Bug Fixes

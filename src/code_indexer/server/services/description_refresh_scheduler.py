@@ -274,6 +274,26 @@ class DescriptionRefreshScheduler:
         max_workers = max(1, _configured)
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
+        # Bug #853: active lifecycle_backfill aggregate job_id for cancellation propagation.
+        # Protected by _backfill_job_id_lock for thread-safe access from the scheduler
+        # thread and the DependencyMapService thread.
+        self._active_backfill_job_id: Optional[str] = None
+        self._backfill_job_id_lock = threading.Lock()
+
+    def set_active_backfill_job_id(self, job_id: Optional[str]) -> None:
+        """
+        Store the active lifecycle_backfill aggregate job_id (thread-safe).
+
+        Called by DependencyMapService after registering the aggregate job so
+        this scheduler can check for cancellation before processing each repo
+        (Bug #853 Fix 5).
+
+        Args:
+            job_id: The job_id to store, or None to clear it.
+        """
+        with self._backfill_job_id_lock:
+            self._active_backfill_job_id = job_id
+
     def start(self) -> None:
         """Start daemon thread if enabled in config."""
         config = self._config_manager.load_config()
@@ -566,8 +586,27 @@ class DescriptionRefreshScheduler:
         Extracted from _run_loop() to enable unit testing of job registration behavior.
         For each stale repo with changes, registers a description_refresh job in the
         job_tracker (if configured) and spawns a background thread (AC2, Story #313).
+
+        Checks for cancellation of the active lifecycle_backfill aggregate job before
+        processing any repo. If cancelled, calls fail_job and returns immediately (Bug #853).
         """
         import uuid
+
+        with self._backfill_job_id_lock:
+            active_backfill_job_id = self._active_backfill_job_id
+
+        if active_backfill_job_id is not None and self._job_tracker is not None:
+            tracked_job = self._job_tracker.get_job(active_backfill_job_id)
+            if tracked_job is not None and tracked_job.status == "cancelled":
+                logger.warning(
+                    "_run_loop_single_pass: backfill job %s was cancelled, "
+                    "stopping repo processing",
+                    active_backfill_job_id,
+                )
+                self._job_tracker.fail_job(active_backfill_job_id, "Cancelled by user")
+                with self._backfill_job_id_lock:
+                    self._active_backfill_job_id = None
+                return
 
         stale_repos = self.get_stale_repos()
 

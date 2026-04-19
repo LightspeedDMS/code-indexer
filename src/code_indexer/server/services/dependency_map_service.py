@@ -101,6 +101,10 @@ class DependencyMapService:
         self._daemon_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
+        # Bug #853: track the active lifecycle_backfill aggregate job_id
+        # so complete_job / cancel propagation can reference it
+        self._active_backfill_job_id: Optional[str] = None
+
     @property
     def activity_journal(self) -> ActivityJournalService:
         """Return the ActivityJournalService instance (Story #329)."""
@@ -2141,16 +2145,22 @@ class DependencyMapService:
                 )
         return queued
 
-    def _backfill_register_aggregate_job(self, cluster_wide_total: int) -> None:
+    def _backfill_register_aggregate_job(
+        self, cluster_wide_total: int
+    ) -> Optional[str]:
         """
         Register and start the lifecycle_backfill aggregate job with JobTracker.
 
         Builds base_meta once and reuses it across register_job and update_status
         to avoid duplication. No-op when job_tracker is None or total is zero.
         All failures are absorbed as non-fatal warnings.
+
+        Returns:
+            The job_id string on success, or None when no job was registered
+            (tracker absent, total zero, or registration failed).
         """
         if self._job_tracker is None or cluster_wide_total == 0:
-            return
+            return None
         try:
             job_id = (
                 f"lifecycle-backfill-{uuid.uuid4().hex[:_BACKFILL_JOB_ID_SUFFIX_LEN]}"
@@ -2196,11 +2206,13 @@ class DependencyMapService:
                 progress_info=stage_text,
                 metadata={**base_meta, "stage": "processing"},
             )
+            return job_id
         except Exception as exc:
             logger.warning(
                 "lifecycle_backfill: JobTracker registration failed (non-fatal): %s",
                 exc,
             )
+            return None
 
     def _queue_lifecycle_backfill_if_needed(self) -> int:
         """
@@ -2230,7 +2242,13 @@ class DependencyMapService:
         candidates = self._backfill_select_candidates(conn_manager)
         this_node_queued = self._backfill_queue_candidates(conn_manager, candidates)
         if owns_aggregate and cluster_wide_total:
-            self._backfill_register_aggregate_job(cluster_wide_total)
+            self._active_backfill_job_id = self._backfill_register_aggregate_job(
+                cluster_wide_total
+            )
+            if self._refresh_scheduler is not None:
+                self._refresh_scheduler.set_active_backfill_job_id(
+                    self._active_backfill_job_id
+                )
         if this_node_queued > 0:
             logger.info(
                 "lifecycle_backfill: queued %d repos (cluster_wide_total=%s)",
