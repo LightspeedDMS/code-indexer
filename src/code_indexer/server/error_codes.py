@@ -4988,6 +4988,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
         severity=Severity.WARNING,
         action="TODO",
     ),
+    "WEB-GENERAL-067": ErrorDefinition(
+        code="WEB-GENERAL-067",
+        description="Batch golden repository creation failed for an individual repository",
+        severity=Severity.WARNING,
+        action="Review web logs for repository URL, alias, and stack trace",
+    ),
     # Story #86: Migrated logger statements - AUTH subsystem
     "AUTH-AUDIT-010": ErrorDefinition(
         code="AUTH-AUDIT-010",
