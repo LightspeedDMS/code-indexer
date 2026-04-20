@@ -15,6 +15,10 @@ inputSchema:
         Minimum number of days since last_analyzed to include a domain in the result.
         Use 0 to retrieve a full freshness inventory of all domains that have a
         parseable last_analyzed date. Negative values are rejected with success=false.
+        Must be a true integer: floats (including 1.5 and integer-valued 30.0),
+        strings ("30"), and booleans (True/False) are rejected with success=false
+        even if they look numeric — this guards against accidental type coercion
+        at the JSON-RPC boundary.
 ---
 Identify which dependency-map domains have not been analyzed recently.
 
@@ -26,19 +30,34 @@ most neglected domains appear first.
 
 Date parsing: accepts ISO-8601 strings with explicit timezone offset
 (2026-04-18T12:00:00+00:00) and Z-suffix forms (2026-04-18T12:00:00Z). All
-timestamps are normalized to UTC before computing staleness.
+timestamps are normalized to UTC before computing staleness. Naive ISO strings
+with neither a Z suffix nor an explicit offset (e.g. 2026-04-18T12:00:00) are
+rejected as anomalies rather than silently interpreted as host local time —
+this prevents staleness from shifting by the server's UTC offset.
 
 Resilience: each domain file is parsed inside its own try/except. A domain whose
-frontmatter lacks the last_analyzed key, or whose value cannot be parsed as
-ISO-8601, produces an anomaly entry and is excluded from stale_domains. Scanning
-continues for all remaining domains. This means partial results are always returned
-even when some files are malformed.
+frontmatter lacks the last_analyzed key, or whose value cannot be parsed as a
+timezone-aware ISO-8601 datetime, produces an anomaly entry and is excluded from
+stale_domains. Scanning continues for all remaining domains. This means partial
+results are always returned even when some files are malformed.
 
 Use days_threshold=0 for a complete freshness inventory: every domain with a
 parseable last_analyzed date is included, regardless of how recent it is.
 
 Use a positive threshold (e.g. 30) to find domains that need re-analysis: only
 domains older than that many days are returned.
+
+Missing directory behavior (two levels):
+
+  1. If dep_map_path itself is not configured or does not exist on disk, the
+     tool returns success=false with a human-readable error and empty lists.
+     The repository has no dependency-map configuration at all.
+
+  2. If dep_map_path exists but the nested dependency-map/ subdirectory (which
+     holds the per-domain markdown files) is missing or empty, the tool returns
+     success=true with stale_domains=[] and anomalies=[]. The configuration
+     exists but no domains have been generated yet — this is a normal empty
+     state, not an error.
 
 Response structure:
 

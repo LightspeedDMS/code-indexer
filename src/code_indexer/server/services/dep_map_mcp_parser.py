@@ -655,10 +655,18 @@ class DepMapMCPParser:
         Result is always UTC via ``astimezone(timezone.utc)``.
 
         Raises:
-            ValueError: when ``fromisoformat`` cannot parse the string.
+            ValueError: when ``fromisoformat`` cannot parse the string, or when
+            the parsed datetime is naive (no timezone info). Naive datetimes
+            are rejected explicitly rather than silently treated as host local
+            time, which would shift staleness by the host's UTC offset.
         """
         normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None or dt.utcoffset() is None:
+            raise ValueError(
+                "last_analyzed must be timezone-aware (missing Z or offset); "
+                f"got naive value {raw!r}"
+            )
         return dt.astimezone(timezone.utc)
 
     def _parse_file_for_consumers(

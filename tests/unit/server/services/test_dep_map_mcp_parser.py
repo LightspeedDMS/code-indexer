@@ -1181,3 +1181,34 @@ class TestGetStaleDomains:
         assert len(stale) == 1
         assert stale[0]["domain_name"] == "dom-clock"
         assert stale[0]["days_stale"] == 109
+
+    def test_get_stale_domains_naive_datetime_becomes_anomaly_not_stale(
+        self, dep_map_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Domain with naive ISO datetime (no tz) → anomaly, NOT in stale list.
+
+        A naive string like '2026-04-18T12:00:00' (no Z, no offset) must be
+        rejected explicitly rather than silently treated as host local time,
+        which would shift the timestamp by the host's UTC offset.
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {"name": "naive-dt-domain", "description": "d", "participating_repos": []},
+        ]
+        _write_domains_json(d, domains)
+        # Naive ISO string — no offset, no Z suffix
+        _write_domain_md_with_last_analyzed(d, "naive-dt-domain", "2026-04-18T12:00:00")
+        self._freeze_now(monkeypatch)
+
+        parser = _make_parser(dep_map_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert stale == [], "Naive datetime domain must NOT appear in stale_domains"
+        assert len(anomalies) == 1, "Exactly one anomaly expected for naive datetime"
+        assert "naive-dt-domain.md" in anomalies[0]["file"], (
+            "Anomaly must reference the specific markdown file naive-dt-domain.md"
+        )
+        error_msg = anomalies[0]["error"]
+        assert "timezone-aware" in error_msg or "naive" in error_msg, (
+            f"Error message must mention 'timezone-aware' or 'naive', got: {error_msg!r}"
+        )
