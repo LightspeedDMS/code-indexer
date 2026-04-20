@@ -446,3 +446,154 @@ def test_get_stale_domains_handler_registered_in_registry() -> None:
     from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 
     assert "depmap_get_stale_domains" in HANDLER_REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# S4: depmap_get_cross_domain_graph — shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _call_cross_domain_graph_handler(params: dict, app_state: MagicMock) -> Any:
+    """Call depmap_get_cross_domain_graph_handler with a patched app state.
+
+    Pattern is identical to _call_stale_domains_handler (line ~341) and all
+    other handler call helpers in this file.
+    """
+    from code_indexer.server.mcp.handlers.depmap import (
+        depmap_get_cross_domain_graph_handler,
+    )
+
+    with patch(
+        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
+        app_state,
+    ):
+        return depmap_get_cross_domain_graph_handler(params, _make_user())
+
+
+def _write_cross_domain_fixture(dep_map_dir: Path) -> None:
+    """Write a minimal two-domain graph fixture (src-dom→tgt-dom) with bidirectional tables.
+
+    Uses a single parameterized inner builder to avoid duplicating the markdown structure.
+    """
+    _write_domains_json_s2(
+        dep_map_dir,
+        [
+            {"name": "src-dom", "description": "d", "participating_repos": []},
+            {"name": "tgt-dom", "description": "d", "participating_repos": []},
+        ],
+    )
+
+    def _make_domain_md(
+        domain: str,
+        outgoing_rows: str,
+        incoming_rows: str,
+    ) -> str:
+        return (
+            f"---\nname: {domain}\n---\n# Domain Analysis: {domain}\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            f"{outgoing_rows}\n"
+            "### Incoming Dependencies\n\n"
+            "| External Repo | Depends On | Source Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            f"{incoming_rows}"
+        )
+
+    (dep_map_dir / "src-dom.md").write_text(
+        _make_domain_md(
+            "src-dom",
+            outgoing_rows="| repo-s | repo-t | tgt-dom | Code-level | why | ev |\n",
+            incoming_rows="",
+        ),
+        encoding="utf-8",
+    )
+    (dep_map_dir / "tgt-dom.md").write_text(
+        _make_domain_md(
+            "tgt-dom",
+            outgoing_rows="",
+            incoming_rows="| repo-s | repo-t | src-dom | Code-level | why | ev |\n",
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_get_cross_domain_graph_handler_returns_success_shape(tmp_path: Path) -> None:
+    """Handler returns success=true with edges list and correct edge shape on happy path."""
+    dep_map_dir = tmp_path / "dependency-map"
+    dep_map_dir.mkdir()
+    _write_cross_domain_fixture(dep_map_dir)
+
+    result = _call_cross_domain_graph_handler({}, _make_app_state(tmp_path))
+    data = _parse_response(result)
+
+    assert data["success"] is True
+    assert isinstance(data["edges"], list)
+    assert isinstance(data["anomalies"], list)
+    assert len(data["edges"]) == 1
+    edge = data["edges"][0]
+    assert edge["source_domain"] == "src-dom"
+    assert edge["target_domain"] == "tgt-dom"
+    assert edge["dependency_count"] == 1
+    assert "Code-level" in edge["types"]
+
+
+def test_get_cross_domain_graph_handler_missing_path_returns_success_false(
+    tmp_path: Path,
+) -> None:
+    """When dep_map_path does not exist, handler returns success=false with error."""
+    result = _call_cross_domain_graph_handler(
+        {}, _make_app_state(tmp_path / "no-such-dir")
+    )
+    data = _parse_response(result)
+
+    assert data["success"] is False
+    assert "error" in data
+    assert data["edges"] == []
+    assert data["anomalies"] == []
+
+
+def test_get_cross_domain_graph_handler_propagates_anomalies(tmp_path: Path) -> None:
+    """Handler surfaces parser anomalies when a domain file is malformed."""
+    dep_map_dir = tmp_path / "dependency-map"
+    dep_map_dir.mkdir()
+    _write_domains_json_s2(
+        dep_map_dir,
+        [
+            {"name": "broken-dom", "description": "d", "participating_repos": []},
+        ],
+    )
+    (dep_map_dir / "broken-dom.md").write_text(
+        "---\nname: [unclosed bracket\nbroken: :\n---\n# bad\n",
+        encoding="utf-8",
+    )
+
+    result = _call_cross_domain_graph_handler({}, _make_app_state(tmp_path))
+    data = _parse_response(result)
+
+    assert data["success"] is True
+    assert len(data["anomalies"]) >= 1
+
+
+def test_get_cross_domain_graph_handler_response_is_json_serializable(
+    tmp_path: Path,
+) -> None:
+    """Response payload must be fully JSON-serializable (no datetime objects or sets)."""
+    dep_map_dir = tmp_path / "dependency-map"
+    dep_map_dir.mkdir()
+    _write_cross_domain_fixture(dep_map_dir)
+
+    result = _call_cross_domain_graph_handler({}, _make_app_state(tmp_path))
+    data = _parse_response(result)
+
+    # json.dumps raises TypeError for non-serializable types (e.g. datetime, set)
+    serialized = _json.dumps(data)
+    assert serialized  # non-empty string confirms no exception was raised
+
+
+def test_get_cross_domain_graph_handler_registered_in_registry() -> None:
+    """depmap_get_cross_domain_graph is present in HANDLER_REGISTRY after module import."""
+    from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+
+    assert "depmap_get_cross_domain_graph" in HANDLER_REGISTRY

@@ -343,8 +343,238 @@ class DepMapMCPParser:
     def get_cross_domain_graph(
         self,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-        """Stub — Story 4 will implement. Returns ([], [])."""
-        return [], []
+        """Return the full directed domain-to-domain edge graph.
+
+        Reads every domain markdown file and aggregates cross-domain dependency
+        rows from the Outgoing Dependencies table into edge records keyed by
+        (source_domain, target_domain). Performs a post-aggregation bidirectional
+        consistency check against the Incoming Dependencies tables in O(edges).
+
+        Per-file and per-section failures are captured as anomaly entries; healthy
+        domains continue to be processed.
+
+        Returns:
+            (edges, anomalies)
+            edges — sorted list of {source_domain, target_domain,
+                dependency_count, types} dicts. Edges with no derivable
+                types are omitted per AC-F6.
+            anomalies — list of {file, error} for parse or consistency issues.
+        """
+        output_dir = self._dep_map_path / "dependency-map"
+        if not output_dir.exists():
+            return [], []
+
+        domains = load_domains_json(output_dir)
+        if not domains:
+            return [], []
+
+        base_dir = output_dir.resolve()
+        edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        incoming_claims: set = set()
+        anomalies: List[Dict[str, str]] = []
+
+        for domain in domains:
+            if not isinstance(domain, dict):
+                continue
+            domain_name = domain.get("name", "")
+            if not domain_name:
+                continue
+            self._parse_domain_file_for_graph(
+                output_dir,
+                base_dir,
+                domain_name,
+                edge_data,
+                incoming_claims,
+                anomalies,
+            )
+
+        self._check_bidirectional_consistency(
+            output_dir, edge_data, incoming_claims, anomalies
+        )
+        return self._finalize_graph_edges(output_dir, edge_data, anomalies), anomalies
+
+    def _parse_domain_file_for_graph(
+        self,
+        output_dir: Path,
+        base_dir: Path,
+        domain_name: str,
+        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
+        incoming_claims: set,
+        anomalies: List[Dict[str, str]],
+    ) -> None:
+        """Read one domain file and populate edge_data and incoming_claims.
+
+        Performs path-traversal guard, then reads and validates frontmatter.
+        Outgoing and incoming sections are each wrapped in their own try/except
+        so that one section's failure does not abort the other.
+        """
+        md_file = (output_dir / f"{domain_name}.md").resolve()
+        try:
+            md_file.relative_to(base_dir)
+        except ValueError:
+            anomalies.append(
+                {"file": str(md_file), "error": "domain_name path traversal rejected"}
+            )
+            return
+
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            self._parse_frontmatter_strict(content)
+        except Exception as exc:
+            logger.warning(
+                "get_cross_domain_graph: failed to read/parse %s",
+                md_file,
+                exc_info=True,
+            )
+            anomalies.append({"file": str(md_file), "error": str(exc)})
+            return
+
+        self._collect_outgoing_edges(
+            content, domain_name, md_file, edge_data, anomalies
+        )
+        self._collect_incoming_claims(
+            content, domain_name, md_file, incoming_claims, anomalies
+        )
+
+    def _collect_outgoing_edges(
+        self,
+        content: str,
+        domain_name: str,
+        md_file: Path,
+        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
+        anomalies: List[Dict[str, str]],
+    ) -> None:
+        """Aggregate outgoing dependency rows into edge_data for domain_name."""
+        try:
+            for cells in self._iter_table_rows(
+                content,
+                "### Outgoing Dependencies",
+                _OUTGOING_MIN_COLS,
+                _OUTGOING_HEADER_SENTINEL,
+            ):
+                target_domain = cells[_COL_OUTGOING_TARGET_DOMAIN]
+                if not target_domain:
+                    continue
+                dep_type = (
+                    cells[_COL_DEP_TYPE].strip() if len(cells) > _COL_DEP_TYPE else ""
+                )
+                key = (domain_name, target_domain)
+                if key not in edge_data:
+                    edge_data[key] = {"count": 0, "types": set()}
+                edge_data[key]["count"] += 1
+                if dep_type:
+                    edge_data[key]["types"].add(dep_type)
+        except Exception as exc:
+            logger.warning(
+                "get_cross_domain_graph: failed to parse outgoing section in %s",
+                md_file,
+                exc_info=True,
+            )
+            anomalies.append(
+                {"file": str(md_file), "error": f"outgoing section: {exc}"}
+            )
+
+    def _collect_incoming_claims(
+        self,
+        content: str,
+        domain_name: str,
+        md_file: Path,
+        incoming_claims: set,
+        anomalies: List[Dict[str, str]],
+    ) -> None:
+        """Extract incoming dependency claims from domain_name's incoming table.
+
+        Each row contributes a (source_domain, domain_name) claim used by the
+        bidirectional consistency check.
+        """
+        try:
+            for cells in self._iter_table_rows(
+                content,
+                "### Incoming Dependencies",
+                _INCOMING_MIN_COLS,
+                _INCOMING_HEADER_SENTINEL,
+            ):
+                source_domain = cells[_COL_SOURCE_DOMAIN]
+                if source_domain:
+                    incoming_claims.add((source_domain, domain_name))
+        except Exception as exc:
+            logger.warning(
+                "get_cross_domain_graph: failed to parse incoming section in %s",
+                md_file,
+                exc_info=True,
+            )
+            anomalies.append(
+                {"file": str(md_file), "error": f"incoming section: {exc}"}
+            )
+
+    @staticmethod
+    def _check_bidirectional_consistency(
+        output_dir: Path,
+        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
+        incoming_claims: set,
+        anomalies: List[Dict[str, str]],
+    ) -> None:
+        """Emit anomalies for mismatched outgoing/incoming claims (both directions).
+
+        Direction 1 (O(edges)): outgoing claim A→B not confirmed by B's incoming.
+        Direction 2 (O(edges)): incoming claim A→B not confirmed by A's outgoing.
+        """
+        for src, tgt in edge_data:
+            if (src, tgt) not in incoming_claims:
+                anomalies.append(
+                    {
+                        "file": str(output_dir / f"{tgt}.md"),
+                        "error": (
+                            f"bidirectional mismatch: {src}\u2192{tgt} declared "
+                            f"outgoing by {src} but not incoming by {tgt}"
+                        ),
+                    }
+                )
+        for src, tgt in incoming_claims:
+            if (src, tgt) not in edge_data:
+                anomalies.append(
+                    {
+                        "file": str(output_dir / f"{src}.md"),
+                        "error": (
+                            f"bidirectional mismatch: {src}\u2192{tgt} declared "
+                            f"incoming by {tgt} but not outgoing by {src}"
+                        ),
+                    }
+                )
+
+    @staticmethod
+    def _finalize_graph_edges(
+        output_dir: Path,
+        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
+        anomalies: List[Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
+        """Build the final edges list, enforcing AC-F6, sorted deterministically.
+
+        Edges with an empty types set are omitted and produce an anomaly entry.
+        Remaining edges have their types converted to a sorted list for
+        deterministic JSON output.
+        """
+        edges: List[Dict[str, Any]] = []
+        for (src, tgt), data in edge_data.items():
+            types_set = data["types"]
+            if not types_set:
+                anomalies.append(
+                    {
+                        "file": str(output_dir / f"{src}.md"),
+                        "error": f"edge {src}\u2192{tgt} has no derivable types",
+                    }
+                )
+                continue
+            edges.append(
+                {
+                    "source_domain": src,
+                    "target_domain": tgt,
+                    "dependency_count": data["count"],
+                    "types": sorted(types_set),
+                }
+            )
+        edges.sort(key=lambda e: (e["source_domain"], e["target_domain"]))
+        return edges
 
     # ------------------------------------------------------------------
     # Private helpers

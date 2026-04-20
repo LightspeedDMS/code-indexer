@@ -1253,3 +1253,501 @@ class TestGetStaleDomains:
         serialized = _json.dumps(stale)
         assert "dom-serialize" in serialized
         assert "last_analyzed" in serialized
+
+
+# ---------------------------------------------------------------------------
+# S4 tests: get_cross_domain_graph
+# ---------------------------------------------------------------------------
+
+
+def _write_domain_md_graph(
+    dep_map_dir: Path,
+    domain_name: str,
+    outgoing_rows: List[Dict[str, str]],
+    incoming_rows: Optional[List[Dict[str, str]]] = None,
+) -> None:
+    """Write a domain .md for cross-domain graph tests.
+
+    Outgoing row keys: this_repo, depends_on, target_domain, dep_type.
+    Incoming row keys: external_repo, depends_on, source_domain, dep_type.
+    """
+    if dep_map_dir is None:
+        raise ValueError("dep_map_dir must not be None")
+    if not domain_name or not domain_name.strip():
+        raise ValueError("domain_name must not be empty or whitespace-only")
+    if "/" in domain_name or "\\" in domain_name or ".." in domain_name:
+        raise ValueError(
+            f"domain_name contains unsafe characters for use as a filename: {domain_name!r}"
+        )
+    if outgoing_rows is None:
+        outgoing_rows = []
+    if incoming_rows is None:
+        incoming_rows = []
+
+    # Secondary containment check — ensures the resolved path stays under base.
+    dest = (dep_map_dir / f"{domain_name}.md").resolve()
+    dest.relative_to(dep_map_dir.resolve())  # raises ValueError if dest escapes base
+
+    frontmatter = f"---\nname: {domain_name}\n---\n"
+
+    out_header = (
+        "### Outgoing Dependencies\n\n"
+        "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+    )
+    out_body = "".join(
+        f"| {r['this_repo']} | {r['depends_on']} | {r['target_domain']} | "
+        f"{r.get('dep_type', 'Code-level')} | why | evidence |\n"
+        for r in outgoing_rows
+    )
+
+    in_header = (
+        "### Incoming Dependencies\n\n"
+        "| External Repo | Depends On | Source Domain | Type | Why | Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+    )
+    in_body = "".join(
+        f"| {r['external_repo']} | {r['depends_on']} | {r['source_domain']} | "
+        f"{r.get('dep_type', 'Code-level')} | why | evidence |\n"
+        for r in incoming_rows
+    )
+
+    body = (
+        f"# Domain Analysis: {domain_name}\n\n"
+        "## Cross-Domain Connections\n\n"
+        + out_header
+        + out_body
+        + "\n"
+        + in_header
+        + in_body
+    )
+    dest.write_text(frontmatter + body, encoding="utf-8")
+
+
+class TestGetCrossDomainGraph:
+    """Tests for DepMapMCPParser.get_cross_domain_graph() — Story #858 (S4)."""
+
+    @pytest.fixture
+    def graph_root(self, dep_map_root: Path) -> Path:
+        """Four-domain graph: A→B, A→C, B→D, C→D with bidirectional consistency."""
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {"name": "domain-a", "description": "d", "participating_repos": []},
+            {"name": "domain-b", "description": "d", "participating_repos": []},
+            {"name": "domain-c", "description": "d", "participating_repos": []},
+            {"name": "domain-d", "description": "d", "participating_repos": []},
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_graph(
+            d,
+            "domain-a",
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-a1",
+                    "depends_on": "repo-b1",
+                    "target_domain": "domain-b",
+                    "dep_type": "Code-level",
+                },
+                {
+                    "this_repo": "repo-a1",
+                    "depends_on": "repo-c1",
+                    "target_domain": "domain-c",
+                    "dep_type": "Service integration",
+                },
+            ],
+            incoming_rows=[],
+        )
+        _write_domain_md_graph(
+            d,
+            "domain-b",
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-b1",
+                    "depends_on": "repo-d1",
+                    "target_domain": "domain-d",
+                    "dep_type": "Code-level",
+                },
+            ],
+            incoming_rows=[
+                {
+                    "external_repo": "repo-a1",
+                    "depends_on": "repo-b1",
+                    "source_domain": "domain-a",
+                    "dep_type": "Code-level",
+                },
+            ],
+        )
+        _write_domain_md_graph(
+            d,
+            "domain-c",
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-c1",
+                    "depends_on": "repo-d1",
+                    "target_domain": "domain-d",
+                    "dep_type": "Data contracts",
+                },
+            ],
+            incoming_rows=[
+                {
+                    "external_repo": "repo-a1",
+                    "depends_on": "repo-c1",
+                    "source_domain": "domain-a",
+                    "dep_type": "Service integration",
+                },
+            ],
+        )
+        _write_domain_md_graph(
+            d,
+            "domain-d",
+            outgoing_rows=[],
+            incoming_rows=[
+                {
+                    "external_repo": "repo-b1",
+                    "depends_on": "repo-d1",
+                    "source_domain": "domain-b",
+                    "dep_type": "Code-level",
+                },
+                {
+                    "external_repo": "repo-c1",
+                    "depends_on": "repo-d1",
+                    "source_domain": "domain-c",
+                    "dep_type": "Data contracts",
+                },
+            ],
+        )
+        return dep_map_root
+
+    def test_get_cross_domain_graph_returns_all_edges(self, graph_root: Path) -> None:
+        """Synthetic 4-domain graph yields exactly 4 edges: A→B, A→C, B→D, C→D."""
+        parser = _make_parser(graph_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        assert anomalies == [], f"Expected no anomalies, got: {anomalies}"
+        edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
+        expected = {
+            ("domain-a", "domain-b"),
+            ("domain-a", "domain-c"),
+            ("domain-b", "domain-d"),
+            ("domain-c", "domain-d"),
+        }
+        assert edge_pairs == expected, f"Edge pairs mismatch: {edge_pairs}"
+        for edge in edges:
+            assert "source_domain" in edge
+            assert "target_domain" in edge
+            assert "dependency_count" in edge
+            assert "types" in edge
+            assert isinstance(edge["types"], list)
+            assert len(edge["types"]) > 0, "types must never be empty"
+
+    def test_get_cross_domain_graph_aggregates_duplicate_edges(
+        self, dep_map_root: Path
+    ) -> None:
+        """Two outgoing rows from src to tgt → one edge with count=2, types merged."""
+        d = dep_map_root / "dependency-map"
+        _write_domains_json(
+            d,
+            [
+                {"name": "src-domain", "description": "d", "participating_repos": []},
+                {"name": "tgt-domain", "description": "d", "participating_repos": []},
+            ],
+        )
+        _write_domain_md_graph(
+            d,
+            "src-domain",
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-s1",
+                    "depends_on": "repo-t1",
+                    "target_domain": "tgt-domain",
+                    "dep_type": "Code-level",
+                },
+                {
+                    "this_repo": "repo-s2",
+                    "depends_on": "repo-t1",
+                    "target_domain": "tgt-domain",
+                    "dep_type": "Service integration",
+                },
+            ],
+            incoming_rows=[],
+        )
+        _write_domain_md_graph(
+            d,
+            "tgt-domain",
+            outgoing_rows=[],
+            incoming_rows=[
+                {
+                    "external_repo": "repo-s1",
+                    "depends_on": "repo-t1",
+                    "source_domain": "src-domain",
+                    "dep_type": "Code-level",
+                },
+                {
+                    "external_repo": "repo-s2",
+                    "depends_on": "repo-t1",
+                    "source_domain": "src-domain",
+                    "dep_type": "Service integration",
+                },
+            ],
+        )
+
+        parser = _make_parser(dep_map_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        assert anomalies == []
+        assert len(edges) == 1, f"Expected exactly 1 aggregated edge, got {len(edges)}"
+        edge = edges[0]
+        assert edge["source_domain"] == "src-domain"
+        assert edge["target_domain"] == "tgt-domain"
+        assert edge["dependency_count"] == 2
+        assert set(edge["types"]) == {"Code-level", "Service integration"}
+
+    def test_get_cross_domain_graph_deterministic_type_order(
+        self, dep_map_root: Path
+    ) -> None:
+        """types list is sorted alphabetically for deterministic output."""
+        d = dep_map_root / "dependency-map"
+        _write_domains_json(
+            d,
+            [
+                {"name": "dom-x", "description": "d", "participating_repos": []},
+                {"name": "dom-y", "description": "d", "participating_repos": []},
+            ],
+        )
+        _write_domain_md_graph(
+            d,
+            "dom-x",
+            outgoing_rows=[
+                {
+                    "this_repo": "r1",
+                    "depends_on": "r2",
+                    "target_domain": "dom-y",
+                    "dep_type": "Service integration",
+                },
+                {
+                    "this_repo": "r1",
+                    "depends_on": "r3",
+                    "target_domain": "dom-y",
+                    "dep_type": "Code-level",
+                },
+                {
+                    "this_repo": "r1",
+                    "depends_on": "r4",
+                    "target_domain": "dom-y",
+                    "dep_type": "Data contracts",
+                },
+            ],
+            incoming_rows=[],
+        )
+        _write_domain_md_graph(
+            d,
+            "dom-y",
+            outgoing_rows=[],
+            incoming_rows=[
+                {
+                    "external_repo": "r1",
+                    "depends_on": "r2",
+                    "source_domain": "dom-x",
+                    "dep_type": "Service integration",
+                },
+                {
+                    "external_repo": "r1",
+                    "depends_on": "r3",
+                    "source_domain": "dom-x",
+                    "dep_type": "Code-level",
+                },
+                {
+                    "external_repo": "r1",
+                    "depends_on": "r4",
+                    "source_domain": "dom-x",
+                    "dep_type": "Data contracts",
+                },
+            ],
+        )
+
+        parser = _make_parser(dep_map_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        assert anomalies == []
+        assert len(edges) == 1
+        types = edges[0]["types"]
+        assert types == sorted(types), f"types not sorted: {types}"
+        assert types == ["Code-level", "Data contracts", "Service integration"]
+
+    def test_get_cross_domain_graph_malformed_file_produces_anomaly_not_exception(
+        self, dep_map_root: Path
+    ) -> None:
+        """Malformed YAML in one file → anomaly recorded, healthy edges still returned."""
+        d = dep_map_root / "dependency-map"
+        _write_domains_json(
+            d,
+            [
+                {
+                    "name": "healthy-domain",
+                    "description": "d",
+                    "participating_repos": [],
+                },
+                {
+                    "name": "broken-domain",
+                    "description": "d",
+                    "participating_repos": [],
+                },
+                {
+                    "name": "target-domain",
+                    "description": "d",
+                    "participating_repos": [],
+                },
+            ],
+        )
+        _write_domain_md_graph(
+            d,
+            "healthy-domain",
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-h",
+                    "depends_on": "repo-t",
+                    "target_domain": "target-domain",
+                    "dep_type": "Code-level",
+                },
+            ],
+            incoming_rows=[],
+        )
+        (d / "broken-domain.md").write_text(
+            "---\nname: [unclosed bracket\nbroken: :\n---\n# Domain Analysis\n",
+            encoding="utf-8",
+        )
+        _write_domain_md_graph(
+            d,
+            "target-domain",
+            outgoing_rows=[],
+            incoming_rows=[
+                {
+                    "external_repo": "repo-h",
+                    "depends_on": "repo-t",
+                    "source_domain": "healthy-domain",
+                    "dep_type": "Code-level",
+                },
+            ],
+        )
+
+        parser = _make_parser(dep_map_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        assert len(anomalies) >= 1, "Expected anomaly for broken-domain"
+        assert any("broken-domain" in a["file"] for a in anomalies)
+        edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
+        assert ("healthy-domain", "target-domain") in edge_pairs, (
+            "Healthy edges must still be returned when one file is malformed"
+        )
+
+    def test_get_cross_domain_graph_bidirectional_mismatch_emits_anomaly(
+        self, dep_map_root: Path
+    ) -> None:
+        """A's outgoing says A→B, but B's incoming omits A → bidirectional anomaly emitted."""
+        d = dep_map_root / "dependency-map"
+        _write_domains_json(
+            d,
+            [
+                {"name": "source-dom", "description": "d", "participating_repos": []},
+                {"name": "target-dom", "description": "d", "participating_repos": []},
+            ],
+        )
+        _write_domain_md_graph(
+            d,
+            "source-dom",
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-s",
+                    "depends_on": "repo-t",
+                    "target_domain": "target-dom",
+                    "dep_type": "Code-level",
+                },
+            ],
+            incoming_rows=[],
+        )
+        # target-dom has NO incoming from source-dom (deliberate mismatch)
+        _write_domain_md_graph(d, "target-dom", outgoing_rows=[], incoming_rows=[])
+
+        parser = _make_parser(dep_map_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
+        assert ("source-dom", "target-dom") in edge_pairs, (
+            "Edge must still be emitted even when incoming verification fails"
+        )
+        assert len(anomalies) >= 1, "Expected anomaly for bidirectional mismatch"
+        anomaly_text = " ".join(
+            a.get("error", "") + a.get("file", "") for a in anomalies
+        )
+        assert "source-dom" in anomaly_text or "target-dom" in anomaly_text, (
+            f"Anomaly must reference the mismatched domains, got: {anomalies}"
+        )
+
+    def test_get_cross_domain_graph_empty_when_no_domains(
+        self, dep_map_root: Path
+    ) -> None:
+        """Empty _domains.json → edges=[], anomalies=[]."""
+        d = dep_map_root / "dependency-map"
+        _write_domains_json(d, [])
+
+        parser = _make_parser(dep_map_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        assert edges == []
+        assert anomalies == []
+
+    def test_get_cross_domain_graph_missing_dep_map_path_returns_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-existent dep_map_path → ([], []) from parser; handler surfaces success=false."""
+        parser = _make_parser(tmp_path / "no-such-dir")
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        assert edges == []
+        assert anomalies == []
+
+    def test_get_cross_domain_graph_edge_with_no_derivable_types_emits_anomaly_and_omits_edge(
+        self, dep_map_root: Path
+    ) -> None:
+        """Outgoing row with blank dep_type → anomaly recorded, edge omitted (AC-F6)."""
+        d = dep_map_root / "dependency-map"
+        _write_domains_json(
+            d,
+            [
+                {
+                    "name": "empty-type-src",
+                    "description": "d",
+                    "participating_repos": [],
+                },
+                {
+                    "name": "empty-type-tgt",
+                    "description": "d",
+                    "participating_repos": [],
+                },
+            ],
+        )
+        # Manually write a file with a blank Type column in the outgoing table.
+        frontmatter = "---\nname: empty-type-src\n---\n"
+        body = (
+            "# Domain Analysis: empty-type-src\n\n"
+            "## Cross-Domain Connections\n\n"
+            "### Outgoing Dependencies\n\n"
+            "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+            "| repo-e | repo-t | empty-type-tgt |  | why | evidence |\n"
+            "\n"
+            "### Incoming Dependencies\n\n"
+            "| External Repo | Depends On | Source Domain | Type | Why | Evidence |\n"
+            "|---|---|---|---|---|---|\n"
+        )
+        (d / "empty-type-src.md").write_text(frontmatter + body, encoding="utf-8")
+        _write_domain_md_graph(d, "empty-type-tgt", outgoing_rows=[], incoming_rows=[])
+
+        parser = _make_parser(dep_map_root)
+        edges, anomalies = parser.get_cross_domain_graph()
+
+        edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
+        assert ("empty-type-src", "empty-type-tgt") not in edge_pairs, (
+            "Edge with no derivable types must be omitted per AC-F6"
+        )
+        assert len(anomalies) >= 1, "Expected anomaly when edge has no derivable types"

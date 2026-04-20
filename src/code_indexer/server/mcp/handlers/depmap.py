@@ -193,9 +193,33 @@ def depmap_get_stale_domains_handler(
     )
 
 
+def depmap_get_cross_domain_graph_handler(
+    params: Dict[str, Any], user: Any
+) -> Dict[str, Any]:
+    """
+    MCP handler for depmap_get_cross_domain_graph.
+
+    Returns the full directed domain-to-domain edge graph across all domains.
+    Takes no required arguments; unknown arguments are ignored gracefully.
+    dep_map_path is resolved fresh on every call via app.state.
+
+    Returns:
+        MCP-compliant response dict:
+        - success=true:  {"success": true, "edges": [...], "anomalies": [...]}
+        - success=false: {"success": false, "error": "...", "edges": [], "anomalies": []}
+    """
+    parser, err = _resolve_parser("depmap_get_cross_domain_graph")
+    if err is not None:
+        return _mcp_response({**err, "edges": [], "anomalies": []})
+
+    edges, anomalies = parser.get_cross_domain_graph()
+    return _mcp_response({"success": True, "edges": edges, "anomalies": anomalies})
+
+
 def _register(registry: Dict[str, Any]) -> None:
     """Register depmap handlers in the HANDLER_REGISTRY."""
     registry["depmap_find_consumers"] = depmap_find_consumers_handler
     registry["depmap_get_repo_domains"] = depmap_get_repo_domains_handler
     registry["depmap_get_domain_summary"] = depmap_get_domain_summary_handler
     registry["depmap_get_stale_domains"] = depmap_get_stale_domains_handler
+    registry["depmap_get_cross_domain_graph"] = depmap_get_cross_domain_graph_handler
