@@ -10,7 +10,7 @@ import os
 import pytest
 
 
-# Single source of truth for all 121 expected HANDLER_REGISTRY keys (AC7)
+# Single source of truth for all 122 expected HANDLER_REGISTRY keys (AC7)
 EXPECTED_REGISTRY_KEYS = frozenset(
     {
         # Dict literal entries from original HANDLER_REGISTRY definition
@@ -171,6 +171,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "manage_provider_indexes",
         "bulk_add_provider_index",
         "get_provider_health",
+        "depmap_find_consumers",
     }
 )
 
@@ -188,6 +189,7 @@ DOMAIN_MODULES = [
     "ssh_keys",
     "delegation",
     "guides",
+    "depmap",
 ]
 
 # Short and absolute package names for the handlers package
