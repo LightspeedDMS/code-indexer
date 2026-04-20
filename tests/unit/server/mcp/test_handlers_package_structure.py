@@ -172,6 +172,8 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "bulk_add_provider_index",
         "get_provider_health",
         "depmap_find_consumers",
+        "depmap_get_repo_domains",
+        "depmap_get_domain_summary",
     }
 )
 

@@ -337,3 +337,394 @@ class TestParserStubMethods:
         result, anomalies = getattr(empty_parser, method)(*args)
         assert result == expected_result
         assert anomalies == []
+
+
+# ---------------------------------------------------------------------------
+# S2 test helpers — split into small focused builders
+# ---------------------------------------------------------------------------
+
+
+def _build_frontmatter(domain_name: str, repos: List[str]) -> str:
+    """Build YAML frontmatter block for a domain markdown file."""
+    repos_list = "\n".join(f"  - {r}" for r in repos)
+    return f"---\ndomain: {domain_name}\nparticipating_repos:\n{repos_list}\n---\n"
+
+
+def _build_roles_table(roles: List[Dict[str, str]]) -> str:
+    """Build the '## Repository Roles' markdown table."""
+    header = "## Repository Roles\n\n| Repository | Language | Role |\n|---|---|---|\n"
+    rows = "".join(
+        f"| {r['repo']} | {r.get('language', 'Python')} | {r['role']} |\n"
+        for r in roles
+    )
+    return header + rows
+
+
+def _build_outgoing_table(rows: List[Dict[str, str]]) -> str:
+    """Build the '### Outgoing Dependencies' markdown table."""
+    header = (
+        "### Outgoing Dependencies\n\n"
+        "| This Repo | Depends On | Target Domain | Type | Why | Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+    )
+    body = "".join(
+        f"| {r['this_repo']} | {r['depends_on']} | {r['target_domain']} | "
+        f"{r.get('dep_type', 'Code-level')} | {r.get('why', 'why')} | "
+        f"{r.get('evidence', 'evidence')} |\n"
+        for r in rows
+    )
+    return header + body
+
+
+def _build_incoming_table(rows: List[Dict[str, str]]) -> str:
+    """Build the '### Incoming Dependencies' markdown table."""
+    header = (
+        "### Incoming Dependencies\n\n"
+        "| External Repo | Depends On | Source Domain | Type | Why | Evidence |\n"
+        "|---|---|---|---|---|---|\n"
+    )
+    body = "".join(
+        f"| {r['external_repo']} | {r['depends_on']} | {r['source_domain']} | "
+        f"{r.get('dep_type', 'Code-level')} | {r.get('why', 'why')} | "
+        f"{r.get('evidence', 'evidence')} |\n"
+        for r in rows
+    )
+    return header + body
+
+
+def _write_domain_md_full(
+    dep_map_dir: Path,
+    domain_name: str,
+    roles: List[Dict[str, str]],
+    outgoing_rows: Optional[List[Dict[str, str]]] = None,
+    incoming_rows: Optional[List[Dict[str, str]]] = None,
+) -> None:
+    """Write a complete domain .md file with frontmatter + roles + dependency tables."""
+    if outgoing_rows is None:
+        outgoing_rows = []
+    if incoming_rows is None:
+        incoming_rows = []
+
+    repo_names = [r["repo"] for r in roles]
+    frontmatter = _build_frontmatter(domain_name, repo_names)
+    roles_section = _build_roles_table(roles)
+    outgoing_section = _build_outgoing_table(outgoing_rows)
+    incoming_section = _build_incoming_table(incoming_rows)
+
+    body = (
+        f"# Domain Analysis: {domain_name}\n\n"
+        "## Overview\n\nOverview text.\n\n"
+        + roles_section
+        + "\n## Cross-Domain Connections\n\n"
+        + outgoing_section
+        + "\n"
+        + incoming_section
+    )
+    (dep_map_dir / f"{domain_name}.md").write_text(frontmatter + body, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# S2 tests: get_repo_domains
+# ---------------------------------------------------------------------------
+
+
+class TestGetRepoDomains:
+    @pytest.fixture
+    def multi_domain_repo_root(self, dep_map_root: Path) -> Path:
+        """repo-alpha participates in 2 domains; repo-beta in 1; repo-gamma in 2 others."""
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "domain-one",
+                "description": "First domain",
+                "participating_repos": ["repo-alpha", "repo-beta"],
+            },
+            {
+                "name": "domain-two",
+                "description": "Second domain",
+                "participating_repos": ["repo-alpha", "repo-gamma"],
+            },
+            {
+                "name": "domain-three",
+                "description": "Third domain",
+                "participating_repos": ["repo-gamma"],
+            },
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_full(
+            d,
+            "domain-one",
+            [
+                {"repo": "repo-alpha", "language": "Python", "role": "Primary service"},
+                {"repo": "repo-beta", "language": "Python", "role": "Consumer"},
+            ],
+        )
+        _write_domain_md_full(
+            d,
+            "domain-two",
+            [
+                {"repo": "repo-alpha", "language": "Python", "role": "Core library"},
+                {"repo": "repo-gamma", "language": "Java", "role": "Integration"},
+            ],
+        )
+        _write_domain_md_full(
+            d,
+            "domain-three",
+            [
+                {"repo": "repo-gamma", "language": "Java", "role": "Standalone"},
+            ],
+        )
+        return dep_map_root
+
+    def test_get_repo_domains_returns_all_memberships(
+        self, multi_domain_repo_root: Path
+    ) -> None:
+        """repo-alpha is in 2 domains → 2 entries with correct domain_name and role.
+
+        This test is RED under the S1 stub (returns [] instead of 2 entries).
+        """
+        parser = _make_parser(multi_domain_repo_root)
+        domains, anomalies = parser.get_repo_domains("repo-alpha")
+
+        assert anomalies == []
+        assert len(domains) == 2
+        domain_names = {d["domain_name"] for d in domains}
+        assert domain_names == {"domain-one", "domain-two"}
+        for entry in domains:
+            assert "domain_name" in entry
+            assert "role" in entry
+            assert entry["role"]  # non-empty role
+
+        role_by_domain = {d["domain_name"]: d["role"] for d in domains}
+        assert role_by_domain["domain-one"] == "Primary service"
+        assert role_by_domain["domain-two"] == "Core library"
+
+    def test_get_repo_domains_unknown_repo_returns_empty(
+        self, multi_domain_repo_root: Path
+    ) -> None:
+        """Repo not in any domain → ([], []) with no anomalies.
+
+        Already passes under the stub — included to guard against regression.
+        """
+        parser = _make_parser(multi_domain_repo_root)
+        domains, anomalies = parser.get_repo_domains("nonexistent-repo")
+
+        assert domains == []
+        assert anomalies == []
+
+    def test_get_repo_domains_handles_malformed_domain_markdown(
+        self, dep_map_root: Path
+    ) -> None:
+        """Malformed YAML frontmatter in one domain .md → anomaly recorded, other entries preserved.
+
+        This test is RED under the S1 stub (returns [] and [] instead of partial results + anomaly).
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "domain-good",
+                "description": "Good",
+                "participating_repos": ["repo-a", "target-repo"],
+            },
+            {
+                "name": "domain-bad",
+                "description": "Bad",
+                "participating_repos": ["target-repo"],
+            },
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_full(
+            d,
+            "domain-good",
+            [
+                {"repo": "repo-a", "language": "Python", "role": "Consumer"},
+                {"repo": "target-repo", "language": "Python", "role": "Provider"},
+            ],
+        )
+        # Write malformed YAML frontmatter for domain-bad
+        bad_content = "---\ndomain: [unclosed bracket\nbroken: :\n---\n# bad\n\n"
+        (d / "domain-bad.md").write_text(bad_content, encoding="utf-8")
+
+        parser = _make_parser(dep_map_root)
+        domains_result, anomalies = parser.get_repo_domains("target-repo")
+
+        # domain-good entry should still be returned
+        assert any(r["domain_name"] == "domain-good" for r in domains_result)
+        # An anomaly from the malformed file
+        assert len(anomalies) >= 1
+        assert "domain-bad" in anomalies[0]["file"]
+
+    def test_get_repo_domains_missing_path_returns_empty_no_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-existent dep_map_path → ([], []) from parser.
+
+        Already passes under the stub — included to guard against regression.
+        """
+        parser = _make_parser(tmp_path / "no-such-dir")
+        domains, anomalies = parser.get_repo_domains("any-repo")
+
+        assert domains == []
+        assert anomalies == []
+
+
+# ---------------------------------------------------------------------------
+# S2 tests: get_domain_summary
+# ---------------------------------------------------------------------------
+
+
+class TestGetDomainSummary:
+    @pytest.fixture
+    def summary_root(self, dep_map_root: Path) -> Path:
+        """Set up a domain with full structure for summary parsing."""
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "my-domain",
+                "description": "A full test domain",
+                "participating_repos": ["repo-x", "repo-y"],
+            }
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_full(
+            d,
+            "my-domain",
+            [
+                {"repo": "repo-x", "language": "Python", "role": "Core service"},
+                {"repo": "repo-y", "language": "Java", "role": "Test fixture"},
+            ],
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-x",
+                    "depends_on": "repo-z",
+                    "target_domain": "other-domain",
+                    "dep_type": "Code-level",
+                    "why": "imports",
+                    "evidence": "main.py",
+                },
+                {
+                    "this_repo": "repo-x",
+                    "depends_on": "repo-w",
+                    "target_domain": "other-domain",
+                    "dep_type": "Service integration",
+                    "why": "REST",
+                    "evidence": "client.py",
+                },
+                {
+                    "this_repo": "repo-y",
+                    "depends_on": "repo-q",
+                    "target_domain": "third-domain",
+                    "dep_type": "Data contracts",
+                    "why": "schema",
+                    "evidence": "schema.json",
+                },
+            ],
+        )
+        return dep_map_root
+
+    def test_get_domain_summary_returns_full_structure(
+        self, summary_root: Path
+    ) -> None:
+        """Known domain returns summary with name, description, participating_repos,
+        cross_domain_connections.
+
+        This test is RED under the S1 stub (returns None instead of a dict).
+        """
+        parser = _make_parser(summary_root)
+        summary, anomalies = parser.get_domain_summary("my-domain")
+
+        assert anomalies == []
+        assert summary is not None
+        assert summary["name"] == "my-domain"
+        assert summary["description"] == "A full test domain"
+
+        pr = summary["participating_repos"]
+        assert len(pr) == 2
+        repo_names = {r["repo"] for r in pr}
+        assert repo_names == {"repo-x", "repo-y"}
+        role_by_repo = {r["repo"]: r["role"] for r in pr}
+        assert role_by_repo["repo-x"] == "Core service"
+        assert role_by_repo["repo-y"] == "Test fixture"
+
+        cdc = summary["cross_domain_connections"]
+        target_domains = {c["target_domain"] for c in cdc}
+        assert "other-domain" in target_domains
+        assert "third-domain" in target_domains
+        count_by_domain = {c["target_domain"]: c["dependency_count"] for c in cdc}
+        assert count_by_domain["other-domain"] == 2
+        assert count_by_domain["third-domain"] == 1
+
+    def test_get_domain_summary_unknown_domain_returns_null(
+        self, summary_root: Path
+    ) -> None:
+        """Domain not in _domains.json → (None, []).
+
+        Already passes under the stub — included to guard against regression.
+        """
+        parser = _make_parser(summary_root)
+        summary, anomalies = parser.get_domain_summary("nonexistent-domain")
+
+        assert summary is None
+        assert anomalies == []
+
+    def test_get_domain_summary_partial_parse_when_section_malformed(
+        self, dep_map_root: Path
+    ) -> None:
+        """When a domain file has malformed YAML frontmatter, an anomaly is recorded
+        but the requested domain summary is still returned if its own file is parseable.
+
+        This test is RED under the S1 stub (returns None instead of a summary dict).
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "target-domain",
+                "description": "Target domain desc",
+                "participating_repos": ["repo-a"],
+            },
+            {
+                "name": "other-domain",
+                "description": "Other",
+                "participating_repos": ["repo-b"],
+            },
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_full(
+            d,
+            "target-domain",
+            [{"repo": "repo-a", "language": "Python", "role": "Main"}],
+            outgoing_rows=[
+                {
+                    "this_repo": "repo-a",
+                    "depends_on": "repo-b",
+                    "target_domain": "other-domain",
+                    "dep_type": "Code-level",
+                    "why": "imports",
+                    "evidence": "main.py",
+                }
+            ],
+        )
+        # Write malformed other-domain .md
+        bad_content = "---\ndomain: [unclosed\nbroken: :\n---\n# bad\n\n"
+        (d / "other-domain.md").write_text(bad_content, encoding="utf-8")
+
+        parser = _make_parser(dep_map_root)
+        summary, anomalies = parser.get_domain_summary("target-domain")
+
+        # Summary for target-domain should still be returned
+        assert summary is not None
+        assert summary["name"] == "target-domain"
+        assert summary["description"] == "Target domain desc"
+
+    def test_get_domain_summary_missing_path_returns_none_no_exception(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-existent dep_map_path → (None, []) from parser.
+
+        Already passes under the stub — included to guard against regression.
+        """
+        parser = _make_parser(tmp_path / "no-such-dir")
+        summary, anomalies = parser.get_domain_summary("any-domain")
+
+        assert summary is None
+        assert anomalies == []

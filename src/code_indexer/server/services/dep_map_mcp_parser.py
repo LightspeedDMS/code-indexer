@@ -5,12 +5,13 @@ Reads the dependency-map directory from cidx-meta and exposes query methods
 used by the depmap MCP handlers. No I/O at construction; all I/O deferred
 to method calls.
 
-Only find_consumers is fully implemented in Story #855 (S1).
-The remaining four methods are correct-signature stubs — Stories 2-4 are
-strictly additive.
+find_consumers is fully implemented in Story #855 (S1).
+get_repo_domains and get_domain_summary are fully implemented in Story #856 (S2).
+get_stale_domains and get_cross_domain_graph remain stubs for Stories S3-S4.
 """
 
 import logging
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +32,18 @@ _COL_DEP_TYPE = 3
 _COL_WHY = 4
 _COL_EVIDENCE = 5
 _INCOMING_MIN_COLS = 6
+
+# Column indices in the Repository Roles table (0-based)
+_COL_ROLES_REPO = 0
+_COL_ROLES_ROLE = 2
+_ROLES_MIN_COLS = 3
+_ROLES_HEADER_SENTINEL = "Repository"
+
+# Column indices in the Outgoing Dependencies table (0-based)
+_COL_OUTGOING_SOURCE_REPO = 0
+_COL_OUTGOING_TARGET_DOMAIN = 2
+_OUTGOING_MIN_COLS = 4
+_OUTGOING_HEADER_SENTINEL = "This Repo"
 
 # Header sentinel to skip when parsing table rows
 _INCOMING_HEADER_SENTINEL = "External Repo"
@@ -125,15 +138,110 @@ class DepMapMCPParser:
 
     def get_repo_domains(
         self, repo_name: str
-    ) -> Tuple[List[str], List[Dict[str, str]]]:
-        """Stub — Story 2 will implement. Returns ([], [])."""
-        return [], []
+    ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+        """Return all domains that repo_name participates in, with its role in each.
+
+        Reads _domains.json for domain membership. For each matching domain,
+        reads the domain .md file and extracts the repo's role from the
+        Repository Roles table. Malformed .md files are captured as anomalies;
+        other domains continue to be processed.
+
+        Missing dependency-map directory returns ([], []) with no exception.
+
+        Returns:
+            (memberships, anomalies)
+            memberships — list of {domain_name, role}
+            anomalies   — list of {file, error}
+        """
+        output_dir = self._dep_map_path / "dependency-map"
+        if not output_dir.exists():
+            return [], []
+
+        domains = load_domains_json(output_dir)
+        memberships: List[Dict[str, str]] = []
+        anomalies: List[Dict[str, str]] = []
+
+        for domain in domains:
+            if not isinstance(domain, dict):
+                continue
+            domain_name = domain.get("name", "")
+            if not domain_name:
+                continue
+            if repo_name not in (domain.get("participating_repos") or []):
+                continue
+
+            md_file = output_dir / f"{domain_name}.md"
+            role = ""
+            if md_file.exists():
+                try:
+                    content = md_file.read_text(encoding="utf-8")
+                    self._parse_frontmatter_strict(content)  # raises on malformed YAML
+                    role = self._parse_roles_table(content).get(repo_name, "")
+                except Exception as exc:
+                    logger.warning(
+                        "get_repo_domains: failed to parse %s: %s", md_file, exc
+                    )
+                    anomalies.append({"file": str(md_file), "error": str(exc)})
+                    memberships.append({"domain_name": domain_name, "role": ""})
+                    continue
+
+            memberships.append({"domain_name": domain_name, "role": role})
+
+        return memberships, anomalies
 
     def get_domain_summary(
         self, domain_name: str
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, str]]]:
-        """Stub — Story 3 will implement. Returns (None, [])."""
-        return None, []
+        """Return structured summary for a named domain.
+
+        Looks up the domain in _domains.json, then reads its .md file.
+        Each parse section (roles table, outgoing table) is independently
+        try/except wrapped so partial failures produce anomalies rather than
+        aborting the whole response.
+
+        Unknown domain returns (None, []). Missing dep-map path returns (None, []).
+
+        Returns:
+            (summary, anomalies)
+            summary — dict or None:
+                {name, description, participating_repos, cross_domain_connections}
+            anomalies — list of {file, error}
+        """
+        output_dir = self._dep_map_path / "dependency-map"
+        if not output_dir.exists():
+            return None, []
+
+        domains = load_domains_json(output_dir)
+        domain_entry = self._lookup_domain_entry(domains, domain_name)
+        if domain_entry is None:
+            return None, []
+
+        description = domain_entry.get("description", "")
+        anomalies: List[Dict[str, str]] = []
+        md_file = output_dir / f"{domain_name}.md"
+
+        content, read_anomaly = self._read_domain_md_content(md_file)
+        if read_anomaly:
+            anomalies.append(read_anomaly)
+
+        participating_repos, pr_anomaly = self._build_participating_repos(
+            content, md_file
+        )
+        if pr_anomaly:
+            anomalies.append(pr_anomaly)
+
+        cross_domain_connections, cdc_anomaly = self._build_cross_domain_connections(
+            content, md_file
+        )
+        if cdc_anomaly:
+            anomalies.append(cdc_anomaly)
+
+        return {
+            "name": domain_name,
+            "description": description,
+            "participating_repos": participating_repos,
+            "cross_domain_connections": cross_domain_connections,
+        }, anomalies
 
     def get_stale_domains(
         self,
@@ -150,6 +258,194 @@ class DepMapMCPParser:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Low-level table parsers (S2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _iter_table_rows(
+        content: str,
+        section_heading: str,
+        min_cols: int,
+        header_sentinel: str,
+    ):
+        """Yield cell lists for each data row in a named markdown table section.
+
+        Activates on `section_heading`. Exits when a subsequent heading whose
+        level (number of leading `#` chars) is <= the section heading's level
+        is encountered.
+
+        Args:
+            content: Full markdown file content.
+            section_heading: Exact heading string (e.g. "## Repository Roles").
+            min_cols: Minimum number of pipe-separated cells required.
+            header_sentinel: First-cell value that identifies the header row.
+
+        Yields:
+            List[str] of stripped cell values for each qualifying data row.
+        """
+        # Compute target section level from leading '#' characters
+        section_level = len(section_heading) - len(section_heading.lstrip("#"))
+        in_section = False
+
+        for line in content.splitlines():
+            stripped = line.strip()
+
+            if stripped == section_heading:
+                in_section = True
+                continue
+
+            if in_section and stripped.startswith("#"):
+                # Compute level of the new heading inline
+                lvl = len(stripped) - len(stripped.lstrip("#"))
+                if lvl > 0 and stripped[lvl : lvl + 1] == " " and lvl <= section_level:
+                    break
+
+            if not in_section:
+                continue
+
+            if not (stripped.startswith("|") and stripped.endswith("|")):
+                continue
+
+            cells = [c.strip() for c in stripped.split("|")[1:-1]]
+            if len(cells) < min_cols:
+                continue
+            if cells[0] == header_sentinel:
+                continue
+            if set(cells[0]) <= frozenset("-"):
+                continue
+
+            yield cells
+
+    @staticmethod
+    def _parse_roles_table(content: str) -> Dict[str, str]:
+        """Extract repo→role mapping from the '## Repository Roles' table.
+
+        Expected columns (at least 3): Repository | Language | Role
+
+        Returns dict of {repo_name: role_str}.
+        """
+        result: Dict[str, str] = {}
+        for cells in DepMapMCPParser._iter_table_rows(
+            content, "## Repository Roles", _ROLES_MIN_COLS, _ROLES_HEADER_SENTINEL
+        ):
+            repo = cells[_COL_ROLES_REPO].strip("*")  # strip bold markers
+            role = cells[_COL_ROLES_ROLE]
+            if repo:
+                result[repo] = role
+        return result
+
+    @staticmethod
+    def _parse_outgoing_table(content: str) -> Dict[str, int]:
+        """Count rows per target_domain in the '### Outgoing Dependencies' table.
+
+        Expected columns (at least 4):
+          This Repo | Depends On | Target Domain | Type | ...
+
+        Returns dict of {target_domain: row_count}.
+        """
+        counts: Dict[str, int] = defaultdict(int)
+        for cells in DepMapMCPParser._iter_table_rows(
+            content,
+            "### Outgoing Dependencies",
+            _OUTGOING_MIN_COLS,
+            _OUTGOING_HEADER_SENTINEL,
+        ):
+            target = cells[_COL_OUTGOING_TARGET_DOMAIN]
+            if target:
+                counts[target] += 1
+        return dict(counts)
+
+    # ------------------------------------------------------------------
+    # Domain lookup and file I/O helpers (S2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lookup_domain_entry(
+        domains: List[Dict[str, Any]], domain_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the first domain dict whose 'name' equals domain_name, or None."""
+        for d in domains:
+            if isinstance(d, dict) and d.get("name") == domain_name:
+                return d
+        return None
+
+    @staticmethod
+    def _read_domain_md_content(
+        md_file: Path,
+    ) -> Tuple[str, Optional[Dict[str, str]]]:
+        """Read a domain .md file and return its content.
+
+        Returns:
+            (content, None) on success.
+            ("", anomaly_dict) on any failure (missing file or read error),
+            after logging a warning for every failure path.
+        """
+        if not md_file.exists():
+            logger.warning("get_domain_summary: .md file not found: %s", md_file)
+            return "", {"file": str(md_file), "error": "file not found"}
+        try:
+            return md_file.read_text(encoding="utf-8"), None
+        except Exception as exc:
+            logger.warning("get_domain_summary: failed to read %s: %s", md_file, exc)
+            return "", {"file": str(md_file), "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Summary builder helpers (S2)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_participating_repos(
+        content: str,
+        md_file: Path,
+    ) -> Tuple[List[Dict[str, str]], Optional[Dict[str, str]]]:
+        """Extract participating_repos from the Repository Roles table.
+
+        Returns:
+            ([{repo, role}, ...], None) on success.
+            ([], anomaly_dict) on parse error, after logging a warning.
+            ([], None) when content is empty (file was not readable).
+        """
+        if not content:
+            return [], None
+        try:
+            roles_map = DepMapMCPParser._parse_roles_table(content)
+            return [{"repo": r, "role": role} for r, role in roles_map.items()], None
+        except Exception as exc:
+            logger.warning(
+                "get_domain_summary: failed to parse roles table in %s: %s",
+                md_file,
+                exc,
+            )
+            return [], {"file": str(md_file), "error": str(exc)}
+
+    @staticmethod
+    def _build_cross_domain_connections(
+        content: str,
+        md_file: Path,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, str]]]:
+        """Extract cross_domain_connections from the Outgoing Dependencies table.
+
+        Returns:
+            ([{target_domain, dependency_count}, ...], None) on success.
+            ([], anomaly_dict) on parse error, after logging a warning.
+            ([], None) when content is empty (file was not readable).
+        """
+        if not content:
+            return [], None
+        try:
+            counts = DepMapMCPParser._parse_outgoing_table(content)
+            return [
+                {"target_domain": t, "dependency_count": c} for t, c in counts.items()
+            ], None
+        except Exception as exc:
+            logger.warning(
+                "get_domain_summary: failed to parse outgoing table in %s: %s",
+                md_file,
+                exc,
+            )
+            return [], {"file": str(md_file), "error": str(exc)}
 
     def _parse_file_for_consumers(
         self,
