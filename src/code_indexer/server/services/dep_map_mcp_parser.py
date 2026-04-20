@@ -195,9 +195,10 @@ class DepMapMCPParser:
         """Return structured summary for a named domain.
 
         Looks up the domain in _domains.json, then reads its .md file.
-        Each parse section (roles table, outgoing table) is independently
-        try/except wrapped so partial failures produce anomalies rather than
-        aborting the whole response.
+        Each parse section (frontmatter, roles table, outgoing table) is
+        independently try/except wrapped so partial failures produce anomalies
+        with the section name in the error string rather than aborting the
+        whole response.
 
         Unknown domain returns (None, []). Missing dep-map path returns (None, []).
 
@@ -216,7 +217,6 @@ class DepMapMCPParser:
         if domain_entry is None:
             return None, []
 
-        description = domain_entry.get("description", "")
         anomalies: List[Dict[str, str]] = []
         md_file = output_dir / f"{domain_name}.md"
 
@@ -224,12 +224,25 @@ class DepMapMCPParser:
         if read_anomaly:
             anomalies.append(read_anomaly)
 
+        # Section 1: frontmatter — name and description from the .md file itself,
+        # with _domains.json values as fallbacks when the file omits those keys.
+        name, description, fm_anomaly = self._build_name_description(
+            content,
+            md_file,
+            fallback_name=domain_name,
+            fallback_description=domain_entry.get("description", ""),
+        )
+        if fm_anomaly:
+            anomalies.append(fm_anomaly)
+
+        # Section 2: participating_repos from Repository Roles table
         participating_repos, pr_anomaly = self._build_participating_repos(
             content, md_file
         )
         if pr_anomaly:
             anomalies.append(pr_anomaly)
 
+        # Section 3: cross_domain_connections from Outgoing Dependencies table
         cross_domain_connections, cdc_anomaly = self._build_cross_domain_connections(
             content, md_file
         )
@@ -237,7 +250,7 @@ class DepMapMCPParser:
             anomalies.append(cdc_anomaly)
 
         return {
-            "name": domain_name,
+            "name": name,
             "description": description,
             "participating_repos": participating_repos,
             "cross_domain_connections": cross_domain_connections,
@@ -396,11 +409,109 @@ class DepMapMCPParser:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _validate_section_has_table(content: str, section_heading: str) -> None:
+        """Raise ValueError when a section heading is present but has no table rows.
+
+        A section is considered "present" when the exact heading string appears
+        in the content.  A table row is any line that starts and ends with '|'.
+        If the section is absent entirely this is a no-op (the section is
+        optional).  If it is present but contains only non-table text the
+        caller should record an anomaly — so we raise to make that explicit.
+
+        Args:
+            content: Full markdown file content.
+            section_heading: Exact heading line to search for.
+
+        Raises:
+            ValueError: section heading found but no pipe-delimited table rows
+                        follow before the next heading of the same or higher level.
+        """
+        section_level = len(section_heading) - len(section_heading.lstrip("#"))
+        in_section = False
+        found_table_row = False
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped == section_heading:
+                in_section = True
+                continue
+            if in_section and stripped.startswith("#"):
+                lvl = len(stripped) - len(stripped.lstrip("#"))
+                if lvl > 0 and stripped[lvl : lvl + 1] == " " and lvl <= section_level:
+                    break
+            if not in_section:
+                continue
+            if stripped.startswith("|") and stripped.endswith("|"):
+                found_table_row = True
+                break
+
+        if in_section and not found_table_row:
+            raise ValueError(
+                f"section '{section_heading}' is present but contains no table rows"
+            )
+
+    @staticmethod
+    def _build_name_description(
+        content: str,
+        md_file: Path,
+        fallback_name: str,
+        fallback_description: str = "",
+    ) -> Tuple[str, str, Optional[Dict[str, str]]]:
+        """Parse name and description from YAML frontmatter in the .md file.
+
+        A file that opens with '---' but has no closing '---' delimiter is
+        treated as corrupt frontmatter (returns anomaly), not as "no frontmatter".
+
+        When the frontmatter parses successfully but lacks a 'name' or
+        'description' key, the caller-supplied fallback values are used.  Key
+        presence (not truthiness) determines whether the file's own value is
+        used, so an explicit empty string in frontmatter is preserved.
+
+        Returns:
+            (name, description, None) on successful parse.
+            ("", "", anomaly_dict) on frontmatter parse error, after logging.
+            (fallback_name, fallback_description, None) when content has no
+            '---' opener at all.
+        """
+        if not content:
+            return fallback_name, fallback_description, None
+        if not content.startswith("---"):
+            return fallback_name, fallback_description, None
+        try:
+            parts = content.split("---", 2)
+            if len(parts) < 3:
+                raise ValueError("frontmatter block opened with '---' but never closed")
+            fm = yaml.safe_load(parts[1]) or {}
+            name = fm["name"] if "name" in fm else fallback_name
+            description = (
+                fm["description"] if "description" in fm else fallback_description
+            )
+            return name, description, None
+        except Exception as exc:
+            logger.warning(
+                "get_domain_summary: failed to parse frontmatter in %s: %s",
+                md_file,
+                exc,
+            )
+            return (
+                "",
+                "",
+                {
+                    "file": str(md_file),
+                    "error": f"frontmatter: {exc}",
+                },
+            )
+
+    @staticmethod
     def _build_participating_repos(
         content: str,
         md_file: Path,
     ) -> Tuple[List[Dict[str, str]], Optional[Dict[str, str]]]:
         """Extract participating_repos from the Repository Roles table.
+
+        Calls _validate_section_has_table first so that a present-but-empty
+        section raises ValueError and the anomaly error string carries the
+        "participating_repos:" prefix for caller identification.
 
         Returns:
             ([{repo, role}, ...], None) on success.
@@ -410,6 +521,7 @@ class DepMapMCPParser:
         if not content:
             return [], None
         try:
+            DepMapMCPParser._validate_section_has_table(content, "## Repository Roles")
             roles_map = DepMapMCPParser._parse_roles_table(content)
             return [{"repo": r, "role": role} for r, role in roles_map.items()], None
         except Exception as exc:
@@ -418,7 +530,10 @@ class DepMapMCPParser:
                 md_file,
                 exc,
             )
-            return [], {"file": str(md_file), "error": str(exc)}
+            return [], {
+                "file": str(md_file),
+                "error": f"participating_repos: {exc}",
+            }
 
     @staticmethod
     def _build_cross_domain_connections(
@@ -426,6 +541,10 @@ class DepMapMCPParser:
         md_file: Path,
     ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, str]]]:
         """Extract cross_domain_connections from the Outgoing Dependencies table.
+
+        Calls _validate_section_has_table first so that a present-but-empty
+        section raises ValueError and the anomaly error string carries the
+        "cross_domain_connections:" prefix for caller identification.
 
         Returns:
             ([{target_domain, dependency_count}, ...], None) on success.
@@ -435,6 +554,9 @@ class DepMapMCPParser:
         if not content:
             return [], None
         try:
+            DepMapMCPParser._validate_section_has_table(
+                content, "### Outgoing Dependencies"
+            )
             counts = DepMapMCPParser._parse_outgoing_table(content)
             return [
                 {"target_domain": t, "dependency_count": c} for t, c in counts.items()
@@ -445,7 +567,10 @@ class DepMapMCPParser:
                 md_file,
                 exc,
             )
-            return [], {"file": str(md_file), "error": str(exc)}
+            return [], {
+                "file": str(md_file),
+                "error": f"cross_domain_connections: {exc}",
+            }
 
     def _parse_file_for_consumers(
         self,

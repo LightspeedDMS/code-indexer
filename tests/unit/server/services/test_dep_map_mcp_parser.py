@@ -670,10 +670,18 @@ class TestGetDomainSummary:
     def test_get_domain_summary_partial_parse_when_section_malformed(
         self, dep_map_root: Path
     ) -> None:
-        """When a domain file has malformed YAML frontmatter, an anomaly is recorded
-        but the requested domain summary is still returned if its own file is parseable.
+        """When the requested domain .md file has a corrupt cross-domain section
+        (heading present but non-table text instead of pipe-delimited rows),
+        get_domain_summary must:
+        - Still return a summary (not None)
+        - Parse frontmatter and participating_repos successfully
+        - Record exactly one anomaly with 'cross_domain_connections' in error
 
-        This test is RED under the S1 stub (returns None instead of a summary dict).
+        AC7: malformed target domain file → anomaly recorded; requested domain
+        still returned if parseable.
+
+        This test is RED until get_domain_summary calls _validate_section_has_table
+        and wraps the cross-domain parse in its own try/except.
         """
         d = dep_map_root / "dependency-map"
         domains = [
@@ -681,40 +689,188 @@ class TestGetDomainSummary:
                 "name": "target-domain",
                 "description": "Target domain desc",
                 "participating_repos": ["repo-a"],
-            },
-            {
-                "name": "other-domain",
-                "description": "Other",
-                "participating_repos": ["repo-b"],
-            },
+            }
         ]
         _write_domains_json(d, domains)
-        _write_domain_md_full(
-            d,
-            "target-domain",
-            [{"repo": "repo-a", "language": "Python", "role": "Main"}],
-            outgoing_rows=[
-                {
-                    "this_repo": "repo-a",
-                    "depends_on": "repo-b",
-                    "target_domain": "other-domain",
-                    "dep_type": "Code-level",
-                    "why": "imports",
-                    "evidence": "main.py",
-                }
-            ],
+
+        # Write target-domain.md with valid frontmatter + valid roles table
+        # but corrupt outgoing section (non-table text where table is expected)
+        frontmatter = (
+            "---\nname: target-domain\ndescription: Target domain desc\n"
+            "participating_repos:\n  - repo-a\n---\n"
         )
-        # Write malformed other-domain .md
-        bad_content = "---\ndomain: [unclosed\nbroken: :\n---\n# bad\n\n"
-        (d / "other-domain.md").write_text(bad_content, encoding="utf-8")
+        roles_section = _build_roles_table(
+            [{"repo": "repo-a", "language": "Python", "role": "Main"}]
+        )
+        corrupt_outgoing = (
+            "### Outgoing Dependencies\n\n"
+            "This section has been corrupted. No table here.\n"
+            "Just garbage text instead of pipe-delimited rows.\n\n"
+        )
+        incoming_section = _build_incoming_table([])
+        body = (
+            "# Domain Analysis: target-domain\n\n"
+            "## Overview\n\nOverview text.\n\n"
+            + roles_section
+            + "\n## Cross-Domain Connections\n\n"
+            + corrupt_outgoing
+            + "\n"
+            + incoming_section
+        )
+        (d / "target-domain.md").write_text(frontmatter + body, encoding="utf-8")
 
         parser = _make_parser(dep_map_root)
         summary, anomalies = parser.get_domain_summary("target-domain")
 
-        # Summary for target-domain should still be returned
+        # Summary is NOT None — frontmatter and roles table parsed successfully
         assert summary is not None
         assert summary["name"] == "target-domain"
         assert summary["description"] == "Target domain desc"
+        # Roles table was parseable → participating_repos populated
+        assert summary["participating_repos"] == [{"repo": "repo-a", "role": "Main"}]
+        # Failed cross-domain section → empty default
+        assert summary["cross_domain_connections"] == []
+        # Exactly one anomaly with section-specific label
+        assert len(anomalies) == 1
+        assert "target-domain.md" in anomalies[0]["file"]
+        assert "cross_domain_connections" in anomalies[0]["error"]
+
+    def test_get_domain_summary_partial_parse_when_frontmatter_malformed(
+        self, dep_map_root: Path
+    ) -> None:
+        """When the requested domain .md file has malformed YAML frontmatter,
+        get_domain_summary must:
+        - Still return a summary (not None) because body sections may be parseable
+        - Set name and description to empty sentinels (frontmatter parse failed)
+        - Record exactly one anomaly with 'frontmatter' in error
+
+        AC7: malformed target domain file → anomaly recorded; domain still returned.
+
+        This test is RED until get_domain_summary calls _parse_frontmatter_strict
+        on the requested domain file within its own try/except.
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "fm-domain",
+                "description": "FM domain desc",
+                "participating_repos": ["repo-p"],
+            }
+        ]
+        _write_domains_json(d, domains)
+
+        # Malformed YAML frontmatter + valid body sections
+        bad_fm = "---\nname: [unclosed bracket\nbroken: :\n---\n"
+        roles_section = _build_roles_table(
+            [{"repo": "repo-p", "language": "Python", "role": "Provider"}]
+        )
+        body = (
+            "# Domain Analysis: fm-domain\n\n"
+            "## Overview\n\nOverview text.\n\n"
+            + roles_section
+            + "\n## Cross-Domain Connections\n\n"
+            + _build_outgoing_table([])
+            + "\n"
+            + _build_incoming_table([])
+        )
+        (d / "fm-domain.md").write_text(bad_fm + body, encoding="utf-8")
+
+        parser = _make_parser(dep_map_root)
+        summary, anomalies = parser.get_domain_summary("fm-domain")
+
+        # Summary is NOT None — file is readable, body sections parseable
+        assert summary is not None
+        # name/description fall back to empty sentinels since frontmatter failed
+        assert summary["name"] == ""
+        assert summary["description"] == ""
+        # Body sections were still attempted: roles table has repo-p
+        assert summary["participating_repos"] == [
+            {"repo": "repo-p", "role": "Provider"}
+        ]
+        # No outgoing rows → empty
+        assert summary["cross_domain_connections"] == []
+        # Exactly one anomaly with frontmatter-specific label
+        assert len(anomalies) == 1
+        assert "fm-domain.md" in anomalies[0]["file"]
+        assert "frontmatter" in anomalies[0]["error"]
+
+    def test_get_domain_summary_partial_parse_when_participating_repos_malformed(
+        self, dep_map_root: Path
+    ) -> None:
+        """When the roles section of the requested domain .md has corrupt content
+        (heading present but non-table text), get_domain_summary must:
+        - Still return a summary (not None)
+        - Set participating_repos to [] (section failed)
+        - Record exactly one anomaly with 'participating_repos' in error
+        - Still parse cross_domain_connections successfully
+
+        AC7: malformed target domain file → anomaly recorded; section-level
+        resilience — other sections continue to be parsed.
+
+        This test is RED until get_domain_summary calls _validate_section_has_table
+        for the roles section and wraps it in its own try/except.
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "pr-domain",
+                "description": "PR domain desc",
+                "participating_repos": ["repo-q"],
+            }
+        ]
+        _write_domains_json(d, domains)
+
+        # Write pr-domain.md with valid frontmatter + corrupt roles section
+        # + valid outgoing section
+        frontmatter = (
+            "---\nname: pr-domain\ndescription: PR domain desc\n"
+            "participating_repos:\n  - repo-q\n---\n"
+        )
+        corrupt_roles = (
+            "## Repository Roles\n\n"
+            "This roles section has been corrupted. No table here.\n"
+            "Just garbage text instead of pipe-delimited rows.\n\n"
+        )
+        outgoing_rows = [
+            {
+                "this_repo": "repo-q",
+                "depends_on": "repo-r",
+                "target_domain": "far-domain",
+                "dep_type": "Code-level",
+                "why": "imports",
+                "evidence": "main.py",
+            }
+        ]
+        outgoing_section = _build_outgoing_table(outgoing_rows)
+        incoming_section = _build_incoming_table([])
+        body = (
+            "# Domain Analysis: pr-domain\n\n"
+            "## Overview\n\nOverview text.\n\n"
+            + corrupt_roles
+            + "\n## Cross-Domain Connections\n\n"
+            + outgoing_section
+            + "\n"
+            + incoming_section
+        )
+        (d / "pr-domain.md").write_text(frontmatter + body, encoding="utf-8")
+
+        parser = _make_parser(dep_map_root)
+        summary, anomalies = parser.get_domain_summary("pr-domain")
+
+        # Summary still returned
+        assert summary is not None
+        # Frontmatter parsed successfully
+        assert summary["name"] == "pr-domain"
+        assert summary["description"] == "PR domain desc"
+        # Failed roles section defaults to empty
+        assert summary["participating_repos"] == []
+        # Cross-domain connections still parsed successfully
+        assert len(summary["cross_domain_connections"]) == 1
+        assert summary["cross_domain_connections"][0]["target_domain"] == "far-domain"
+        # Exactly one anomaly with section-specific label
+        assert len(anomalies) == 1
+        assert "pr-domain.md" in anomalies[0]["file"]
+        assert "participating_repos" in anomalies[0]["error"]
 
     def test_get_domain_summary_missing_path_returns_none_no_exception(
         self, tmp_path: Path
