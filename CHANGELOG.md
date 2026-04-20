@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.9
+
+### Bug Fixes
+
+- fix(#869): RefreshScheduler now has `set_active_backfill_job_id()` method and `_active_backfill_job_id` attribute. Every delta refresh was crashing with `AttributeError: 'RefreshScheduler' object has no attribute 'set_active_backfill_job_id'` because `DependencyMapService._queue_lifecycle_backfill_if_needed()` called this method that did not exist on the scheduler.
+
+- fix(#870): `BackgroundJobsSqliteBackend.update_job()` now JSON-serializes the `metadata` field. The `lifecycle_backfill` job registration was failing with `Error binding parameter 7 - probably unsupported type` because the `metadata` dict was passed directly to SQLite without serialization. Added `"metadata"` to the `json_fields` set in `update_job()`.
+
 ## v9.20.8
 
 ### Bug Fixes

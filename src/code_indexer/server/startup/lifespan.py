@@ -26,7 +26,9 @@ def _apply_fault_injection_state(app: Any, startup_config: Any) -> None:
 
     This helper guarantees BOTH attributes are set on every path.
     """
-    from code_indexer.server.fault_injection.http_client_factory import HttpClientFactory
+    from code_indexer.server.fault_injection.http_client_factory import (
+        HttpClientFactory,
+    )
     from code_indexer.server.fault_injection.startup import wire_fault_injection
 
     if startup_config is None:

@@ -37,8 +37,8 @@ BOOTSTRAP_KEYS = frozenset(
         "postgres_dsn",
         "ontap",
         "cluster",
-        "fault_injection_enabled",       # Story #746
-        "fault_injection_nonprod_ack",   # Story #746
+        "fault_injection_enabled",  # Story #746
+        "fault_injection_nonprod_ack",  # Story #746
     }
 )
 CONFIG_KEY_RUNTIME = "runtime"

@@ -34,7 +34,8 @@ def db_path(tmp_path):
             last_known_files_processed INTEGER,
             last_known_indexed_at TEXT,
             created_at TEXT,
-            updated_at TEXT
+            updated_at TEXT,
+            lifecycle_schema_version INTEGER DEFAULT NULL
         )
     """
     )

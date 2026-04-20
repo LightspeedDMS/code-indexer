@@ -2493,6 +2493,7 @@ class BackgroundJobsSqliteBackend:
             "claude_actions",
             "extended_error",
             "language_resolution_status",
+            "metadata",
         }
         bool_fields = {"is_admin", "cancelled"}
         updates: List[str] = []

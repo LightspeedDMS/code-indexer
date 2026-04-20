@@ -31,12 +31,24 @@ def workspace_with_seed_url(tmp_path: Path) -> Tuple[Path, str]:
     """Return a (workspace, seed_url) pair for git-init tests.
 
     ``workspace`` is a freshly created directory.
-    ``seed_url`` is a filesystem path derived from ``tmp_path`` that
-    mirrors how the E2E suite builds ``str(e2e_config.seed_cache_dir / 'markupsafe')``.
+    ``seed_url`` is a filesystem path to a minimal git repo with one commit,
+    mirroring how the E2E suite builds ``str(e2e_config.seed_cache_dir / 'markupsafe')``.
     """
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    seed_url = str(tmp_path / "seed" / "markupsafe")
+
+    seed_dir = tmp_path / "seed" / "markupsafe"
+    seed_dir.mkdir(parents=True)
+
+    # Create a minimal git repo with one commit so git clone works
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(seed_dir), check=True, capture_output=True)
+    (seed_dir / "README.md").write_text("seed repo")
+    subprocess.run(["git", "add", "."], cwd=str(seed_dir), check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(seed_dir), check=True, capture_output=True)
+
+    seed_url = str(seed_dir)
     return workspace, seed_url
 
 

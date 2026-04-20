@@ -78,7 +78,7 @@ class TestRepositoryActivationAPI:
                 "POST",
                 "/api/repos/activate",
                 json={
-                    "golden_alias": "web-service",
+                    "golden_repo_alias": "web-service",
                     "user_alias": "my-repo",
                     "target_branch": "feature-branch",
                 },
@@ -104,7 +104,7 @@ class TestRepositoryActivationAPI:
                 "POST",
                 "/api/repos/activate",
                 json={
-                    "golden_alias": "web-service",
+                    "golden_repo_alias": "web-service",
                     "user_alias": "my-repo",
                     "target_branch": None,
                 },

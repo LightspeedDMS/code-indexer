@@ -187,6 +187,10 @@ class RefreshScheduler:
         self._fetch_failure_counts: Dict[str, int] = {}
         self._reclone_cooldowns: Dict[str, float] = {}
 
+        # Bug #869: active lifecycle_backfill aggregate job_id shared by
+        # DependencyMapService so progress updates can reference it.
+        self._active_backfill_job_id: Optional[str] = None
+
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
         Get or create a lock for a specific repository.
@@ -203,6 +207,17 @@ class RefreshScheduler:
             if alias_name not in self._repo_locks:
                 self._repo_locks[alias_name] = threading.Lock()
             return self._repo_locks[alias_name]
+
+    def set_active_backfill_job_id(self, job_id: Optional[str]) -> None:
+        """Store the lifecycle_backfill aggregate job_id (Bug #869).
+
+        Called by DependencyMapService after registering the aggregate job so
+        the scheduler can reference it for progress updates and cancellation.
+
+        Args:
+            job_id: The aggregate lifecycle_backfill job_id, or None to clear.
+        """
+        self._active_backfill_job_id = job_id
 
     # ------------------------------------------------------------------
     # Story #295: Auto-recovery for corrupted git object databases

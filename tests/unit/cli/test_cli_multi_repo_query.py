@@ -11,9 +11,8 @@ Tests AC1-AC6:
 
 from click.testing import CliRunner
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 import json
-import asyncio
 import pytest
 
 
@@ -237,11 +236,11 @@ class TestUnsupportedParameterWarnings:
         mock_config.return_value = {"server_url": "http://test"}
         mock_creds.return_value = {"username": "test"}
 
-        # Setup mock client
-        mock_instance = AsyncMock()
-        mock_instance.__aenter__.return_value = mock_instance
-        mock_instance.__aexit__.return_value = None
-        mock_instance.execute_multi_repo_query = AsyncMock(return_value={"results": {}})
+        # Setup mock client (sync context manager — production code uses `with`, not `async with`)
+        mock_instance = MagicMock()
+        mock_instance.__enter__.return_value = mock_instance
+        mock_instance.__exit__.return_value = None
+        mock_instance.execute_multi_repo_query = MagicMock(return_value={"results": {}})
         mock_client.return_value = mock_instance
 
         # Setup mock console
@@ -260,14 +259,12 @@ class TestUnsupportedParameterWarnings:
         """Test that warning is shown for unsupported exclude_languages parameter."""
         from src.code_indexer.cli_multi_repo import execute_multi_repo_query
 
-        asyncio.run(
-            execute_multi_repo_query(
-                query_text="test",
-                repos=["repo1"],
-                limit=10,
-                project_root=Path.cwd(),
-                exclude_languages=("python",),
-            )
+        execute_multi_repo_query(
+            query_text="test",
+            repos=["repo1"],
+            limit=10,
+            project_root=Path.cwd(),
+            exclude_languages=("python",),
         )
 
         # Verify warning was printed
@@ -282,14 +279,12 @@ class TestUnsupportedParameterWarnings:
         """Test that warning is shown for unsupported exclude_paths parameter."""
         from src.code_indexer.cli_multi_repo import execute_multi_repo_query
 
-        asyncio.run(
-            execute_multi_repo_query(
-                query_text="test",
-                repos=["repo1"],
-                limit=10,
-                project_root=Path.cwd(),
-                exclude_paths=("*/tests/*",),
-            )
+        execute_multi_repo_query(
+            query_text="test",
+            repos=["repo1"],
+            limit=10,
+            project_root=Path.cwd(),
+            exclude_paths=("*/tests/*",),
         )
 
         # Verify warning was printed
@@ -304,14 +299,12 @@ class TestUnsupportedParameterWarnings:
         """Test that warning is shown for unsupported accuracy parameter."""
         from src.code_indexer.cli_multi_repo import execute_multi_repo_query
 
-        asyncio.run(
-            execute_multi_repo_query(
-                query_text="test",
-                repos=["repo1"],
-                limit=10,
-                project_root=Path.cwd(),
-                accuracy="high",
-            )
+        execute_multi_repo_query(
+            query_text="test",
+            repos=["repo1"],
+            limit=10,
+            project_root=Path.cwd(),
+            accuracy="high",
         )
 
         # Verify warning was printed
@@ -328,16 +321,14 @@ class TestUnsupportedParameterWarnings:
         """Test that no warning is shown when all parameters are supported."""
         from src.code_indexer.cli_multi_repo import execute_multi_repo_query
 
-        asyncio.run(
-            execute_multi_repo_query(
-                query_text="test",
-                repos=["repo1"],
-                limit=10,
-                project_root=Path.cwd(),
-                languages=("python",),
-                path_filter=("*/src/*",),
-                min_score=0.7,
-            )
+        execute_multi_repo_query(
+            query_text="test",
+            repos=["repo1"],
+            limit=10,
+            project_root=Path.cwd(),
+            languages=("python",),
+            path_filter=("*/src/*",),
+            min_score=0.7,
         )
 
         # Verify NO warning was printed

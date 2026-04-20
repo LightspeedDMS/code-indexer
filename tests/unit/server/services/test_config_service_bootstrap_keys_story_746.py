@@ -1,5 +1,6 @@
 """Story #746 BOOTSTRAP_KEYS regression test — ensures fault_injection flags
 survive ConfigService._strip_config_file_to_bootstrap()."""
+
 from code_indexer.server.services.config_service import BOOTSTRAP_KEYS
 
 

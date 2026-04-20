@@ -1,15 +1,13 @@
 """Unit tests for repository file browsing helper functions."""
 
-import pytest
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 
 class TestGetRepoIdFromAlias:
     """Tests for get_repo_id_from_alias() helper function."""
 
-    @pytest.mark.asyncio
-    async def test_get_repo_id_from_alias_success(self):
+    def test_get_repo_id_from_alias_success(self):
         """Test successful lookup of repository ID from alias."""
         # Arrange
         from code_indexer.api_clients.repos_client import ActivatedRepository
@@ -36,11 +34,11 @@ class TestGetRepoIdFromAlias:
 
         with patch("code_indexer.cli_repos_files.ReposAPIClient") as mock_client_class:
             mock_client = Mock()
-            mock_client.list_activated_repositories = AsyncMock(return_value=mock_repos)
-            mock_client.close = AsyncMock()
+            mock_client.list_activated_repositories = Mock(return_value=mock_repos)
+            mock_client.close = Mock()
             mock_client_class.return_value = mock_client
 
-            result = await get_repo_id_from_alias("myrepo", Path("/fake/project/root"))
+            result = get_repo_id_from_alias("myrepo", Path("/fake/project/root"))
 
         # Assert
         assert result == "myrepo"  # For now, alias IS the repo_id
