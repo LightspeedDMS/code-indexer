@@ -280,6 +280,13 @@ class DescriptionRefreshScheduler:
         self._active_backfill_job_id: Optional[str] = None
         self._backfill_job_id_lock = threading.Lock()
 
+        # Bug #851: in-memory count of repos that have been attempted (success OR failure)
+        # in the current backfill cycle.  When processed_count reaches cluster_wide_total
+        # and some repos failed, _maybe_fail_backfill_job closes the aggregate job so it
+        # does not stay "running" forever when all repos fail (100% parse-failure scenario).
+        # Protected by _backfill_job_id_lock (reuses the same lock for simplicity).
+        self._backfill_processed_count: int = 0
+
     def set_active_backfill_job_id(self, job_id: Optional[str]) -> None:
         """
         Store the active lifecycle_backfill aggregate job_id (thread-safe).
@@ -1212,6 +1219,82 @@ class DescriptionRefreshScheduler:
                 exc,
             )
 
+    def _maybe_fail_backfill_job(self, alias: str) -> None:
+        """
+        Close the aggregate lifecycle_backfill job with fail_job when all repos
+        have been attempted but Phase 2 failed (Bug #851 failure-path sweeper).
+
+        Called from _run_two_phase_task when phase2_outcome != "success".  Increments
+        _backfill_processed_count atomically under _backfill_job_id_lock.  When the
+        count reaches cluster_wide_total (read from job metadata via get_job), calls
+        fail_job on the active aggregate job and clears _active_backfill_job_id.
+
+        Uses fail_job (NOT complete_job) so the terminal status is distinguishable from
+        a successful backfill run.  The success path (_self_close_backfill ->
+        _maybe_complete_backfill_job) is unchanged.
+
+        No-op when _active_backfill_job_id is None, _job_tracker is None, or
+        get_job returns None (job already gone).
+
+        Args:
+            alias: Repository alias that just completed with a failure outcome.
+        """
+        with self._backfill_job_id_lock:
+            active_job_id = self._active_backfill_job_id
+
+        if active_job_id is None or self._job_tracker is None:
+            return
+
+        # Atomically increment the processed counter
+        with self._backfill_job_id_lock:
+            self._backfill_processed_count += 1
+            processed = self._backfill_processed_count
+
+        # Read cluster_wide_total from the job metadata
+        try:
+            job = self._job_tracker.get_job(active_job_id)
+        except Exception as exc:
+            logger.warning(
+                "_maybe_fail_backfill_job: get_job failed for %s: %s",
+                active_job_id,
+                exc,
+            )
+            return
+
+        if job is None:
+            return
+
+        cluster_wide_total = (job.metadata or {}).get("cluster_wide_total")
+        if cluster_wide_total is None or processed < cluster_wide_total:
+            return
+
+        # All repos attempted — close the aggregate as failed
+        logger.info(
+            "_maybe_fail_backfill_job: all %d repos processed, %d had failures — "
+            "closing aggregate job %s as failed",
+            cluster_wide_total,
+            processed,
+            active_job_id,
+        )
+        try:
+            self._job_tracker.fail_job(
+                active_job_id,
+                error=(
+                    f"lifecycle_backfill: {processed}/{cluster_wide_total} repos "
+                    f"attempted; all completed without a valid lifecycle block. "
+                    f"Last failing alias: {alias!r}."
+                ),
+            )
+            with self._backfill_job_id_lock:
+                if self._active_backfill_job_id == active_job_id:
+                    self._active_backfill_job_id = None
+        except Exception as exc:
+            logger.warning(
+                "_maybe_fail_backfill_job: fail_job failed for %s: %s",
+                active_job_id,
+                exc,
+            )
+
     def _self_close_backfill(self, alias: str) -> None:
         """
         Update lifecycle_schema_version in description_refresh_tracking after
@@ -1303,6 +1386,12 @@ class DescriptionRefreshScheduler:
         # version so the backfill scheduler retries on the next cycle.
         if phase2_outcome == "success":
             self._self_close_backfill(alias)
+        else:
+            # Bug #851: failure-path sweeper — advance processed counter and close
+            # the aggregate job with fail_job when all repos have been attempted.
+            # This prevents the aggregate staying "running" at 0% forever when all
+            # repos fail (e.g., 100% YAML parse failure from bare CSI sequences).
+            self._maybe_fail_backfill_job(alias)
 
     def close(self) -> None:
         """Clean up resources."""

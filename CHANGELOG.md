@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.10
+
+### Bug Fixes
+
+- fix(#871): `_clean_claude_output()` now strips bare CSI tails (e.g. `[>4m`, `[?25h`, `[?1004h`, `[0m`) that `script -q -c ... /dev/null` produces when it drops the leading ESC byte. Every Phase 2 `invoke_lifecycle_detection` call in production was silently failing `yaml.safe_load` with `found character '>' that cannot start any token` (182+ occurrences since Epic #725 deploy), returning `None`, and never writing the per-repo lifecycle YAML. Added a second regex pass anchored on a private-param prefix (`[?<>=!]`) or a leading digit so YAML flow sequences (`[repo-a, repo-b]`) are preserved while all production-observed bare CSI variants are stripped.
+
+- fix(#852): `DependencyMapService.run_full_analysis()` now calls `_queue_lifecycle_backfill_if_needed()` as the first statement — before conflict checks, before setup — matching the Story #728 AC2 pattern already used by `run_delta_analysis`. Fresh repos that had never gone through a delta run were never queueing the `lifecycle_backfill` aggregate job on first-run, leaving newly-registered repos without lifecycle metadata indefinitely.
+
+- fix(#851): `DescriptionRefreshScheduler._maybe_fail_backfill_job()` added as a failure-path sweeper. When Phase 2 returns without a valid `lifecycle` block (e.g., the 100% YAML parse-failure scenario caused by #871), this method increments an in-memory processed counter under `_backfill_job_id_lock` and calls `job_tracker.fail_job()` on the active aggregate when the counter reaches `cluster_wide_total`. Before this fix, aggregate `lifecycle_backfill` jobs stayed `running` at 0% forever when every repo failed — relying on orphan cleanup at server restart.
+
 ## v9.20.9
 
 ### Bug Fixes

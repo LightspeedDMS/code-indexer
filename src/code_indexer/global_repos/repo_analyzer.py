@@ -178,10 +178,29 @@ def _clean_claude_output(output: str) -> str:
     Applies the cleaning sequence used by description_refresh_scheduler.py
     (lines 596-610) to strip CSI, OSC, ESC, script artifacts, and
     normalize line endings.
+
+    Two CSI variants are handled (Bug #871):
+    - ESC-prefixed: ``\\x1b[`` + params + final byte  (standard ECMA-48)
+    - Bare (no ESC): ``[`` + params + final byte       (produced when the
+      ``script`` pseudo-TTY wrapper strips the ESC byte from the stream, as
+      observed in 182+ production failures since Epic #725 deploy)
+
+    The bare-CSI pattern uses the optional private-parameter prefix
+    ``[?<>=!]?`` to cover all production-observed variants ([>4m, [?25h,
+    [?1004h, [0m) while remaining disjoint from YAML flow sequences
+    (``[1, 2, 3]``): digits 0-9 are valid param bytes but are NOT in the
+    final-byte range ``[@-~]`` (0x40-0x7e), so ``[1, 2, 3]`` never matches.
     """
     # CSI sequences: full ECMA-48 grammar — parameter bytes [0-?], intermediate bytes [ -/],
     # final bytes [@-~] (covers colors, cursor, private modes, intermediate byte variants).
     output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    # Bare CSI tails (Bug #871): same grammar but without the ESC prefix.
+    # Produced when ``script -q -c ...`` strips the ESC byte from the stream.
+    # Pattern requires either a private-param prefix ([?<>=!]) OR at least one
+    # leading digit so that bare YAML identifiers like ``[repo-a, repo-b]``
+    # do NOT match: ``r`` is in [@-~] but is not preceded by a digit or prefix.
+    # All production-observed variants are covered: [>4m, [?25h, [?1004h, [0m.
+    output = re.sub(r"(?m)\[(?:[?<>=!][0-9;]*|[0-9][0-9;]*)[ -/]*[@-~]", "", output)
     # OSC sequences: ESC ] ... BEL or ST
     output = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?", "", output)
     # Other ESC sequences (ESC followed by a single char)

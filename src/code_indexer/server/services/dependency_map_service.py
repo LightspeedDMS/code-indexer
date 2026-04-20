@@ -179,6 +179,12 @@ class DependencyMapService:
             RuntimeError: If analysis is already in progress
             DuplicateJobError: If job_tracker detects a concurrent full analysis (AC6)
         """
+        # Bug #852: Backfill detection runs FIRST, UNCONDITIONALLY — before conflict
+        # checks, before setup, before any other logic — matching run_delta_analysis
+        # (Story #728 AC2 pattern). Fresh repos that have never gone through a delta
+        # run need this call here so lifecycle_backfill is queued on first-run.
+        self._queue_lifecycle_backfill_if_needed()
+
         # Story #312: Conflict detection via JobTracker (AC6).
         # DuplicateJobError propagates to caller; all other tracker errors are absorbed.
         if self._job_tracker is not None:
