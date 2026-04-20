@@ -387,6 +387,47 @@ def test_get_stale_domains_handler_rejects_non_integer_threshold(
     assert "days_threshold" in data["error"]
 
 
+@_pytest.mark.parametrize(
+    "bad_value",
+    [
+        1.5,  # non-integer float
+        30.0,  # integer-valued float (should still reject — doc promises type-strict)
+        "30",  # stringified integer (should still reject)
+        True,  # boolean subclass of int — must reject to avoid silent acceptance
+        False,  # boolean subclass of int — must reject
+    ],
+    ids=[
+        "float_1_5",
+        "integer_valued_float_30_0",
+        "string_30",
+        "bool_true",
+        "bool_false",
+    ],
+)
+def test_get_stale_domains_handler_rejects_doc_documented_non_integer_types(
+    stale_domains_dep_map: Path, bad_value: object
+) -> None:
+    """Regression lock: every non-integer type named in the tool doc is rejected.
+
+    The tool doc explicitly promises rejection of 1.5, 30.0, "30", True, False.
+    This parameterized test exercises each, guarding against:
+      (a) guard loosening (e.g., someone replaces ``type(x) is int`` with
+          ``isinstance(x, int)``, which would silently accept bool),
+      (b) doc drift (doc promises more than code delivers).
+    """
+    result = _call_stale_domains_handler(
+        {"days_threshold": bad_value}, _make_app_state(stale_domains_dep_map)
+    )
+    data = _parse_response(result)
+
+    assert data["success"] is False, (
+        f"days_threshold={bad_value!r} ({type(bad_value).__name__}) must be rejected "
+        f"per tool doc, but handler returned success=true"
+    )
+    assert "error" in data
+    assert "days_threshold" in data["error"]
+
+
 def test_get_stale_domains_handler_reads_path_fresh_each_call(
     stale_domains_dep_map: Path,
 ) -> None:
