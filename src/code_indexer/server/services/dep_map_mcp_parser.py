@@ -481,6 +481,7 @@ class DepMapMCPParser:
             parts = content.split("---", 2)
             if len(parts) < 3:
                 raise ValueError("frontmatter block opened with '---' but never closed")
+            # yaml.safe_load: PyYAML stdlib-adjacent primitive; returns None for empty YAML, dict for mappings (verified: python-yaml.org/wiki/PyYAMLDocumentation).
             fm = yaml.safe_load(parts[1]) or {}
             name = fm["name"] if "name" in fm else fallback_name
             description = (
@@ -643,6 +644,7 @@ class DepMapMCPParser:
         parts = content.split("---", 2)
         if len(parts) < 3:
             return None
+        # yaml.safe_load: PyYAML stdlib-adjacent primitive; returns None for empty YAML, dict for mappings (verified: python-yaml.org/wiki/PyYAMLDocumentation).
         # Raises yaml.YAMLError if the frontmatter block is malformed
         return yaml.safe_load(parts[1]) or {}
 

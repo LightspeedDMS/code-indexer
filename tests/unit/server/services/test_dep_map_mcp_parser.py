@@ -884,3 +884,129 @@ class TestGetDomainSummary:
 
         assert summary is None
         assert anomalies == []
+
+    def test_get_domain_summary_file_not_found_returns_summary_with_read_anomaly_and_fallback_fields(
+        self, dep_map_root: Path
+    ) -> None:
+        """Domain exists in _domains.json but .md file does not exist on disk.
+
+        Expected: summary NOT None; name = domain_name (fallback),
+        description = _domains.json description (fallback),
+        participating_repos = [], cross_domain_connections = [];
+        exactly one read anomaly ('file not found').
+
+        Covers lines 476 (_build_name_description empty content),
+        521 (_build_participating_repos empty content),
+        554 (_build_cross_domain_connections empty content).
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "ghost-domain",
+                "description": "Ghost domain from _domains.json",
+                "participating_repos": ["repo-ghost"],
+            }
+        ]
+        _write_domains_json(d, domains)
+        # Deliberately do NOT write ghost-domain.md
+
+        parser = _make_parser(dep_map_root)
+        summary, anomalies = parser.get_domain_summary("ghost-domain")
+
+        assert summary is not None
+        assert summary["name"] == "ghost-domain"
+        assert summary["description"] == "Ghost domain from _domains.json"
+        assert summary["participating_repos"] == []
+        assert summary["cross_domain_connections"] == []
+        assert len(anomalies) == 1
+        assert "file not found" in anomalies[0]["error"]
+
+    def test_get_domain_summary_no_frontmatter_uses_domains_json_fallbacks(
+        self, dep_map_root: Path
+    ) -> None:
+        """.md file exists with roles table but no '---' frontmatter opener.
+
+        Expected: summary NOT None; name = domain_name (fallback),
+        description = _domains.json description (fallback);
+        participating_repos populated from the roles table; no frontmatter anomaly.
+
+        Covers line 478 (_build_name_description: content does not start with '---').
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "nofm-domain",
+                "description": "No-frontmatter domain desc",
+                "participating_repos": ["repo-nofm"],
+            }
+        ]
+        _write_domains_json(d, domains)
+
+        # Write .md with ONLY a roles table + outgoing table — no frontmatter block
+        roles_section = _build_roles_table(
+            [{"repo": "repo-nofm", "language": "Python", "role": "Worker"}]
+        )
+        body = (
+            "# Domain Analysis: nofm-domain\n\n"
+            "## Overview\n\nOverview text.\n\n"
+            + roles_section
+            + "\n## Cross-Domain Connections\n\n"
+            + _build_outgoing_table([])
+            + "\n"
+            + _build_incoming_table([])
+        )
+        (d / "nofm-domain.md").write_text(body, encoding="utf-8")
+
+        parser = _make_parser(dep_map_root)
+        summary, anomalies = parser.get_domain_summary("nofm-domain")
+
+        assert summary is not None
+        assert summary["name"] == "nofm-domain"
+        assert summary["description"] == "No-frontmatter domain desc"
+        assert summary["participating_repos"] == [
+            {"repo": "repo-nofm", "role": "Worker"}
+        ]
+        # No frontmatter anomaly — the absent-frontmatter path is a silent fallback
+        assert not any("frontmatter" in a.get("error", "") for a in anomalies)
+
+    def test_get_domain_summary_frontmatter_opener_never_closed_records_anomaly(
+        self, dep_map_root: Path
+    ) -> None:
+        """.md file starts with '---' but has no closing '---'.
+
+        Expected: summary NOT None; name = "" and description = "" (sentinel
+        values from failed frontmatter parse); exactly one anomaly whose error
+        contains 'frontmatter' and 'never closed'.
+
+        Covers line 482 (_build_name_description: len(parts) < 3 → ValueError).
+        """
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {
+                "name": "unclosed-domain",
+                "description": "Unclosed frontmatter domain",
+                "participating_repos": ["repo-uc"],
+            }
+        ]
+        _write_domains_json(d, domains)
+
+        # Content starts with '---' opener but the block is never closed.
+        # Every character after the opener must avoid the three-dash sequence
+        # because split("---", 2) would otherwise yield 3 parts and bypass
+        # the len(parts) < 3 guard.  Plain prose only — no table separators.
+        content = (
+            "---\nname: unclosed-domain\ndescription: something\n"
+            "no closing fence in this file\n\n"
+            "Some body text without any triple-dash sequences.\n"
+        )
+        (d / "unclosed-domain.md").write_text(content, encoding="utf-8")
+
+        parser = _make_parser(dep_map_root)
+        summary, anomalies = parser.get_domain_summary("unclosed-domain")
+
+        assert summary is not None
+        assert summary["name"] == ""
+        assert summary["description"] == ""
+        assert len(anomalies) == 1
+        assert "frontmatter" in anomalies[0]["error"]
+        assert "never closed" in anomalies[0]["error"]
