@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.11
+
+### Bug Fixes
+
+- fix(#875): `_update_claude_cli_setting()` now handles five previously-missing keys that caused a `ValueError` when saving Web UI config: `dep_map_fact_check_enabled` (bool), `fact_check_timeout_seconds` (int, min 60), `scheduled_catchup_enabled` (bool), `scheduled_catchup_interval_minutes` (int, min 1), and `cohere_api_key` (Optional[str], empty string clears to None). Added module-level constants `_MIN_FACT_CHECK_TIMEOUT_SECONDS` and `_MIN_SCHEDULED_CATCHUP_INTERVAL_MINUTES`, and a `_parse_bool()` helper to avoid magic numbers and duplicated boolean-parsing logic.
+
 ## v9.20.10
 
 ### Bug Fixes

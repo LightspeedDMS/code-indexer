@@ -45,6 +45,15 @@ CONFIG_KEY_RUNTIME = "runtime"
 UPDATER_WEB_UI = "web-ui"
 UPDATER_SEED = "config-seed"
 
+# Bug #875: minimum bounds for new claude_cli settings
+_MIN_FACT_CHECK_TIMEOUT_SECONDS = 60
+_MIN_SCHEDULED_CATCHUP_INTERVAL_MINUTES = 1
+
+
+def _parse_bool(value: Any) -> bool:
+    """Return True when value is the string 'true', 'True', or the boolean True."""
+    return value in ["true", True, "True"]
+
 
 class ConfigService:
     """
@@ -837,6 +846,20 @@ class ConfigService:
             claude_config.llm_creds_provider_api_key = str(value) if value else ""
         elif key == "llm_creds_provider_consumer_id":
             claude_config.llm_creds_provider_consumer_id = str(value) if value else ""
+        elif key == "dep_map_fact_check_enabled":
+            claude_config.dep_map_fact_check_enabled = _parse_bool(value)
+        elif key == "fact_check_timeout_seconds":
+            claude_config.fact_check_timeout_seconds = max(
+                _MIN_FACT_CHECK_TIMEOUT_SECONDS, int(value)
+            )
+        elif key == "scheduled_catchup_enabled":
+            claude_config.scheduled_catchup_enabled = _parse_bool(value)
+        elif key == "scheduled_catchup_interval_minutes":
+            claude_config.scheduled_catchup_interval_minutes = max(
+                _MIN_SCHEDULED_CATCHUP_INTERVAL_MINUTES, int(value)
+            )
+        elif key == "cohere_api_key":
+            claude_config.cohere_api_key = str(value) if value else None
         else:
             raise ValueError(f"Unknown claude_cli setting: {key}")
 
@@ -1544,9 +1567,9 @@ class ConfigService:
                 "SELECT version FROM server_config WHERE config_key = %s",
                 (CONFIG_KEY_RUNTIME,),
             ).fetchone()
-            assert row is not None, (
-                "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
-            )
+            assert (
+                row is not None
+            ), "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
             self._db_config_version = row["version"]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
