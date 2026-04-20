@@ -329,3 +329,79 @@ def test_get_domain_summary_handler_registered_in_registry() -> None:
     from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
 
     assert "depmap_get_domain_summary" in HANDLER_REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# S3: depmap_get_stale_domains handler tests
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest  # noqa: E402
+
+
+def _call_stale_domains_handler(params: dict, app_state: MagicMock) -> Any:
+    """Call depmap_get_stale_domains_handler with a patched app state."""
+    from code_indexer.server.mcp.handlers.depmap import depmap_get_stale_domains_handler
+
+    with patch(
+        "code_indexer.server.mcp.handlers.depmap._utils.app_module.app.state",
+        app_state,
+    ):
+        return depmap_get_stale_domains_handler(params, _make_user())
+
+
+@_pytest.fixture
+def stale_domains_dep_map(tmp_path: Path) -> Path:
+    """Create a dependency-map directory with empty _domains.json. Returns tmp_path."""
+    dep_map_dir = tmp_path / "dependency-map"
+    dep_map_dir.mkdir()
+    (dep_map_dir / "_domains.json").write_text("[]", encoding="utf-8")
+    return tmp_path
+
+
+def test_get_stale_domains_handler_rejects_negative_threshold(
+    stale_domains_dep_map: Path,
+) -> None:
+    """Handler returns success=false with error message when days_threshold is negative."""
+    result = _call_stale_domains_handler(
+        {"days_threshold": -1}, _make_app_state(stale_domains_dep_map)
+    )
+    data = _parse_response(result)
+
+    assert data["success"] is False
+    assert "error" in data
+    assert "days_threshold" in data["error"]
+    assert "non-negative" in data["error"]
+
+
+def test_get_stale_domains_handler_rejects_non_integer_threshold(
+    stale_domains_dep_map: Path,
+) -> None:
+    """Handler returns success=false with error message when days_threshold is not an integer."""
+    result = _call_stale_domains_handler(
+        {"days_threshold": "thirty"}, _make_app_state(stale_domains_dep_map)
+    )
+    data = _parse_response(result)
+
+    assert data["success"] is False
+    assert "error" in data
+    assert "days_threshold" in data["error"]
+
+
+def test_get_stale_domains_handler_reads_path_fresh_each_call(
+    stale_domains_dep_map: Path,
+) -> None:
+    """cidx_meta_read_path is accessed once per handler invocation (no caching)."""
+    state, counter = _make_tracking_state(stale_domains_dep_map)
+    _call_stale_domains_handler({"days_threshold": 0}, state)
+    _call_stale_domains_handler({"days_threshold": 0}, state)
+
+    assert counter["count"] == 2, (
+        f"Expected cidx_meta_read_path accessed once per call (total 2), got {counter['count']}"
+    )
+
+
+def test_get_stale_domains_handler_registered_in_registry() -> None:
+    """depmap_get_stale_domains is present in HANDLER_REGISTRY after module import."""
+    from code_indexer.server.mcp.handlers import HANDLER_REGISTRY
+
+    assert "depmap_get_stale_domains" in HANDLER_REGISTRY

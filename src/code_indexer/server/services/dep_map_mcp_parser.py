@@ -12,6 +12,7 @@ get_stale_domains and get_cross_domain_graph remain stubs for Stories S3-S4.
 
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +24,16 @@ from code_indexer.server.services.dep_map_file_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _current_utc_now() -> datetime:
+    """Return the current UTC time.
+
+    Defined at module level so tests can monkeypatch it for clock-controlled
+    assertions without importing or patching datetime itself.
+    """
+    return datetime.now(timezone.utc)
+
 
 # Column indices in the Incoming Dependencies table (0-based, after stripping outer pipes)
 _COL_EXTERNAL_REPO = 0
@@ -258,9 +269,71 @@ class DepMapMCPParser:
 
     def get_stale_domains(
         self,
-    ) -> Tuple[List[str], List[Dict[str, str]]]:
-        """Stub — Story 3 will implement. Returns ([], [])."""
-        return [], []
+        days_threshold: int,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+        """Return domains whose last_analyzed is older than days_threshold days.
+
+        Args:
+            days_threshold: Minimum days_stale for inclusion. Must be >= 0.
+
+        Returns:
+            (stale_domains, anomalies) sorted descending by days_stale.
+            stale_domains entries: {domain_name, last_analyzed, days_stale}.
+            anomalies entries: {file, error} for missing/unparseable last_analyzed.
+
+        Raises:
+            ValueError: when days_threshold < 0.
+        """
+        if days_threshold < 0:
+            raise ValueError("days_threshold must be non-negative")
+
+        output_dir = self._dep_map_path / "dependency-map"
+        if not output_dir.exists():
+            return [], []
+
+        base_dir = output_dir.resolve()
+        domains = load_domains_json(output_dir)
+        now_utc = _current_utc_now()
+        stale_domains: List[Dict[str, Any]] = []
+        anomalies: List[Dict[str, str]] = []
+
+        for domain in domains:
+            if not isinstance(domain, dict):
+                continue
+            domain_name = domain.get("name", "")
+            if not domain_name:
+                continue
+            md_file = (output_dir / f"{domain_name}.md").resolve()
+            try:
+                md_file.relative_to(base_dir)
+            except ValueError:
+                anomalies.append(
+                    {
+                        "file": str(md_file),
+                        "error": "domain_name path traversal rejected",
+                    }
+                )
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+                fm = self._parse_frontmatter_strict(content) or {}
+                if "last_analyzed" not in fm:
+                    raise ValueError("last_analyzed field missing from frontmatter")
+                last_analyzed_dt = self._parse_last_analyzed(str(fm["last_analyzed"]))
+                days_stale = (now_utc - last_analyzed_dt).days
+                if days_stale >= days_threshold:
+                    stale_domains.append(
+                        {
+                            "domain_name": domain_name,
+                            "last_analyzed": fm["last_analyzed"],
+                            "days_stale": days_stale,
+                        }
+                    )
+            except Exception as exc:
+                anomalies.append({"file": str(md_file), "error": str(exc)})
+
+        stale_domains.sort(key=lambda d: d["days_stale"], reverse=True)
+        return stale_domains, anomalies
 
     def get_cross_domain_graph(
         self,
@@ -572,6 +645,21 @@ class DepMapMCPParser:
                 "file": str(md_file),
                 "error": f"cross_domain_connections: {exc}",
             }
+
+    @staticmethod
+    def _parse_last_analyzed(raw: str) -> datetime:
+        """Parse a last_analyzed ISO-8601 string to a UTC-normalized datetime.
+
+        Accepts timezone-aware ISO-8601 strings (``2026-04-18T12:00:00+00:00``)
+        and ``Z``-suffixed forms (converted to ``+00:00`` before parsing).
+        Result is always UTC via ``astimezone(timezone.utc)``.
+
+        Raises:
+            ValueError: when ``fromisoformat`` cannot parse the string.
+        """
+        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(normalized)
+        return dt.astimezone(timezone.utc)
 
     def _parse_file_for_consumers(
         self,

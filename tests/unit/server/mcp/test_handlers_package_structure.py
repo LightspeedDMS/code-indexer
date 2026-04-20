@@ -174,6 +174,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "depmap_find_consumers",
         "depmap_get_repo_domains",
         "depmap_get_domain_summary",
+        "depmap_get_stale_domains",
     }
 )
 

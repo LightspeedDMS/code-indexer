@@ -322,7 +322,7 @@ class TestParserStubMethods:
         [
             ("get_repo_domains", ("any-repo",), []),
             ("get_domain_summary", ("any-domain",), None),
-            ("get_stale_domains", (), []),
+            ("get_stale_domains", (0,), []),
             ("get_cross_domain_graph", (), []),
         ],
     )
@@ -1010,3 +1010,174 @@ class TestGetDomainSummary:
         assert len(anomalies) == 1
         assert "frontmatter" in anomalies[0]["error"]
         assert "never closed" in anomalies[0]["error"]
+
+
+# ---------------------------------------------------------------------------
+# S3 tests: get_stale_domains
+# ---------------------------------------------------------------------------
+
+
+def _write_domain_md_with_last_analyzed(
+    dep_map_dir: Path,
+    domain_name: str,
+    last_analyzed: Optional[str],
+) -> None:
+    """Write a minimal domain .md file with optional last_analyzed in frontmatter.
+
+    When last_analyzed is None, the frontmatter block is written without the
+    last_analyzed key (simulating a domain file that has frontmatter but omits
+    the field — AC3: missing last_analyzed → anomaly).
+    """
+    if last_analyzed is not None:
+        frontmatter = f"---\nname: {domain_name}\nlast_analyzed: {last_analyzed}\n---\n"
+    else:
+        frontmatter = f"---\nname: {domain_name}\n---\n"
+    body = f"# Domain Analysis: {domain_name}\n\nSome content.\n"
+    (dep_map_dir / f"{domain_name}.md").write_text(frontmatter + body, encoding="utf-8")
+
+
+class TestGetStaleDomains:
+    @pytest.fixture
+    def stale_root(self, dep_map_root: Path) -> Path:
+        """Set up 3 domains with different last_analyzed dates, relative to frozen now=2026-04-20."""
+        d = dep_map_root / "dependency-map"
+        # frozen now = 2026-04-20T00:00:00+00:00
+        # domain-old: 2026-01-01 → 109 days stale
+        # domain-mid: 2026-03-01 → 50 days stale
+        # domain-recent: 2026-04-18 → 2 days stale
+        domains = [
+            {"name": "domain-old", "description": "d", "participating_repos": []},
+            {"name": "domain-mid", "description": "d", "participating_repos": []},
+            {"name": "domain-recent", "description": "d", "participating_repos": []},
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_with_last_analyzed(
+            d, "domain-old", "2026-01-01T00:00:00+00:00"
+        )
+        _write_domain_md_with_last_analyzed(
+            d, "domain-mid", "2026-03-01T00:00:00+00:00"
+        )
+        _write_domain_md_with_last_analyzed(
+            d, "domain-recent", "2026-04-18T00:00:00+00:00"
+        )
+        return dep_map_root
+
+    def _freeze_now(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Freeze _current_utc_now to 2026-04-20 UTC for deterministic days_stale."""
+        from datetime import datetime, timezone
+
+        import code_indexer.server.services.dep_map_mcp_parser as mod
+
+        monkeypatch.setattr(
+            mod, "_current_utc_now", lambda: datetime(2026, 4, 20, tzinfo=timezone.utc)
+        )
+
+    def test_get_stale_domains_returns_only_items_exceeding_threshold(
+        self, stale_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """threshold=5 returns only domains older than 5 days (domain-old: 109d, domain-mid: 50d)."""
+        self._freeze_now(monkeypatch)
+        parser = _make_parser(stale_root)
+        stale, anomalies = parser.get_stale_domains(5)
+
+        assert anomalies == []
+        names = {d["domain_name"] for d in stale}
+        assert "domain-old" in names
+        assert "domain-mid" in names
+        assert "domain-recent" not in names
+        for entry in stale:
+            assert "domain_name" in entry
+            assert "last_analyzed" in entry
+            assert "days_stale" in entry
+            assert isinstance(entry["days_stale"], int)
+
+    def test_get_stale_domains_threshold_zero_returns_all_parseable(
+        self, stale_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """threshold=0 returns all domains with parseable last_analyzed."""
+        self._freeze_now(monkeypatch)
+        parser = _make_parser(stale_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert anomalies == []
+        names = {d["domain_name"] for d in stale}
+        assert names == {"domain-old", "domain-mid", "domain-recent"}
+
+    def test_get_stale_domains_sorted_descending_by_days_stale(
+        self, stale_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Results are sorted descending by days_stale (domain-old first, domain-recent last)."""
+        self._freeze_now(monkeypatch)
+        parser = _make_parser(stale_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert anomalies == []
+        assert len(stale) == 3
+        days = [d["days_stale"] for d in stale]
+        assert days == sorted(days, reverse=True), f"Not sorted descending: {days}"
+        assert stale[0]["domain_name"] == "domain-old"
+        assert stale[-1]["domain_name"] == "domain-recent"
+
+    def test_get_stale_domains_missing_last_analyzed_field_becomes_anomaly(
+        self, dep_map_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Domain whose frontmatter lacks the last_analyzed key → anomaly, NOT in stale list."""
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {"name": "no-date-domain", "description": "d", "participating_repos": []},
+        ]
+        _write_domains_json(d, domains)
+        # frontmatter has no last_analyzed key — simulates AC3 missing field
+        _write_domain_md_with_last_analyzed(d, "no-date-domain", None)
+        self._freeze_now(monkeypatch)
+
+        parser = _make_parser(dep_map_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert stale == []
+        assert len(anomalies) == 1
+        assert "no-date-domain" in anomalies[0]["file"]
+
+    def test_get_stale_domains_unparseable_date_becomes_anomaly(
+        self, dep_map_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Domain with unparseable last_analyzed string → anomaly, NOT in stale list."""
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {"name": "bad-date-domain", "description": "d", "participating_repos": []},
+        ]
+        _write_domains_json(d, domains)
+        _write_domain_md_with_last_analyzed(d, "bad-date-domain", "not-a-date")
+        self._freeze_now(monkeypatch)
+
+        parser = _make_parser(dep_map_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert stale == []
+        assert len(anomalies) == 1
+        assert "bad-date-domain" in anomalies[0]["file"]
+
+    def test_get_stale_domains_uses_utc_now(
+        self, dep_map_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """days_stale is computed from the injectable _current_utc_now — clock control works."""
+        from datetime import datetime, timezone
+
+        import code_indexer.server.services.dep_map_mcp_parser as mod
+
+        d = dep_map_root / "dependency-map"
+        domains = [{"name": "dom-clock", "description": "d", "participating_repos": []}]
+        _write_domains_json(d, domains)
+        # last_analyzed = 2026-01-01; if now = 2026-04-20 → 109 days
+        _write_domain_md_with_last_analyzed(d, "dom-clock", "2026-01-01T00:00:00+00:00")
+
+        monkeypatch.setattr(
+            mod, "_current_utc_now", lambda: datetime(2026, 4, 20, tzinfo=timezone.utc)
+        )
+        parser = _make_parser(dep_map_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert anomalies == []
+        assert len(stale) == 1
+        assert stale[0]["domain_name"] == "dom-clock"
+        assert stale[0]["days_stale"] == 109

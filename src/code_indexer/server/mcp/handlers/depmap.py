@@ -154,8 +154,48 @@ def depmap_get_domain_summary_handler(
     return _mcp_response({"success": True, "summary": summary, "anomalies": anomalies})
 
 
+def depmap_get_stale_domains_handler(
+    params: Dict[str, Any], user: Any
+) -> Dict[str, Any]:
+    """
+    MCP handler for depmap_get_stale_domains.
+
+    Returns domains whose last_analyzed frontmatter field is older than
+    days_threshold days. dep_map_path is resolved fresh on every call via app.state.
+
+    Args:
+        params: Tool arguments. Expected key: ``days_threshold`` (non-negative int).
+        user: Authenticated user (unused, kept for handler signature compatibility).
+
+    Returns:
+        MCP-compliant response dict:
+        - success=true:  {"success": true, "stale_domains": [...], "anomalies": [...]}
+        - success=false: {"success": false, "error": "...", "stale_domains": [], "anomalies": []}
+    """
+    raw = params.get("days_threshold") if isinstance(params, dict) else None
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "days_threshold must be a non-negative integer",
+                "stale_domains": [],
+                "anomalies": [],
+            }
+        )
+
+    parser, err = _resolve_parser("depmap_get_stale_domains")
+    if err is not None:
+        return _mcp_response({**err, "stale_domains": [], "anomalies": []})
+
+    stale_domains, anomalies = parser.get_stale_domains(raw)
+    return _mcp_response(
+        {"success": True, "stale_domains": stale_domains, "anomalies": anomalies}
+    )
+
+
 def _register(registry: Dict[str, Any]) -> None:
     """Register depmap handlers in the HANDLER_REGISTRY."""
     registry["depmap_find_consumers"] = depmap_find_consumers_handler
     registry["depmap_get_repo_domains"] = depmap_get_repo_domains_handler
     registry["depmap_get_domain_summary"] = depmap_get_domain_summary_handler
+    registry["depmap_get_stale_domains"] = depmap_get_stale_domains_handler
