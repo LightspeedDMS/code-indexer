@@ -325,7 +325,12 @@ class DepMapMCPParser:
                     stale_domains.append(
                         {
                             "domain_name": domain_name,
-                            "last_analyzed": fm["last_analyzed"],
+                            # Emit the parsed UTC-aware datetime as an ISO-8601
+                            # string so the value is JSON-serializable at the
+                            # MCP layer. PyYAML parses unquoted ISO-8601 YAML
+                            # dates into native datetime objects, so we cannot
+                            # forward fm["last_analyzed"] verbatim.
+                            "last_analyzed": last_analyzed_dt.isoformat(),
                             "days_stale": days_stale,
                         }
                     )

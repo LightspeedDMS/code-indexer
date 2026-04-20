@@ -1212,3 +1212,44 @@ class TestGetStaleDomains:
         assert "timezone-aware" in error_msg or "naive" in error_msg, (
             f"Error message must mention 'timezone-aware' or 'naive', got: {error_msg!r}"
         )
+
+    def test_get_stale_domains_last_analyzed_is_json_serializable_string(
+        self, dep_map_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """stale_domains[*].last_analyzed must be a JSON-serializable ISO-8601 string.
+
+        Regression test for manual-E2E bug: PyYAML parses bare (unquoted) ISO-8601
+        dates into native datetime objects. When the parser forwards those raw
+        values into the response dict, ``json.dumps`` at the MCP layer raises
+        ``TypeError: Object of type datetime is not JSON serializable`` (JSON-RPC
+        error -32603). The parser must normalize ``last_analyzed`` to a string
+        (the parsed UTC-aware ISO-8601 form) before returning.
+        """
+        import json as _json  # local import keeps top-of-file untouched
+
+        d = dep_map_root / "dependency-map"
+        domains = [
+            {"name": "dom-serialize", "description": "d", "participating_repos": []}
+        ]
+        _write_domains_json(d, domains)
+        # Bare, unquoted ISO-8601 — PyYAML will parse this into a datetime object
+        _write_domain_md_with_last_analyzed(
+            d, "dom-serialize", "2026-01-01T00:00:00+00:00"
+        )
+        self._freeze_now(monkeypatch)
+
+        parser = _make_parser(dep_map_root)
+        stale, anomalies = parser.get_stale_domains(0)
+
+        assert len(stale) == 1, "Domain must be included; PyYAML-parsed dates are valid"
+        assert anomalies == [], "No anomalies expected for a valid ISO-8601 frontmatter"
+
+        last_analyzed_val = stale[0]["last_analyzed"]
+        assert isinstance(last_analyzed_val, str), (
+            f"last_analyzed must be a string for JSON serialization, got "
+            f"{type(last_analyzed_val).__name__}: {last_analyzed_val!r}"
+        )
+        # Must be JSON-serializable end-to-end (reproduces the real MCP crash)
+        serialized = _json.dumps(stale)
+        assert "dom-serialize" in serialized
+        assert "last_analyzed" in serialized
