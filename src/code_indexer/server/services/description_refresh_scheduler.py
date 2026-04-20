@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 _CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
 _CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
 
+# Backfill aggregate job progress reporting constants.
+# Intermediate updates are capped at 99 so the terminal complete_job/fail_job
+# call is the only event that transitions the job to 100 / completed.
+_BACKFILL_PROGRESS_PERCENT_SCALE = 100
+_BACKFILL_INTERMEDIATE_PROGRESS_MAX = 99
+
 
 def _build_claude_command(prompt: str, analysis_model: str) -> list:
     """
@@ -1201,6 +1207,33 @@ class DescriptionRefreshScheduler:
             return
 
         if remaining > 0:
+            # Emit intermediate progress when some — but not all — repos are done.
+            try:
+                job = self._job_tracker.get_job(active_job_id)
+                if job is not None:
+                    cluster_wide_total = (job.metadata or {}).get("cluster_wide_total")
+                    if cluster_wide_total:
+                        processed = cluster_wide_total - remaining
+                        if processed > 0:
+                            progress_pct = min(
+                                _BACKFILL_INTERMEDIATE_PROGRESS_MAX,
+                                int(
+                                    processed
+                                    * _BACKFILL_PROGRESS_PERCENT_SCALE
+                                    / cluster_wide_total
+                                ),
+                            )
+                            self._job_tracker.update_status(
+                                active_job_id,
+                                progress=progress_pct,
+                                progress_info=f"{processed}/{cluster_wide_total} repos processed",
+                            )
+            except Exception as exc:
+                logger.warning(
+                    "_maybe_complete_backfill_job: could not emit intermediate progress for %s: %s",
+                    active_job_id,
+                    exc,
+                )
             return
 
         logger.info(
@@ -1266,6 +1299,28 @@ class DescriptionRefreshScheduler:
 
         cluster_wide_total = (job.metadata or {}).get("cluster_wide_total")
         if cluster_wide_total is None or processed < cluster_wide_total:
+            # Emit intermediate progress when some — but not all — repos have been attempted.
+            if cluster_wide_total and 0 < processed < cluster_wide_total:
+                try:
+                    progress_pct = min(
+                        _BACKFILL_INTERMEDIATE_PROGRESS_MAX,
+                        int(
+                            processed
+                            * _BACKFILL_PROGRESS_PERCENT_SCALE
+                            / cluster_wide_total
+                        ),
+                    )
+                    self._job_tracker.update_status(
+                        active_job_id,
+                        progress=progress_pct,
+                        progress_info=f"{processed}/{cluster_wide_total} repos processed",
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "_maybe_fail_backfill_job: could not emit intermediate progress for %s: %s",
+                        active_job_id,
+                        exc,
+                    )
             return
 
         # All repos attempted — close the aggregate as failed

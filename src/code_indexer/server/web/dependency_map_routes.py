@@ -240,6 +240,7 @@ def _get_progress_from_service(dep_map_service) -> tuple:
                 "dependency_map_delta",
                 "dependency_map_repair",
                 "dependency_map_refinement",
+                "lifecycle_backfill",
             ):
                 return job.progress or 0, job.progress_info or ""
     except Exception as e:

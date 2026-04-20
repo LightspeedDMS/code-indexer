@@ -260,9 +260,7 @@ class TestRunTwoPhaseTaskCallsFailureSweeper:
     to return None — the production failure scenario from Bug #871.
     """
 
-    def _make_scheduler_for_task(
-        self, tmp_path: Path
-    ):
+    def _make_scheduler_for_task(self, tmp_path: Path):
         """
         Build scheduler with meta_dir and active backfill job for one repo.
 

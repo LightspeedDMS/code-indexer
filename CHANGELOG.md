@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.12
+
+### Bug Fixes
+
+- fix(#872): `lifecycle_backfill` jobs now emit real-time progress through the entire run instead of remaining silently at 0% until terminal completion. Two emission sites added inside `DescriptionRefreshScheduler`: the success branch of `_maybe_complete_backfill_job()` and the failure branch of `_maybe_fail_backfill_job()`. Each per-repo completion or failure now calls `JobTracker.update_status()` with computed `progress=int(processed*100/cluster_wide_total)` (capped below 100 until the terminal step) and `progress_info="{processed}/{total} repos processed"`. Also added `"lifecycle_backfill"` to the operation_type allowlist in `dependency_map_routes._get_progress_from_service()` so HTMX dashboard polling returns the emitted values in the `X-Journal-Progress` / `X-Journal-Progress-Info` response headers. Progress now advances 25 → 50 → 75 → 100 during a 4-repo backfill; terminal failure preserves the last intermediate value (e.g., 75) because `fail_job()` intentionally does not overwrite progress. Root cause: both aggregate-owner methods previously returned silently when `remaining > 0` without ever touching the JobTracker, and the reader filter rejected the emitted values anyway. Module-level constants `_BACKFILL_PROGRESS_PERCENT_SCALE` and `_BACKFILL_INTERMEDIATE_PROGRESS_MAX` introduced to avoid magic numbers.
+
 ## v9.20.11
 
 ### Bug Fixes
