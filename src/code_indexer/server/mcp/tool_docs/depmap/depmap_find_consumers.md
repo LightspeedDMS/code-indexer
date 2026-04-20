@@ -44,3 +44,8 @@ Response structure:
     error: human-readable message
     consumers: []
     anomalies: []
+
+### See also
+
+- `guides/dependency_analysis_workflow` — two-phase workflow (semantic search
+  then `depmap_*`) and the `anomalies[]` contract

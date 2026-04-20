@@ -103,6 +103,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "git_amend",
         "first_time_user_guide",
         "get_tool_categories",
+        "dependency_analysis_workflow",
         "admin_logs_query",
         "admin_logs_export",
         "get_scip_audit_log",
