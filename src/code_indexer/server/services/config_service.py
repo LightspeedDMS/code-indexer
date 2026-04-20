@@ -1567,9 +1567,9 @@ class ConfigService:
                 "SELECT version FROM server_config WHERE config_key = %s",
                 (CONFIG_KEY_RUNTIME,),
             ).fetchone()
-            assert (
-                row is not None
-            ), "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
+            assert row is not None, (
+                "server_config row must exist after INSERT ON CONFLICT DO NOTHING"
+            )
             self._db_config_version = row["version"]
         logger.info(
             "ConfigService: seeded runtime config to PostgreSQL (%d keys)",
