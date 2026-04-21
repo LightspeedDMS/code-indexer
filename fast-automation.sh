@@ -318,7 +318,7 @@ python3 -m pytest \
     --timeout=15 \
     2>&1 | tee "$TELEMETRY_FILE"
 
-PYTEST_EXIT_CODE=$?
+PYTEST_EXIT_CODE=${PIPESTATUS[0]}
 
 # TELEMETRY: Extract duration data
 grep -E "^[0-9]+\.[0-9]+s (call|setup|teardown)" "$TELEMETRY_FILE" | sort -rn > "$DURATION_FILE"
