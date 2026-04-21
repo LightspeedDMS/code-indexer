@@ -13,7 +13,11 @@ Test strategy:
 - Real SQLite DB seeded via real backend APIs (DatabaseSchema + real backends)
 - MagicMock backends for unit isolation where real DB is not needed
 - No mocking of the code under test (Messi Rule #1)
-- Every test must FAIL on HEAD before fix, PASS after fix
+- Regression-proof tests (8 in this file) MUST FAIL on HEAD before the fix
+  and PASS after it lands. These prove the new behavior.
+- Contract/sanity tests (3 in this file) pass independently of the fix --
+  they verify that backend protocol methods and valid-entry pass-through
+  behavior remain correct. They are not regression proofs.
 
 Note (dual-backend wiring gap): The PostgreSQL wiring in lifespan.py currently passes
 db_path= only, so the scheduler silently uses SQLite backends on PostgreSQL deployments.
@@ -26,7 +30,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, call
 
@@ -235,11 +239,16 @@ class TestReconcileOrphanTracking:
 
         now = datetime.now(timezone.utc).isoformat()
         tracking_backend = DescriptionRefreshTrackingBackend(db_file)
+        # next_run deliberately set far in the future so get_stale_repos() (which the
+        # daemon thread runs via _run_loop_single_pass after start()) would NOT
+        # select this row. That isolates the test: only reconcile_orphan_tracking()
+        # -- called directly from start() -- can explain the deletion.
+        future = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
         tracking_backend.upsert_tracking(
             repo_alias="dangling-orphan",
             status="pending",
             last_run=now,
-            next_run=now,
+            next_run=future,
             created_at=now,
             updated_at=now,
         )
