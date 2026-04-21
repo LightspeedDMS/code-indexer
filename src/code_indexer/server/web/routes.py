@@ -5623,6 +5623,19 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     field_name = field.replace("_", " ").title()
                     return f"{field_name} must be a valid number"
 
+        # Validate cache size-cap fields (Bug #880)
+        # Empty string is valid (means "use 4096 MiB default").
+        # Non-empty must be a positive integer >= 1.
+        for field in ["index_cache_max_size_mb", "fts_cache_max_size_mb"]:
+            value = data.get(field)
+            if value is not None and str(value).strip() != "":
+                try:
+                    val_int = int(value)
+                    if val_int < 1:
+                        return f"{field} must be empty or a positive integer (MB)"
+                except (ValueError, TypeError):
+                    return f"{field} must be empty or a positive integer (MB)"
+
         # Validate payload cache settings (Story #679)
         for field in [
             "payload_preview_size_chars",

@@ -786,6 +786,7 @@ class ConfigService:
         """
         try:
             from code_indexer.server.cache import (
+                DEFAULT_MAX_CACHE_SIZE_MB,
                 get_global_cache,
                 get_global_fts_cache,
             )
@@ -797,13 +798,23 @@ class ConfigService:
             else:
                 raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
 
+            # Bug #880: when DB value is None (operator cleared the field to
+            # "use default"), re-apply the 4096 MiB safety floor to the live
+            # singleton.  The invariant from Bug #878 is: runtime cap is NEVER
+            # None post-startup.  The DB stores None correctly (meaning "no
+            # override"); only the live singleton needs the concrete floor.
+            runtime_cap = (
+                DEFAULT_MAX_CACHE_SIZE_MB if new_size_mb is None else new_size_mb
+            )
+
             with cache._cache_lock:
-                cache.config.max_cache_size_mb = new_size_mb
+                cache.config.max_cache_size_mb = runtime_cap
                 cache._enforce_size_limit()
 
             logger.info(
-                "Hot-reloaded %s cache max_cache_size_mb=%s",
+                "Hot-reloaded %s cache max_cache_size_mb=%s (db_value=%s)",
                 cache_kind,
+                runtime_cap,
                 new_size_mb,
                 extra={"correlation_id": get_correlation_id()},
             )

@@ -1350,7 +1350,8 @@ function saveLlmCredsConfig() {
                     </tr>
                     <tr>
                         <td class="config-label">Index Cache Max Size (MB)</td>
-                        <td class="config-value">{{ config.cache.index_cache_max_size_mb or 'Unlimited' }}</td>
+                        {# Bug #880: use explicit `is none` to avoid conflating None/0/"" (old `or` shorthand was a lie after hot-reload cleared the cap) #}
+                        <td class="config-value">{% if config.cache.index_cache_max_size_mb is none %}4096 (default){% else %}{{ config.cache.index_cache_max_size_mb }}{% endif %}</td>
                         <td class="config-note"></td>
                     </tr>
                     <tr>
@@ -1365,7 +1366,8 @@ function saveLlmCredsConfig() {
                     </tr>
                     <tr>
                         <td class="config-label">FTS Cache Max Size (MB)</td>
-                        <td class="config-value">{{ config.cache.fts_cache_max_size_mb or 'Unlimited' }}</td>
+                        {# Bug #880: use explicit `is none` to avoid conflating None/0/"" (old `or` shorthand was a lie after hot-reload cleared the cap) #}
+                        <td class="config-value">{% if config.cache.fts_cache_max_size_mb is none %}4096 (default){% else %}{{ config.cache.fts_cache_max_size_mb }}{% endif %}</td>
                         <td class="config-note"></td>
                     </tr>
                     <tr>
@@ -1414,6 +1416,11 @@ function saveLlmCredsConfig() {
                     Index Cache Cleanup Interval (sec)
                     <input type="number" id="cache-index-cleanup" name="index_cache_cleanup_interval" value="{{ config.cache.index_cache_cleanup_interval }}" min="1">
                 </label>
+                <label for="cache-index-max-size">
+                    Index Cache Max Size (MB)
+                    <input type="number" id="cache-index-max-size" name="index_cache_max_size_mb" value="{% if config.cache.index_cache_max_size_mb is none %}{% else %}{{ config.cache.index_cache_max_size_mb }}{% endif %}" min="1">
+                    <small>Leave empty to use the 4096 MiB default</small>
+                </label>
                 <label for="cache-fts-ttl">
                     FTS Cache TTL (minutes)
                     <input type="number" id="cache-fts-ttl" name="fts_cache_ttl_minutes" value="{{ config.cache.fts_cache_ttl_minutes }}" min="1" step="0.1">
@@ -1421,6 +1428,11 @@ function saveLlmCredsConfig() {
                 <label for="cache-fts-cleanup">
                     FTS Cache Cleanup Interval (sec)
                     <input type="number" id="cache-fts-cleanup" name="fts_cache_cleanup_interval" value="{{ config.cache.fts_cache_cleanup_interval }}" min="1">
+                </label>
+                <label for="cache-fts-max-size">
+                    FTS Cache Max Size (MB)
+                    <input type="number" id="cache-fts-max-size" name="fts_cache_max_size_mb" value="{% if config.cache.fts_cache_max_size_mb is none %}{% else %}{{ config.cache.fts_cache_max_size_mb }}{% endif %}" min="1">
+                    <small>Leave empty to use the 4096 MiB default</small>
                 </label>
                 <label for="cache-payload-preview">
                     Payload Preview Size (chars)

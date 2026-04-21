@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.14
+
+### Bug Fixes
+
+- fix(#880): Web UI Admin → Config cache section now exposes `index_cache_max_size_mb` and `fts_cache_max_size_mb` as operator-editable inputs in `<form id="edit-form-cache">`, and display rows render `4096 (default)` instead of the misleading `Unlimited` when the DB value is `None`. After Bug #878 Fix B.1 began overlaying `DEFAULT_MAX_CACHE_SIZE_MB = 4096` at singleton init, operators saw "Unlimited" on screen while the runtime silently enforced a 4096 MiB LRU cap — a UX lie. Four coordinated changes: (1) `config_section.html` adds two `<input type="number" min="1">` fields with helper text "Leave empty to use the 4096 MiB default", and rewrites display expressions from `{{ value or 'Unlimited' }}` to explicit `{% if value is none %}4096 (default){% else %}{{ value }}{% endif %}` so `0`/`""`/`None` are no longer conflated; (2) `ConfigService._hot_reload_cache_size_cap()` now imports `DEFAULT_MAX_CACHE_SIZE_MB` and applies it to the live singleton's `config.max_cache_size_mb` whenever the incoming value is `None`, preserving the 4096 MiB safety floor at runtime even after operator-driven clears (DB value remains `None` for correct "no override" persistence semantics); (3) `_validate_config_section("cache")` in `routes.py` rejects `"0"`, `"-100"`, `"abc"`, and `"1.5"` with the message `"<field> must be empty or a positive integer (MB)"` before `update_cache_setting()` is called; (4) 20 new parametrized tests in `tests/unit/server/web/test_config_cache_size_caps.py` cover edit-form presence, display semantics, POST round-trip through `reset_config_service()` + `initialize_runtime_db()`, hot-reload propagation with two-sided invariant (runtime=4096 AND DB=None), and negative validation. Dataclass defaults remain `None` (Bug #878 invariant preserved); hot-reload scope stays narrow to the two size-cap keys only. Codex code review APPROVED after one reject/remediate cycle.
+
 ## v9.20.13
 
 ### Bug Fixes
