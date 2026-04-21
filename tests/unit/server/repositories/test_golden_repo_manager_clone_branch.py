@@ -17,15 +17,10 @@ Test strategy:
     (matches pattern in test_golden_repo_manager_ssh_noninteractive.py)
   - Patch subprocess.run to capture the exact git clone invocation
   - Inspect the captured command list for presence/absence of --branch
-  - Use typing.get_type_hints() to resolve the actual annotation on the
-    branch parameter (handles both string and resolved annotations, and
-    both Optional[str] and str | None union forms)
 """
 
 from __future__ import annotations
 
-import inspect
-import typing
 from unittest.mock import MagicMock, patch
 
 
@@ -82,32 +77,6 @@ def _run_clone_and_get_cmd(branch, tmp_path):
     )
 
 
-def _annotation_allows_none(annotation) -> bool:
-    """
-    Return True if `annotation` represents an optional type that allows None.
-
-    Handles both:
-    - typing.Optional[str]  (== typing.Union[str, NoneType])
-    - str | None            (Python 3.10+ union syntax, types.UnionType)
-    """
-    origin = typing.get_origin(annotation)
-    if origin is typing.Union:
-        return type(None) in typing.get_args(annotation)
-    # Python 3.10+ union: `str | None` produces types.UnionType
-    try:
-        import types as _types
-        if isinstance(annotation, _types.UnionType):
-            return type(None) in typing.get_args(annotation)
-    except AttributeError:
-        pass
-    return False
-
-
-def _str_is_in_annotation(annotation) -> bool:
-    """Return True if str is one of the types in the annotation union."""
-    return str in typing.get_args(annotation)
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -157,37 +126,43 @@ def test_clone_with_valid_default_branch_includes_branch_flag(tmp_path):
     )
 
 
-def test_clone_repository_signature_accepts_optional_str():
+def test_add_golden_repo_with_none_default_branch_does_not_emit_branch_flag(tmp_path):
+    """End-to-end regression: _clone_repository with default_branch=None must not
+    emit `git clone --branch ""` (or `--branch None`).
+
+    This is the test that would have caught the original bug.  The prior tests
+    exercised the leaf `_clone_remote_repository` directly, which had a correct
+    guard — but the bug lived one layer up, where `default_branch or ""`
+    silently coerced None into an empty string that slipped through the leaf.
+
+    Drives the call through _clone_repository (the middle layer) with
+    branch=None and patches subprocess.run at the module boundary
+    (code_indexer.server.repositories.golden_repo_manager.subprocess.run)
+    so the full chain is exercised without spawning a real git process.
     """
-    _clone_repository must declare branch as Optional[str] (or str | None) with
-    a None default value.
+    manager = _make_manager()
+    manager.golden_repos_dir = str(tmp_path)
+    clone_path = str(tmp_path / "clone")
 
-    Uses typing.get_type_hints() to resolve annotations properly — this handles
-    both string annotations (from `from __future__ import annotations`) and
-    already-resolved forms, and works regardless of Python version.
-    """
-    from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
+    with patch(
+        "code_indexer.server.repositories.golden_repo_manager.subprocess.run",
+        return_value=_make_successful_subprocess_result(),
+    ) as mock_run:
+        manager._clone_repository(
+            repo_url="git@github.com:example/repo.git",
+            alias="test-repo",
+            branch=None,
+        )
 
-    # Verify default value via inspect.signature (unaffected by annotation mode).
-    sig = inspect.signature(GoldenRepoManager._clone_repository)
-    branch_param = sig.parameters.get("branch")
-    assert branch_param is not None, (
-        "_clone_repository must have a 'branch' parameter"
-    )
-    assert branch_param.default is None, (
-        f"Expected branch default=None, got: {branch_param.default!r}"
-    )
+    # Flatten all subprocess.run invocation args into a single list so we can
+    # assert that --branch never appears in any emitted command.
+    all_tokens = []
+    for call in mock_run.call_args_list:
+        cmd = call[0][0] if call[0] else call[1].get("args", [])
+        if isinstance(cmd, list):
+            all_tokens.extend(cmd)
 
-    # Verify annotation via get_type_hints() which resolves string annotations.
-    hints = typing.get_type_hints(GoldenRepoManager._clone_repository)
-    branch_annotation = hints.get("branch")
-    assert branch_annotation is not None, (
-        "_clone_repository must have a type annotation for 'branch'"
-    )
-    assert _annotation_allows_none(branch_annotation), (
-        f"Expected branch annotation to allow None (Optional[str] or str | None), "
-        f"got: {branch_annotation!r}"
-    )
-    assert _str_is_in_annotation(branch_annotation), (
-        f"Expected branch annotation to include str, got: {branch_annotation!r}"
+    assert "--branch" not in all_tokens, (
+        f"Expected no --branch token anywhere when default_branch=None, "
+        f"but subprocess received: {[c[0][0] if c[0] else c[1].get('args', []) for c in mock_run.call_args_list]}"
     )
