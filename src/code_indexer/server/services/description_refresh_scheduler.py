@@ -316,6 +316,7 @@ class DescriptionRefreshScheduler:
         )
 
         self.reconcile_orphan_tracking()
+        self.reconcile_broken_lifecycle_metadata()
 
         # Start daemon thread
         self._shutdown_event.clear()
@@ -514,10 +515,173 @@ class DescriptionRefreshScheduler:
                     exc_info=True,
                 )
 
-        logger.info(
-            "Orphan tracking reconciliation: pruned %d rows", deleted
-        )
+        logger.info("Orphan tracking reconciliation: pruned %d rows", deleted)
         return deleted
+
+    def reconcile_broken_lifecycle_metadata(self) -> int:
+        """One-shot backfill sweep: scan all golden repos for broken cidx-meta
+        lifecycle frontmatter and asynchronously route them through
+        LifecycleBatchRunner for repair.
+
+        Runs once at start(), after reconcile_orphan_tracking() and before the
+        periodic daemon thread spawns.  Closes Story #876 gap: pre-existing
+        aliases with stale v2 or 'confidence: unknown' metadata are never repaired
+        by any event-driven code path.
+
+        Returns the number of broken aliases queued for async repair, or 0 on
+        any error or empty result.  Self-defensive: all failures are logged and
+        swallowed so scheduler startup cannot be blocked.
+        """
+        if not self._check_lifecycle_backfill_wiring():
+            return 0
+
+        aliases = self._list_golden_aliases()
+        if aliases is None:
+            return 0
+        if not aliases:
+            logger.info("Lifecycle backfill: no golden repos to scan")
+            return 0
+
+        broken = self._find_broken_lifecycle_aliases(aliases)
+        if broken is None:
+            return 0
+        if not broken:
+            logger.info(
+                "Lifecycle backfill: no broken lifecycle metadata found "
+                "(%d aliases clean)",
+                len(aliases),
+            )
+            return 0
+
+        logger.info(
+            "Lifecycle backfill: identified %d broken aliases — "
+            "dispatching async repair thread",
+            len(broken),
+        )
+        self._dispatch_lifecycle_backfill_thread(broken)
+        return len(broken)
+
+    def _check_lifecycle_backfill_wiring(self) -> bool:
+        """Return True if all four lifecycle collaborators are wired; log WARNING and
+        return False for the first missing one (Messi Rule #2 — no silent fallback)."""
+        for name, value in (
+            ("lifecycle_invoker", self._lifecycle_invoker),
+            ("golden_repos_dir", self._golden_repos_dir),
+            ("lifecycle_debouncer", self._lifecycle_debouncer),
+            ("refresh_scheduler", self._refresh_scheduler),
+        ):
+            if value is None:
+                logger.warning(
+                    "Lifecycle backfill skipped at startup: %s not wired",
+                    name,
+                )
+                return False
+        return True
+
+    def _list_golden_aliases(self) -> Optional[List[str]]:
+        """Return a list of valid alias strings from the golden backend.
+
+        Returns None on error (caller should skip the sweep).
+        Returns [] when the backend has no repos yet.
+        Alias filter: must be a non-empty str (excludes None, int, empty string).
+        """
+        try:
+            repos = self._golden_backend.list_repos() or []
+        except Exception:
+            logger.error(
+                "Lifecycle backfill: list_repos failed — skipping startup sweep",
+                exc_info=True,
+            )
+            return None
+
+        aliases: List[str] = []
+        for repo in repos:
+            alias = repo.get("alias") if isinstance(repo, dict) else None
+            if isinstance(alias, str) and alias:
+                aliases.append(alias)
+        return aliases
+
+    def _find_broken_lifecycle_aliases(self, aliases: List[str]) -> Optional[List[str]]:
+        """Run LifecycleFleetScanner over *aliases* and return the broken subset.
+
+        Returns None on scanner error (caller should skip the sweep).
+        Returns [] when all aliases have valid lifecycle metadata.
+        """
+        try:
+            from code_indexer.global_repos.lifecycle_batch_runner import (
+                LifecycleFleetScanner,
+            )
+
+            scanner = LifecycleFleetScanner(
+                golden_repos_dir=self._golden_repos_dir,
+                repo_aliases=aliases,
+            )
+            return scanner.find_broken_or_missing()
+        except Exception:
+            logger.error(
+                "Lifecycle backfill: fleet scan failed — skipping startup sweep",
+                exc_info=True,
+            )
+            return None
+
+    def _dispatch_lifecycle_backfill_thread(self, broken: List[str]) -> None:
+        """Spawn a daemon thread to run LifecycleBatchRunner on *broken* aliases."""
+        thread = threading.Thread(
+            target=self._run_lifecycle_backfill_async,
+            args=(list(broken),),
+            daemon=True,
+            name="lifecycle-backfill",
+        )
+        thread.start()
+
+    def _run_lifecycle_backfill_async(self, aliases: List[str]) -> None:
+        """Background worker: run LifecycleBatchRunner on broken aliases.
+
+        Generates a UUID job_id, registers it with JobTracker (operation_type
+        'lifecycle_backfill', username 'system'), then invokes
+        LifecycleBatchRunner.run(aliases, parent_job_id=job_id) — which itself
+        handles sub-batching, concurrency, per-alias locking, debouncer signal,
+        and job_tracker.complete_job.
+
+        All exceptions are logged and swallowed — a sweep failure must not crash
+        the daemon thread or leak back into scheduler startup.
+        """
+        try:
+            if self._job_tracker is None:
+                logger.error(
+                    "Lifecycle backfill async: job_tracker missing — "
+                    "cannot route repair through LifecycleBatchRunner"
+                )
+                return
+
+            import uuid
+
+            job_id = str(uuid.uuid4())
+            self._job_tracker.register_job(
+                job_id=job_id,
+                operation_type="lifecycle_backfill",
+                username="system",
+                metadata={"total": len(aliases), "source": "startup_backfill"},
+            )
+
+            runner = LifecycleBatchRunner(
+                golden_repos_dir=self._golden_repos_dir,
+                job_tracker=self._job_tracker,
+                refresh_scheduler=self._refresh_scheduler,
+                debouncer=self._lifecycle_debouncer,
+                claude_cli_invoker=self._lifecycle_invoker,
+                tracking_backend=self._tracking_backend,
+            )
+            runner.run(aliases, parent_job_id=job_id)
+            logger.info(
+                "Lifecycle backfill async: completed repair for %d aliases",
+                len(aliases),
+            )
+        except Exception:
+            logger.error(
+                "Lifecycle backfill async: repair thread failed",
+                exc_info=True,
+            )
 
     def on_refresh_complete(
         self,
