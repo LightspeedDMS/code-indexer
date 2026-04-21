@@ -142,7 +142,6 @@ def test_add_golden_repo_with_none_default_branch_does_not_emit_branch_flag(tmp_
     """
     manager = _make_manager()
     manager.golden_repos_dir = str(tmp_path)
-    clone_path = str(tmp_path / "clone")
 
     with patch(
         "code_indexer.server.repositories.golden_repo_manager.subprocess.run",
