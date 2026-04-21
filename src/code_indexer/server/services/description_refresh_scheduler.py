@@ -315,6 +315,8 @@ class DescriptionRefreshScheduler:
             f"Description refresh scheduler started (interval: {interval_hours}h, {buckets} buckets)"
         )
 
+        self.reconcile_orphan_tracking()
+
         # Start daemon thread
         self._shutdown_event.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -456,11 +458,66 @@ class DescriptionRefreshScheduler:
                 merged = {**tracking, "clone_path": golden_repo["clone_path"]}
                 result.append(merged)
             else:
-                logger.warning(
-                    f"Tracking record exists for {alias} but golden repo not found"
-                )
+                try:
+                    self._tracking_backend.delete_tracking(alias)
+                    logger.info(
+                        "Pruned orphan tracking row for %s (golden repo not found)",
+                        alias,
+                    )
+                except Exception:
+                    logger.error(
+                        "Failed to prune orphan tracking row for %s",
+                        alias,
+                        exc_info=True,
+                    )
 
         return result
+
+    def reconcile_orphan_tracking(self) -> int:
+        """One-shot sweep: delete tracking rows whose golden_repo is missing.
+
+        Returns the number of rows pruned. Self-defensive: any exception in the
+        sweep is logged and swallowed so scheduler startup cannot be blocked.
+        """
+        deleted = 0
+        try:
+            rows = self._tracking_backend.get_all_tracking()
+        except Exception:
+            logger.error(
+                "Orphan tracking reconciliation: get_all_tracking failed",
+                exc_info=True,
+            )
+            return 0
+
+        for row in rows:
+            alias = row.get("repo_alias")
+            if not alias:
+                continue
+            try:
+                golden = self._golden_backend.get_repo(alias)
+            except Exception:
+                logger.error(
+                    "Orphan tracking reconciliation: get_repo failed for %s",
+                    alias,
+                    exc_info=True,
+                )
+                continue
+            if golden:
+                continue
+            try:
+                self._tracking_backend.delete_tracking(alias)
+                deleted += 1
+            except Exception:
+                logger.error(
+                    "Orphan tracking reconciliation: delete failed for %s",
+                    alias,
+                    exc_info=True,
+                )
+
+        logger.info(
+            "Orphan tracking reconciliation: pruned %d rows", deleted
+        )
+        return deleted
 
     def on_refresh_complete(
         self,
