@@ -372,22 +372,25 @@ class TestBranchGuardCheckoutFailure:
 
 
 # ---------------------------------------------------------------------------
-# Test 4: Missing default_branch defaults to "main"
+# Test 4: Missing default_branch with all fallbacks exhausted skips checkout
 # ---------------------------------------------------------------------------
 
 
 class TestBranchGuardDefaultBranch:
     """
-    When repo_info does not contain a 'default_branch' key,
-    the guard must fall back to "main".
+    When repo_info does not contain a 'default_branch' key AND all three
+    fallback layers (repo_info, DB, git symbolic-ref) yield no branch,
+    the branch-reset step must be skipped entirely — no checkout, no crash.
     """
 
-    def test_missing_default_branch_defaults_to_main(
+    def test_missing_default_branch_skips_checkout_when_all_fallbacks_fail(
         self, scheduler, golden_repos_dir, mock_registry
     ):
         """
-        When repo_info has no 'default_branch' key, the branch guard must
-        compare against 'main' and checkout 'main' if needed.
+        When repo_info has no 'default_branch' key, the DB lookup fails,
+        and git symbolic-ref returns an empty result, the guard must skip
+        the branch-reset step entirely rather than attempting a checkout
+        with an unknown branch name.
         """
         alias_name = "my-repo-global"
         master_path = str(golden_repos_dir / "my-repo")
@@ -403,8 +406,10 @@ class TestBranchGuardDefaultBranch:
 
         def fake_subprocess_run(cmd, **kwargs):
             if cmd == ["git", "branch", "--show-current"]:
-                # On the wrong branch
                 return _proc(returncode=0, stdout="feature/something")
+            if cmd == ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]:
+                # All fallbacks exhausted — symbolic-ref returns empty
+                return _proc(returncode=0, stdout="")
             if cmd[:2] == ["git", "checkout"]:
                 checkout_calls.append(cmd)
                 return _proc(returncode=0)
@@ -442,12 +447,7 @@ class TestBranchGuardDefaultBranch:
         ):
             scheduler._execute_refresh(alias_name)
 
-        # Must have called git checkout main (the default fallback)
-        assert len(checkout_calls) == 1, (
-            f"Expected 1 checkout call, got {len(checkout_calls)}: {checkout_calls}"
+        # When all three fallbacks fail, no checkout must be attempted
+        assert len(checkout_calls) == 0, (
+            f"Expected no checkout when all fallbacks fail, got: {checkout_calls}"
         )
-        assert checkout_calls[0] == [
-            "git",
-            "checkout",
-            "main",
-        ], f"Expected 'git checkout main' (default), got: {checkout_calls[0]}"
