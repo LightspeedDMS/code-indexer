@@ -4,6 +4,11 @@ Server-side cache module for CIDX server.
 Story #526: Provides singleton HNSW index cache for server-wide performance optimization.
 Story #XXX: Provides singleton FTS (Tantivy) index cache for FTS query performance.
 Story #679: Provides PayloadCache for semantic search result truncation.
+Bug #878 (Fix B.1): Applies an opinionated default ``max_cache_size_mb`` at
+singleton init so HNSW / FTS native memory is bounded even when the
+configuration on disk omits the size cap. Dataclass defaults remain
+``None``; the overlay is only applied inside the server-init helpers below.
+Test coverage: tests/unit/server/cache/test_size_cap_defaults.py.
 """
 
 from code_indexer.server.middleware.correlation import get_correlation_id
@@ -30,6 +35,45 @@ from code_indexer.server.logging_utils import format_error_log
 # Initialized on first import, shared across all server components
 _global_cache_instance = None
 _global_fts_cache_instance = None
+
+# Fix B.1 (Issue #878): Opinionated default cap for HNSW / FTS index caches.
+# Applied by get_global_cache() / get_global_fts_cache() when the loaded
+# configuration has ``max_cache_size_mb is None``. Keeps native memory
+# bounded for hot repositories whose access-based TTL would otherwise keep
+# them cached forever. Operators can override by setting an explicit value
+# in config.json / via the documented environment variables.
+DEFAULT_MAX_CACHE_SIZE_MB = 4096
+
+
+def _apply_default_size_cap(
+    config: "HNSWIndexCacheConfig | FTSIndexCacheConfig",
+    cache_kind: str,
+) -> None:
+    """
+    Overlay the opinionated default ``max_cache_size_mb`` when the loaded
+    config has ``None``.
+
+    Mutates ``config`` in place and emits an INFO log record so operators
+    can see they are running on the default rather than an explicit value.
+    No-op when ``config.max_cache_size_mb`` is already set.
+
+    Args:
+        config: HNSW or FTS cache config instance to mutate.
+        cache_kind: Human-readable tag (e.g. "HNSW", "FTS") used in the log
+            message for operator clarity.
+    """
+    import logging
+
+    if config.max_cache_size_mb is not None:
+        return
+
+    config.max_cache_size_mb = DEFAULT_MAX_CACHE_SIZE_MB
+    logging.getLogger(__name__).info(
+        f"Applying default max_cache_size_mb={DEFAULT_MAX_CACHE_SIZE_MB}MB "
+        f"for {cache_kind} cache. Set an explicit value in server config "
+        "to override.",
+        extra={"correlation_id": get_correlation_id()},
+    )
 
 
 def get_global_cache() -> HNSWIndexCache:
@@ -81,6 +125,9 @@ def get_global_cache() -> HNSWIndexCache:
                 f"Initialized HNSW cache with env/default config: TTL={config.ttl_minutes}min",
                 extra={"correlation_id": get_correlation_id()},
             )
+
+        # Fix B.1 (Issue #878): overlay opinionated default size cap.
+        _apply_default_size_cap(config, cache_kind="HNSW")
 
         _global_cache_instance = HNSWIndexCache(config=config)
 
@@ -154,6 +201,9 @@ def get_global_fts_cache() -> FTSIndexCache:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Fix B.1 (Issue #878): overlay opinionated default size cap.
+        _apply_default_size_cap(config, cache_kind="FTS")
+
         _global_fts_cache_instance = FTSIndexCache(config=config)
 
         # Start background cleanup thread
@@ -212,4 +262,6 @@ __all__ = [
     "PayloadCache",
     "PayloadCacheConfig",
     "CacheNotFoundError",
+    # Fix B.1 default size cap (exported for observability / tests)
+    "DEFAULT_MAX_CACHE_SIZE_MB",
 ]

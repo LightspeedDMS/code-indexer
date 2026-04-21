@@ -17,6 +17,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Callable, TYPE_CHECKING, List
 from dataclasses import dataclass, asdict
 
+# Bug #878 Fix A.3: The outer finally in _execute_job iterates registered
+# DatabaseConnectionManager instances and proactively closes the worker
+# thread's SQLite connection on each before the thread exits.  Imported
+# at module scope (not under TYPE_CHECKING) because we need the runtime
+# class object, not just the type annotation.
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import (
         ServerResourceConfig,
@@ -646,6 +653,39 @@ class BackgroundJobManager:
         except Exception:
             pass  # Best-effort — don't break progress reporting
 
+    def _close_thread_connections_on_all_managers(self, job_id: str) -> None:
+        """Bug #878 Fix A.3 helper.
+
+        Iterate over every registered ``DatabaseConnectionManager`` instance
+        and call ``close_thread_connection()`` on each so the caller thread's
+        tracked SQLite connection is closed and untracked before the thread
+        dies.  Called from two places:
+
+        1. ``_execute_job`` outer finally — covers the ``progress_callback``
+           path where the user's ``func`` runs directly on the outer worker
+           thread that ``submit_job`` spawned.
+        2. ``_execute_with_cancellation_check`` inner worker's finally —
+           covers the non-``progress_callback`` path where ``func`` runs on
+           a nested thread whose TID never equals the outer thread's TID.
+
+        Defensive: any exception from an individual manager is logged at
+        WARNING level but does NOT propagate, so one broken manager cannot
+        prevent cleanup on its siblings.
+        """
+        # Take a snapshot list so a concurrent _instances mutation during
+        # iteration cannot raise RuntimeError: dictionary changed size.
+        managers_snapshot = list(DatabaseConnectionManager._instances.values())
+        for manager in managers_snapshot:
+            try:
+                manager.close_thread_connection()
+            except Exception as exc:
+                logging.warning(
+                    "close_thread_connection raised for job %s on manager %s: %s",
+                    job_id,
+                    getattr(manager, "db_path", "<unknown>"),
+                    exc,
+                )
+
     def _execute_job(
         self, job_id: str, func: Callable[[], Dict[str, Any]], args: tuple, kwargs: dict
     ) -> None:
@@ -661,220 +701,247 @@ class BackgroundJobManager:
             args: Function arguments
             kwargs: Function keyword arguments
         """
-        # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
-        # Job remains in PENDING state while waiting
-        logging.debug(
-            f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})"
-        )
-        self._job_semaphore.acquire()
-
+        # Bug #878 Fix A.3: Outer try/finally wraps the entire job body so
+        # that every exit path from this worker thread — normal return,
+        # exception, early cancellation — closes any SQLite connections
+        # this thread opened on registered DatabaseConnectionManager
+        # instances.  Closing at the source of the churn eliminates the
+        # race (RC-3) where short-lived job threads accumulated tracked
+        # connections faster than the demand-driven cleanup sweep could
+        # drain them.
         try:
-            # Now we have a slot - check if job was cancelled while waiting
-            with self._lock:
-                job = self.jobs[job_id]
+            # Story #26: Wait for a slot in the semaphore (blocks if limit reached)
+            # Job remains in PENDING state while waiting
+            logging.debug(
+                f"Job {job_id} waiting for execution slot (current limit: {self.max_concurrent_jobs})"
+            )
+            self._job_semaphore.acquire()
+
+            try:
+                # Now we have a slot - check if job was cancelled while waiting
+                with self._lock:
+                    job = self.jobs[job_id]
+                    if job.cancelled:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = datetime.now(timezone.utc)
+                # Story #267 Component 3-4: Persist outside lock
                 if job.cancelled:
-                    job.status = JobStatus.CANCELLED
-                    job.completed_at = datetime.now(timezone.utc)
-            # Story #267 Component 3-4: Persist outside lock
-            if job.cancelled:
-                self._persist_jobs(job_id=job_id)
-                return
+                    self._persist_jobs(job_id=job_id)
+                    return
 
-            with self._lock:
-                job.status = JobStatus.RUNNING
-                job.started_at = datetime.now(timezone.utc)
-                job.progress = 10
-            # Story #267 Component 3-4: Persist outside lock
-            self._persist_jobs(job_id=job_id)
-
-            # Story #311: Notify tracker that job is now running
-            if self._job_tracker is not None:
-                try:
-                    self._job_tracker.update_status(job_id, status="running")
-                except Exception:
-                    logging.warning(
-                        f"JobTracker.update_status(running) failed for {job_id}",
-                        exc_info=True,
-                    )
-
-            logging.info(f"Starting background job {job_id}")
-
-            # Create progress callback function
-            def progress_callback(
-                progress: int,
-                phase: Optional[str] = None,
-                detail: Optional[str] = None,
-            ):
                 with self._lock:
-                    if job_id in self.jobs and not self.jobs[job_id].cancelled:
-                        self.jobs[job_id].progress = progress
-                        # Story #480: Update phase info when provided
-                        if phase is not None:
-                            self.jobs[job_id].current_phase = phase
-                        if detail is not None:
-                            self.jobs[job_id].phase_detail = detail
+                    job.status = JobStatus.RUNNING
+                    job.started_at = datetime.now(timezone.utc)
+                    job.progress = 10
                 # Story #267 Component 3-4: Persist outside lock
                 self._persist_jobs(job_id=job_id)
-                # Bug #584: Check DB for cross-node cancellation
-                self._check_db_cancellation(job_id)
 
-            # Check if function accepts progress callback
-            func_signature = inspect.signature(func)
+                # Story #311: Notify tracker that job is now running
+                if self._job_tracker is not None:
+                    try:
+                        self._job_tracker.update_status(job_id, status="running")
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker.update_status(running) failed for {job_id}",
+                            exc_info=True,
+                        )
 
-            # Check for cancellation before execution
-            cancelled = False
-            with self._lock:
-                if self.jobs[job_id].cancelled:
-                    self.jobs[job_id].status = JobStatus.CANCELLED
-                    self.jobs[job_id].completed_at = datetime.now(timezone.utc)
-                    cancelled = True
-            if cancelled:
-                # Story #267 Component 3-4: Persist outside lock
-                self._persist_jobs(job_id=job_id)
-                return
+                logging.info(f"Starting background job {job_id}")
 
-            # Execute the actual operation with frequent cancellation checks
-            if "progress_callback" in func_signature.parameters:
-                # Function manages its own progress via ProgressPhaseAllocator.
-                # Bug #483 Fix: Do NOT emit hardcoded 25% here — it would create
-                # a visible 25->0 regression when the function's first phase
-                # starts at 0 (e.g., phase_start("semantic") == 0).
-                enhanced_kwargs = kwargs.copy()
-                enhanced_kwargs["progress_callback"] = progress_callback
-                result = func(*args, **enhanced_kwargs)
-            else:
-                # For functions without progress callback, emit a coarse 25%
-                # marker to indicate execution has started, then wrap execution
-                # to check for cancellation periodically.
-                progress_callback(25)
-                result = self._execute_with_cancellation_check(
-                    job_id, func, args, kwargs
-                )
+                # Create progress callback function
+                def progress_callback(
+                    progress: int,
+                    phase: Optional[str] = None,
+                    detail: Optional[str] = None,
+                ):
+                    with self._lock:
+                        if job_id in self.jobs and not self.jobs[job_id].cancelled:
+                            self.jobs[job_id].progress = progress
+                            # Story #480: Update phase info when provided
+                            if phase is not None:
+                                self.jobs[job_id].current_phase = phase
+                            if detail is not None:
+                                self.jobs[job_id].phase_detail = detail
+                    # Story #267 Component 3-4: Persist outside lock
+                    self._persist_jobs(job_id=job_id)
+                    # Bug #584: Check DB for cross-node cancellation
+                    self._check_db_cancellation(job_id)
 
-            # Job completed — determine final status from result
-            with self._lock:
-                job = self.jobs[job_id]
-                if not job.cancelled:
-                    # Bug #646: result["success"] is False (exact identity) → FAILED
-                    if isinstance(result, dict) and result.get("success") is False:
-                        job.status = JobStatus.FAILED
-                    # Bug #679: result["partial"] is True (exact identity) → COMPLETED_PARTIAL
-                    elif isinstance(result, dict) and result.get("partial") is True:
-                        job.status = JobStatus.COMPLETED_PARTIAL
-                    else:
-                        job.status = JobStatus.COMPLETED
-                    job.completed_at = datetime.now(timezone.utc)
-                    job.result = result
-                    job.progress = 100
+                # Check if function accepts progress callback
+                func_signature = inspect.signature(func)
+
+                # Check for cancellation before execution
+                cancelled = False
+                with self._lock:
+                    if self.jobs[job_id].cancelled:
+                        self.jobs[job_id].status = JobStatus.CANCELLED
+                        self.jobs[job_id].completed_at = datetime.now(timezone.utc)
+                        cancelled = True
+                if cancelled:
+                    # Story #267 Component 3-4: Persist outside lock
+                    self._persist_jobs(job_id=job_id)
+                    return
+
+                # Execute the actual operation with frequent cancellation checks
+                if "progress_callback" in func_signature.parameters:
+                    # Function manages its own progress via ProgressPhaseAllocator.
+                    # Bug #483 Fix: Do NOT emit hardcoded 25% here — it would create
+                    # a visible 25->0 regression when the function's first phase
+                    # starts at 0 (e.g., phase_start("semantic") == 0).
+                    enhanced_kwargs = kwargs.copy()
+                    enhanced_kwargs["progress_callback"] = progress_callback
+                    result = func(*args, **enhanced_kwargs)
                 else:
+                    # For functions without progress callback, emit a coarse 25%
+                    # marker to indicate execution has started, then wrap execution
+                    # to check for cancellation periodically.
+                    progress_callback(25)
+                    result = self._execute_with_cancellation_check(
+                        job_id, func, args, kwargs
+                    )
+
+                # Job completed — determine final status from result
+                with self._lock:
+                    job = self.jobs[job_id]
+                    if not job.cancelled:
+                        # Bug #646: result["success"] is False (exact identity) → FAILED
+                        if isinstance(result, dict) and result.get("success") is False:
+                            job.status = JobStatus.FAILED
+                        # Bug #679: result["partial"] is True (exact identity) → COMPLETED_PARTIAL
+                        elif isinstance(result, dict) and result.get("partial") is True:
+                            job.status = JobStatus.COMPLETED_PARTIAL
+                        else:
+                            job.status = JobStatus.COMPLETED
+                        job.completed_at = datetime.now(timezone.utc)
+                        job.result = result
+                        job.progress = 100
+                    else:
+                        job.status = JobStatus.CANCELLED
+                        job.completed_at = datetime.now(timezone.utc)
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+
+                # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
+                if self._job_tracker is not None:
+                    try:
+                        if job.status in (
+                            JobStatus.COMPLETED,
+                            JobStatus.COMPLETED_PARTIAL,
+                        ):
+                            # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
+                            self._job_tracker.complete_job(
+                                job_id,
+                                result=job.result
+                                if isinstance(job.result, dict)
+                                else None,
+                            )
+                        else:
+                            # FAILED or CANCELLED — record as failed with reason
+                            error_msg = (
+                                "cancelled"
+                                if job.status == JobStatus.CANCELLED
+                                else (
+                                    job.result.get("error", "job failed")
+                                    if isinstance(job.result, dict)
+                                    else "job failed"
+                                )
+                            )
+                            self._job_tracker.fail_job(job_id, error=error_msg)
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker completion callback failed for {job_id}",
+                            exc_info=True,
+                        )
+
+                # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
+                # Only when SQLite backend is available (data is preserved in DB)
+                # Bug #679: COMPLETED_PARTIAL is also a terminal status — must be evicted
+                if self._sqlite_backend and job.status in (
+                    JobStatus.COMPLETED,
+                    JobStatus.COMPLETED_PARTIAL,
+                    JobStatus.CANCELLED,
+                    JobStatus.FAILED,
+                ):
+                    with self._lock:
+                        self.jobs.pop(job_id, None)
+
+                if job.status == JobStatus.FAILED:
+                    logging.warning(
+                        f"Background job {job_id} completed with failure result"
+                    )
+                else:
+                    logging.info(f"Background job {job_id} completed successfully")
+
+            except InterruptedError as e:
+                # Job was cancelled
+                logging.info(f"Background job {job_id} was cancelled: {e}")
+                with self._lock:
+                    job = self.jobs[job_id]
                     job.status = JobStatus.CANCELLED
                     job.completed_at = datetime.now(timezone.utc)
-            # Story #267 Component 3-4: Persist outside lock
-            self._persist_jobs(job_id=job_id)
+                    job.error = str(e)
+                    job.progress = 0
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+                # Story #311 AC10: Notify tracker of cancellation via fail_job
+                if self._job_tracker is not None:
+                    try:
+                        self._job_tracker.fail_job(job_id, error=f"cancelled: {e}")
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker.fail_job(cancelled) failed for {job_id}",
+                            exc_info=True,
+                        )
+                # Story #267 Component 8: Remove from memory after persist (SQLite only)
+                if self._sqlite_backend:
+                    with self._lock:
+                        self.jobs.pop(job_id, None)
+            except Exception as e:
+                # Job failed
+                error_msg = str(e)
+                logging.error(f"Background job {job_id} failed: {error_msg}")
 
-            # Story #311: Notify tracker of completion (AC3) or cancellation (AC10)
-            if self._job_tracker is not None:
-                try:
-                    if job.status in (JobStatus.COMPLETED, JobStatus.COMPLETED_PARTIAL):
-                        # Bug #679: COMPLETED_PARTIAL is a completion variant — notify tracker
-                        self._job_tracker.complete_job(
-                            job_id,
-                            result=job.result if isinstance(job.result, dict) else None,
-                        )
-                    else:
-                        # FAILED or CANCELLED — record as failed with reason
-                        error_msg = (
-                            "cancelled"
-                            if job.status == JobStatus.CANCELLED
-                            else (
-                                job.result.get("error", "job failed")
-                                if isinstance(job.result, dict)
-                                else "job failed"
-                            )
-                        )
+                with self._lock:
+                    job = self.jobs[job_id]
+                    job.status = JobStatus.FAILED
+                    job.completed_at = datetime.now(timezone.utc)
+                    job.error = error_msg
+                    job.progress = 0
+                # Story #267 Component 3-4: Persist outside lock
+                self._persist_jobs(job_id=job_id)
+                # Story #311 AC3: Notify tracker of failure
+                if self._job_tracker is not None:
+                    try:
                         self._job_tracker.fail_job(job_id, error=error_msg)
-                except Exception:
-                    logging.warning(
-                        f"JobTracker completion callback failed for {job_id}",
-                        exc_info=True,
-                    )
+                    except Exception:
+                        logging.warning(
+                            f"JobTracker.fail_job failed for {job_id}",
+                            exc_info=True,
+                        )
+                # Story #267 Component 8: Remove from memory after persist (SQLite only)
+                if self._sqlite_backend:
+                    with self._lock:
+                        self.jobs.pop(job_id, None)
 
-            # Story #267 Component 8: Remove completed/cancelled/failed jobs from memory
-            # Only when SQLite backend is available (data is preserved in DB)
-            # Bug #679: COMPLETED_PARTIAL is also a terminal status — must be evicted
-            if self._sqlite_backend and job.status in (
-                JobStatus.COMPLETED,
-                JobStatus.COMPLETED_PARTIAL,
-                JobStatus.CANCELLED,
-                JobStatus.FAILED,
-            ):
+            finally:
+                # Story #26: Release semaphore slot to allow another job to run
+                self._job_semaphore.release()
+                # Clean up running job reference
                 with self._lock:
-                    self.jobs.pop(job_id, None)
-
-            if job.status == JobStatus.FAILED:
-                logging.warning(
-                    f"Background job {job_id} completed with failure result"
-                )
-            else:
-                logging.info(f"Background job {job_id} completed successfully")
-
-        except InterruptedError as e:
-            # Job was cancelled
-            logging.info(f"Background job {job_id} was cancelled: {e}")
-            with self._lock:
-                job = self.jobs[job_id]
-                job.status = JobStatus.CANCELLED
-                job.completed_at = datetime.now(timezone.utc)
-                job.error = str(e)
-                job.progress = 0
-            # Story #267 Component 3-4: Persist outside lock
-            self._persist_jobs(job_id=job_id)
-            # Story #311 AC10: Notify tracker of cancellation via fail_job
-            if self._job_tracker is not None:
-                try:
-                    self._job_tracker.fail_job(job_id, error=f"cancelled: {e}")
-                except Exception:
-                    logging.warning(
-                        f"JobTracker.fail_job(cancelled) failed for {job_id}",
-                        exc_info=True,
-                    )
-            # Story #267 Component 8: Remove from memory after persist (SQLite only)
-            if self._sqlite_backend:
-                with self._lock:
-                    self.jobs.pop(job_id, None)
-        except Exception as e:
-            # Job failed
-            error_msg = str(e)
-            logging.error(f"Background job {job_id} failed: {error_msg}")
-
-            with self._lock:
-                job = self.jobs[job_id]
-                job.status = JobStatus.FAILED
-                job.completed_at = datetime.now(timezone.utc)
-                job.error = error_msg
-                job.progress = 0
-            # Story #267 Component 3-4: Persist outside lock
-            self._persist_jobs(job_id=job_id)
-            # Story #311 AC3: Notify tracker of failure
-            if self._job_tracker is not None:
-                try:
-                    self._job_tracker.fail_job(job_id, error=error_msg)
-                except Exception:
-                    logging.warning(
-                        f"JobTracker.fail_job failed for {job_id}",
-                        exc_info=True,
-                    )
-            # Story #267 Component 8: Remove from memory after persist (SQLite only)
-            if self._sqlite_backend:
-                with self._lock:
-                    self.jobs.pop(job_id, None)
-
+                    self._running_jobs.pop(job_id, None)
         finally:
-            # Story #26: Release semaphore slot to allow another job to run
-            self._job_semaphore.release()
-            # Clean up running job reference
-            with self._lock:
-                self._running_jobs.pop(job_id, None)
+            # Bug #878 Fix A.3: Proactively close any SQLite connections
+            # this worker thread opened on registered DatabaseConnectionManager
+            # instances.  Runs after the inner finally so semaphore release and
+            # _running_jobs cleanup still happen first.  Defensive: a failure
+            # to close on one manager must not stop cleanup on its siblings.
+            #
+            # Note: this covers the "progress_callback" path where the user's
+            # func runs directly on THIS thread.  The non-progress_callback
+            # path dispatches to a nested worker thread inside
+            # _execute_with_cancellation_check; that path has its own Fix A.3
+            # cleanup block so each thread closes the connections IT opened.
+            self._close_thread_connections_on_all_managers(job_id=job_id)
 
     def _execute_with_cancellation_check(
         self, job_id: str, func: Callable, args: tuple, kwargs: dict
@@ -893,11 +960,20 @@ class BackgroundJobManager:
         exception_queue: queue.Queue[Exception] = queue.Queue()
 
         def worker():
+            # Bug #878 Fix A.3: This nested worker thread is where the
+            # user's func actually runs on the non-progress_callback path,
+            # so any SQLite connections are opened under THIS thread's TID.
+            # The outer _execute_job finally runs on a DIFFERENT thread and
+            # would close the wrong entry — cleanup must happen HERE before
+            # the nested worker thread dies.  Defensive via helper.
             try:
-                result = func(*args, **kwargs)
-                result_queue.put(result)
-            except Exception as e:
-                exception_queue.put(e)
+                try:
+                    result = func(*args, **kwargs)
+                    result_queue.put(result)
+                except Exception as e:
+                    exception_queue.put(e)
+            finally:
+                self._close_thread_connections_on_all_managers(job_id=job_id)
 
         # Start function in separate thread
         worker_thread = threading.Thread(target=worker, daemon=True)

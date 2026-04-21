@@ -13,7 +13,15 @@ class TestGlobalCleanup:
     """Verify cleanup propagates to ALL instances when any instance triggers it."""
 
     def test_cleanup_propagates_to_all_instances(self, tmp_path):
-        """When instance A triggers cleanup, instance B's stale connections are also cleaned."""
+        """When cleanup runs, it sweeps ALL registered instances (Bug #517 semantic).
+
+        Bug #878 Fix A.2 moved the cleanup trigger from a get_connection()
+        piggyback to a dedicated wall-clock daemon.  The cross-instance
+        propagation semantic (a single sweep covers every registered
+        DatabaseConnectionManager, not just the one accessed) is preserved;
+        this test now invokes _cleanup_all_instances() directly to exercise
+        that invariant without relying on the removed piggyback.
+        """
         from code_indexer.server.storage.database_manager import (
             DatabaseConnectionManager,
         )
@@ -43,13 +51,18 @@ class TestGlobalCleanup:
         # Verify inst_b has a connection for the dead thread
         assert stale_thread_id in inst_b._connections
 
-        # Force cleanup interval to have passed
+        # Force throttle interval to have passed so _cleanup_all_instances
+        # (still used by the Bug #517 throttled path) actually performs a
+        # sweep when invoked.
         DatabaseConnectionManager._last_global_cleanup = 0.0
 
-        # Trigger cleanup from inst_a (NOT inst_b)
-        inst_a.get_connection()
+        # Trigger cleanup directly.  Under the new architecture this path is
+        # driven by the wall-clock daemon in production; calling it inline
+        # here exercises the same code path without starting a thread.
+        DatabaseConnectionManager._cleanup_all_instances()
 
-        # inst_b's stale connection should have been cleaned
+        # inst_b's stale connection should have been cleaned even though
+        # the sweep was NOT initiated via inst_b itself.
         assert stale_thread_id not in inst_b._connections
 
         # Cleanup

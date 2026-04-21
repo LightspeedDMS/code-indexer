@@ -747,6 +747,75 @@ class ConfigService:
         else:
             raise ValueError(f"Unknown cache setting: {key}")
 
+        # Bug #878 Fix B.2: hot-reload max_cache_size_mb on the matching live
+        # cache singleton so operators can bound native HNSW / FTS memory at
+        # runtime without a server restart. Fix B.1 seats a default cap at
+        # init time; Fix B.2 lets that cap change dynamically.
+        #
+        # Only the two size-cap keys trigger hot-reload. All other cache
+        # settings write through to config only (by design -- see test
+        # TestHotReloadScopeIsolation).
+        if key == "index_cache_max_size_mb":
+            self._hot_reload_cache_size_cap(
+                cache_kind="HNSW", new_size_mb=cache.index_cache_max_size_mb
+            )
+        elif key == "fts_cache_max_size_mb":
+            self._hot_reload_cache_size_cap(
+                cache_kind="FTS", new_size_mb=cache.fts_cache_max_size_mb
+            )
+
+    def _hot_reload_cache_size_cap(
+        self, cache_kind: str, new_size_mb: Optional[int]
+    ) -> None:
+        """
+        Bug #878 Fix B.2: propagate a ``max_cache_size_mb`` change to the
+        live HNSW or FTS cache singleton.
+
+        Acquires the cache's ``_cache_lock``, overwrites
+        ``cache.config.max_cache_size_mb``, and runs ``_enforce_size_limit``
+        so any entries that now exceed the new cap are evicted immediately.
+
+        If the cache layer is not importable / the singleton does not exist
+        yet, the exception is logged at WARNING and swallowed -- config
+        persistence has already happened and we must not leave the caller
+        with an incomplete write on the file side.
+
+        Args:
+            cache_kind: "HNSW" or "FTS" (drives singleton selection + logs).
+            new_size_mb: New cap in MB, or ``None`` to disable the cap.
+        """
+        try:
+            from code_indexer.server.cache import (
+                get_global_cache,
+                get_global_fts_cache,
+            )
+
+            if cache_kind == "HNSW":
+                cache = get_global_cache()
+            elif cache_kind == "FTS":
+                cache = get_global_fts_cache()
+            else:
+                raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
+
+            with cache._cache_lock:
+                cache.config.max_cache_size_mb = new_size_mb
+                cache._enforce_size_limit()
+
+            logger.info(
+                "Hot-reloaded %s cache max_cache_size_mb=%s",
+                cache_kind,
+                new_size_mb,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload %s cache max_cache_size_mb=%s: %s",
+                cache_kind,
+                new_size_mb,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
     def _update_timeout_setting(
         self, config: ServerConfig, key: str, value: Any
     ) -> None:

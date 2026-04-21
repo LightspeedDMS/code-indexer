@@ -21,6 +21,8 @@ from typing import Callable, List, Tuple, Union
 import pytest
 from pathlib import Path
 
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
+
 
 @pytest.mark.slow
 class TestSQLiteLogHandlerCleanup:
@@ -346,12 +348,14 @@ class TestReentryDeadlockRegression:
     @staticmethod
     def _make_handler_and_manager(
         db_path: Path,
-    ) -> Tuple[logging.Handler, object]:
-        """Create a SQLiteLogHandler and its DatabaseConnectionManager."""
+    ) -> Tuple[logging.Handler, DatabaseConnectionManager]:
+        """Create a SQLiteLogHandler and its DatabaseConnectionManager.
+
+        Returns the concrete manager type (not ``object``) so tests can call
+        DatabaseConnectionManager-specific APIs without ``# type: ignore``
+        escapes.
+        """
         from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
-        from code_indexer.server.storage.database_manager import (
-            DatabaseConnectionManager,
-        )
 
         handler = SQLiteLogHandler(db_path)
         manager = DatabaseConnectionManager.get_instance(str(db_path))
@@ -393,18 +397,42 @@ class TestReentryDeadlockRegression:
         fires during its own execution (simulating logger.info inside
         _cleanup_stale_connections).  A deadlock causes the worker thread to
         never set test_completed, failing the timeout assertion.
+
+        Bug #878 Fix A.2 note: the piggyback cleanup in get_connection() was
+        removed in favour of a dedicated daemon.  To reproduce Bug #731 under
+        the new architecture we wrap manager.execute_atomic with a shim that
+        invokes _cleanup_stale_connections BEFORE delegating to the real
+        atomic insert.  That places the recursive logger.info call inside the
+        active outer emit() call stack (same re-entry window as before), so
+        the Bug #731 re-entry guard and RLock are exercised identically.
         """
         from unittest.mock import patch
 
         handler, manager = self._make_handler_and_manager(tmp_path / "deadlock_test.db")
         recursive_attempted = threading.Event()
         test_completed = threading.Event()
-        original_cleanup = manager._cleanup_stale_connections  # type: ignore[union-attr]
+        original_cleanup = manager._cleanup_stale_connections
+        original_execute_atomic = manager.execute_atomic
 
         def patched_cleanup() -> None:
             recursive_attempted.set()
+            # This logger.info call reaches SQLiteLogHandler.emit a second
+            # time on the same thread while the outer emit is mid-flight.
+            # Bug #731 guard (re-entry check + RLock) must prevent deadlock.
             logging.getLogger("cidx.db").info("Simulated recursive cleanup log")
             original_cleanup()
+
+        def execute_atomic_with_cleanup(fn: Callable[[sqlite3.Connection], None]):
+            """Fire the patched cleanup WHILE the outer emit is still active.
+
+            The outer SQLiteLogHandler.emit calls execute_atomic to insert its
+            record.  By running the cleanup hook as the first step of that
+            call, the recursive log arrives before emit unwinds, precisely
+            mirroring the original Bug #731 interleaving (cleanup triggered
+            from within get_connection() while emit held the path open).
+            """
+            patched_cleanup()
+            return original_execute_atomic(fn)
 
         outer = logging.LogRecord(
             name="test.deadlock",
@@ -425,6 +453,7 @@ class TestReentryDeadlockRegression:
 
         with (
             patch.object(manager, "_cleanup_stale_connections", patched_cleanup),
+            patch.object(manager, "execute_atomic", execute_atomic_with_cleanup),
             patch.object(type(manager), "_last_global_cleanup", 0.0),
             patch.object(root_logger, "handlers", [handler]),
             patch.object(root_logger, "level", logging.DEBUG),
@@ -449,13 +478,31 @@ class TestReentryDeadlockRegression:
         """
         The re-entry guard must silently drop the inner emit() and let the outer
         emit() complete, persisting only the outer record to the database.
+
+        Bug #878 Fix A.2 note: the piggyback cleanup in get_connection() was
+        removed.  To keep exercising the re-entry-guard behaviour, this test
+        wraps manager.execute_atomic so the patched cleanup (which emits an
+        inner LogRecord via this same handler) fires WHILE the outer emit is
+        still active — the exact window in which the re-entry guard applies.
         """
         from unittest.mock import patch
 
         db_path = tmp_path / "reentry_drop_test.db"
         handler, manager = self._make_handler_and_manager(db_path)
-        original_cleanup = manager._cleanup_stale_connections  # type: ignore[union-attr]
+        original_cleanup = manager._cleanup_stale_connections
+        original_execute_atomic = manager.execute_atomic
         cleanup_fn = self._make_cleanup_that_logs(handler, original_cleanup)
+
+        def execute_atomic_with_cleanup(fn: Callable[[sqlite3.Connection], None]):
+            """Trigger the inner-logging cleanup inside the outer emit path.
+
+            Fires cleanup_fn (which emits an inner LogRecord) before the real
+            atomic insert runs, so the inner emit arrives while the outer
+            emit's re-entry guard is active — the scenario the guard exists
+            to neutralise.
+            """
+            cleanup_fn()
+            return original_execute_atomic(fn)
 
         outer = logging.LogRecord(
             name="test.outer",
@@ -467,13 +514,15 @@ class TestReentryDeadlockRegression:
             exc_info=None,
         )
 
-        with (
-            patch.object(manager, "_cleanup_stale_connections", cleanup_fn),
-            patch.object(type(manager), "_last_global_cleanup", 0.0),
-        ):
-            handler.emit(outer)
-
-        handler.close()
+        try:
+            with (
+                patch.object(manager, "_cleanup_stale_connections", cleanup_fn),
+                patch.object(manager, "execute_atomic", execute_atomic_with_cleanup),
+                patch.object(type(manager), "_last_global_cleanup", 0.0),
+            ):
+                handler.emit(outer)
+        finally:
+            handler.close()
 
         messages = self._read_log_messages(db_path)
         assert any("Outer record" in m for m in messages), (
