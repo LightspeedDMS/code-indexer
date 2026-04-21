@@ -357,7 +357,7 @@ class GoldenRepoManager:
             try:
                 # Clone repository
                 clone_path = self._clone_repository(
-                    repo_url, alias, default_branch or ""
+                    repo_url, alias, default_branch
                 )
 
                 # Bug #699: When no branch was specified, resolve the actual
@@ -1079,7 +1079,7 @@ class GoldenRepoManager:
             )
             return False
 
-    def _clone_repository(self, repo_url: str, alias: str, branch: str) -> str:
+    def _clone_repository(self, repo_url: str, alias: str, branch: Optional[str] = None) -> str:
         """
         Clone a git repository to the golden repos directory.
 
@@ -1214,7 +1214,7 @@ class GoldenRepoManager:
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
             cmd = ["git", "clone"]
-            if branch is not None:
+            if branch:
                 cmd.extend(["--branch", branch])
             cmd.extend([repo_url, clone_path])
 
