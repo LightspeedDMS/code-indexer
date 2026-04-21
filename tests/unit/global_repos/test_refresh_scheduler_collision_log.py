@@ -55,10 +55,16 @@ def _make_registry() -> Mock:
 
 
 def _stop_after_first_refresh(scheduler: RefreshScheduler):
-    """Side-effect for update_next_refresh that stops the loop after one pass."""
+    """Side-effect for update_next_refresh that stops the loop after one pass.
+
+    Sets both _running = False (exit the while loop) and _stop_event (unblock
+    the _stop_event.wait(timeout=poll_interval) call so the test exits
+    immediately instead of blocking for MIN_POLL_SECONDS=30 seconds).
+    """
 
     def _side_effect(alias_name, next_refresh):
         scheduler._running = False
+        scheduler._stop_event.set()
 
     return _side_effect
 

@@ -5,6 +5,7 @@ Epic #261 Story 2 (#312): Dependency Map Analysis Job Tracking.
 """
 
 import sqlite3
+from contextlib import closing
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,35 +15,53 @@ from code_indexer.server.services.job_tracker import JobTracker
 
 @pytest.fixture
 def db_path(tmp_path):
-    """Temporary SQLite database with background_jobs schema."""
+    """
+    Temporary SQLite database with background_jobs schema AND the
+    idx_active_job_per_repo partial unique index (Story #876 Phase C).
+
+    The index is required so that register_job_if_no_conflict (the atomic
+    gate used by run_full_analysis / run_delta_analysis as of Story #876
+    Phase B-1 Deliverables 2/3) can reject duplicate active jobs at the
+    DB layer for (operation_type, repo_alias) pairs.
+
+    Uses contextlib.closing() so the connection is released even if schema
+    creation raises mid-setup.
+    """
     db = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db))
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS background_jobs (
-        job_id TEXT PRIMARY KEY NOT NULL,
-        operation_type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        started_at TEXT,
-        completed_at TEXT,
-        result TEXT,
-        error TEXT,
-        progress INTEGER NOT NULL DEFAULT 0,
-        username TEXT NOT NULL,
-        is_admin INTEGER NOT NULL DEFAULT 0,
-        cancelled INTEGER NOT NULL DEFAULT 0,
-        repo_alias TEXT,
-        resolution_attempts INTEGER NOT NULL DEFAULT 0,
-        claude_actions TEXT,
-        failure_reason TEXT,
-        extended_error TEXT,
-        language_resolution_status TEXT,
-        progress_info TEXT,
-        metadata TEXT
-    )"""
-    )
-    conn.commit()
-    conn.close()
+    with closing(sqlite3.connect(str(db))) as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS background_jobs (
+            job_id TEXT PRIMARY KEY NOT NULL,
+            operation_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            result TEXT,
+            error TEXT,
+            progress INTEGER NOT NULL DEFAULT 0,
+            username TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            cancelled INTEGER NOT NULL DEFAULT 0,
+            repo_alias TEXT,
+            resolution_attempts INTEGER NOT NULL DEFAULT 0,
+            claude_actions TEXT,
+            failure_reason TEXT,
+            extended_error TEXT,
+            language_resolution_status TEXT,
+            progress_info TEXT,
+            metadata TEXT
+        )"""
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_active_job_per_repo
+            ON background_jobs(operation_type, repo_alias)
+            WHERE status IN ('pending', 'running')
+              AND repo_alias IS NOT NULL
+            """
+        )
+        conn.commit()
     return str(db)
 
 

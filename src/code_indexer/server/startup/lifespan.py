@@ -804,6 +804,35 @@ def make_lifespan(
                 )
                 set_debouncer(cidx_meta_debouncer)
                 app.state.cidx_meta_debouncer = cidx_meta_debouncer
+
+                # Story #876 D4 — Wire cluster-atomic lifecycle registration
+                # hook collaborators into golden_repo_manager.  _refresh_scheduler
+                # was wired earlier; the three below complete the quartet so the
+                # helper _register_lifecycle_after_registration fires during
+                # production registrations instead of staged-rollout skipping.
+                from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
+                    LifecycleClaudeCliInvoker,
+                )
+
+                lifecycle_invoker_singleton = LifecycleClaudeCliInvoker()
+                if golden_repo_manager is not None:
+                    golden_repo_manager.job_tracker = job_tracker
+                    golden_repo_manager.lifecycle_debouncer = cidx_meta_debouncer
+                    golden_repo_manager.lifecycle_invoker = lifecycle_invoker_singleton
+                    golden_repo_manager.lifecycle_tracking_backend = tracking_backend
+
+                # Story #876 D3 — wire the same quartet onto the description
+                # refresh scheduler so refresh_task can route every stale repo
+                # through LifecycleBatchRunner.  All four slots are mandatory;
+                # a missing slot emits a WARNING and skips the runner
+                # (Messi Rule #2 anti-fallback, verified by the D3 test suite).
+                description_refresh_scheduler._lifecycle_invoker = (
+                    lifecycle_invoker_singleton
+                )
+                description_refresh_scheduler._golden_repos_dir = Path(golden_repos_dir)
+                description_refresh_scheduler._lifecycle_debouncer = cidx_meta_debouncer
+                description_refresh_scheduler._refresh_scheduler = refresh_scheduler
+
                 logger.info(
                     "CidxMetaRefreshDebouncer initialized "
                     f"(debounce_seconds={_DEFAULT_DEBOUNCE_SECONDS})",

@@ -166,8 +166,12 @@ class TestListJobsFilteredByStatus:
         """No status filter returns all jobs regardless of status."""
         _save_job(backend, "job-1", "completed")
         _save_job(backend, "job-2", "failed")
-        _save_job(backend, "job-3", "running")
-        _save_job(backend, "job-4", "pending")
+        # Use distinct repo_alias for active-status jobs so they do not
+        # collide on the idx_active_job_per_repo partial unique index
+        # (Story #876 Phase C): the index prevents two jobs with the same
+        # (operation_type, repo_alias) from being active simultaneously.
+        _save_job(backend, "job-3", "running", repo_alias="my-repo-3")
+        _save_job(backend, "job-4", "pending", repo_alias="my-repo-4")
 
         jobs, total_count = backend.list_jobs_filtered()
         assert len(jobs) == 4

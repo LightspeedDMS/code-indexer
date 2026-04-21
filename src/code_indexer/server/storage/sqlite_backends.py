@@ -1348,6 +1348,7 @@ class DescriptionRefreshTrackingBackend:
             "last_known_indexed_at",
             "created_at",
             "updated_at",
+            "lifecycle_schema_version",
         }
         set_fields = {k: v for k, v in fields.items() if k in valid_fields}
 
@@ -2396,6 +2397,8 @@ class BackgroundJobsSqliteBackend:
         phase_detail: Optional[str] = None,
         progress_info: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
     ) -> None:
         """Save a new background job."""
 
@@ -2406,8 +2409,8 @@ class BackgroundJobsSqliteBackend:
                     result, error, progress, username, is_admin, cancelled, repo_alias,
                     resolution_attempts, claude_actions, failure_reason, extended_error,
                     language_resolution_status, current_phase, phase_detail,
-                    progress_info, metadata)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    progress_info, metadata, executing_node, claimed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job_id,
                     operation_type,
@@ -2435,6 +2438,8 @@ class BackgroundJobsSqliteBackend:
                     phase_detail,
                     progress_info,
                     json.dumps(metadata) if metadata else None,
+                    executing_node,
+                    claimed_at,
                 ),
             )
             return None
@@ -2450,7 +2455,7 @@ class BackgroundJobsSqliteBackend:
                       result, error, progress, username, is_admin, cancelled, repo_alias,
                       resolution_attempts, claude_actions, failure_reason, extended_error,
                       language_resolution_status, current_phase, phase_detail,
-                      progress_info, metadata
+                      progress_info, metadata, executing_node, claimed_at
                FROM background_jobs WHERE job_id = ?""",
             (job_id,),
         )
@@ -2484,6 +2489,8 @@ class BackgroundJobsSqliteBackend:
             "phase_detail": row[19] if len(row) > 19 else None,
             "progress_info": row[20] if len(row) > 20 else None,
             "metadata": json.loads(row[21]) if len(row) > 21 and row[21] else None,
+            "executing_node": row[22] if len(row) > 22 else None,
+            "claimed_at": row[23] if len(row) > 23 else None,
         }
 
     def update_job(self, job_id: str, **kwargs) -> None:
@@ -3097,6 +3104,7 @@ class LogsSqliteBackend:
                     request_path TEXT,
                     extra_data TEXT,
                     node_id TEXT,
+                    alias TEXT,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -3108,13 +3116,18 @@ class LogsSqliteBackend:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
             )
-            # Migrate existing databases: add node_id column if missing
-            # (must run BEFORE creating the index on node_id)
+            # Migrate existing databases: add node_id / alias columns if missing
+            # (must run BEFORE creating the indexes that reference them).
             cursor = conn.execute("PRAGMA table_info(logs)")
             columns = {row[1] for row in cursor.fetchall()}
             if "node_id" not in columns:
                 conn.execute("ALTER TABLE logs ADD COLUMN node_id TEXT")
+            # Story #876 Phase C: tag error rows with the repo alias so the
+            # admin UI can filter lifecycle-runner failures by repo.
+            if "alias" not in columns:
+                conn.execute("ALTER TABLE logs ADD COLUMN alias TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_node_id ON logs(node_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_alias ON logs(alias)")
 
         self._conn_manager.execute_atomic(operation)
 
@@ -3129,6 +3142,7 @@ class LogsSqliteBackend:
         request_path: Optional[str] = None,
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
+        alias: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -3142,6 +3156,8 @@ class LogsSqliteBackend:
             request_path: Optional HTTP request path.
             extra_data: Optional JSON-serialised extra fields.
             node_id: Optional cluster node identifier (NULL in standalone).
+            alias: Optional repo alias (Story #876 Phase C). Tags rows written
+                by the lifecycle-runner so operators can filter logs by repo.
         """
 
         def operation(conn: Any) -> None:
@@ -3149,8 +3165,8 @@ class LogsSqliteBackend:
                 """
                 INSERT INTO logs
                     (timestamp, level, source, message, correlation_id,
-                     user_id, request_path, extra_data, node_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     user_id, request_path, extra_data, node_id, alias)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -3162,6 +3178,7 @@ class LogsSqliteBackend:
                     request_path,
                     extra_data,
                     node_id,
+                    alias,
                 ),
             )
 
@@ -3201,7 +3218,12 @@ class LogsSqliteBackend:
         return where_clause, params
 
     def _row_to_log_dict(self, row: tuple) -> Dict[str, Any]:
-        """Convert a database row tuple to a log record dict."""
+        """Convert a database row tuple to a log record dict.
+
+        Column order matches the SELECT list in query_logs(): id, timestamp,
+        level, source, message, correlation_id, user_id, request_path,
+        extra_data, node_id, alias, created_at.
+        """
         return {
             "id": row[0],
             "timestamp": row[1],
@@ -3213,7 +3235,8 @@ class LogsSqliteBackend:
             "request_path": row[7],
             "extra_data": row[8],
             "node_id": row[9],
-            "created_at": row[10],
+            "alias": row[10],
+            "created_at": row[11],
         }
 
     def query_logs(
@@ -3243,7 +3266,7 @@ class LogsSqliteBackend:
         rows = conn.execute(
             f"""
             SELECT id, timestamp, level, source, message, correlation_id,
-                   user_id, request_path, extra_data, node_id, created_at
+                   user_id, request_path, extra_data, node_id, alias, created_at
             FROM logs {where_clause}
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?

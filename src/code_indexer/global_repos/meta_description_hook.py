@@ -16,11 +16,7 @@ from typing import Any, Optional
 
 import yaml
 
-from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
-from code_indexer.global_repos.repo_analyzer import (
-    RepoAnalyzer,
-    invoke_lifecycle_detection,
-)
+from code_indexer.global_repos.repo_analyzer import RepoAnalyzer
 from code_indexer.server.services.claude_cli_manager import (
     get_claude_cli_manager,
 )
@@ -356,12 +352,12 @@ def on_repo_added(
         _create_readme_fallback(Path(clone_path), repo_name, cidx_meta_path)
 
     else:
-        # Generate .md file using Claude CLI (two-phase: Phase 1 + Phase 2 lifecycle)
-        md_content, phase2_outcome = _generate_repo_description(
+        # Generate .md file using Claude CLI (Phase 1 analysis only;
+        # lifecycle detection handled separately by LifecycleBatchRunner)
+        md_content = _generate_repo_description(
             repo_name,
             repo_url,
             clone_path,
-            mcp_registration_service=mcp_registration_service,
         )
 
         md_file = cidx_meta_path / f"{repo_name}.md"
@@ -411,10 +407,7 @@ def on_repo_added(
         # Single atomic write with (verified or original) content — always ONCE
         atomic_write_description(md_file, verified_content)
 
-        logger.info(
-            f"Created meta description file: {md_file} "
-            f"(phase2_outcome={phase2_outcome})"
-        )
+        logger.info(f"Created meta description file: {md_file}")
 
     # Trigger cidx-meta reindex to make the new description searchable
     if _refresh_scheduler is not None:
@@ -584,39 +577,25 @@ def _generate_repo_description(
     repo_name: str,
     repo_url: str,
     clone_path: str,
-    mcp_registration_service: Optional[Any] = None,
-) -> tuple:
+) -> str:
     """
-    Generate .md file content for a repository using two-phase analysis.
+    Generate .md file content for a repository using Phase 1 analysis only.
 
     Phase 1: RepoAnalyzer extracts technologies, purpose, summary, features,
              and use cases.  Builds a frontmatter dict and markdown body.
 
-    Phase 2: invoke_lifecycle_detection runs lifecycle detection via Claude
-             CLI and returns a parsed dict (or None on failure).  The result
-             is merged into the frontmatter dict before serialisation.
+    Lifecycle detection is handled separately by LifecycleBatchRunner
+    (Story #876 unified pipeline).
 
     Args:
         repo_name: Repository name/alias
         repo_url: Repository URL
         clone_path: Path to cloned repository
-        mcp_registration_service: Optional MCPSelfRegistrationService; when
-            not None, ensure_registered() is called before Phase 2.
 
     Returns:
-        Tuple of (content_str, phase2_outcome) where phase2_outcome is one
-        of "success" | "failed_degraded_to_unknown".
+        Content string (YAML frontmatter + markdown body).
     """
     now = datetime.now(timezone.utc).isoformat()
-
-    # --- MCP registration (before Phase 2) ---
-    if mcp_registration_service is not None:
-        mcp_registration_service.ensure_registered()
-    else:
-        logger.warning(
-            "MCPSelfRegistrationService not wired; skipping ensure_registered(). "
-            "Phase 2 MCP access not guaranteed."
-        )
 
     # --- Phase 1: extract repo info ---
     analyzer = RepoAnalyzer(clone_path)
@@ -641,26 +620,10 @@ def _generate_repo_description(
         for uc in info.use_cases[:5]:
             body += f"- {uc}\n"
 
-    # --- Phase 2: lifecycle detection ---
-    lifecycle_result = invoke_lifecycle_detection(clone_path)
-
-    frontmatter_dict["lifecycle_schema_version"] = LIFECYCLE_SCHEMA_VERSION
-    if lifecycle_result is not None:
-        frontmatter_dict["lifecycle"] = lifecycle_result["lifecycle"]
-        phase2_outcome = "success"
-    else:
-        frontmatter_dict["lifecycle"] = {
-            "branches_to_env": {},
-            "detected_sources": [],
-            "confidence": "unknown",
-            "claude_notes": "Phase 2 lifecycle detection did not return a result.",
-        }
-        phase2_outcome = "failed_degraded_to_unknown"
-
     # --- Serialize ---
     fm_text = yaml.safe_dump(
         frontmatter_dict, default_flow_style=False, sort_keys=False
     )
     content = "---\n" + fm_text + "---\n" + body
 
-    return content, phase2_outcome
+    return content

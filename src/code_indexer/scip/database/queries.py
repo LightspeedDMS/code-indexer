@@ -1204,6 +1204,7 @@ def get_dependents(
                 o.start_line as line,
                 o.start_char as column,
                 s.kind as kind,
+                1 as depth,
                 cg.relationship as relationship
             FROM call_graph cg
             JOIN symbols s ON cg.caller_symbol_id = s.id
@@ -1238,6 +1239,7 @@ def get_dependents(
                 o.start_line as line,
                 o.start_char as column,
                 s.kind as kind,
+                td.depth as depth,
                 td.relationship as relationship
             FROM transitive_deps td
             JOIN symbols s ON td.symbol_id = s.id
@@ -1259,7 +1261,8 @@ def get_dependents(
                 "line": row[2],
                 "column": row[3],
                 "kind": row[4],
-                "relationship": row[5],
+                "depth": row[5],
+                "relationship": row[6],
             }
         )
 

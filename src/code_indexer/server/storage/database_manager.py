@@ -183,6 +183,9 @@ class DatabaseSchema:
     """
 
     # Background Jobs table (Bug fix: BackgroundJobManager SQLite migration)
+    # Story #876: executing_node and claimed_at added to match PostgreSQL
+    # migration 001 (001_initial_schema.sql lines 150-151).  Both columns are
+    # nullable with no default so existing rows remain valid after migration.
     CREATE_BACKGROUND_JOBS_TABLE = """
         CREATE TABLE IF NOT EXISTS background_jobs (
             job_id TEXT PRIMARY KEY NOT NULL,
@@ -202,7 +205,9 @@ class DatabaseSchema:
             claude_actions TEXT,
             failure_reason TEXT,
             extended_error TEXT,
-            language_resolution_status TEXT
+            language_resolution_status TEXT,
+            executing_node TEXT,
+            claimed_at TEXT
         )
     """
 
@@ -262,6 +267,28 @@ class DatabaseSchema:
     CREATE_IDX_BACKGROUND_JOBS_COMPLETED_STATUS = """
         CREATE INDEX IF NOT EXISTS idx_background_jobs_completed_status
         ON background_jobs(completed_at, status)
+    """
+
+    # Story #876 Phase C: cluster-atomic gate for register_job_if_no_conflict.
+    # Mirrors PostgreSQL migration 004 — prevents two nodes from simultaneously
+    # running the same (operation_type, repo_alias) job.  The partial predicate
+    # limits uniqueness to ACTIVE jobs so completed/failed history can contain
+    # duplicates (the same repo is refreshed many times over its lifetime).
+    # SQLite supports partial indexes since 3.8.0 (2013).
+    CREATE_IDX_ACTIVE_JOB_PER_REPO = """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_active_job_per_repo
+        ON background_jobs(operation_type, repo_alias)
+        WHERE status IN ('pending', 'running')
+          AND repo_alias IS NOT NULL
+    """
+
+    # Story #876: mirrors PostgreSQL migration 005 (005_executing_node_index.sql).
+    # Indexed for cluster-mode queries that filter by executing_node to find
+    # jobs owned by a specific node (e.g. DistributedJobClaimer.get_node_jobs).
+    CREATE_IDX_BACKGROUND_JOBS_EXECUTING_NODE = """
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_executing_node
+        ON background_jobs(executing_node)
+        WHERE executing_node IS NOT NULL
     """
 
     # user_api_keys: looked up by username for user-specific key listing
@@ -640,6 +667,9 @@ class DatabaseSchema:
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_STATUS_CREATED)
             conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_COMPLETED_STATUS)
+            # Story #876 Phase C: partial unique index for cluster-atomic
+            # job registration.  Mirrors PostgreSQL migration 004.
+            conn.execute(self.CREATE_IDX_ACTIVE_JOB_PER_REPO)
             conn.execute(self.CREATE_IDX_USER_API_KEYS_USERNAME)
             conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_USERNAME)
             conn.execute(self.CREATE_IDX_USER_MCP_CREDENTIALS_CLIENT_ID)
@@ -700,6 +730,12 @@ class DatabaseSchema:
             self._migrate_token_blacklist_table(conn)
             # Story #728: lifecycle_schema_version column for backfill detection
             self._migrate_description_refresh_lifecycle_version(conn)
+            # Story #876 Phase C: partial unique index for cluster-atomic
+            # register_job_if_no_conflict (mirrors PostgreSQL migration 004).
+            self._migrate_active_job_unique_index(conn)
+            # Story #876: executing_node + claimed_at columns and index
+            # (mirrors PostgreSQL migrations 001 lines 150-151 and 005).
+            self._migrate_add_executing_node_claimed_at(conn)
 
             logger.info(f"Database initialized at {db_path}")
 
@@ -1087,6 +1123,22 @@ class DatabaseSchema:
         conn.commit()
         logger.debug("Ensured token_blacklist table exists")
 
+    def _migrate_active_job_unique_index(self, conn: sqlite3.Connection) -> None:
+        """Create partial unique index idx_active_job_per_repo (Story #876 Phase C).
+
+        Mirrors PostgreSQL migration 004: prevents two cluster nodes from
+        simultaneously registering the same (operation_type, repo_alias)
+        active job.  The partial predicate limits uniqueness to pending/running
+        jobs with a non-NULL repo_alias so historical duplicates and
+        system-wide jobs remain allowed.
+
+        Idempotent via CREATE UNIQUE INDEX IF NOT EXISTS.  Safe to run on any
+        database regardless of age.
+        """
+        conn.execute(self.CREATE_IDX_ACTIVE_JOB_PER_REPO)
+        conn.commit()
+        logger.debug("Ensured idx_active_job_per_repo partial unique index exists")
+
     def _migrate_description_refresh_lifecycle_version(
         self, conn: sqlite3.Connection
     ) -> None:
@@ -1111,6 +1163,40 @@ class DatabaseSchema:
                 "Migrated description_refresh_tracking schema: "
                 "added lifecycle_schema_version column (Story #728)"
             )
+
+    def _migrate_add_executing_node_claimed_at(self, conn: sqlite3.Connection) -> None:
+        """Add executing_node, claimed_at columns and executing_node index (Story #876).
+
+        Closes the SQLite symmetry gap with PostgreSQL:
+          - migration 001 (lines 150-151): executing_node TEXT, claimed_at TEXT
+          - migration 005: CREATE INDEX ON background_jobs(executing_node)
+
+        Both columns are nullable with no DEFAULT so existing rows remain
+        valid — backward-compatible for rolling cluster upgrades.  The index
+        creation uses CREATE INDEX IF NOT EXISTS for the same reason.
+
+        Idempotent: checks PRAGMA table_info before each ALTER TABLE; the
+        index DDL uses IF NOT EXISTS.  Re-running on an already-migrated
+        database is a safe no-op.
+        """
+        cursor = conn.execute("PRAGMA table_info(background_jobs)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+
+        if "executing_node" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN executing_node TEXT")
+            logger.info(
+                "Migrated background_jobs schema: "
+                "added executing_node column (Story #876)"
+            )
+
+        if "claimed_at" not in existing_columns:
+            conn.execute("ALTER TABLE background_jobs ADD COLUMN claimed_at TEXT")
+            logger.info(
+                "Migrated background_jobs schema: added claimed_at column (Story #876)"
+            )
+
+        conn.execute(self.CREATE_IDX_BACKGROUND_JOBS_EXECUTING_NODE)
+        conn.commit()
 
 
 class DatabaseConnectionManager:

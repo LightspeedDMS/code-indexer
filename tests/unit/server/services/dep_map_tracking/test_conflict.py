@@ -117,8 +117,19 @@ class TestConflictDetection:
         Given a 'dependency_map_full' job is already running in the tracker
         When run_full_analysis is called again
         Then DuplicateJobError is raised before analysis starts
+
+        Story #876 Phase B-1: run_full_analysis now calls
+        register_job_if_no_conflict(..., repo_alias="server"), which relies on
+        the idx_active_job_per_repo partial unique index. The seed job must
+        therefore carry the same repo_alias so it participates in the index
+        and the INSERT fails with the expected DuplicateJobError.
         """
-        job_tracker.register_job("active-full-001", "dependency_map_full", "system")
+        job_tracker.register_job(
+            "active-full-001",
+            "dependency_map_full",
+            "system",
+            repo_alias="server",
+        )
         job_tracker.update_status("active-full-001", status="running")
 
         service = make_service(
@@ -146,8 +157,19 @@ class TestConflictDetection:
         Given a 'dependency_map_delta' job is already running in the tracker
         When run_delta_analysis is called again
         Then DuplicateJobError is raised before analysis starts
+
+        Story #876 Phase B-1: run_delta_analysis now calls
+        register_job_if_no_conflict(..., repo_alias="server"), which relies on
+        the idx_active_job_per_repo partial unique index. The seed job must
+        therefore carry the same repo_alias so it participates in the index
+        and the INSERT fails with the expected DuplicateJobError.
         """
-        job_tracker.register_job("active-delta-001", "dependency_map_delta", "system")
+        job_tracker.register_job(
+            "active-delta-001",
+            "dependency_map_delta",
+            "system",
+            repo_alias="server",
+        )
         job_tracker.update_status("active-delta-001", status="running")
 
         service = make_service(

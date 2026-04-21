@@ -5,6 +5,7 @@ Tests Claude prompt assembly, log delta tracking, issue classification,
 and three-tier deduplication algorithm.
 """
 
+import datetime
 import json
 import shutil
 import sqlite3
@@ -203,11 +204,17 @@ class TestDeduplicationContext:
         # Store a scan and issue with fingerprint
         conn = sqlite3.connect(temp_db)
         try:
+            _scan_started_at = (
+                datetime.datetime.utcnow() - datetime.timedelta(days=1, minutes=5)
+            ).isoformat(timespec="seconds")
+            _issue_created_at = (
+                datetime.datetime.utcnow() - datetime.timedelta(days=1)
+            ).isoformat(timespec="seconds")
             conn.execute(
                 "INSERT INTO self_monitoring_scans "
                 "(scan_id, started_at, status, log_id_start, log_id_end) "
                 "VALUES (?, ?, ?, ?, ?)",
-                ("scan-previous", "2026-01-20T10:00:00", "SUCCESS", 1, 50),
+                ("scan-previous", _scan_started_at, "SUCCESS", 1, 50),
             )
             conn.execute(
                 "INSERT INTO self_monitoring_issues "
@@ -224,7 +231,7 @@ class TestDeduplicationContext:
                     "abc123def456",
                     "1,2,3",
                     "src/auth.py",
-                    "2026-01-20T10:05:00",
+                    _issue_created_at,
                 ),
             )
             conn.commit()
