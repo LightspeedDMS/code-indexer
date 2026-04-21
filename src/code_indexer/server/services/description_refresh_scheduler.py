@@ -558,17 +558,25 @@ class DescriptionRefreshScheduler:
             "dispatching async repair thread",
             len(broken),
         )
-        self._dispatch_lifecycle_backfill_thread(broken)
+        try:
+            self._dispatch_lifecycle_backfill_thread(broken)
+        except Exception:
+            logger.error(
+                "Lifecycle backfill: failed to dispatch async repair thread",
+                exc_info=True,
+            )
+            return 0
         return len(broken)
 
     def _check_lifecycle_backfill_wiring(self) -> bool:
-        """Return True if all four lifecycle collaborators are wired; log WARNING and
+        """Return True if all five lifecycle collaborators are wired; log WARNING and
         return False for the first missing one (Messi Rule #2 — no silent fallback)."""
         for name, value in (
             ("lifecycle_invoker", self._lifecycle_invoker),
             ("golden_repos_dir", self._golden_repos_dir),
             ("lifecycle_debouncer", self._lifecycle_debouncer),
             ("refresh_scheduler", self._refresh_scheduler),
+            ("job_tracker", self._job_tracker),
         ):
             if value is None:
                 logger.warning(

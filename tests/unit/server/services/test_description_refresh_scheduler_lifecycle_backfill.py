@@ -72,11 +72,12 @@ def _make_scheduler_bare() -> Any:
 
 
 def _wire_all(sched: Any) -> None:
-    """Set all four lifecycle collaborators to MagicMock instances."""
+    """Set all five lifecycle collaborators to MagicMock instances."""
     sched._lifecycle_invoker = MagicMock()
     sched._golden_repos_dir = MagicMock()
     sched._lifecycle_debouncer = MagicMock()
     sched._refresh_scheduler = MagicMock()
+    sched._job_tracker = MagicMock()
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +158,23 @@ class TestReconcileBrokenLifecycleMetadataWiringGuard:
         assert any(
             "refresh_scheduler" in m and "not wired" in m for m in warning_messages
         ), f"Expected WARNING about 'refresh_scheduler not wired', got: {warning_messages}"
+        sched._golden_backend.list_repos.assert_not_called()
+
+    def test_returns_zero_when_job_tracker_not_wired(self, caplog):
+        sched = _make_scheduler_bare()
+        _wire_all(sched)
+        sched._job_tracker = None  # break this one
+
+        with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+            result = sched.reconcile_broken_lifecycle_metadata()
+
+        assert result == 0
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert any(
+            "job_tracker" in m and "not wired" in m for m in warning_messages
+        ), f"Expected WARNING about 'job_tracker not wired', got: {warning_messages}"
         sched._golden_backend.list_repos.assert_not_called()
 
 
@@ -444,3 +462,31 @@ class TestRunLifecycleBackfillAsync:
         run_kwargs = run_call[1]
         assert list(run_positional[0]) == ["x", "y"]
         assert run_kwargs.get("parent_job_id") == job_id
+
+    def test_async_worker_swallows_register_job_exception_and_skips_runner(
+        self, caplog
+    ):
+        sched = _make_scheduler_bare()
+        _wire_all(sched)
+
+        mock_job_tracker = MagicMock()
+        mock_job_tracker.register_job.side_effect = RuntimeError("simulated")
+        sched._job_tracker = mock_job_tracker
+        sched._tracking_backend = MagicMock()
+
+        with patch(f"{SCHEDULER_MODULE}.LifecycleBatchRunner") as mock_runner_cls:
+            mock_runner = MagicMock()
+            mock_runner_cls.return_value = mock_runner
+
+            with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+                sched._run_lifecycle_backfill_async(["a", "b"])
+
+        mock_job_tracker.register_job.assert_called_once()
+        mock_runner_cls.assert_not_called()
+        mock_runner.run.assert_not_called()
+        error_messages = [
+            r.message for r in caplog.records if r.levelno == logging.ERROR
+        ]
+        assert any(
+            "repair thread failed" in m for m in error_messages
+        ), f"Expected ERROR 'repair thread failed', got: {error_messages}"
