@@ -2,7 +2,7 @@
 name: depmap_get_stale_domains
 category: depmap
 required_permission: query_repos
-tl_dr: List domains whose last_analyzed date is older than N days, sorted most-stale first.
+tl_dr: List domains older than N days (use days_threshold=0 for a full freshness inventory); sorted most-stale first.
 inputSchema:
   type: object
   required:
@@ -40,6 +40,13 @@ frontmatter lacks the last_analyzed key, or whose value cannot be parsed as a
 timezone-aware ISO-8601 datetime, produces an anomaly entry and is excluded from
 stale_domains. Scanning continues for all remaining domains. This means partial
 results are always returned even when some files are malformed.
+
+Path-traversal protection: domain names from _domains.json that would resolve
+outside the dependency-map directory are rejected with a
+`domain_name path traversal rejected` anomaly and excluded from the scan.
+This is only reachable via a malformed _domains.json entry; legitimate
+clients never trigger it, but a client seeing the anomaly should surface
+it as a data-quality finding rather than retrying.
 
 Use days_threshold=0 for a complete freshness inventory: every domain with a
 parseable last_analyzed date is included, regardless of how recent it is.
@@ -82,3 +89,7 @@ Response structure:
 
 - `guides/dependency_analysis_workflow` — two-phase workflow (semantic search
   then `depmap_*`) and the `anomalies[]` contract
+- `depmap/depmap_get_domain_summary` — drill into a specific stale domain for
+  its participating repos and outgoing connections
+- `depmap/depmap_get_cross_domain_graph` — check whether a stale domain sits
+  on a critical path before scheduling re-analysis

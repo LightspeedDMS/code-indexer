@@ -2,7 +2,7 @@
 name: depmap_get_cross_domain_graph
 category: depmap
 required_permission: query_repos
-tl_dr: Return the complete directed domain-to-domain edge graph across all dependency-map domains.
+tl_dr: Return all domain-to-domain edges as JSON records (source, target, dependency_count, types); no rendering — pass edges to your visualization tool of choice.
 inputSchema:
   type: object
   properties: {}
@@ -37,6 +37,13 @@ with malformed YAML frontmatter or an unreadable outgoing/incoming section produ
 an anomaly entry for that file and continues scanning the remaining domains. Partial
 results (edges from healthy domains) are always returned alongside any anomalies.
 
+Path-traversal protection: domain names from _domains.json or markdown
+frontmatter that would resolve outside the dependency-map directory are
+rejected with a `domain_name path traversal rejected` anomaly and excluded
+from the scan. This is only reachable via malformed inputs; legitimate
+clients never trigger it, but a client seeing the anomaly should surface it
+as a data-quality finding rather than retrying.
+
 Missing directory behavior (two levels):
 
   1. If dep_map_path itself is not configured or does not exist on disk, the
@@ -69,3 +76,8 @@ Response structure:
 
 - `guides/dependency_analysis_workflow` — two-phase workflow (semantic search
   then `depmap_*`) and the `anomalies[]` contract
+- `depmap/depmap_get_domain_summary` — per-domain detail for any source or
+  target in the graph (participating repos, outgoing counts); does not
+  include per-edge `types[]`
+- `depmap/depmap_find_consumers` — drill from a target domain into the repos
+  that consume a specific repo inside that domain

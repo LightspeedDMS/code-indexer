@@ -11,11 +11,13 @@ inputSchema:
     domain_name:
       type: string
       description: >
-        Name of the domain to retrieve. The tool confirms the domain exists in
-        _domains.json, then parses its markdown file for three sections: YAML
-        frontmatter (name and description), Repository Roles table (participating
-        repos with roles), and Outgoing Dependencies table (cross-domain
-        connection counts per target domain).
+        Name of the domain to retrieve (case-sensitive exact match against the
+        domain name in _domains.json or the `name` field in the domain
+        markdown file's YAML frontmatter). The tool confirms the domain exists
+        in _domains.json, then parses its markdown file for three sections:
+        YAML frontmatter (name and description), Repository Roles table
+        (participating repos with roles), and Outgoing Dependencies table
+        (cross-domain connection counts per target domain).
 ---
 Retrieve a structured summary for a single dependency-map domain in one call.
 
@@ -62,7 +64,22 @@ Response structure:
     summary: null
     anomalies: []
 
+Field-naming note: `participating_repos[].repo` here corresponds to
+`consuming_repo` in `depmap_find_consumers` and to the `repo_name` input of
+`depmap_get_repo_domains`. Same values, different key name — clients
+chaining from `find_consumers` output into `get_domain_summary` or from
+this tool's output into `get_repo_domains` must reconcile the shape.
+
+Types-omission note: `cross_domain_connections` is a count-only projection
+and intentionally omits the `types[]` field per edge, to keep the summary
+compact. Call `depmap_get_cross_domain_graph` when you need the distinct
+dependency-type labels for a specific edge.
+
 ### See also
 
 - `guides/dependency_analysis_workflow` — two-phase workflow (semantic search
   then `depmap_*`) and the `anomalies[]` contract
+- `depmap/depmap_get_cross_domain_graph` — outgoing edges with `types[]` per
+  edge (this tool's `cross_domain_connections` omits types intentionally)
+- `depmap/depmap_get_repo_domains` — inverse lookup: given a repo in
+  `participating_repos`, find which other domains it belongs to

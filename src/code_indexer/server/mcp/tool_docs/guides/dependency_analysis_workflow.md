@@ -58,8 +58,11 @@ The five tools and the questions they answer:
 - `depmap_find_consumers(repo_name)` — Who depends on repo X?
   Example question: "I am about to change `auth-service`. Who will break?"
   Returns every `{domain, consuming_repo, dependency_type, evidence}` record
-  where `consuming_repo` is the repository that depends on the target, pulled
-  one entry per (domain, consuming_repo) pair across the whole dep map.
+  where `consuming_repo` is the repository that depends on the target. One
+  entry per matching Incoming-Dependencies row: rows with the same
+  (domain, consuming_repo) but different evidence strings produce multiple
+  entries, so callers counting unique consumers must deduplicate by
+  (domain, consuming_repo).
 
 - `depmap_get_repo_domains(repo_name)` — Which domains does repo X participate
   in, and in what role?
@@ -86,6 +89,9 @@ The five tools and the questions they answer:
   Returns aggregated `{source_domain, target_domain, dependency_count,
   types[]}` edges with bidirectional consistency checking (the `types` field is
   a sorted list of the distinct dependency-type labels for that edge).
+  `types` is always non-empty: edges whose contributing rows all have a
+  blank Type column are omitted from the result and emit an anomaly
+  instead, so clients do not need to guard against empty `types` arrays.
 
 Phase-2 strengths:
 
@@ -170,6 +176,26 @@ For each consumer repo returned in Step 3, run `search_code` against that repo
 with a narrow query about the specific API you are changing. This is the
 phase-1 tool doing what it does best: finding the specific call sites inside a
 known code base.
+
+Concrete handoff pattern (pseudo-code):
+
+    unique_consumers = {
+        (c.domain, c.consuming_repo) for c in result.consumers
+    }
+    for domain, consumer in unique_consumers:
+        search_code(
+            repository_alias=f"{consumer}-global",
+            query_text="callers of <specific API you are changing>",
+            limit=20,
+        )
+
+Two caveats. First, remember to deduplicate consumers by
+(domain, consuming_repo) — `depmap_find_consumers` emits one entry per
+matching Incoming-Dependencies row, so the same (domain, consuming_repo)
+pair may appear multiple times when evidence strings differ. Second, a
+consumer repo may not be indexed as a global repo in this CIDX instance;
+if `search_code` returns a repo-not-found error, record the consumer in a
+manual-review list and skip rather than aborting the whole sweep.
 
 The key insight: phase 2 told you `which` repos are at risk (complete, no
 misses). Phase 1 told you `where` inside each of those repos the risk lives
