@@ -24,7 +24,7 @@ MCP tools (registered globally, always available):
    - `confidence`: exactly one of `high`, `medium`, or `low` (see rules below)
 
 3. **lifecycle.branching** (REQUIRED in v3 — always emit; use escape values (`null`, `"unknown"`) for fields lacking evidence):
-   - `default_branch` (required within section): run `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`; if empty inspect `git branch -r` for `HEAD ->` pointer.
+   - `default_branch` (required within section): run `git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||'`; if empty inspect `git branch -r` for `HEAD ->` pointer; if both fail (orphan/empty repo), use `"unknown"` — never invent.
    - `model` (required within section): infer from branch names — `release/*` branches → `"gitflow"`, direct PR-to-main with short-lived branches → `"github-flow"`, long-lived `develop`/feature branches → `"trunk-based"`, single `release-*` branch → `"release-branch"`, insufficient evidence → `"unknown"`. MUST be exactly one of: `github-flow | gitflow | trunk-based | release-branch | unknown`. Use `"unknown"` when evidence is insufficient — never invent.
    - `release_branch_pattern` (required within section): e.g. `"release/*"` or `"v*"`; use `null` if no release branches detected.
    - `protected_branches` (required within section): list of branch names from `.github/settings.yml` or CONTRIBUTING.md; use `null` if no evidence found.
@@ -45,6 +45,7 @@ MCP tools (registered globally, always available):
 **CRITICAL — enum escape values:**
 
 Every enum field has a legal escape value so you never have to invent:
+- `branching.default_branch`: use `"unknown"` when neither `git symbolic-ref` nor `git branch -r` HEAD-pointer yields a branch name
 - `branching.model`: use `"unknown"` when evidence is insufficient
 - `ci.deploy_on`: use `"none"` when no deployment job exists
 - `ci.trigger_events`: use `[]` when no CI config found

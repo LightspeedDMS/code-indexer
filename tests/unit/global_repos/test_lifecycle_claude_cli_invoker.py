@@ -131,20 +131,36 @@ def test_prompt_contains_always_emit_v3_guidance() -> None:
         _PROMPT_TEXT as prompt,
     )
 
-    # The prompt must explicitly instruct always-emit for all three v3 sections.
-    assert "Always emit all three v3 sections" in prompt, (
-        "Prompt must instruct Claude to always emit all three v3 sections"
-    )
+    # Each v3 section declared REQUIRED (guards against accidental reversion
+    # of the six OPTIONAL -> REQUIRED edits)
+    for section in ("branching", "ci", "release"):
+        required_marker = f"**lifecycle.{section}** (REQUIRED in v3"
+        assert required_marker in prompt, (
+            f"section '{section}' not declared REQUIRED in v3 — "
+            f"expected marker '{required_marker}' missing"
+        )
 
-    # The prompt must explicitly forbid omitting sections.
-    assert "NEVER omit a section" in prompt, (
-        "Prompt must explicitly forbid omitting a section (anti-omit rule)"
-    )
+    # Escape-value summary block intact with all six enum-field entries
+    # (including the new default_branch escape from the codex review fix)
+    assert "**CRITICAL — enum escape values:**" in prompt
+    for field in (
+        "branching.default_branch",
+        "branching.model",
+        "ci.deploy_on",
+        "ci.trigger_events",
+        "release.versioning",
+        "release.artifact_types",
+    ):
+        assert f"`{field}`:" in prompt, (
+            f"escape-value summary missing entry for '{field}'"
+        )
 
-    # The old anti-hallucination rule that said OMIT must be gone.
-    assert "OMIT the section entirely (do not emit a section full of nulls)" not in prompt, (
-        "Old 'OMIT the section entirely' instruction must be replaced with always-emit guidance"
-    )
+    # Anti-hallucination rule explicitly names all three sections
+    assert "Always emit all three v3 sections (`branching`, `ci`, `release`)" in prompt
+    assert "NEVER omit a section" in prompt
+
+    # Old OPTIONAL language must be gone
+    assert "OMIT the section entirely (do not emit a section full of nulls)" not in prompt
 
 
 # ---------------------------------------------------------------------------
