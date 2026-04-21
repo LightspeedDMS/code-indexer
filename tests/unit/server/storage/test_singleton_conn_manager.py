@@ -13,6 +13,7 @@ import inspect
 import os
 import re
 import tempfile
+import warnings
 
 
 from code_indexer.server.storage.database_manager import DatabaseConnectionManager
@@ -22,7 +23,29 @@ class TestSingletonConnectionManager:
     """Tests for DatabaseConnectionManager singleton pattern (Bug #378)."""
 
     def setup_method(self):
-        """Clear singleton cache between tests to ensure isolation."""
+        """Clear singleton cache between tests to ensure isolation.
+
+        Defensive close: earlier tests in the same chunk can leak
+        DatabaseConnectionManager instances with open sqlite connections
+        and held RLocks.  Dropping references via .clear() on its own can
+        hang GC-driven connection close paths, so explicitly drain every
+        pooled connection first.  Bug #731 documents the related
+        SQLiteLogHandler / RLock re-entrance risk.
+
+        Connection close failures are surfaced via warnings.warn() so that
+        teardown problems remain visible rather than being silently swallowed.
+        """
+        for instance in list(DatabaseConnectionManager._instances.values()):
+            for tid, conn in list(instance._connections.items()):
+                try:
+                    conn.close()
+                except Exception as exc:  # noqa: BLE001
+                    warnings.warn(
+                        f"setup_method: could not close leaked sqlite connection "
+                        f"for thread {tid}: {exc}",
+                        stacklevel=2,
+                    )
+            instance._connections.clear()
         DatabaseConnectionManager._instances.clear()
 
     def test_get_instance_returns_same_object_for_same_path(self):

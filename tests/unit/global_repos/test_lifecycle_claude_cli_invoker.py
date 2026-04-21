@@ -101,13 +101,50 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     # -- subprocess wiring ----------------------------------------------
     # Repo path must be passed as string (cwd for subprocess).
     assert captured["repo_path"] == str(repo_path)
-    # Phase 2 timeouts: 180s inner shell timeout + 240s outer Python timeout.
-    assert captured["shell_timeout"] == 180
-    assert captured["outer_timeout"] == 240
+    # v3 timeouts: 240s inner shell timeout + 300s outer Python timeout.
+    assert captured["shell_timeout"] == 240
+    assert captured["outer_timeout"] == 300
     # Prompt must be loaded from the packaged lifecycle_unified.md file.
     assert captured["prompt"], "prompt must be non-empty"
     assert "description" in captured["prompt"]
     assert "lifecycle" in captured["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# Prompt content: always-emit v3 guidance (AC-V3-11 compliance)
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_contains_always_emit_v3_guidance() -> None:
+    """
+    AC-V3-11 compliance: the lifecycle_unified.md prompt MUST instruct
+    Claude to always emit all three v3 sections (branching, ci, release)
+    using escape values when evidence is absent — never omitting a section.
+
+    This prevents the 'tries' (no-CI Delphi/Lazarus repo) regression where
+    Claude omitted the ci section entirely instead of emitting escape values.
+
+    The anti-hallucination rule must NOT say 'OMIT the section entirely' for
+    optional sections; instead it must enforce always-emit with escape values.
+    """
+    from code_indexer.global_repos.lifecycle_claude_cli_invoker import (
+        _PROMPT_TEXT as prompt,
+    )
+
+    # The prompt must explicitly instruct always-emit for all three v3 sections.
+    assert "Always emit all three v3 sections" in prompt, (
+        "Prompt must instruct Claude to always emit all three v3 sections"
+    )
+
+    # The prompt must explicitly forbid omitting sections.
+    assert "NEVER omit a section" in prompt, (
+        "Prompt must explicitly forbid omitting a section (anti-omit rule)"
+    )
+
+    # The old anti-hallucination rule that said OMIT must be gone.
+    assert "OMIT the section entirely (do not emit a section full of nulls)" not in prompt, (
+        "Old 'OMIT the section entirely' instruction must be replaced with always-emit guidance"
+    )
 
 
 # ---------------------------------------------------------------------------

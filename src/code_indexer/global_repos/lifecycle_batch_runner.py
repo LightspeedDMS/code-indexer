@@ -23,6 +23,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import yaml
 
+from code_indexer.global_repos.unified_response_parser import (
+    CURRENT_LIFECYCLE_SCHEMA_VERSION,
+)
+
 # Alias character whitelist — prevents path traversal via
 # directory separators, null bytes, or shell metacharacters.
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -84,7 +88,9 @@ def _do_write(
     """
     # Fail-closed: re-raise yaml serialisation errors rather than silently
     # writing a corrupt file (Messi Rule #13 — Anti-Silent-Failure).
-    frontmatter_yaml = yaml.dump(lifecycle_frontmatter, default_flow_style=False, allow_unicode=True)
+    frontmatter_yaml = yaml.dump(
+        lifecycle_frontmatter, default_flow_style=False, allow_unicode=True
+    )
 
     content = f"---\n{frontmatter_yaml}---\n\n{description_body}\n"
 
@@ -187,7 +193,9 @@ def write_meta_md(
     _LOCK_KEY = "cidx-meta"
 
     if not already_locked:
-        acquired = refresh_scheduler.acquire_write_lock(_LOCK_KEY, owner_name=_LOCK_OWNER)
+        acquired = refresh_scheduler.acquire_write_lock(
+            _LOCK_KEY, owner_name=_LOCK_OWNER
+        )
         if not acquired:
             raise LifecycleLockUnavailableError(
                 f"Could not acquire write lock for {_LOCK_KEY!r} (owner={_LOCK_OWNER!r}); "
@@ -202,14 +210,8 @@ def write_meta_md(
 
 
 # ---------------------------------------------------------------------------
-# Schema version constant and self-alias guard
+# Self-alias guard
 # ---------------------------------------------------------------------------
-
-# Current lifecycle schema version. Bump when the lifecycle block structure
-# changes in a backward-incompatible way. LifecycleFleetScanner flags any
-# repo whose lifecycle_schema_version < CURRENT_LIFECYCLE_SCHEMA_VERSION.
-# Bumped to 2 for Story #876 unified JSON schema (Bug #876 fix).
-CURRENT_LIFECYCLE_SCHEMA_VERSION: int = 2
 
 # The cidx-meta directory alias must never be scanned for lifecycle health —
 # it is the metadata store itself, not a golden repo clone.
@@ -318,7 +320,9 @@ class LifecycleFleetScanner:
                 broken.append(alias)
                 continue
 
-            confidence = lifecycle.get("confidence") if isinstance(lifecycle, dict) else None
+            confidence = (
+                lifecycle.get("confidence") if isinstance(lifecycle, dict) else None
+            )
             if confidence == "unknown":
                 broken.append(alias)
 

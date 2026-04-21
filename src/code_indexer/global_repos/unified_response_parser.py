@@ -26,6 +26,11 @@ from typing import Any, Dict, List, Optional
 
 from code_indexer.global_repos.repo_analyzer import _clean_claude_output
 
+# Current lifecycle schema version emitted by this parser.
+# Bumped to 3 for Schema v3 amendment (Story #876) — adds optional
+# branching/ci/release sections. v2 files continue to parse without change.
+CURRENT_LIFECYCLE_SCHEMA_VERSION: int = 3
+
 # Confidence enum accepted by the unified contract.
 _VALID_CONFIDENCE = frozenset({"high", "medium", "low"})
 
@@ -41,6 +46,96 @@ _REQUIRED_LIFECYCLE_KEYS = (
     "testing_framework",
     "confidence",
 )
+
+# ---------------------------------------------------------------------------
+# v3 optional section schemas (Schema v3 amendment — Story #876)
+# ---------------------------------------------------------------------------
+
+_BRANCHING_MODEL_ENUM = (
+    "github-flow",
+    "gitflow",
+    "trunk-based",
+    "release-branch",
+    "unknown",
+)
+_CI_TRIGGER_EVENT_ENUM = (
+    "push",
+    "pull_request",
+    "tag",
+    "schedule",
+    "workflow_dispatch",
+    "manual",
+)
+_CI_DEPLOY_ON_ENUM = (
+    "tag",
+    "merge-to-main",
+    "merge-to-release-branch",
+    "manual",
+    "none",
+)
+_RELEASE_VERSIONING_ENUM = (
+    "semver",
+    "calver",
+    "custom",
+    "none",
+    "unknown",
+)
+_RELEASE_ARTIFACT_TYPE_ENUM = (
+    "wheel",
+    "sdist",
+    "docker",
+    "tarball",
+    "binary",
+    "gem",
+    "jar",
+    "nupkg",
+    "deb",
+    "rpm",
+    "other",
+)
+
+# Schema for each optional section.  Keys are field names; values describe
+# the field's expected Python type, optional enum constraint, and whether the
+# field is required-within-section (all are required within a present section).
+#
+# "type": Python type or tuple of types accepted by isinstance().
+# "enum": tuple of allowed string values (applied when field is a str).
+# "item_enum": tuple of allowed values for *list* items (str items only).
+# "item_type": expected Python type for list items (used when no item_enum).
+# "required": True — every field is required when the section is present.
+_OPTIONAL_SECTION_SCHEMAS: Dict[str, Any] = {
+    "branching": {
+        "default_branch": {"type": str, "required": True},
+        "model": {"type": str, "enum": _BRANCHING_MODEL_ENUM, "required": True},
+        "release_branch_pattern": {"type": (str, type(None)), "required": True},
+        "protected_branches": {"type": (list, type(None)), "required": True},
+    },
+    "ci": {
+        "trigger_events": {
+            "type": list,
+            "item_enum": _CI_TRIGGER_EVENT_ENUM,
+            "required": True,
+        },
+        "required_checks": {"type": list, "item_type": str, "required": True},
+        "deploy_on": {"type": str, "enum": _CI_DEPLOY_ON_ENUM, "required": True},
+        "environments": {"type": (list, type(None)), "required": True},
+    },
+    "release": {
+        "versioning": {
+            "type": str,
+            "enum": _RELEASE_VERSIONING_ENUM,
+            "required": True,
+        },
+        "version_source": {"type": (str, type(None)), "required": True},
+        "changelog": {"type": (str, type(None)), "required": True},
+        "auto_publish": {"type": bool, "required": True},
+        "artifact_types": {
+            "type": list,
+            "item_enum": _RELEASE_ARTIFACT_TYPE_ENUM,
+            "required": True,
+        },
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +163,9 @@ class UnifiedResponseParseError(Exception):
     ) -> None:
         super().__init__(message)
         self.raw = raw
-        self.validation_errors: List[str] = validation_errors if validation_errors else []
+        self.validation_errors: List[str] = (
+            validation_errors if validation_errors else []
+        )
 
 
 @dataclass
@@ -147,7 +244,9 @@ class UnifiedResponseParser:
             raise UnifiedResponseParseError(
                 f"expected a JSON object, got {type(obj).__name__}",
                 raw=raw,
-                validation_errors=[f"top-level value is {type(obj).__name__}, expected object"],
+                validation_errors=[
+                    f"top-level value is {type(obj).__name__}, expected object"
+                ],
             )
 
         errors = cls._validate(obj)
@@ -157,6 +256,11 @@ class UnifiedResponseParser:
                 raw=raw,
                 validation_errors=errors,
             )
+
+        # v3 optional section validation (branching / ci / release).
+        # Absent sections are silently skipped; present sections are fully
+        # validated. Raises UnifiedResponseParseError on first violation.
+        cls._validate_optional_sections(obj["lifecycle"], raw)
 
         return UnifiedResult(
             description=obj["description"],
@@ -194,6 +298,90 @@ class UnifiedResponseParser:
         if brace_pos > 0:
             return text[brace_pos:]
         return text
+
+    @staticmethod
+    def _check_section_shape(
+        section_name: str, section: Any, field_specs: Dict[str, Any], raw: str
+    ) -> None:
+        """Raise if *section* is not a dict or any required field is absent."""
+        if not isinstance(section, dict):
+            raise UnifiedResponseParseError(
+                f"lifecycle.{section_name} must be an object, "
+                f"got {type(section).__name__!r}",
+                raw=raw,
+                validation_errors=[
+                    f"lifecycle.{section_name}: expected dict, "
+                    f"got {type(section).__name__!r}"
+                ],
+            )
+        for field_name in field_specs:
+            if field_name not in section:
+                path = f"lifecycle.{section_name}.{field_name}"
+                raise UnifiedResponseParseError(
+                    f"missing required field: '{path}'",
+                    raw=raw,
+                    validation_errors=[f"missing required field: '{path}'"],
+                )
+
+    @staticmethod
+    def _check_field_value(
+        field_path: str, value: Any, spec: Dict[str, Any], raw: str
+    ) -> None:
+        """Validate *value* against *spec* (type, enum, item_enum, item_type)."""
+        expected_type = spec["type"]
+        if not isinstance(value, expected_type):
+            raise UnifiedResponseParseError(
+                f"{field_path} has wrong type: "
+                f"expected {expected_type!r}, got {type(value).__name__!r}",
+                raw=raw,
+                validation_errors=[
+                    f"{field_path}: wrong type {type(value).__name__!r}"
+                ],
+            )
+        if isinstance(value, str) and "enum" in spec and value not in spec["enum"]:
+            raise UnifiedResponseParseError(
+                f"{field_path} value {value!r} not in allowed enum {spec['enum']}",
+                raw=raw,
+                validation_errors=[f"{field_path}: {value!r} not in {spec['enum']}"],
+            )
+        if isinstance(value, list):
+            item_enum = spec.get("item_enum")
+            item_type = spec.get("item_type")
+            for item in value:
+                if item_enum is not None and item not in item_enum:
+                    raise UnifiedResponseParseError(
+                        f"{field_path} item {item!r} not in allowed enum {item_enum}",
+                        raw=raw,
+                        validation_errors=[f"{field_path}: item {item!r} not in enum"],
+                    )
+                if item_type is not None and not isinstance(item, item_type):
+                    raise UnifiedResponseParseError(
+                        f"{field_path} item {item!r} has wrong type",
+                        raw=raw,
+                        validation_errors=[f"{field_path}: item wrong type"],
+                    )
+
+    @classmethod
+    def _validate_optional_sections(cls, lifecycle: Dict[str, Any], raw: str) -> None:
+        """
+        Validate optional v3 sections (branching, ci, release) in *lifecycle*.
+
+        Absent sections are silently skipped — each is independently optional
+        (backward-compatible with v2 files). For present sections every required
+        field is validated for type and enum membership.
+
+        Raises:
+            UnifiedResponseParseError: On the first violation, with section and
+                field path in the message for operator diagnostics.
+        """
+        for section_name, field_specs in _OPTIONAL_SECTION_SCHEMAS.items():
+            if section_name not in lifecycle:
+                continue
+            section_value = lifecycle[section_name]
+            cls._check_section_shape(section_name, section_value, field_specs, raw)
+            for field_name, spec in field_specs.items():
+                field_path = f"lifecycle.{section_name}.{field_name}"
+                cls._check_field_value(field_path, section_value[field_name], spec, raw)
 
     @staticmethod
     def _validate(obj: Dict[str, Any]) -> List[str]:

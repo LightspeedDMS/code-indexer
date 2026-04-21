@@ -94,7 +94,10 @@ def test_parse_valid_json_returns_unified_result_with_correct_fields() -> None:
 @pytest.mark.parametrize("confidence", ["high", "medium", "low"])
 def test_parse_all_valid_confidence_values_accepted(confidence: str) -> None:
     """confidence in {high, medium, low} is accepted and preserved in result."""
-    payload = {**VALID_PAYLOAD, "lifecycle": {**VALID_LIFECYCLE, "confidence": confidence}}
+    payload = {
+        **VALID_PAYLOAD,
+        "lifecycle": {**VALID_LIFECYCLE, "confidence": confidence},
+    }
     result = UnifiedResponseParser.parse(_raw(payload))
     assert result.lifecycle["confidence"] == confidence
 
@@ -249,7 +252,10 @@ def test_parse_error_exposes_raw_response_on_json_failure() -> None:
 
 def test_parse_error_exposes_non_empty_validation_errors_on_schema_violation() -> None:
     """UnifiedResponseParseError.validation_errors is a non-empty list on schema violation."""
-    payload = {"description": "Valid", "lifecycle": {**VALID_LIFECYCLE, "confidence": "unknown"}}
+    payload = {
+        "description": "Valid",
+        "lifecycle": {**VALID_LIFECYCLE, "confidence": "unknown"},
+    }
     with pytest.raises(UnifiedResponseParseError) as exc_info:
         UnifiedResponseParser.parse(_raw(payload))
     assert isinstance(exc_info.value.validation_errors, list)

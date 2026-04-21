@@ -118,7 +118,9 @@ def test_write_meta_md_lock_failure_raises_and_does_not_write(
             golden_repos_dir=golden_repos_dir,
         )
 
-    assert not meta_path.exists(), "No file should be written when lock acquisition fails"
+    assert not meta_path.exists(), (
+        "No file should be written when lock acquisition fails"
+    )
     mock_scheduler_locked.release_write_lock.assert_not_called()
 
 
@@ -174,12 +176,15 @@ def test_write_meta_md_uses_atomic_rename(
         rename_calls.append((src, dst))
         real_rename(src, dst)
 
-    with patch(
-        "code_indexer.global_repos.lifecycle_batch_runner.tempfile.mkstemp",
-        side_effect=capturing_mkstemp,
-    ), patch(
-        "code_indexer.global_repos.lifecycle_batch_runner.os.rename",
-        side_effect=capturing_rename,
+    with (
+        patch(
+            "code_indexer.global_repos.lifecycle_batch_runner.tempfile.mkstemp",
+            side_effect=capturing_mkstemp,
+        ),
+        patch(
+            "code_indexer.global_repos.lifecycle_batch_runner.os.rename",
+            side_effect=capturing_rename,
+        ),
     ):
         write_meta_md(
             alias="foo-global",
@@ -222,7 +227,9 @@ def test_write_meta_md_frontmatter_contains_lifecycle_fields(
     )
 
     content = (golden_repos_dir / "cidx-meta" / "repo-beta-global.md").read_text()
-    assert content.startswith("---\n"), "File must start with YAML frontmatter delimiter"
+    assert content.startswith("---\n"), (
+        "File must start with YAML frontmatter delimiter"
+    )
     parts = content.split("---\n", maxsplit=2)
     assert len(parts) >= 3, "File must have opening and closing frontmatter delimiters"
     fm = yaml.safe_load(parts[1])
@@ -282,7 +289,9 @@ def test_write_meta_md_does_not_touch_golden_repo_clone(
     )
 
     assert sentinel.read_text() == "untouched", "Clone directory must not be modified"
-    assert versioned_sentinel.read_text() == "untouched versioned", ".versioned/ must not be modified"
+    assert versioned_sentinel.read_text() == "untouched versioned", (
+        ".versioned/ must not be modified"
+    )
     new_md_files = list(golden_repos_dir.glob("**/*.md"))
     assert all("cidx-meta" in str(f) for f in new_md_files), (
         "Only cidx-meta .md files should be written"

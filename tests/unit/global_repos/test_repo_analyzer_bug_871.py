@@ -189,13 +189,13 @@ class TestAnsiColorIntermixed:
     def test_esc_prefixed_sgr_and_bare_csi_yaml_parses(self):
         """Full parse test: ESC-prefixed + bare CSI in same output -> valid YAML."""
         raw = (
-            "\x1b[>4m"         # ESC-prefixed (Bug #850, already fixed)
-            "[>4m"             # bare (Bug #871, new fix)
-            "\x1b[?25h"       # ESC-prefixed cursor hide
-            "[?25h"            # bare cursor hide
+            "\x1b[>4m"  # ESC-prefixed (Bug #850, already fixed)
+            "[>4m"  # bare (Bug #871, new fix)
+            "\x1b[?25h"  # ESC-prefixed cursor hide
+            "[?25h"  # bare cursor hide
             + _LIFECYCLE_YAML
-            + "\x1b[0m"        # ESC-prefixed SGR reset
-            + "[0m"            # bare SGR reset
+            + "\x1b[0m"  # ESC-prefixed SGR reset
+            + "[0m"  # bare SGR reset
         )
         parsed = _parse_cleaned(raw)
         assert parsed["lifecycle"]["status"] == "active"

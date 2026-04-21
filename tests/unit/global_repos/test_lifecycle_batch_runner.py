@@ -15,7 +15,6 @@ _make_runner is a plain helper (not a fixture) because it takes non-fixture
 parameters (golden_repos_dir, log) to stay readable per test.
 """
 
-import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,7 +22,6 @@ import pytest
 
 from code_indexer.global_repos.lifecycle_batch_runner import (
     LifecycleBatchRunner,
-    LifecycleLockUnavailableError,
 )
 from code_indexer.global_repos.unified_response_parser import UnifiedResult
 
@@ -182,10 +180,10 @@ def golden_repos_dir(tmp_path: Path) -> Path:
 @pytest.mark.parametrize(
     ("ttl_seconds", "concurrency", "est_secs", "expected_size"),
     [
-        (DEFAULT_TTL_SECONDS, 4, DEFAULT_EST_SECS, 240),   # floor(0.5*3600*4/30)=240
-        (DEFAULT_TTL_SECONDS, 1, DEFAULT_EST_SECS, 60),    # floor(0.5*3600*1/30)=60
+        (DEFAULT_TTL_SECONDS, 4, DEFAULT_EST_SECS, 240),  # floor(0.5*3600*4/30)=240
+        (DEFAULT_TTL_SECONDS, 1, DEFAULT_EST_SECS, 60),  # floor(0.5*3600*1/30)=60
         (DEFAULT_TTL_SECONDS, 4, DEFAULT_TTL_SECONDS, 2),  # very slow: floor(0.5*4)=2
-        (60, 1, DEFAULT_TTL_SECONDS, 1),                   # tiny TTL → max(1,0)=1
+        (60, 1, DEFAULT_TTL_SECONDS, 1),  # tiny TTL → max(1,0)=1
     ],
     ids=["standard", "concurrency_1", "very_slow", "min_clamp"],
 )
@@ -333,4 +331,43 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
     )
     assert (cidx_meta / "z-global.md").exists(), (
         "z-global.md must exist: lock succeeded for this alias"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 6. LifecycleBatchRunner emits lifecycle_schema_version == 3 in written .md
+# ---------------------------------------------------------------------------
+
+
+def test_process_one_repo_emits_v3_schema_version(golden_repos_dir: Path) -> None:
+    """
+    The YAML frontmatter written by _process_one_repo must contain
+    lifecycle_schema_version: 3 (not 2), reflecting CURRENT_LIFECYCLE_SCHEMA_VERSION
+    from unified_response_parser, which is the single canonical source of truth.
+
+    This test exists to catch the duplicate-constant bug: if lifecycle_batch_runner.py
+    defines its own CURRENT_LIFECYCLE_SCHEMA_VERSION = 2 instead of importing the
+    canonical 3 from unified_response_parser, this test will fail.
+    """
+    import yaml
+
+    alias = "writer-test-global"
+    (golden_repos_dir / alias).mkdir(exist_ok=True)
+
+    log = _EventLog()
+    runner, _, _, _ = _make_runner(golden_repos_dir, log)
+    runner.run([alias], parent_job_id="job-v3")
+
+    md_path = golden_repos_dir / "cidx-meta" / f"{alias}.md"
+    assert md_path.exists(), f"{md_path} must have been written by the runner"
+
+    content = md_path.read_text(encoding="utf-8")
+    parts = content.split("---\n", maxsplit=2)
+    assert len(parts) >= 3, "Written .md must have YAML frontmatter delimiters"
+    fm = yaml.safe_load(parts[1])
+
+    assert fm.get("lifecycle_schema_version") == 3, (
+        f"Expected lifecycle_schema_version=3, got {fm.get('lifecycle_schema_version')!r}. "
+        "lifecycle_batch_runner.py must import CURRENT_LIFECYCLE_SCHEMA_VERSION from "
+        "unified_response_parser, not define its own stale constant."
     )

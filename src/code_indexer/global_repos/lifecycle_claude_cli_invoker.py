@@ -20,7 +20,16 @@ Thread-safety:
   The adapter is called concurrently from LifecycleBatchRunner's thread
   pool.  The unified prompt is loaded ONCE at import time into a module-
   level frozen string (_PROMPT_TEXT) so there is no shared mutable state
-  and no lock is required on the hot path.
+  and no lock is required on the hot path.  The timeout constants follow
+  the same frozen-at-import pattern: immutable integers shared across
+  all worker threads without locking.
+
+Timeout budget (Schema v3 amendment — Story #876):
+  Shell timeout bumped 180s → 240s: the v3 prompt reads additional
+  per-repo files (CI workflow files, branch topology, manifest files)
+  to populate the branching/ci/release optional sections.
+  Outer Python timeout bumped 240s → 300s: 60s grace window between
+  shell kill signal and Python-level process termination.
 
 Failure contract:
   - On subprocess failure, raises RuntimeError with the alias and the
@@ -40,12 +49,13 @@ from code_indexer.global_repos.unified_response_parser import (
     UnifiedResult,
 )
 
-# Phase 2 timeouts (seconds). The unified prompt asks Claude to spend
-# "approximately 2 minutes exploring" — we cap the shell-level timeout
-# at 180s and give the outer Python subprocess 240s so timeout signals
-# propagate cleanly before Python itself kills the process.
-_SHELL_TIMEOUT_SECONDS: int = 180
-_OUTER_TIMEOUT_SECONDS: int = 240
+# Subprocess timeouts (seconds) — module-level frozen constants, same
+# pattern as _PROMPT_TEXT.  Bumped for Schema v3 amendment (Story #876):
+# v3 prompt reads more files per repo (CI config, branch topology,
+# manifests) requiring a larger time budget.
+# Shell kill budget: 240s (was 180s). Outer Python grace: 300s (was 240s).
+_SHELL_TIMEOUT_SECONDS: int = 240
+_OUTER_TIMEOUT_SECONDS: int = 300
 
 # Absolute path to the packaged unified prompt.  Resolved once at import
 # time.
@@ -123,9 +133,7 @@ class LifecycleClaudeCliInvoker:
         """
         # -- Entry-point validation ----------------------------------------
         if not isinstance(alias, str) or not alias.strip():
-            raise ValueError(
-                f"alias must be a non-empty string, got {alias!r}"
-            )
+            raise ValueError(f"alias must be a non-empty string, got {alias!r}")
         if repo_path is None:
             raise ValueError("repo_path must not be None")
         path_obj = Path(repo_path)
