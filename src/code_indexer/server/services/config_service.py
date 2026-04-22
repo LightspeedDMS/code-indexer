@@ -713,6 +713,9 @@ class ConfigService:
         # Story #883 - Memory retrieval configuration
         elif category == "memory_retrieval":
             self._update_memory_retrieval_setting(config, key, value)
+        # Story #885 - Lifecycle analysis timeouts
+        elif category == "lifecycle_analysis":
+            self._update_lifecycle_analysis_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1189,6 +1192,19 @@ class ConfigService:
             mem.memory_retrieval_max_body_chars = int(value)
         else:
             raise ValueError(f"Unknown memory_retrieval setting: {key}")
+
+    def _update_lifecycle_analysis_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a lifecycle analysis timeout setting (Story #885 A7a/A7c)."""
+        lifecycle = config.lifecycle_analysis_config
+        assert lifecycle is not None  # Guaranteed by ServerConfig.__post_init__
+        if key == "shell_timeout_seconds":
+            lifecycle.shell_timeout_seconds = int(value)
+        elif key == "outer_timeout_seconds":
+            lifecycle.outer_timeout_seconds = int(value)
+        else:
+            raise ValueError(f"Unknown lifecycle_analysis setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any
