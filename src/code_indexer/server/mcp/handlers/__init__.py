@@ -111,6 +111,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.files",
                 "code_indexer.server.mcp.handlers.repos",
                 "code_indexer.server.mcp.handlers.search",
+                "code_indexer.server.mcp.handlers.depmap",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -371,6 +372,10 @@ from code_indexer.server.mcp.handlers.cicd import (  # noqa: F401, E402
     handle_gitlab_ci_get_job_logs,
     handle_gitlab_ci_retry_pipeline,
     handle_gitlab_ci_cancel_pipeline,
+)
+
+from code_indexer.server.mcp.handlers.depmap import (  # noqa: F401, E402
+    depmap_find_consumers_handler,
 )
 
 # Re-export infrastructure symbols patched by tests via handlers.X
