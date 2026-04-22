@@ -27,7 +27,7 @@ Use plain text headers: `### Performance Improvements`
 **NEVER** assume or guess SSH passwords, server credentials, usernames, or connection details.
 
 **ALWAYS** read `.local-testing` (gitignored, project root) for:
-- SSH usernames and passwords for staging (.20), Mac laptop
+- SSH usernames and passwords for staging, Mac laptop
 - CIDX admin credentials per environment
 - API keys (Langfuse, GitHub, GitLab, Anthropic)
 - MCPB deployment details and encrypted credential paths
@@ -230,7 +230,7 @@ setting = config.some_setting
 ```json
 {
   "server_dir": "~/.cidx-server",
-  "host": "127.0.0.1",
+  "host": "localhost",
   "port": 8000
 }
 ```
@@ -239,7 +239,7 @@ setting = config.some_setting
 ```json
 {
   "server_dir": "~/.cidx-server",
-  "host": "0.0.0.0",
+  "host": "<node-bind-address>",
   "port": 8000,
   "storage_mode": "postgres",
   "postgres_dsn": "postgresql://user:pass@host/db",
@@ -390,14 +390,14 @@ setting = config.some_setting
 | Branch | Purpose | Direct Commits |
 |--------|---------|----------------|
 | `development` | Active work, version bumps | YES |
-| `staging` | Staging env (.20 server) | NO (merge only) |
+| `staging` | Staging env (staging server) | NO (merge only) |
 | `master` | Production env (auto-deploy) | NO (merge only) |
 
 ### Auto-Deployment
 
 | Branch | Tag | Deploys To |
 |--------|-----|------------|
-| `staging` | v8.x.x | .20 server |
+| `staging` | v8.x.x | staging server |
 | `master` | v8.x.x | production (auto-deploy) |
 | `development` | any | No auto-deploy |
 
@@ -414,7 +414,7 @@ git describe --exact-match HEAD 2>/dev/null
 # 2. Merge to staging
 git checkout staging && git merge development
 
-# 3. Push (triggers .20 deployment)
+# 3. Push (triggers staging deployment)
 git push origin staging
 ```
 
@@ -447,7 +447,7 @@ Before ANY work: `git branch --show-current`
 ```
 development → staging → master
      ↓            ↓          ↓
-  (develop)    (.20)    (auto-deploy)
+  (develop)    (staging)    (auto-deploy)
    bump/tag    test     production
 ```
 
@@ -766,16 +766,16 @@ cidx stop              # Stop daemon
 
 ```bash
 # Start (from project root)
-PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000
+PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host <bind-address> --port 8000
 
 # Background
-PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host 0.0.0.0 --port 8000 &
+PYTHONPATH=./src python3 -m uvicorn code_indexer.server.app:app --host <bind-address> --port 8000 &
 ```
 
 **Why this command**:
 - `PYTHONPATH=./src` - code_indexer not installed as package in dev
 - `python3 -m uvicorn` - uses correct Python env
-- `--host 0.0.0.0` - external access
+- `--host <bind-address>` - interface to bind (localhost for private, wildcard for external access)
 - `--port 8000` - standard local dev port
 
 **Verify**:

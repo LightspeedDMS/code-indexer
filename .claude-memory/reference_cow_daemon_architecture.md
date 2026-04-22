@@ -24,7 +24,7 @@ Repo: `/home/jsbattig/Dev/cow-storage-daemon`
 
 - Daemon listens on port **8081** by default
 - Config: `/etc/cow-storage-daemon/config.json` (installed via `scripts/install-cow-daemon.sh`)
-- Config fields: `base_path`, `api_key`, `port` (8081), `host` (0.0.0.0), `allowed_source_roots`, `health_requires_auth`
+- Config fields: `base_path`, `api_key`, `port` (8081), `host` (bind-all), `allowed_source_roots`, `health_requires_auth`
 - API key stored in config — restart daemon to change
 - Returns **relative** clone paths (e.g., `cidx/clone-name`) — clients prepend NFS mount point
 - Never auto-deletes clones — clients responsible for lifecycle

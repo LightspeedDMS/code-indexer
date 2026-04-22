@@ -4,7 +4,6 @@
 - [feedback_zero_failures_no_excuses.md](feedback_zero_failures_no_excuses.md) - NEVER dismiss test failures as "pre-existing" — zero failures means zero, fix them all
 - [feedback_e2e_not_code_inspection.md](feedback_e2e_not_code_inspection.md) - E2E means executing real functionality, NEVER code inspection/source checks
 - [project_bug469_472_package.md](project_bug469_472_package.md) - Bug package #469-472: implement all, deploy to staging only, E2E regression test
-- [reference_cidx_cluster_topology.md](reference_cidx_cluster_topology.md) - CIDX cluster test topology — staging is STANDALONE, NEVER cluster. See .local-testing for IPs
 - [feedback_ruff_black_version_alignment.md](feedback_ruff_black_version_alignment.md) - Pre-commit ruff version must match system ruff; server-fast-automation uses ruff format (not black)
 - [feedback_admin_password_sacred.md](feedback_admin_password_sacred.md) - NEVER leave admin password changed; always restore admin/admin via DB bypass
 - [feedback_versioned_path_trap.md](feedback_versioned_path_trap.md) - _resolve_golden_repo_path returns VERSIONED path — NEVER write to it, resolve to base clone first
