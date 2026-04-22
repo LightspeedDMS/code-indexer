@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.21.2
+
+### Bug Fixes
+
+- fix(#882 v9.21.2 hotfix): **Auto-updater crash-loop under cross-user systemd topology**. v9.21.1's `_resolve_server_url()` called `ServerConfigManager()` with no arguments, which falls back to the `CIDX_SERVER_DATA_DIR` env var first, then to `Path.home() / ".cidx-server"`. The auto-updater service file (via Bug #879's `_ensure_data_dir_env_var()`) injects `CIDX_DATA_DIR` — a different env var name — so under cross-user production topology (`cidx-auto-update.service` runs as `User=root` while `cidx-server.service` runs as a different user), neither lookup found the real data directory. `Path.home()` resolved to `/root`, `.cidx-server` was not there, `load_config()` returned `None`, `RuntimeError` was raised, and `sys.exit(1)` ran within ~1 second of every 60s timer fire — indefinite crash loop that never advanced to `service.poll_once()` and therefore never pulled the next release. Same-user deployments (staging, dev machines) were unaffected because `Path.home()` coincidentally pointed at the correct directory. Fix: `_resolve_server_url()` now reads `CIDX_DATA_DIR` explicitly via `os.environ.get()` and passes it to `ServerConfigManager(data_dir)` so the correct data directory is resolved regardless of which env var name the internal fallback reads. Regression test `TestResolveServerUrlHonorsCidxDataDir` asserts on `ServerConfigManager.__init__` `call_args` to prevent future env-var-name drift — the v9.21.1 test suite's `_patch_config_manager` helper replaced the entire `ServerConfigManager` class with a MagicMock that swallowed constructor arguments, which is why this regression slipped past CI. Production recovery for servers already stuck on v9.21.1 requires manual intervention (e.g., `systemctl edit cidx-auto-update.service` adding `Environment="CIDX_SERVER_DATA_DIR=/opt/code-indexer/.cidx-server"` — the env var the broken code already reads), after which the auto-updater picks up v9.21.2 automatically on the next timer fire.
+
 ## v9.21.1
 
 ### Bug Fixes

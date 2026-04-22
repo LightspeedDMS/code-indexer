@@ -105,6 +105,52 @@ def _patched_drain(executor, auth="fake-token", drain_timeout=60):
 # ---------------------------------------------------------------------------
 
 
+class TestResolveServerUrlHonorsCidxDataDir:
+    """Bug #882 follow-up (v9.21.2) — constructor arg must honour CIDX_DATA_DIR.
+
+    v9.21.1 shipped _resolve_server_url() calling ServerConfigManager() with no
+    args.  Under the auto-updater service (User=root on production) the env var
+    injected by _ensure_data_dir_env_var is CIDX_DATA_DIR, but
+    ServerConfigManager.__init__ looks for CIDX_SERVER_DATA_DIR.  When neither
+    is set and home()=/root, load_config() returns None and the process
+    crash-loops.
+
+    The fix: read CIDX_DATA_DIR explicitly and pass it to the constructor so the
+    correct data directory is used regardless of what the internal default-lookup
+    env var is named.
+    """
+
+    def test_passes_cidx_data_dir_to_constructor_when_env_var_is_set(self, monkeypatch):
+        """Test A — env var set: constructor receives the exact path string."""
+        from code_indexer.server.auto_update import run_once
+
+        monkeypatch.setenv("CIDX_DATA_DIR", "/tmp/cidx-test-8234")
+        mock_class = MagicMock()
+        mock_class.return_value.load_config.return_value = _make_config(
+            "127.0.0.1", 8000
+        )
+
+        with patch.object(run_once, "ServerConfigManager", mock_class):
+            run_once._resolve_server_url()
+
+        mock_class.assert_called_once_with("/tmp/cidx-test-8234")
+
+    def test_passes_none_to_constructor_when_env_var_is_not_set(self, monkeypatch):
+        """Test B — env var unset: constructor receives None (falls back internally)."""
+        from code_indexer.server.auto_update import run_once
+
+        monkeypatch.delenv("CIDX_DATA_DIR", raising=False)
+        mock_class = MagicMock()
+        mock_class.return_value.load_config.return_value = _make_config(
+            "127.0.0.1", 8000
+        )
+
+        with patch.object(run_once, "ServerConfigManager", mock_class):
+            run_once._resolve_server_url()
+
+        mock_class.assert_called_once_with(None)
+
+
 class TestResolveServerUrl:
     """Bug #882 defect #1 — resolve server URL from config.json."""
 

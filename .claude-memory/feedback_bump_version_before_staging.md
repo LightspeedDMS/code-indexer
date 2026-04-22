@@ -2,9 +2,9 @@
 name: feedback_bump_version_before_staging
 description: ALWAYS bump version and tag BEFORE promoting to staging — auto-deployer requires version tag
 type: feedback
+originSessionId: 8468be82-1a9f-4399-a331-e381cf4eee2c
 ---
-
-ALWAYS bump version + create git tag BEFORE merging to staging. The auto-deployer on the staging server (.20) triggers on version tags — without a new tag, the deployment does not happen.
+ALWAYS bump version + create git tag BEFORE merging to staging. The auto-deployer on the staging server triggers on version tags — without a new tag, the deployment does not happen.
 
 **Why:** Twice in the same session, code was promoted to staging without a version bump. The staging server did not auto-deploy because there was no new tag. User had to ask "did you bump the version?" both times.
 
