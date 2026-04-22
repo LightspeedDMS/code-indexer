@@ -429,3 +429,29 @@ def test_reject_release_missing_versioning() -> None:
     msg = str(exc_info.value).lower()
     assert "release" in msg
     assert "versioning" in msg
+
+
+# ---------------------------------------------------------------------------
+# 16. Accept: ci.trigger_events with GitLab "merge_request" value
+# ---------------------------------------------------------------------------
+
+
+def test_ci_trigger_events_accepts_merge_request() -> None:
+    """
+    ci.trigger_events containing "merge_request" must parse successfully.
+
+    Production regression guard: in v9.21.0 the enum omitted "merge_request"
+    (GitLab's MR trigger event, analog of GitHub's "pull_request"), causing
+    every GitLab-hosted repo in the lifecycle backfill to fail Schema v3
+    validation with UnifiedResponseParseError. Fixed in v9.21.1 by adding
+    "merge_request" to _CI_TRIGGER_EVENT_ENUM alongside "pull_request".
+    Both values coexist so GitHub and GitLab repos can be represented
+    without semantic conflation.
+    """
+    gitlab_ci = {**_CI_SECTION, "trigger_events": ["push", "merge_request"]}
+    raw = _with_lifecycle_override("ci", gitlab_ci)
+
+    result = UnifiedResponseParser.parse(raw)
+
+    assert isinstance(result, UnifiedResult)
+    assert result.lifecycle["ci"]["trigger_events"] == ["push", "merge_request"]

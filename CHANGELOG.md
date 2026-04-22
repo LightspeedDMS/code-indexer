@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.21.1
+
+### Bug Fixes
+
+- fix(#876 follow-up): **Schema v3 `_CI_TRIGGER_EVENT_ENUM` missing `"merge_request"`** caused every GitLab-hosted golden repo to fail lifecycle backfill with `UnifiedResponseParseError: Invalid enum value for lifecycle.ci.trigger_events`. Production impact on 2026-04-22: 19 aliases rejected, 140 failed jobs, entire GitLab fleet stalled. Root cause: the original v3 enum only included GitHub's `"pull_request"` trigger; GitLab uses `"merge_request"` (its native MR event). Fix: add `"merge_request"` to the enum alongside `"pull_request"`; prompt template updated to tell Claude CLI to use the correct value per host (GitHub → `pull_request`, GitLab → `merge_request`) without conflation. Regression test locked in at `test_unified_response_parser_v3.py::test_ci_trigger_events_accepts_merge_request`.
+
+- fix(#882): **Auto-updater ignored operator-configured server URL**. `run_once.py` constructed `DeploymentExecutor` without passing `server_url`, leaving it at the hardcoded default `http://localhost:8000`. Deployments on non-default ports (e.g., 8080) could not issue maintenance-mode or drain-status requests against their own server. Fix: `run_once.py` now loads `ServerConfigManager().load_config()` and passes `http://{cfg.host}:{cfg.port}` explicitly into `DeploymentExecutor`. When `config.json` is absent, `run_once` raises `RuntimeError` with actionable remediation text ("Run the CIDX installer") per Messi Rule #2 (Anti-Fallback) — no hardcoded fallback URL, fail loud.
+
+- fix(#882): **Drain loop burned 120s systemd TimeoutStartSec budget when cidx-server was unreachable**. `DeploymentExecutor._wait_for_drain()` spun for up to `drain_timeout` seconds (7200s fallback when the timeout endpoint also failed with `ConnectionError`), killing the entire `cidx-auto-update.service` upgrade cycle. Fix: track STRICTLY CONSECUTIVE `ConnectionError` count and return `True` ("assume drained — nothing to drain if server is down") after 3 in a row (~30s at the default 10s poll interval). Any non-ConnectionError iteration outcome (HTTP response received, auth failure, generic exception) resets the counter so the early-exit is never triggered by cumulative mixed failures.
+
 ## v9.21.0
 
 ### Features

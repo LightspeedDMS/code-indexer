@@ -61,6 +61,7 @@ _BRANCHING_MODEL_ENUM = (
 _CI_TRIGGER_EVENT_ENUM = (
     "push",
     "pull_request",
+    "merge_request",
     "tag",
     "schedule",
     "workflow_dispatch",
