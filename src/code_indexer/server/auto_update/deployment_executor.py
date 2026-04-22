@@ -15,6 +15,7 @@ import subprocess
 import logging
 import time
 import sys
+import os
 import pwd
 import shutil
 
@@ -23,24 +24,35 @@ from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
 
+# Bug #879: Honor CIDX_DATA_DIR env var so cidx-server (User=code-indexer,
+# HOME=/opt/code-indexer) and cidx-auto-update (User=root, HOME=/root) resolve
+# the IPC paths identically.  Falls back to Path.home()/.cidx-server so same-
+# user dev installs continue to work without any configuration change.
+_cidx_data_dir = Path(
+    os.environ.get("CIDX_DATA_DIR", str(Path.home() / ".cidx-server"))
+)
+
 # Issue #154: Pending redeploy marker for self-healing Python environment
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
-PENDING_REDEPLOY_MARKER = Path.home() / ".cidx-server" / "pending-redeploy"
+PENDING_REDEPLOY_MARKER = _cidx_data_dir / "pending-redeploy"
 # Legacy marker path used in v8.15.0 (before path moved to ~/.cidx-server/)
 LEGACY_REDEPLOY_MARKER = Path("/var/lib/cidx-pending-redeploy")
 AUTO_UPDATE_SERVICE_NAME = "cidx-auto-update"
+# Systemd unit directory — configurable for testing or non-standard deployments.
+# Default is the Linux standard /etc/systemd/system.
+SYSTEMD_UNIT_DIR = Path(os.environ.get("SYSTEMD_UNIT_DIR", "/etc/systemd/system"))
 
 # Self-restart mechanism constants
 # Note: Using ~/.cidx-server/ instead of /tmp/ because systemd PrivateTmp=yes isolates /tmp
 # and /var/lib/ is not writable by non-root service users
-AUTO_UPDATE_STATUS_FILE = Path.home() / ".cidx-server" / "auto-update-status.json"
+AUTO_UPDATE_STATUS_FILE = _cidx_data_dir / "auto-update-status.json"
 SYSTEMCTL_TIMEOUT_SECONDS = 30  # Timeout for systemctl restart operations
 
 # Story #355: Signal-based server restart via auto-updater
 # Server writes this file to request a restart; auto-updater detects and executes it.
 # Using ~/.cidx-server/ to avoid systemd PrivateTmp=yes isolation issues.
-RESTART_SIGNAL_PATH = Path.home() / ".cidx-server" / "restart.signal"
+RESTART_SIGNAL_PATH = _cidx_data_dir / "restart.signal"
 # Signals older than this threshold (seconds) are treated as stale (from a previous crash)
 # and deleted without triggering a restart. Set to 2x the typical poll interval.
 RESTART_SIGNAL_STALENESS_THRESHOLD = 120
@@ -1317,6 +1329,133 @@ class DeploymentExecutor:
             )
             return False
 
+    def _get_server_data_dir(self) -> Optional[str]:
+        """Resolve the server user's .cidx-server data directory path.
+
+        Reads the server systemd service file, extracts the User= directive,
+        and resolves that user's home directory via pwd.  Returns None when the
+        server service file is absent (non-fatal fresh-install) OR when no
+        User= directive is present (same-user deployment: both processes share
+        the same home directory, so no CIDX_DATA_DIR injection is required).
+
+        Returns:
+            Absolute path string for the data dir when server has a User=
+            directive; None when service file is absent OR has no User=
+            directive (same-user deployment — no action needed).
+        """
+        server_service = Path(f"/etc/systemd/system/{self.service_name}.service")
+        server_content = self._read_service_file(server_service)
+        if server_content is None:
+            return None  # Service file absent — non-fatal
+
+        service_user = self._extract_service_user(server_content)
+        if not service_user:
+            # Same-user deployment: no User= directive means server runs as the
+            # same user as the auto-updater, so Path.home() is identical in both
+            # processes and no CIDX_DATA_DIR injection is required.
+            return None
+
+        user_home = Path(pwd.getpwnam(service_user).pw_dir)
+        return str(user_home / ".cidx-server")
+
+    def _inject_cidx_data_dir_into_content(
+        self, content: str, expected_line: str
+    ) -> str:
+        """Build new service file content with CIDX_DATA_DIR injected.
+
+        Strips any stale CIDX_DATA_DIR= entries, then inserts expected_line
+        immediately after the last existing Environment= line.  When no
+        Environment= lines are present, inserts after the [Service] header.
+
+        Args:
+            content: Current service file content.
+            expected_line: The full Environment="CIDX_DATA_DIR=..." line to add.
+
+        Returns:
+            Updated service file content string (newline-terminated).
+        """
+        filtered = [
+            line for line in content.splitlines() if "CIDX_DATA_DIR" not in line
+        ]
+
+        last_env_index = -1
+        for i, line in enumerate(filtered):
+            if line.strip().startswith("Environment="):
+                last_env_index = i
+
+        if last_env_index >= 0:
+            insert_after = last_env_index
+        else:
+            # No Environment= lines: insert after [Service] header
+            insert_after = next(
+                (i for i, line in enumerate(filtered) if line.strip() == "[Service]"),
+                len(filtered) - 1,
+            )
+
+        new_lines = []
+        for i, line in enumerate(filtered):
+            new_lines.append(line)
+            if i == insert_after:
+                new_lines.append(expected_line)
+
+        return "\n".join(new_lines) + "\n"
+
+    def _ensure_data_dir_env_var(self) -> bool:
+        """Ensure auto-updater service has CIDX_DATA_DIR pointing at the
+        server user's data directory.
+
+        Bug #879: cidx-server (User=code-indexer) and cidx-auto-update
+        (User=root) resolve Path.home() differently, breaking the IPC file
+        contract.  This method self-heals the auto-updater service file.
+        Error code DEPLOY-GENERAL-058 is emitted by execute() on failure.
+
+        Returns:
+            True if config is correct or was updated (or server service absent),
+            False on error
+        """
+        try:
+            correct_data_dir = self._get_server_data_dir()
+            if correct_data_dir is None:
+                return True  # Non-fatal: server service file absent (fresh install)
+
+            auto_update_service = (
+                SYSTEMD_UNIT_DIR / f"{AUTO_UPDATE_SERVICE_NAME}.service"
+            )
+            current_content = self._read_service_file(auto_update_service)
+            if current_content is None:
+                return False
+
+            expected_line = f'Environment="CIDX_DATA_DIR={correct_data_dir}"'
+            if expected_line in current_content:
+                logger.debug(
+                    "CIDX_DATA_DIR already correctly configured",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            logger.info(
+                f"Injecting CIDX_DATA_DIR={correct_data_dir} into auto-updater service",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            new_content = self._inject_cidx_data_dir_into_content(
+                current_content, expected_line
+            )
+            if not self._write_service_file_and_reload(
+                auto_update_service, new_content
+            ):
+                return False
+
+            if not self._restart_auto_update_service():
+                return False
+            return True
+
+        except Exception as e:
+            logger.exception(
+                f"Error ensuring CIDX_DATA_DIR: {e}",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return False
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
 
@@ -2463,6 +2602,19 @@ class DeploymentExecutor:
 
         # Step 6: Issue #154 - Ensure auto-updater uses server Python
         self._ensure_auto_updater_uses_server_python()
+
+        # Step 6.5: Bug #879 - Ensure auto-updater has CIDX_DATA_DIR pointing at
+        # server user's data dir so restart signal and redeploy marker paths match
+        # across cidx-server (User=code-indexer) and cidx-auto-update (User=root).
+        if not self._ensure_data_dir_env_var():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-058",
+                    "CIDX_DATA_DIR could not be verified/injected — "
+                    "restart signal and redeploy marker paths may diverge",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
 
         # Step 7: Ensure ripgrep is installed (Bug #157: log result)
         ripgrep_result = self.ensure_ripgrep()
