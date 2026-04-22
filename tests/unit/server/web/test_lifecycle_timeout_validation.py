@@ -29,9 +29,9 @@ DEFAULT_OUTER_TIMEOUT = 420
 MINIMUM_MARGIN = 30  # outer must be >= shell + MINIMUM_MARGIN
 
 SHELL_600 = 600
-OUTER_INVALID_610 = 610    # 610 < 600 + 30 = 630  -> rejected
-OUTER_BOUNDARY_630 = 630   # 630 == 600 + 30        -> accepted (boundary)
-OUTER_VALID_700 = 700      # 700 > 600 + 30         -> accepted
+OUTER_INVALID_610 = 610  # 610 < 600 + 30 = 630  -> rejected
+OUTER_BOUNDARY_630 = 630  # 630 == 600 + 30        -> accepted (boundary)
+OUTER_VALID_700 = 700  # 700 > 600 + 30         -> accepted
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +66,15 @@ def _make_legacy_db(server_dir: Path) -> Path:
 
     Returns the path to the SQLite DB file.
     """
-    (server_dir / "config.json").write_text(json.dumps({
-        "server_dir": str(server_dir),
-        "host": "localhost",
-        "port": 8000,
-    }))
+    (server_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "server_dir": str(server_dir),
+                "host": "localhost",
+                "port": 8000,
+            }
+        )
+    )
 
     db_path = server_dir / "runtime.db"
     conn = sqlite3.connect(str(db_path))
@@ -188,7 +192,8 @@ class TestLifecycleConfigAutoMigration:
             service.initialize_runtime_db(str(db_path))
 
         lifecycle_logs = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.levelno == logging.INFO
             and "lifecycle_analysis" in r.getMessage().lower()
         ]

@@ -29,10 +29,7 @@ _PROMPT_FILE = (
 )
 
 _LIFECYCLE_SRC = str(
-    Path(__file__).resolve().parents[4]
-    / "src"
-    / "code_indexer"
-    / "global_repos"
+    Path(__file__).resolve().parents[4] / "src" / "code_indexer" / "global_repos"
 )
 
 
@@ -141,8 +138,8 @@ def test_no_runtime_code_enforces_cidx_local_cap():
     cidx_local = r"cidx[-_]local"
 
     patterns = [
-        f"{cap_terms}.*{cidx_local}",   # cap-term first
-        f"{cidx_local}.*{cap_terms}",   # cidx-local first
+        f"{cap_terms}.*{cidx_local}",  # cap-term first
+        f"{cidx_local}.*{cap_terms}",  # cidx-local first
     ]
 
     all_matches: list[str] = []

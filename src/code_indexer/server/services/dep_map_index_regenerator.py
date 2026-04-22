@@ -219,7 +219,9 @@ class IndexRegenerator:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Build repos_analyzed YAML list
-        repos_yaml = "\n".join(f"  - {yaml_quote_if_unsafe(r)}" for r in repos) if repos else ""
+        repos_yaml = (
+            "\n".join(f"  - {yaml_quote_if_unsafe(r)}" for r in repos) if repos else ""
+        )
         repos_analyzed_block = (
             f"repos_analyzed:\n{repos_yaml}" if repos else "repos_analyzed: []"
         )
