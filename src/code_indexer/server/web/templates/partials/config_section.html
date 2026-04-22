@@ -1640,6 +1640,62 @@ function saveLlmCredsConfig() {
 </details>
 
 
+<!-- Lifecycle Analysis Timeouts Section -->
+<details class="config-section" id="section-lifecycle-analysis">
+    <summary>
+        <h2>Lifecycle Analysis Timeouts</h2>
+    </summary>
+    <p class="section-description">
+        Configures timeouts for repository lifecycle analysis operations. Shell timeout governs individual shell command execution within the analysis. Outer timeout is the hard wall-clock limit for the entire lifecycle analysis run.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-lifecycle-analysis">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Shell Timeout (sec)</td>
+                        <td class="config-value">{{ config.lifecycle_analysis.shell_timeout_seconds }}</td>
+                        <td class="config-note"><small>Timeout for individual shell commands during analysis</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Outer Timeout (sec)</td>
+                        <td class="config-value">{{ config.lifecycle_analysis.outer_timeout_seconds }}</td>
+                        <td class="config-note"><small>Hard wall-clock limit for the entire lifecycle analysis run</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('lifecycle-analysis')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-lifecycle-analysis" method="post" action="/admin/config/lifecycle-analysis" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.lifecycle_analysis %}
+            <div class="validation-error">{{ validation_errors.lifecycle_analysis }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="lifecycle-shell-timeout">
+                    Shell Timeout (sec)
+                    <input type="number" id="lifecycle-shell-timeout" name="shell_timeout_seconds" value="{{ config.lifecycle_analysis.shell_timeout_seconds }}" min="60" step="30">
+                    <small>Timeout for individual shell commands during lifecycle analysis</small>
+                </label>
+                <label for="lifecycle-outer-timeout">
+                    Outer Timeout (sec)
+                    <input type="number" id="lifecycle-outer-timeout" name="outer_timeout_seconds" value="{{ config.lifecycle_analysis.outer_timeout_seconds }}" min="90" step="30">
+                    <small>Hard wall-clock limit for the entire lifecycle analysis run</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('lifecycle-analysis')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
+
 <details class="config-section" id="section-health">
     <summary>
         <h2>Health Check Thresholds</h2>

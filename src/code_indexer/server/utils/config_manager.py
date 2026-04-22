@@ -1613,6 +1613,16 @@ class ServerConfigManager:
         ):
             config_dict["rerank_config"] = RerankConfig(**config_dict["rerank_config"])
 
+        # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to
+        # LifecycleAnalysisConfig so that _merge_runtime_config produces proper
+        # dataclass instances rather than plain dicts when loading from SQLite/PG.
+        if "lifecycle_analysis_config" in config_dict and isinstance(
+            config_dict["lifecycle_analysis_config"], dict
+        ):
+            config_dict["lifecycle_analysis_config"] = LifecycleAnalysisConfig(
+                **config_dict["lifecycle_analysis_config"]
+            )
+
         # Bug #678: Convert sinbin dicts to ProviderSinBinConfig
         for _sinbin_key in ("voyage_ai_sinbin", "cohere_sinbin"):
             if _sinbin_key in config_dict and isinstance(

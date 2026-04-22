@@ -1827,6 +1827,21 @@ class ConfigService:
         for k, v in runtime_dict.items():
             if k not in BOOTSTRAP_KEYS:
                 full_dict[k] = v
+        # Story #885 Phase 5b (A7d): log when lifecycle_analysis_config is absent
+        # from the stored runtime dict so operators know defaults are being applied
+        # on first boot after upgrade (no manual action required).
+        if "lifecycle_analysis_config" not in runtime_dict:
+            logger.info(
+                "ConfigService: lifecycle_analysis_config absent from runtime storage "
+                "-- applying defaults (shell=%ds, outer=%ds). "
+                "No operator action required.",
+                full_dict.get("lifecycle_analysis_config", {}).get(
+                    "shell_timeout_seconds", 360
+                ),
+                full_dict.get("lifecycle_analysis_config", {}).get(
+                    "outer_timeout_seconds", 420
+                ),
+            )
         # Reconstruct ServerConfig through the existing deserialization path
         # which correctly converts nested dicts to dataclass instances
         new_config = self.config_manager._dict_to_server_config(full_dict)

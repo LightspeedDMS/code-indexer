@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import quote
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -48,6 +48,11 @@ UNASSIGNED_CATEGORY_PRIORITY = (
 
 # Discovery enrichment limit (Story #754): max clone_urls per enrich request
 MAX_ENRICH_CLONE_URLS = 50
+
+# Story #885 Phase 5b (A7b): minimum gap between outer and shell lifecycle timeouts.
+# outer_timeout_seconds must be >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
+# so the Python-level watchdog always outlives the shell kill budget.
+LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS = 30
 
 # Story #198: Settings that require server restart
 # These settings are read during server startup (singleton init, thread pool creation)
@@ -6484,6 +6489,46 @@ def _validate_config_section(section: str, data: dict) -> Optional[str]:
                     return "Verification timeout must be between 60 and 3600 seconds"
             except (ValueError, TypeError):
                 return "Verification timeout must be a valid number"
+
+    elif section == "lifecycle_analysis":
+        # Story #885 Phase 5b (A7b): Lifecycle analysis timeout validation.
+        # Rule: outer_timeout_seconds >= shell_timeout_seconds + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
+
+        def _parse_positive_timeout(
+            raw: Optional[str], label: str
+        ) -> Union[int, str, None]:
+            """Return parsed int, error string, or None if raw is None."""
+            if raw is None:
+                return None
+            try:
+                val = int(raw)
+            except (ValueError, TypeError):
+                return f"{label} must be a valid number"
+            if val < 1:
+                return f"{label} must be a positive number"
+            return val
+
+        shell_result = _parse_positive_timeout(
+            data.get("shell_timeout_seconds"), "Shell timeout"
+        )
+        if isinstance(shell_result, str):
+            return shell_result
+
+        outer_result = _parse_positive_timeout(
+            data.get("outer_timeout_seconds"), "Outer timeout"
+        )
+        if isinstance(outer_result, str):
+            return outer_result
+
+        # Cross-field check: only applies when both values are present
+        if shell_result is not None and outer_result is not None:
+            min_outer = shell_result + LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS
+            if outer_result < min_outer:
+                return (
+                    f"Outer timeout ({outer_result}s) must be at least "
+                    f"shell timeout + {LIFECYCLE_OUTER_TIMEOUT_GRACE_SECONDS}s "
+                    f"({min_outer}s)"
+                )
 
     return None
 
