@@ -811,6 +811,52 @@ def make_lifespan(
                     extra={"correlation_id": get_correlation_id()},
                 )
 
+                # Wire MemoryStoreService for Story #877 (shared technical memory store).
+                # No inner try/except — failures propagate to the outer except at APP-GENERAL-021
+                # which logs a warning without blocking startup, consistent with this block's pattern.
+                from code_indexer.server.startup.nfs_self_check import (
+                    run_nfs_atomic_create_self_check,
+                )
+
+                run_nfs_atomic_create_self_check(Path(golden_repos_dir) / "cidx-meta")
+
+                from code_indexer.server.services.memory_store_service_factory import (
+                    build_memory_store_service as _build_memory_store_service,
+                )
+                from code_indexer.server.services.access_filtering_service import (
+                    AccessFilteringService as _AccessFilteringService,
+                )
+
+                _memory_bundle = _build_memory_store_service(
+                    golden_repos_dir=Path(golden_repos_dir),
+                    server_data_dir=Path(server_data_dir),
+                    refresh_scheduler=refresh_scheduler,
+                    refresh_debouncer=cidx_meta_debouncer,
+                )
+                _memory_store_service = _memory_bundle.service
+                _memory_metadata_cache = _memory_bundle.cache
+                _memories_dir = _memory_bundle.memories_dir
+
+                app.state.memory_store_service = _memory_store_service
+                app.state.memory_metadata_cache = _memory_metadata_cache
+                if hasattr(app.state, "app_state") and app.state.app_state is not None:
+                    app.state.app_state.memory_store_service = _memory_store_service
+
+                # Story #877 Phase 3-A: reconstruct AccessFilteringService with the
+                # shared memory metadata cache so filter_cidx_meta_files() can look up
+                # memory file scope/referenced_repo without redundant disk reads.
+                # Uses _memories_dir from the bundle — the single authoritative path.
+                _access_filtering_service_with_cache = _AccessFilteringService(
+                    group_manager,
+                    memory_metadata_cache=_memory_metadata_cache,
+                    memories_dir=_memories_dir,
+                )
+                app.state.access_filtering_service = _access_filtering_service_with_cache
+                logger.info(
+                    "MemoryStoreService initialized for Story #877 (cache wired to AccessFilteringService)",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+
             # Start scheduler (internally checks if enabled)
             description_refresh_scheduler.start()
             app.state.description_refresh_scheduler = description_refresh_scheduler

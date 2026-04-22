@@ -22,6 +22,7 @@ import errno
 import json
 import logging
 import os
+import socket
 import threading
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -29,6 +30,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional, cast
 
 logger = logging.getLogger(__name__)
+
+# Default TTL for locks that do not specify one (1 hour).
+# Used as fallback when "ttl_seconds" key is absent from lock metadata.
+DEFAULT_LOCK_TTL_SECONDS = 3600
 
 
 class WriteLockManager:
@@ -117,6 +122,7 @@ class WriteLockManager:
                 metadata = {
                     "owner": owner_name,
                     "pid": os.getpid(),
+                    "hostname": socket.gethostname(),
                     "acquired_at": datetime.now(timezone.utc).isoformat(),
                     "ttl_seconds": ttl_seconds,
                 }
@@ -250,23 +256,42 @@ class WriteLockManager:
         """
         Return True if the lock metadata indicates a stale lock.
 
-        Stale if:
-            - PID is dead (os.kill(pid, 0) raises OSError with errno.ESRCH), OR
-            - acquired_at + ttl_seconds is in the past.
+        Host-aware staleness rules (Story #877):
+            - If hostname field is absent OR matches local host -> local lock:
+                Stale if PID is dead (os.kill(pid, 0) raises OSError with errno.ESRCH)
+                OR acquired_at + ttl_seconds is in the past.
+            - If hostname field differs from local host -> foreign lock:
+                Stale ONLY if acquired_at + ttl_seconds is in the past.
+                PID liveness is NEVER checked for foreign hosts (meaningless cross-node).
+
+        Backward compatibility: locks without a hostname field are treated as local.
         """
+        hostname = content.get("hostname")
+        local_hostname = socket.gethostname()
+        is_local = hostname is None or hostname == local_hostname
+
         pid = content.get("pid")
-        if pid is not None:
+        if is_local and pid is not None:
             try:
                 os.kill(pid, 0)
             except OSError as e:
                 if e.errno == errno.ESRCH:
                     return True
-                # EPERM means process exists but we can't signal it — not stale
+                # EPERM: process exists but we lack permission to signal it — not stale
             except (TypeError, ValueError):
+                # pid field is present but not a valid integer — cannot check liveness;
+                # fall through to TTL check rather than incorrectly evicting the lock
                 pass
 
         acquired_at_str = content.get("acquired_at", "")
-        ttl_seconds = content.get("ttl_seconds", 3600)
+
+        # Validate ttl_seconds explicitly; non-numeric values fall back to default
+        raw_ttl = content.get("ttl_seconds")
+        try:
+            ttl_seconds = int(raw_ttl) if raw_ttl is not None else DEFAULT_LOCK_TTL_SECONDS
+        except (TypeError, ValueError):
+            ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
+
         if acquired_at_str:
             try:
                 acquired_at = datetime.fromisoformat(acquired_at_str)
@@ -278,6 +303,8 @@ class WriteLockManager:
                 if elapsed > ttl_seconds:
                     return True
             except (ValueError, TypeError):
+                # Malformed acquired_at timestamp cannot be parsed;
+                # treat the lock as non-stale rather than incorrectly evicting it
                 pass
 
         # If lock has neither PID nor timestamp, it cannot be validated — treat as stale

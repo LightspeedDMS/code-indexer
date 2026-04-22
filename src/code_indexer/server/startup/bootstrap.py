@@ -9,7 +9,9 @@ migration, and Langfuse repo registration.
 import logging
 import os
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
+
+import yaml
 
 from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
@@ -18,6 +20,132 @@ if TYPE_CHECKING:
     from code_indexer.server.repositories.golden_repo_manager import GoldenRepoManager
 
 logger = logging.getLogger(__name__)
+
+
+_CIDX_META_OVERRIDE_FILENAME = ".code-indexer-override.yaml"
+_CIDX_META_REQUIRED_EXCLUDE_DIRS: Tuple[str, ...] = (".locks",)
+_CIDX_META_REQUIRED_FORCE_EXCLUDE_PATTERNS: Tuple[str, ...] = ("*.tmp",)
+
+
+def _load_override_yaml(override_path: Path) -> Optional[Dict]:
+    """Read and validate .code-indexer-override.yaml. Returns dict or None on error."""
+    try:
+        with open(override_path, "r") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            logger.warning(
+                "cidx-meta override YAML is not a mapping (got %s), skipping patch",
+                type(data).__name__,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return None
+        return data
+    except Exception as exc:
+        logger.warning(
+            "Failed to read cidx-meta override YAML, skipping patch: %s",
+            exc,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+
+
+def _apply_cidx_meta_excludes(data: Dict) -> Optional[bool]:
+    """Add required exclude entries to the override dict in-place.
+
+    Returns:
+        None  — a field has the wrong type; warning already logged; dict unchanged.
+        False — all required entries were already present; dict unchanged.
+        True  — at least one entry was added; dict was mutated.
+    """
+    exclude_dirs = data.get("add_exclude_dirs")
+    if exclude_dirs is not None and not isinstance(exclude_dirs, list):
+        logger.warning(
+            "cidx-meta override YAML 'add_exclude_dirs' is not a list (got %s),"
+            " skipping patch to preserve existing config",
+            type(exclude_dirs).__name__,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+
+    force_exclude = data.get("force_exclude_patterns")
+    if force_exclude is not None and not isinstance(force_exclude, list):
+        logger.warning(
+            "cidx-meta override YAML 'force_exclude_patterns' is not a list (got %s),"
+            " skipping patch to preserve existing config",
+            type(force_exclude).__name__,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return None
+
+    if exclude_dirs is None:
+        exclude_dirs = []
+        data["add_exclude_dirs"] = exclude_dirs
+    if force_exclude is None:
+        force_exclude = []
+        data["force_exclude_patterns"] = force_exclude
+
+    changed = False
+    for entry in _CIDX_META_REQUIRED_EXCLUDE_DIRS:
+        if entry not in exclude_dirs:
+            exclude_dirs.append(entry)
+            changed = True
+    for entry in _CIDX_META_REQUIRED_FORCE_EXCLUDE_PATTERNS:
+        if entry not in force_exclude:
+            force_exclude.append(entry)
+            changed = True
+    return changed
+
+
+def _save_override_yaml(override_path: Path, data: Dict) -> bool:
+    """Write the patched override dict back to disk. Returns True on success."""
+    try:
+        with open(override_path, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Failed to write cidx-meta override YAML after patching: %s",
+            exc,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return False
+
+
+def _patch_cidx_meta_override_yaml(cidx_meta_path: Path) -> None:
+    """Idempotently add required excludes to cidx-meta's .code-indexer-override.yaml.
+
+    Silently skips when the file does not exist (e.g. cidx init failed).
+    """
+    override_path = cidx_meta_path / _CIDX_META_OVERRIDE_FILENAME
+    if not override_path.exists():
+        logger.debug(
+            "cidx-meta override YAML not found, skipping exclude patching: %s",
+            override_path,
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return
+
+    data = _load_override_yaml(override_path)
+    if data is None:
+        return
+
+    result = _apply_cidx_meta_excludes(data)
+    if result is None:
+        return  # validation failure; warning already emitted by helper
+    if result is False:
+        logger.debug(
+            "cidx-meta override YAML already has required excludes, no update needed",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return
+
+    if _save_override_yaml(override_path, data):
+        logger.info(
+            "Patched cidx-meta override YAML: add_exclude_dirs+=%s force_exclude_patterns+=%s",
+            list(_CIDX_META_REQUIRED_EXCLUDE_DIRS),
+            list(_CIDX_META_REQUIRED_FORCE_EXCLUDE_PATTERNS),
+            extra={"correlation_id": get_correlation_id()},
+        )
 
 
 def _detect_repo_root(start_from_file: bool = True) -> Optional[Path]:
@@ -230,6 +358,9 @@ def bootstrap_cidx_meta(
             "Bootstrapped cidx-meta via register_local_repo",
             extra={"correlation_id": get_correlation_id()},
         )
+
+    # Always patch excludes — runs on fresh installs and on already-registered upgrades.
+    _patch_cidx_meta_override_yaml(cidx_meta_path)
 
 
 def register_langfuse_golden_repos(

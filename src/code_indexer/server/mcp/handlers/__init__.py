@@ -111,6 +111,7 @@ class _ForwardingModule(_types.ModuleType):
                 "code_indexer.server.mcp.handlers.files",
                 "code_indexer.server.mcp.handlers.repos",
                 "code_indexer.server.mcp.handlers.search",
+                "code_indexer.server.mcp.handlers.memory",
             ):
                 _submod = _sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:
@@ -346,6 +347,12 @@ from code_indexer.server.mcp.handlers.search import (  # noqa: F401, E402
     # Private helpers used by tests and external consumers
     _omni_search_code,
     _omni_regex_search,
+)
+
+from code_indexer.server.mcp.handlers.memory import (  # noqa: F401, E402
+    handle_create_memory,
+    handle_edit_memory,
+    handle_delete_memory,
 )
 
 from code_indexer.server.auth import dependencies  # noqa: F401, E402
