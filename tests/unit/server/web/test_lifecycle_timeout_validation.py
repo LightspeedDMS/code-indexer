@@ -38,6 +38,9 @@ OUTER_VALID_700 = 700  # 700 > 600 + 30         -> accepted
 # Shared legacy-DB helper
 # ---------------------------------------------------------------------------
 
+_TEST_HOST = "localhost"
+_TEST_PORT = 8000
+
 _SERVER_CONFIG_DDL = """
     CREATE TABLE IF NOT EXISTS server_config (
         config_key   TEXT PRIMARY KEY,
@@ -89,6 +92,61 @@ def _make_legacy_db(server_dir: Path) -> Path:
     finally:
         conn.close()
     return db_path
+
+
+def _read_runtime_row(db_path: Path) -> tuple:
+    """Return (config_dict, version) from the 'runtime' row, or (None, None)."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        row = conn.execute(
+            "SELECT config_json, version FROM server_config WHERE config_key = 'runtime'",
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return (None, None)
+    return (json.loads(row[0]), int(row[1]))
+
+
+def _make_migrated_db(server_dir: Path, runtime_config: dict, version: int) -> Path:
+    """
+    Create config.json + SQLite DB with the given runtime_config at the
+    specified version, simulating a server that has already been migrated.
+
+    Returns the DB path.
+    """
+    (server_dir / "config.json").write_text(
+        json.dumps(
+            {"server_dir": str(server_dir), "host": _TEST_HOST, "port": _TEST_PORT}
+        )
+    )
+    db_path = server_dir / "runtime.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(_SERVER_CONFIG_DDL)
+        conn.execute(
+            "INSERT INTO server_config "
+            "(config_key, config_json, version, updated_by) VALUES (?, ?, ?, ?)",
+            ("runtime", json.dumps(runtime_config), version, "test"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+# Runtime used by second-boot idempotence test (lifecycle section already present)
+_MIGRATED_RUNTIME_WITH_LIFECYCLE = {
+    "password_security_config": {
+        "min_length": 8,
+        "max_length": 128,
+        "required_char_classes": 2,
+    },
+    "lifecycle_analysis_config": {
+        "shell_timeout_seconds": DEFAULT_SHELL_TIMEOUT,
+        "outer_timeout_seconds": DEFAULT_OUTER_TIMEOUT,
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +230,67 @@ class TestLifecycleConfigAutoMigration:
         section = settings["lifecycle_analysis"]
         assert section["shell_timeout_seconds"] == DEFAULT_SHELL_TIMEOUT
         assert section["outer_timeout_seconds"] == DEFAULT_OUTER_TIMEOUT
+
+    def test_first_boot_persists_defaults_to_sqlite_row(self, tmp_path):
+        """
+        AC-V4-17: initialize_runtime_db() on a legacy DB whose config_json lacks
+        lifecycle_analysis_config must persist defaults to the SQLite row and
+        bump the version from 1 to 2.
+        """
+        from code_indexer.server.services.config_service import ConfigService
+
+        server_dir = tmp_path / "cidx-server3"
+        server_dir.mkdir()
+        db_path = _make_legacy_db(server_dir)
+
+        service = ConfigService(server_dir_path=str(server_dir))
+        service.initialize_runtime_db(str(db_path))
+
+        persisted, version = _read_runtime_row(db_path)
+
+        assert persisted is not None, "runtime row must exist in server_config"
+        assert "lifecycle_analysis_config" in persisted, (
+            "lifecycle_analysis_config must be persisted to SQLite on first boot"
+        )
+        lac = persisted["lifecycle_analysis_config"]
+        assert lac["shell_timeout_seconds"] == DEFAULT_SHELL_TIMEOUT
+        assert lac["outer_timeout_seconds"] == DEFAULT_OUTER_TIMEOUT
+        assert version == 2, f"Version must bump 1->2 on first boot; got {version}"
+
+    def test_second_boot_is_no_op_on_already_migrated_row(self, tmp_path, caplog):
+        """
+        AC-V4-17 idempotence: initialize_runtime_db() on a row that already
+        contains lifecycle_analysis_config must leave config_json and version
+        unchanged and must NOT emit any INFO log containing 'lifecycle_analysis'.
+        """
+        from code_indexer.server.services.config_service import ConfigService
+
+        server_dir = tmp_path / "cidx-server4"
+        server_dir.mkdir()
+        db_path = _make_migrated_db(server_dir, _MIGRATED_RUNTIME_WITH_LIFECYCLE, 2)
+
+        service = ConfigService(server_dir_path=str(server_dir))
+        with caplog.at_level(
+            logging.INFO,
+            logger="code_indexer.server.services.config_service",
+        ):
+            service.initialize_runtime_db(str(db_path))
+
+        persisted, version = _read_runtime_row(db_path)
+
+        assert version == 2, f"Version must stay 2 on second boot (no-op); got {version}"
+        assert persisted == _MIGRATED_RUNTIME_WITH_LIFECYCLE, (
+            "config_json must be identical after second boot — no silent rewrite"
+        )
+        spurious_logs = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO
+            and "lifecycle_analysis" in r.getMessage().lower()
+        ]
+        assert len(spurious_logs) == 0, (
+            f"No lifecycle_analysis INFO log expected on second boot; got: "
+            f"{[r.getMessage() for r in spurious_logs]}"
+        )
 
     def test_first_boot_logs_migration_event(self, tmp_path, caplog):
         """

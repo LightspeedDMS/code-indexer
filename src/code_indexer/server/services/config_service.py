@@ -18,6 +18,7 @@ from ..utils.config_manager import (
     ServerConfigManager,
     ServerConfig,
     RerankConfig,
+    LifecycleAnalysisConfig,
 )
 from ..config.delegation_config import ClaudeDelegationManager, ClaudeDelegationConfig
 
@@ -101,6 +102,11 @@ class ConfigService:
             # DB has runtime config -- merge with bootstrap
             self._merge_runtime_config(runtime)
             self._strip_config_file_to_bootstrap()
+            # A7d (Story #885 AC-V4-17): persist lifecycle_analysis_config defaults
+            # to SQLite on first boot after upgrade (key absent from legacy row).
+            if "lifecycle_analysis_config" not in runtime:
+                runtime["lifecycle_analysis_config"] = asdict(LifecycleAnalysisConfig())
+                self._save_runtime_to_sqlite(runtime)
         else:
             # First boot or pre-migration: seed DB from config.json
             config = self.get_config()
