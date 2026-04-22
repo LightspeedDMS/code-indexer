@@ -256,7 +256,9 @@ class TestScopeTargetConsistency:
             ("file", _file_payload, "referenced_repo"),
         ],
     )
-    def test_non_global_scope_null_required_field_raises(self, scope, base_payload_fn, field):
+    def test_non_global_scope_null_required_field_raises(
+        self, scope, base_payload_fn, field
+    ):
         """scope=repo and scope=file require non-null scope_target and referenced_repo."""
         payload = base_payload_fn(**{field: None})
         with pytest.raises(MemorySchemaValidationError) as exc_info:
@@ -373,9 +375,7 @@ class TestEvidenceEntryExclusiveUnion:
 
     def test_commit_entry_with_extra_key_raises(self):
         """Commit entry with an unrecognised extra key is rejected — only {commit} allowed."""
-        payload = _global_payload(
-            evidence=[{"commit": "abc123", "lines": "1-5"}]
-        )
+        payload = _global_payload(evidence=[{"commit": "abc123", "lines": "1-5"}])
         with pytest.raises(MemorySchemaValidationError) as exc_info:
             validate_create_payload(payload, MAX_SUMMARY_CHARS)
         assert exc_info.value.field == "evidence"
@@ -396,7 +396,9 @@ class TestEvidenceEntryValues:
     )
     def test_invalid_lines_value_raises(self, lines_value):
         """lines must be a non-empty string matching '<start>-<end>' format."""
-        payload = _global_payload(evidence=[{"file": "src/foo.py", "lines": lines_value}])
+        payload = _global_payload(
+            evidence=[{"file": "src/foo.py", "lines": lines_value}]
+        )
         with pytest.raises(MemorySchemaValidationError) as exc_info:
             validate_create_payload(payload, MAX_SUMMARY_CHARS)
         assert exc_info.value.field == "evidence"
@@ -451,7 +453,11 @@ class TestMaxSummaryCharsValidation:
     def test_negative_max_summary_chars_raises_value_error_on_edit(self):
         """validate_edit_payload also rejects negative max_summary_chars."""
         current = _global_payload()
-        edit = {"summary": "Updated.", "edited_by": "editor", "edited_at": VALID_ISO8601_2}
+        edit = {
+            "summary": "Updated.",
+            "edited_by": "editor",
+            "edited_at": VALID_ISO8601_2,
+        }
         with pytest.raises(ValueError):
             validate_edit_payload(edit, current, -1)
 

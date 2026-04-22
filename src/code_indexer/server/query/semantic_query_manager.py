@@ -426,6 +426,9 @@ class SemanticQueryManager:
         score_fusion: Optional[str] = None,
         # Multi-provider routing (Story #593)
         preferred_provider: Optional[str] = None,
+        # Story #883 Phase C: reuse a pre-computed Voyage vector so the handler
+        # makes exactly ONE embedding API call per request (shared with memory retrieval).
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
         """
         Perform semantic query on user's activated repositories.
@@ -454,6 +457,9 @@ class SemanticQueryManager:
             edit_distance: Fuzzy match tolerance level 0-3 (FTS-only)
             snippet_lines: Context lines around FTS matches 0-50 (FTS-only)
             regex: Interpret query as regex pattern (FTS-only, incompatible with fuzzy)
+            precomputed_query_vector: Optional Voyage embedding vector computed by the caller.
+                When supplied (Story #883 Phase C), the vector is reused by the semantic
+                search path so no duplicate Voyage API call is made.
 
         Returns:
             Dictionary with results, total_results, and query_metadata
@@ -552,6 +558,8 @@ class SemanticQueryManager:
                 score_fusion=score_fusion,
                 # Multi-provider routing (Story #593)
                 preferred_provider=preferred_provider,
+                # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
+                precomputed_query_vector=precomputed_query_vector,
             )
             execution_time_ms = int((time.time() - start_time) * 1000)
             timeout_occurred = False
@@ -752,6 +760,8 @@ class SemanticQueryManager:
         score_fusion: Optional[str] = None,
         # Multi-provider routing (Story #593)
         preferred_provider: Optional[str] = None,
+        # Story #883 Phase C: reuse pre-computed Voyage vector (no duplicate API call)
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> List[QueryResult]:
         """
         Perform the actual search across user repositories.
@@ -877,6 +887,8 @@ class SemanticQueryManager:
                     score_fusion=score_fusion,
                     # Multi-provider routing (Story #593)
                     preferred_provider=preferred_provider,
+                    # Story #883 Phase C: reuse pre-computed vector (no duplicate Voyage call)
+                    precomputed_query_vector=precomputed_query_vector,
                 )
                 all_results.extend(results)
 
@@ -988,6 +1000,8 @@ class SemanticQueryManager:
         score_fusion: Optional[str] = None,
         # Multi-provider routing (Story #593)
         preferred_provider: Optional[str] = None,
+        # Story #883 Phase C: reuse pre-computed Voyage vector (no duplicate API call)
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> List[QueryResult]:
         """
         Search a single repository using the appropriate search service.
@@ -1575,8 +1589,11 @@ class SemanticQueryManager:
             )
 
             # Perform search on the repository using direct path
+            # Story #883 Phase C: pass precomputed vector to avoid duplicate Voyage call
             search_response = search_service.search_repository_path(
-                repo_path=repo_path, search_request=search_request
+                repo_path=repo_path,
+                search_request=search_request,
+                precomputed_query_vector=precomputed_query_vector,
             )
 
             # Convert search results to QueryResult objects

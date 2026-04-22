@@ -8,8 +8,6 @@ translators — the service has its own 174 unit tests.
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from code_indexer.server.services.memory_store_service import (
     ConflictError,
     NotFoundError,
@@ -107,8 +105,7 @@ class TestHandleCreateMemory:
         app_module_mock = MagicMock()
         app_module_mock.app.state.memory_store_service = None
 
-        params = {"type": "gotcha", "scope": "global", "summary": "s",
-                  "evidence": []}
+        params = {"type": "gotcha", "scope": "global", "summary": "s", "evidence": []}
         with patch(
             "code_indexer.server.mcp.handlers.memory._utils.app_module",
             app_module_mock,
@@ -128,8 +125,12 @@ class TestHandleCreateMemory:
             "summary", "Summary too long"
         )
 
-        params = {"type": "gotcha", "scope": "global", "summary": "x" * 2000,
-                  "evidence": []}
+        params = {
+            "type": "gotcha",
+            "scope": "global",
+            "summary": "x" * 2000,
+            "evidence": [],
+        }
         with make_context(service):
             result = handle_create_memory(params, make_user())
 
@@ -145,8 +146,7 @@ class TestHandleCreateMemory:
         service = MagicMock()
         service.create_memory.side_effect = RateLimitError("Too many writes")
 
-        params = {"type": "gotcha", "scope": "global", "summary": "s",
-                  "evidence": []}
+        params = {"type": "gotcha", "scope": "global", "summary": "s", "evidence": []}
         with make_context(service):
             result = handle_create_memory(params, make_user())
 
@@ -162,8 +162,7 @@ class TestHandleCreateMemory:
         service = MagicMock()
         service.create_memory.side_effect = ConflictError("Lock held")
 
-        params = {"type": "gotcha", "scope": "global", "summary": "s",
-                  "evidence": []}
+        params = {"type": "gotcha", "scope": "global", "summary": "s", "evidence": []}
         with make_context(service):
             result = handle_create_memory(params, make_user())
 
@@ -241,15 +240,22 @@ class TestHandleEditMemory:
             "evidence": [{"file": "src/foo.py", "lines": "1-5", "quote": "q"}],
             "body": "detail",
         }
-        service.edit_memory.assert_called_once_with("m1", expected_payload, "h1", "carol")
+        service.edit_memory.assert_called_once_with(
+            "m1", expected_payload, "h1", "carol"
+        )
 
     def test_missing_memory_id_returns_missing_parameter(self):
         """Test 9: missing memory_id -> error='missing_parameter'."""
         from code_indexer.server.mcp.handlers.memory import handle_edit_memory
 
         service = MagicMock()
-        params = {"expected_content_hash": "abc", "type": "gotcha", "scope": "global",
-                  "summary": "s", "evidence": []}
+        params = {
+            "expected_content_hash": "abc",
+            "type": "gotcha",
+            "scope": "global",
+            "summary": "s",
+            "evidence": [],
+        }
         with make_context(service):
             result = handle_edit_memory(params, make_user())
 
@@ -263,8 +269,13 @@ class TestHandleEditMemory:
         from code_indexer.server.mcp.handlers.memory import handle_edit_memory
 
         service = MagicMock()
-        params = {"memory_id": "x1", "type": "gotcha", "scope": "global",
-                  "summary": "s", "evidence": []}
+        params = {
+            "memory_id": "x1",
+            "type": "gotcha",
+            "scope": "global",
+            "summary": "s",
+            "evidence": [],
+        }
         with make_context(service):
             result = handle_edit_memory(params, make_user())
 

@@ -19,7 +19,16 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Set, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    Set,
+    runtime_checkable,
+)
 
 from .constants import CIDX_META_REPO, DEFAULT_GROUP_ADMINS
 from .group_access_manager import GroupAccessManager
@@ -81,7 +90,9 @@ class AccessFilteringService:
                 When both are None, memory files are excluded (fail-closed).
         """
         self.group_manager = group_access_manager
-        self._memory_metadata_cache: "Optional[MemoryMetadataCache]" = memory_metadata_cache
+        self._memory_metadata_cache: "Optional[MemoryMetadataCache]" = (
+            memory_metadata_cache
+        )
         self._memories_dir: Optional[Path] = memories_dir
         # Bug #338: TTL cache for _get_all_repo_aliases()
         self._repo_aliases_cache: Optional[Set[str]] = None
@@ -350,9 +361,7 @@ class AccessFilteringService:
                     result.append(filename)
         return result
 
-    def _is_memory_file_accessible(
-        self, filename: str, accessible: Set[str]
-    ) -> bool:
+    def _is_memory_file_accessible(self, filename: str, accessible: Set[str]) -> bool:
         """Determine whether a UUID-stemmed memory file is accessible to the user.
 
         Looks up the file's frontmatter via the metadata cache (or disk when

@@ -63,7 +63,9 @@ def _validate_cap(max_summary_chars: object) -> int:
             f"max_summary_chars must be a non-negative integer, got {type(max_summary_chars).__name__!r}"
         )
     if max_summary_chars < 0:
-        raise ValueError(f"max_summary_chars must be non-negative, got {max_summary_chars}")
+        raise ValueError(
+            f"max_summary_chars must be non-negative, got {max_summary_chars}"
+        )
     return max_summary_chars
 
 
@@ -80,7 +82,9 @@ def validate_create_payload(payload: object, max_summary_chars: object) -> None:
     _run_payload_validation(payload, cap)
 
 
-def validate_edit_payload(edit: object, current: object, max_summary_chars: object) -> None:
+def validate_edit_payload(
+    edit: object, current: object, max_summary_chars: object
+) -> None:
     """Validate an edit payload against the current stored payload.
 
     Immutable fields (id, created_by, created_at) may not be changed.
@@ -109,7 +113,9 @@ def _run_payload_validation(payload: dict, cap: int) -> None:
     """Orchestrate field-by-field validation of a complete payload dict."""
     for field in _REQUIRED_CREATE_FIELDS:
         if field not in payload:
-            raise MemorySchemaValidationError(field, f"required field {field!r} is missing")
+            raise MemorySchemaValidationError(
+                field, f"required field {field!r} is missing"
+            )
     _check_enums_and_scope(payload)
     _check_summary_and_evidence(payload, cap)
 
@@ -124,7 +130,8 @@ def _check_enums_and_scope(payload: dict) -> None:
     scope_val = payload["scope"]
     if not isinstance(scope_val, str) or scope_val not in _VALID_SCOPES:
         raise MemorySchemaValidationError(
-            "scope", f"scope must be one of {sorted(_VALID_SCOPES)!r}, got {scope_val!r}"
+            "scope",
+            f"scope must be one of {sorted(_VALID_SCOPES)!r}, got {scope_val!r}",
         )
     scope_target = payload.get("scope_target")
     referenced_repo = payload.get("referenced_repo")
@@ -140,7 +147,8 @@ def _check_enums_and_scope(payload: dict) -> None:
     else:
         if scope_target is None:
             raise MemorySchemaValidationError(
-                "scope_target", f"scope_target must be non-null when scope is {scope_val!r}"
+                "scope_target",
+                f"scope_target must be non-null when scope is {scope_val!r}",
             )
         if referenced_repo is None:
             raise MemorySchemaValidationError(
@@ -166,7 +174,9 @@ def _check_summary_and_evidence(payload: dict, cap: int) -> None:
             "evidence", f"evidence must be a list, got {type(evidence_val).__name__!r}"
         )
     if len(evidence_val) == 0:
-        raise MemorySchemaValidationError("evidence", "evidence must have at least one entry")
+        raise MemorySchemaValidationError(
+            "evidence", "evidence must have at least one entry"
+        )
     if len(evidence_val) > _MAX_EVIDENCE_ENTRIES:
         raise MemorySchemaValidationError(
             "evidence",
@@ -179,13 +189,16 @@ def _check_summary_and_evidence(payload: dict, cap: int) -> None:
 def _validate_evidence_entry(entry: object) -> None:
     """Raise MemorySchemaValidationError('evidence') if a single evidence entry is invalid."""
     if not isinstance(entry, dict):
-        raise MemorySchemaValidationError("evidence", "each evidence entry must be a dict")
+        raise MemorySchemaValidationError(
+            "evidence", "each evidence entry must be a dict"
+        )
     keys = set(entry.keys())
     has_file = "file" in keys
     has_commit = "commit" in keys
     if has_file and has_commit:
         raise MemorySchemaValidationError(
-            "evidence", "evidence entry must be exclusively {file+lines} or {commit}, not both"
+            "evidence",
+            "evidence entry must be exclusively {file+lines} or {commit}, not both",
         )
     if has_file:
         if keys != {"file", "lines"}:
@@ -200,7 +213,8 @@ def _validate_evidence_entry(entry: object) -> None:
         lines_val = entry["lines"]
         if not isinstance(lines_val, str) or not _LINES_RE.fullmatch(lines_val):
             raise MemorySchemaValidationError(
-                "evidence", "evidence 'lines' must be a non-empty string in '<start>-<end>' format"
+                "evidence",
+                "evidence 'lines' must be a non-empty string in '<start>-<end>' format",
             )
         return
     if has_commit:

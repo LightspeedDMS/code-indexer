@@ -36,6 +36,7 @@ from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCac
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_memory_file(
     memories_dir: Path,
     memory_id: str,
@@ -69,6 +70,7 @@ def _write_memory_file(
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def temp_db(tmp_path: Path):
     return tmp_path / "test.db"
@@ -96,7 +98,9 @@ def cache(memories_dir: Path) -> MemoryMetadataCache:
 
 
 @pytest.fixture
-def service(group_manager: GroupAccessManager, cache: MemoryMetadataCache) -> AccessFilteringService:
+def service(
+    group_manager: GroupAccessManager, cache: MemoryMetadataCache
+) -> AccessFilteringService:
     return AccessFilteringService(group_manager, memory_metadata_cache=cache)
 
 
@@ -137,6 +141,7 @@ MEMORY_ID_MISSING = "dddddddd" * 4
 # Test 1: Non-memory files pass through unchanged (all listed files verified)
 # ---------------------------------------------------------------------------
 
+
 def test_non_memory_md_files_all_pass_through_for_poweruser(
     service: AccessFilteringService, poweruser: str
 ) -> None:
@@ -171,6 +176,7 @@ def test_non_md_files_all_pass_through(
 # Test 2: Memory file with scope=global is always visible
 # ---------------------------------------------------------------------------
 
+
 def test_global_memory_file_visible_to_regular_user(
     service: AccessFilteringService,
     memories_dir: Path,
@@ -200,13 +206,16 @@ def test_global_memory_file_visible_to_poweruser(
 # Test 3: scope=repo with referenced_repo in accessible set → visible
 # ---------------------------------------------------------------------------
 
+
 def test_repo_scoped_memory_visible_when_repo_accessible(
     service: AccessFilteringService,
     memories_dir: Path,
     poweruser: str,
 ) -> None:
     """scope=repo memory files are visible when referenced_repo is accessible to user."""
-    _write_memory_file(memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo")
+    _write_memory_file(
+        memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
+    )
     filename = f"{MEMORY_ID_REPO}.md"
 
     result = service.filter_cidx_meta_files([filename], poweruser)
@@ -217,13 +226,16 @@ def test_repo_scoped_memory_visible_when_repo_accessible(
 # Test 4: scope=repo with referenced_repo NOT in accessible set → filtered out
 # ---------------------------------------------------------------------------
 
+
 def test_repo_scoped_memory_hidden_when_repo_inaccessible(
     service: AccessFilteringService,
     memories_dir: Path,
     regular_user: str,
 ) -> None:
     """scope=repo memory files are hidden when referenced_repo is not accessible."""
-    _write_memory_file(memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo")
+    _write_memory_file(
+        memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
+    )
     filename = f"{MEMORY_ID_REPO}.md"
 
     result = service.filter_cidx_meta_files([filename], regular_user)
@@ -233,6 +245,7 @@ def test_repo_scoped_memory_hidden_when_repo_inaccessible(
 # ---------------------------------------------------------------------------
 # Test 5: scope=file follows the same repo-access rule
 # ---------------------------------------------------------------------------
+
 
 def test_file_scoped_memory_visible_when_referenced_repo_accessible(
     service: AccessFilteringService,
@@ -275,6 +288,7 @@ def test_file_scoped_memory_hidden_when_referenced_repo_inaccessible(
 # Test 6: Missing memory file → filtered out (fail-closed)
 # ---------------------------------------------------------------------------
 
+
 def test_missing_memory_file_filtered_out(
     service: AccessFilteringService,
     poweruser: str,
@@ -290,6 +304,7 @@ def test_missing_memory_file_filtered_out(
 # ---------------------------------------------------------------------------
 # Test 7: Corrupt YAML frontmatter memory file → filtered out (fail-closed)
 # ---------------------------------------------------------------------------
+
 
 def test_corrupt_yaml_memory_file_filtered_out(
     service: AccessFilteringService,
@@ -311,6 +326,7 @@ def test_corrupt_yaml_memory_file_filtered_out(
 # Test 8: Cache-miss path reads from filesystem and caches result
 # ---------------------------------------------------------------------------
 
+
 def test_cache_miss_reads_from_filesystem_then_caches(
     memories_dir: Path,
     group_manager: GroupAccessManager,
@@ -330,12 +346,15 @@ def test_cache_miss_reads_from_filesystem_then_caches(
     # Remove file from disk; second call should use cached result
     (memories_dir / filename).unlink()
     result2 = svc.filter_cidx_meta_files([filename], poweruser)
-    assert filename in result2, "Second call should return cached result after file deletion"
+    assert filename in result2, (
+        "Second call should return cached result after file deletion"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Test 9: Admin user sees all memory files including truly inaccessible-repo ones
 # ---------------------------------------------------------------------------
+
 
 def test_admin_sees_memory_files_for_repos_not_granted_to_admins(
     service: AccessFilteringService,
@@ -348,7 +367,9 @@ def test_admin_sees_memory_files_for_repos_not_granted_to_admins(
     The memory file references 'my-repo' which is only granted to powerusers.
     Admin must still see the file.
     """
-    _write_memory_file(memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo")
+    _write_memory_file(
+        memories_dir, MEMORY_ID_REPO, scope="repo", referenced_repo="my-repo"
+    )
     _write_memory_file(memories_dir, MEMORY_ID_GLOBAL, scope="global")
 
     files = [f"{MEMORY_ID_REPO}.md", f"{MEMORY_ID_GLOBAL}.md"]

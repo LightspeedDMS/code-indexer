@@ -60,7 +60,9 @@ def _write_lock(locks_root: Path, memory_id: str, **overrides) -> None:
 
 
 class TestAcquireOnCleanSlate:
-    def test_acquire_on_clean_slate_succeeds(self, manager: MemoryFileLockManager, locks_root: Path) -> None:
+    def test_acquire_on_clean_slate_succeeds(
+        self, manager: MemoryFileLockManager, locks_root: Path
+    ) -> None:
         result = manager.acquire("mem-001", "writer-A")
         assert result is True
         lock_file = _lock_path(locks_root, "mem-001")
@@ -72,14 +74,18 @@ class TestAcquireOnCleanSlate:
 
 
 class TestAcquireTwiceSameOwner:
-    def test_acquire_twice_same_owner_returns_false(self, manager: MemoryFileLockManager) -> None:
+    def test_acquire_twice_same_owner_returns_false(
+        self, manager: MemoryFileLockManager
+    ) -> None:
         assert manager.acquire("mem-002", "writer-A") is True
         # Second acquire on the same id — non-reentrant
         assert manager.acquire("mem-002", "writer-A") is False
 
 
 class TestReleaseThenReacquire:
-    def test_release_then_reacquire_succeeds(self, manager: MemoryFileLockManager, locks_root: Path) -> None:
+    def test_release_then_reacquire_succeeds(
+        self, manager: MemoryFileLockManager, locks_root: Path
+    ) -> None:
         assert manager.acquire("mem-003", "writer-A") is True
         assert manager.release("mem-003", "writer-A") is True
         lock_file = _lock_path(locks_root, "mem-003")
@@ -92,7 +98,9 @@ class TestReleaseThenReacquire:
 
 
 class TestReleaseWrongOwner:
-    def test_release_with_wrong_owner_refused(self, manager: MemoryFileLockManager, locks_root: Path) -> None:
+    def test_release_with_wrong_owner_refused(
+        self, manager: MemoryFileLockManager, locks_root: Path
+    ) -> None:
         assert manager.acquire("mem-004", "writer-A") is True
         result = manager.release("mem-004", "writer-B")
         assert result is False
@@ -101,7 +109,9 @@ class TestReleaseWrongOwner:
 
 
 class TestReleaseIdempotent:
-    def test_release_idempotent_when_file_missing(self, manager: MemoryFileLockManager) -> None:
+    def test_release_idempotent_when_file_missing(
+        self, manager: MemoryFileLockManager
+    ) -> None:
         result = manager.release("mem-never-acquired", "anyone")
         assert result is True
 
@@ -175,14 +185,18 @@ class TestAcquireWritesHostname:
 
 
 class TestLockPathLayout:
-    def test_lock_path_layout(self, manager: MemoryFileLockManager, locks_root: Path) -> None:
+    def test_lock_path_layout(
+        self, manager: MemoryFileLockManager, locks_root: Path
+    ) -> None:
         assert manager.acquire("mem-010", "writer-A") is True
         expected = locks_root / "cidx-meta" / "memories" / "mem-010.lock"
         assert expected.exists()
 
 
 class TestConcurrentThreadsExactlyOneWins:
-    def test_concurrent_threads_exactly_one_wins(self, manager: MemoryFileLockManager) -> None:
+    def test_concurrent_threads_exactly_one_wins(
+        self, manager: MemoryFileLockManager
+    ) -> None:
         barrier = threading.Barrier(2)
         results: queue.Queue[bool] = queue.Queue()
 
@@ -217,49 +231,63 @@ class TestGetLockInfoReturnsMetadata:
 
 
 class TestGetLockInfoNoneWhenNotHeld:
-    def test_get_lock_info_none_when_not_held(self, manager: MemoryFileLockManager) -> None:
+    def test_get_lock_info_none_when_not_held(
+        self, manager: MemoryFileLockManager
+    ) -> None:
         assert manager.get_lock_info("mem-never") is None
 
 
 class TestPathTraversalSecurity:
-    @pytest.mark.parametrize("bad_id", [
-        "../evil",
-        "../../etc/passwd",
-        "foo/bar",
-        "foo\\bar",
-        "foo\x00bar",
-    ])
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../evil",
+            "../../etc/passwd",
+            "foo/bar",
+            "foo\\bar",
+            "foo\x00bar",
+        ],
+    )
     def test_acquire_rejects_unsafe_memory_id(
         self, manager: MemoryFileLockManager, bad_id: str
     ) -> None:
         with pytest.raises(ValueError):
             manager.acquire(bad_id, "attacker")
 
-    @pytest.mark.parametrize("bad_id", [
-        "../evil",
-        "foo/bar",
-        "foo\\bar",
-    ])
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../evil",
+            "foo/bar",
+            "foo\\bar",
+        ],
+    )
     def test_release_rejects_unsafe_memory_id(
         self, manager: MemoryFileLockManager, bad_id: str
     ) -> None:
         with pytest.raises(ValueError):
             manager.release(bad_id, "attacker")
 
-    @pytest.mark.parametrize("bad_id", [
-        "../evil",
-        "foo/bar",
-    ])
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../evil",
+            "foo/bar",
+        ],
+    )
     def test_is_locked_rejects_unsafe_memory_id(
         self, manager: MemoryFileLockManager, bad_id: str
     ) -> None:
         with pytest.raises(ValueError):
             manager.is_locked(bad_id)
 
-    @pytest.mark.parametrize("bad_id", [
-        "../evil",
-        "foo/bar",
-    ])
+    @pytest.mark.parametrize(
+        "bad_id",
+        [
+            "../evil",
+            "foo/bar",
+        ],
+    )
     def test_get_lock_info_rejects_unsafe_memory_id(
         self, manager: MemoryFileLockManager, bad_id: str
     ) -> None:

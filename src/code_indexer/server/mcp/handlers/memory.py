@@ -39,15 +39,21 @@ def _get_service():
 
 def _service_unavailable() -> Dict[str, Any]:
     return _mcp_response(
-        {"success": False, "error": "service_unavailable",
-         "message": "Memory store service unavailable"}
+        {
+            "success": False,
+            "error": "service_unavailable",
+            "message": "Memory store service unavailable",
+        }
     )
 
 
 def _missing_param(name: str) -> Dict[str, Any]:
     return _mcp_response(
-        {"success": False, "error": "missing_parameter",
-         "message": f"Missing required parameter: {name}"}
+        {
+            "success": False,
+            "error": "missing_parameter",
+            "message": f"Missing required parameter: {name}",
+        }
     )
 
 
@@ -124,13 +130,21 @@ def handle_create_memory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         result = service.create_memory(params, user.username)
         return _mcp_response(
-            {"success": True, "id": result["id"],
-             "content_hash": result["content_hash"], "path": result["path"]}
+            {
+                "success": True,
+                "id": result["id"],
+                "content_hash": result["content_hash"],
+                "path": result["path"],
+            }
         )
     except StaleContentError as e:
         return _mcp_response(
-            {"success": False, "error": "stale_content_hash",
-             "current_content_hash": e.current_hash, "message": str(e)}
+            {
+                "success": False,
+                "error": "stale_content_hash",
+                "current_content_hash": e.current_hash,
+                "message": str(e),
+            }
         )
     except Exception as e:
         return _handle_common_exception(e, "handle_create_memory")
@@ -162,16 +176,25 @@ def handle_edit_memory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     payload = {k: v for k, v in params.items() if k not in _EDIT_CONTROL_PARAMS}
 
     try:
-        result = service.edit_memory(memory_id, payload, expected_content_hash,
-                                     user.username)
+        result = service.edit_memory(
+            memory_id, payload, expected_content_hash, user.username
+        )
         return _mcp_response(
-            {"success": True, "id": result["id"],
-             "content_hash": result["content_hash"], "path": result["path"]}
+            {
+                "success": True,
+                "id": result["id"],
+                "content_hash": result["content_hash"],
+                "path": result["path"],
+            }
         )
     except StaleContentError as e:
         return _mcp_response(
-            {"success": False, "error": "stale_content_hash",
-             "current_content_hash": e.current_hash, "message": str(e)}
+            {
+                "success": False,
+                "error": "stale_content_hash",
+                "current_content_hash": e.current_hash,
+                "message": str(e),
+            }
         )
     except Exception as e:
         return _handle_common_exception(e, "handle_edit_memory")
@@ -205,8 +228,12 @@ def handle_delete_memory(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         )
     except StaleContentError as e:
         return _mcp_response(
-            {"success": False, "error": "stale_content_hash",
-             "current_content_hash": e.current_hash, "message": str(e)}
+            {
+                "success": False,
+                "error": "stale_content_hash",
+                "current_content_hash": e.current_hash,
+                "message": str(e),
+            }
         )
     except Exception as e:
         return _handle_common_exception(e, "handle_delete_memory")

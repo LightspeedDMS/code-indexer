@@ -171,6 +171,10 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "manage_provider_indexes",
         "bulk_add_provider_index",
         "get_provider_health",
+        # Story #877: memory store handlers
+        "create_memory",
+        "edit_memory",
+        "delete_memory",
     }
 )
 

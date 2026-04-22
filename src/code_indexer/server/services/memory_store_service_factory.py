@@ -16,7 +16,10 @@ from typing import Any, NamedTuple
 
 from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
 from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCache
-from code_indexer.server.services.memory_rate_limiter import MemoryRateLimiter, RateLimitConfig
+from code_indexer.server.services.memory_rate_limiter import (
+    MemoryRateLimiter,
+    RateLimitConfig,
+)
 from code_indexer.server.services.memory_store_service import (
     MemoryStoreConfig,
     MemoryStoreService,

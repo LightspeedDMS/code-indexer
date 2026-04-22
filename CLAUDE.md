@@ -1129,3 +1129,69 @@ The fault injection harness intercepts outbound HTTP at the transport layer (htt
 Direct `httpx.AsyncClient()` construction outside the factory is caught by Scenario 18 anti-regression test in `test_http_client_factory.py`. Infrastructure/auth clients are excluded — see `_EXCLUDED_PATHS` in that test file.
 
 *Recorded 2026-04-18 (Story #746)*
+
+---
+
+## 14. Story #883 Memory Retrieval (v9.20.X+)
+
+Semantic-Triggered Parallel Memory Retrieval for Hookless MCP Clients.
+
+When `search_code` is called with `search_mode` = `semantic` or `hybrid`, a parallel pipeline
+retrieves stored technical memories relevant to the query and injects them into the
+`relevant_memories` field of the response.
+
+**Full operator reference**: `docs/memory-retrieval-operator-guide.md`
+
+### Pipeline Stage Order
+
+1. Compute query vector via VoyageAI (same `VOYAGE_API_KEY` as code search)
+2. HNSW candidate retrieval from per-user memory store
+3. Voyage floor filter (`memory_voyage_min_score`)
+4. Relevant memory assembly (`build_relevant_memories`)
+5. Ordering (`order_memory_items`) — Cohere rerank score desc or HNSW score desc
+6. Cohere floor filter (`apply_cohere_floor`) — only when reranker active
+7. Body hydration (`_hydrate_memory_bodies`) — reads memory files from disk, skips corrupt
+8. Empty-state nudge injection when zero candidates survive all filters
+
+### Config Keys (`memory_retrieval_config`)
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `memory_retrieval_enabled` | `false` | Master kill switch |
+| `memory_retrieval_limit` | `5` | Max HNSW candidates |
+| `memory_voyage_min_score` | `0.75` | Minimum HNSW similarity to survive first filter |
+| `memory_cohere_min_score` | `0.5` | Minimum Cohere rerank score to survive second filter |
+| `memory_reranker_enabled` | `false` | Whether to apply Cohere reranker to candidates |
+
+### Kill Switch
+
+Set `memory_retrieval_enabled = false` in the Web UI Config Screen. Effective immediately,
+no restart required. When off, no VoyageAI call is made and `relevant_memories` is absent.
+
+### Path Confinement
+
+Memory IDs are validated with `_MEMORY_ID_SAFE_RE = re.compile(r"^[A-Za-z0-9_-]+$")` and
+resolved via `Path.relative_to()` (not `str.startswith()`) to prevent path traversal.
+Candidates with invalid IDs or unconfined paths are skipped with a WARNING log.
+
+### Empty-State Nudge
+
+Nudge text is in `src/code_indexer/server/mcp/prompts/memory_empty_nudge.md`.
+Loaded at runtime, cached with `@lru_cache(maxsize=1)`. Operators can edit the .md file
+without touching Python code. The nudge entry has `memory_id = "__empty_nudge__"` and
+`is_nudge = True` so clients can detect and style it differently.
+
+### Key Implementation Files
+
+- `src/code_indexer/server/mcp/memory_retrieval_pipeline.py` — pipeline orchestration
+- `src/code_indexer/server/mcp/handlers/search.py` — handler integration (`_run_memory_retrieval`, `_compute_memory_query_vector`)
+- `src/code_indexer/server/mcp/prompts/memory_empty_nudge.md` — nudge text (editable)
+- `tests/unit/server/mcp/test_search_memory_retrieval.py` — 20-test unit suite (GAPs 1-4)
+
+### Body Hydration Fault Behavior (AC15)
+
+On any file read error for a candidate, the pipeline logs a WARNING and drops that candidate.
+It does NOT raise — the remaining hydrated candidates are returned. This prevents a single
+corrupt memory file from blocking all results.
+
+*Recorded 2026-04-22 (Story #883)*

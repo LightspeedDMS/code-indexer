@@ -4,6 +4,7 @@ NFS atomic-create self-check — Story #877 Phase 1.
 Validates that the filesystem hosting cidx_meta_dir honours O_CREAT|O_EXCL
 atomicity under concurrent contention before the shared memory store is enabled.
 """
+
 import numbers
 import os
 import queue
@@ -84,7 +85,9 @@ def run_nfs_atomic_create_self_check(
                 if sys.version_info >= (3, 11):
                     original_exc.add_note(cleanup_msg)
                 else:
-                    original_exc.__context__ = NFSAtomicCreateSelfCheckError(cleanup_msg)
+                    original_exc.__context__ = NFSAtomicCreateSelfCheckError(
+                        cleanup_msg
+                    )
             else:
                 raise NFSAtomicCreateSelfCheckError(
                     f"Failed to remove self-check temp dir {tmp_dir}: {cleanup_exc}"
@@ -102,9 +105,7 @@ def _validate_args(
     narrowing; cast() then communicates that narrowing to the type checker
     before os.fspath() is called.  bytes results are rejected explicitly.
     """
-    if cidx_meta_dir is None or not isinstance(
-        cidx_meta_dir, (str, Path, os.PathLike)
-    ):
+    if cidx_meta_dir is None or not isinstance(cidx_meta_dir, (str, Path, os.PathLike)):
         raise NFSAtomicCreateSelfCheckError(
             f"cidx_meta_dir must be str/Path/PathLike[str], "
             f"got {type(cidx_meta_dir).__name__!r}"
@@ -118,10 +119,18 @@ def _validate_args(
     if not meta_dir.exists():
         raise NFSAtomicCreateSelfCheckError(f"cidx_meta_dir does not exist: {meta_dir}")
     if not meta_dir.is_dir():
-        raise NFSAtomicCreateSelfCheckError(f"cidx_meta_dir is not a directory: {meta_dir}")
+        raise NFSAtomicCreateSelfCheckError(
+            f"cidx_meta_dir is not a directory: {meta_dir}"
+        )
     if not os.access(meta_dir, os.W_OK):
-        raise NFSAtomicCreateSelfCheckError(f"cidx_meta_dir is not writable: {meta_dir}")
-    if isinstance(iterations, bool) or not isinstance(iterations, int) or iterations < 1:
+        raise NFSAtomicCreateSelfCheckError(
+            f"cidx_meta_dir is not writable: {meta_dir}"
+        )
+    if (
+        isinstance(iterations, bool)
+        or not isinstance(iterations, int)
+        or iterations < 1
+    ):
         raise NFSAtomicCreateSelfCheckError(
             f"iterations must be a non-bool int >= 1, got {iterations!r}"
         )

@@ -593,6 +593,8 @@ class MultiSearchLimitsConfig:
     omni_max_results_per_repo: int = 100
     omni_max_total_results_before_aggregation: int = 10000
     omni_pattern_metacharacters: str = "*?[]^$+|"
+    # Maximum number of repositories a wildcard pattern can expand to
+    omni_wildcard_expansion_cap: int = 50
 
 
 @dataclass
@@ -907,6 +909,26 @@ class QueryOrchestrationConfig:
 
 
 @dataclass
+class MemoryRetrievalConfig:
+    """Server-side memory retrieval configuration (Story #883).
+
+    Controls automatic parallel memory lookup triggered by semantic/hybrid queries.
+    All keys are runtime (DB-backed) — NOT bootstrap config.json keys.
+    """
+
+    # Master kill-switch: set False to suppress memory retrieval and nudge entirely
+    memory_retrieval_enabled: bool = True
+    # HNSW cosine floor from Voyage embedding search
+    memory_voyage_min_score: float = 0.5
+    # Post-rerank floor from Cohere reranker (skipped when reranker is disabled)
+    memory_cohere_min_score: float = 0.4
+    # k = max(20, request.limit * k_multiplier) candidates fetched before reranking
+    memory_retrieval_k_multiplier: int = 5
+    # Maximum body characters included in each memory entry; excess is truncated
+    memory_retrieval_max_body_chars: int = 2000
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -981,6 +1003,9 @@ class ServerConfig:
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
     rerank_config: Optional[RerankConfig] = None
+
+    # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
+    memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
 
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1080,6 +1105,9 @@ class ServerConfig:
             self.cohere_sinbin = ProviderSinBinConfig()
         if self.query_orchestration is None:
             self.query_orchestration = QueryOrchestrationConfig()
+        # Story #883 - Initialize memory retrieval config
+        if self.memory_retrieval_config is None:
+            self.memory_retrieval_config = MemoryRetrievalConfig()
 
 
 class ServerConfigManager:

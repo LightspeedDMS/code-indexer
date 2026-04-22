@@ -4,6 +4,7 @@ TDD tests for nfs_self_check.py — Story #877 Phase 1.
 Tests validate that run_nfs_atomic_create_self_check correctly detects whether
 the hosting filesystem honours O_CREAT|O_EXCL atomicity under concurrent contention.
 """
+
 import os
 import threading
 from pathlib import Path
@@ -123,9 +124,10 @@ def test_non_eexist_failure_raises(tmp_path: Path) -> None:
         with pytest.raises(NFSAtomicCreateSelfCheckError) as exc_info:
             run_nfs_atomic_create_self_check(tmp_path, iterations=5)
 
-    assert "PermissionError" in str(exc_info.value) or "permission" in str(
-        exc_info.value
-    ).lower(), f"Message did not mention unexpected error: {exc_info.value}"
+    assert (
+        "PermissionError" in str(exc_info.value)
+        or "permission" in str(exc_info.value).lower()
+    ), f"Message did not mention unexpected error: {exc_info.value}"
 
 
 # ---------------------------------------------------------------------------

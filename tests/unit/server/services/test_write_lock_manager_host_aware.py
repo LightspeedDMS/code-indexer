@@ -97,7 +97,9 @@ class TestLocalHostAcquire:
 
     def test_acquire_writes_hostname_to_metadata(self, manager, lock_dir):
         """Acquired lock JSON must contain 'hostname' equal to socket.gethostname()."""
-        result = manager.acquire("my-alias", "test-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
+        result = manager.acquire(
+            "my-alias", "test-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
         assert result is True
 
         lock_file = lock_dir / ".locks" / "my-alias.lock"
@@ -116,18 +118,26 @@ class TestLocalHostAcquire:
 
     def test_local_host_dead_pid_evicted(self, manager, lock_dir):
         """A lock with local hostname and a dead PID is treated as stale and evicted."""
-        _write_lock_file(lock_dir, "dead-pid", "dead-owner", DEAD_PID, socket.gethostname())
+        _write_lock_file(
+            lock_dir, "dead-pid", "dead-owner", DEAD_PID, socket.gethostname()
+        )
 
         # Acquire should succeed by evicting the stale local lock
-        result = manager.acquire("dead-pid", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
+        result = manager.acquire(
+            "dead-pid", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
         assert result is True
 
     def test_local_host_live_pid_not_evicted(self, manager, lock_dir):
         """A lock with local hostname and a live PID (current process) is not evicted."""
-        _write_lock_file(lock_dir, "live-pid", "live-owner", os.getpid(), socket.gethostname())
+        _write_lock_file(
+            lock_dir, "live-pid", "live-owner", os.getpid(), socket.gethostname()
+        )
 
         # Acquire should fail because lock holder is alive
-        result = manager.acquire("live-pid", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
+        result = manager.acquire(
+            "live-pid", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
         assert result is False
 
 
@@ -141,11 +151,17 @@ class TestForeignHostLock:
 
     def test_foreign_host_dead_pid_not_evicted_before_ttl(self, manager, lock_dir):
         """A lock with a foreign hostname and dead PID must NOT be evicted before TTL expires."""
-        _write_lock_file(lock_dir, "foreign-dead", "foreign-owner", DEAD_PID, FOREIGN_HOSTNAME)
+        _write_lock_file(
+            lock_dir, "foreign-dead", "foreign-owner", DEAD_PID, FOREIGN_HOSTNAME
+        )
 
         # Must NOT evict — foreign host lock, TTL not expired
-        result = manager.acquire("foreign-dead", "local-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
-        assert result is False, "Foreign-host lock with dead PID must not be evicted before TTL"
+        result = manager.acquire(
+            "foreign-dead", "local-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
+        assert result is False, (
+            "Foreign-host lock with dead PID must not be evicted before TTL"
+        )
 
     def test_foreign_host_ttl_expired_is_evicted(self, manager, lock_dir):
         """A foreign-host lock with expired TTL is evicted via TTL-only staleness."""
@@ -161,14 +177,20 @@ class TestForeignHostLock:
         )
 
         # TTL expired — should be evictable
-        result = manager.acquire("foreign-expired", "local-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
+        result = manager.acquire(
+            "foreign-expired", "local-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
         assert result is True, "Foreign-host lock with expired TTL should be evicted"
 
     def test_foreign_host_live_ttl_not_evicted(self, manager, lock_dir):
         """A foreign-host lock within TTL window is respected even with dead local PID."""
-        _write_lock_file(lock_dir, "foreign-live", "foreign-owner", DEAD_PID, FOREIGN_HOSTNAME)
+        _write_lock_file(
+            lock_dir, "foreign-live", "foreign-owner", DEAD_PID, FOREIGN_HOSTNAME
+        )
 
-        result = manager.acquire("foreign-live", "local-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
+        result = manager.acquire(
+            "foreign-live", "local-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
         assert result is False
 
     def test_is_stale_foreign_host_dead_pid_not_stale_within_ttl(self, manager):
@@ -221,14 +243,20 @@ class TestBackwardCompatibility:
         _write_lock_file(lock_dir, "old-format", "old-owner", DEAD_PID, hostname=None)
 
         # Should be evicted (treated as local — dead PID check applies)
-        result = manager.acquire("old-format", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
-        assert result is True, "Old-format lock with dead PID should be treated as local and evicted"
+        result = manager.acquire(
+            "old-format", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
+        assert result is True, (
+            "Old-format lock with dead PID should be treated as local and evicted"
+        )
 
     def test_old_format_live_pid_not_evicted(self, manager, lock_dir):
         """Lock without hostname field with live PID is respected (treated as local)."""
         _write_lock_file(lock_dir, "old-live", "old-owner", os.getpid(), hostname=None)
 
-        result = manager.acquire("old-live", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS)
+        result = manager.acquire(
+            "old-live", "new-owner", ttl_seconds=ACQUIRE_TTL_SECONDS
+        )
         assert result is False, "Old-format lock with live PID must not be evicted"
 
     def test_is_stale_no_hostname_dead_pid_is_stale(self, manager):

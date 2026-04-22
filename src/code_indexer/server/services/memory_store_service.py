@@ -53,6 +53,7 @@ _COARSE_REFRESH_ALIAS = "cidx-meta-global"
 # Public exceptions
 # ---------------------------------------------------------------------------
 
+
 class ConflictError(Exception):
     """Another writer holds the per-memory lock (retry later)."""
 
@@ -77,34 +78,33 @@ class RateLimitError(Exception):
 # Protocols (minimal subsets used by this service)
 # ---------------------------------------------------------------------------
 
+
 @runtime_checkable
 class RefreshSchedulerProtocol(Protocol):
     """Minimal subset of refresh_scheduler used by MemoryStoreService."""
 
-    def acquire_write_lock(self, alias: str, owner_name: str, ttl_seconds: int = 60) -> bool:
-        ...
+    def acquire_write_lock(
+        self, alias: str, owner_name: str, ttl_seconds: int = 60
+    ) -> bool: ...
 
-    def release_write_lock(self, alias: str, owner_name: str) -> bool:
-        ...
+    def release_write_lock(self, alias: str, owner_name: str) -> bool: ...
 
-    def is_write_lock_held(self, alias: str) -> bool:
-        ...
+    def is_write_lock_held(self, alias: str) -> bool: ...
 
-    def trigger_refresh_for_repo(self, repo_alias: str) -> Any:
-        ...
+    def trigger_refresh_for_repo(self, repo_alias: str) -> Any: ...
 
 
 @runtime_checkable
 class RefreshDebouncerProtocol(Protocol):
     """Minimal subset of CidxMetaRefreshDebouncer used by MemoryStoreService."""
 
-    def signal_dirty(self) -> None:
-        ...
+    def signal_dirty(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class MemoryStoreConfig:
@@ -117,6 +117,7 @@ class MemoryStoreConfig:
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
+
 
 class MemoryStoreService:
     def __init__(
@@ -140,12 +141,12 @@ class MemoryStoreService:
         self._clock: Callable[[], datetime] = clock or (
             lambda: datetime.now(timezone.utc)
         )
-        self._id_factory: Callable[[], str] = id_factory or (
-            lambda: uuid.uuid4().hex
-        )
+        self._id_factory: Callable[[], str] = id_factory or (lambda: uuid.uuid4().hex)
         # Story #877 Phase 3-A: optional callback to invalidate metadata cache
         # after successful write. Called with memory_id; never on exception paths.
-        self._cache_invalidator: Optional[Callable[[str], None]] = metadata_cache_invalidator
+        self._cache_invalidator: Optional[Callable[[str], None]] = (
+            metadata_cache_invalidator
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -285,9 +286,7 @@ class MemoryStoreService:
         try:
             path.resolve().relative_to(self._config.memories_dir.resolve())
         except ValueError:
-            raise ValueError(
-                f"memory_id {memory_id!r} resolves outside memories_dir"
-            )
+            raise ValueError(f"memory_id {memory_id!r} resolves outside memories_dir")
         return path
 
     def _read_or_raise(self, path: Path, memory_id: str):
@@ -316,7 +315,8 @@ class MemoryStoreService:
                 logger.warning(
                     "Per-memory lock release returned False for memory_id=%r owner=%r "
                     "(owner mismatch or file gone); lock may be stale until TTL.",
-                    memory_id, owner,
+                    memory_id,
+                    owner,
                 )
 
     def _coarse_piggyback_or_acquire(self, owner: str) -> bool:
@@ -360,7 +360,8 @@ class MemoryStoreService:
         if not released:
             logger.warning(
                 "Coarse lock release returned False for owner=%r; "
-                "lock may persist until TTL.", owner
+                "lock may persist until TTL.",
+                owner,
             )
 
     def _run_with_coarse_lock(self, owner: str, operation: Callable[[], Any]) -> Any:

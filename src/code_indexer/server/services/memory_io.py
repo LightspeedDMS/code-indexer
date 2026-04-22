@@ -94,7 +94,7 @@ def deserialize_memory(raw: str) -> Tuple[Dict[str, Any], str]:
         )
 
     yaml_text = "\n".join(lines[1:closing_index])
-    body_lines = lines[closing_index + 1:]
+    body_lines = lines[closing_index + 1 :]
     body = "\n".join(body_lines)
 
     try:
@@ -139,9 +139,7 @@ def read_memory_file(path: Path) -> Tuple[Dict[str, Any], str, str]:
     try:
         raw_text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise MemoryFileCorruptError(
-            f"Memory file is not valid UTF-8: {path}"
-        ) from exc
+        raise MemoryFileCorruptError(f"Memory file is not valid UTF-8: {path}") from exc
 
     frontmatter_dict, body = deserialize_memory(raw_text)
     return frontmatter_dict, body, content_hash

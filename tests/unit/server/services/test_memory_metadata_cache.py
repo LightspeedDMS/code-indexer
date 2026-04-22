@@ -25,6 +25,7 @@ from code_indexer.server.services.memory_metadata_cache import MemoryMetadataCac
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_memory_file(
     memories_dir: Path,
     memory_id: str,
@@ -55,6 +56,7 @@ def _write_memory_file(
 # Fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def memories_dir(tmp_path: Path) -> Path:
     d = tmp_path / "memories"
@@ -66,6 +68,7 @@ def memories_dir(tmp_path: Path) -> Path:
 # Cache miss: file does not exist → returns None
 # ---------------------------------------------------------------------------
 
+
 def test_cache_miss_returns_none_for_missing_file(memories_dir: Path) -> None:
     cache = MemoryMetadataCache(memories_dir)
     result = cache.get("nonexistent00000000000000000000000")
@@ -75,6 +78,7 @@ def test_cache_miss_returns_none_for_missing_file(memories_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Cache hit: file exists → returns frontmatter dict
 # ---------------------------------------------------------------------------
+
 
 def test_cache_hit_returns_frontmatter_dict(memories_dir: Path) -> None:
     memory_id = "aabbccdd" * 4  # 32 hex chars
@@ -91,6 +95,7 @@ def test_cache_hit_returns_frontmatter_dict(memories_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Cache hit: second call returns cached data (file removed between calls)
 # ---------------------------------------------------------------------------
+
 
 def test_cache_hit_serves_from_cache_on_second_call(memories_dir: Path) -> None:
     memory_id = "11223344" * 4
@@ -111,12 +116,15 @@ def test_cache_hit_serves_from_cache_on_second_call(memories_dir: Path) -> None:
 # TTL expiry: after TTL, cache re-reads from disk
 # ---------------------------------------------------------------------------
 
+
 def test_ttl_expiry_triggers_reread(memories_dir: Path) -> None:
     memory_id = "deadbeef" * 4
     path = _write_memory_file(memories_dir, memory_id, scope="global")
 
     fake_time = [0.0]
-    cache = MemoryMetadataCache(memories_dir, ttl_seconds=10, _clock=lambda: fake_time[0])
+    cache = MemoryMetadataCache(
+        memories_dir, ttl_seconds=10, _clock=lambda: fake_time[0]
+    )
 
     # First read
     first = cache.get(memory_id)
@@ -144,6 +152,7 @@ def test_ttl_expiry_triggers_reread(memories_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # LRU eviction: recently-used entry is retained; least-recently-used is evicted
 # ---------------------------------------------------------------------------
+
 
 def test_lru_eviction_retains_recently_accessed_entry(memories_dir: Path) -> None:
     """LRU semantics: re-accessing id_a after id_b makes id_b the least-recently-used.
@@ -179,16 +188,21 @@ def test_lru_eviction_retains_recently_accessed_entry(memories_dir: Path) -> Non
 
     # id_a: was recently accessed → still cached → should return data
     result_a = cache.get(id_a)
-    assert result_a is not None, "id_a should still be cached after LRU eviction of id_b"
+    assert result_a is not None, (
+        "id_a should still be cached after LRU eviction of id_b"
+    )
 
     # id_b: was LRU → evicted → disk gone → returns None
     result_b = cache.get(id_b)
-    assert result_b is None, "id_b should have been evicted as the least-recently-used entry"
+    assert result_b is None, (
+        "id_b should have been evicted as the least-recently-used entry"
+    )
 
 
 # ---------------------------------------------------------------------------
 # invalidate: removes a single entry (and is idempotent)
 # ---------------------------------------------------------------------------
+
 
 def test_invalidate_removes_specific_entry(memories_dir: Path) -> None:
     memory_id = "feedc0de" * 4
@@ -217,6 +231,7 @@ def test_invalidate_is_idempotent(memories_dir: Path) -> None:
 # invalidate_all: clears all entries
 # ---------------------------------------------------------------------------
 
+
 def test_invalidate_all_clears_all_entries(memories_dir: Path) -> None:
     id_a = "aaaaaaaa" * 4
     id_b = "bbbbbbbb" * 4
@@ -241,6 +256,7 @@ def test_invalidate_all_clears_all_entries(memories_dir: Path) -> None:
 # Corrupt YAML frontmatter → returns None (fail-closed)
 # ---------------------------------------------------------------------------
 
+
 def test_corrupt_yaml_frontmatter_returns_none(memories_dir: Path) -> None:
     """A file with a valid --- delimiter but malformed YAML body fails closed.
 
@@ -262,6 +278,7 @@ def test_corrupt_yaml_frontmatter_returns_none(memories_dir: Path) -> None:
 # referenced_repo preserved in returned dict
 # ---------------------------------------------------------------------------
 
+
 def test_cache_preserves_referenced_repo_field(memories_dir: Path) -> None:
     memory_id = "12341234" * 4
     _write_memory_file(memories_dir, memory_id, scope="repo", referenced_repo="my-repo")
@@ -277,6 +294,7 @@ def test_cache_preserves_referenced_repo_field(memories_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 # Thread safety smoke test: concurrent gets do not corrupt state
 # ---------------------------------------------------------------------------
+
 
 def test_thread_safety_smoke(memories_dir: Path) -> None:
     """Multiple threads calling get() concurrently should not raise or corrupt data.

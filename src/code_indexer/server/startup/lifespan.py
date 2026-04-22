@@ -851,7 +851,9 @@ def make_lifespan(
                     memory_metadata_cache=_memory_metadata_cache,
                     memories_dir=_memories_dir,
                 )
-                app.state.access_filtering_service = _access_filtering_service_with_cache
+                app.state.access_filtering_service = (
+                    _access_filtering_service_with_cache
+                )
                 logger.info(
                     "MemoryStoreService initialized for Story #877 (cache wired to AccessFilteringService)",
                     extra={"correlation_id": get_correlation_id()},

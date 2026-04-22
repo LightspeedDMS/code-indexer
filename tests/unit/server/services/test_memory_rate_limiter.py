@@ -32,7 +32,9 @@ def test_none_config_raises() -> None:
 def test_invalid_user_id_raises() -> None:
     """consume/peek/reset reject None or empty user_id."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     for method in (limiter.consume, limiter.peek, limiter.reset):
         # type: ignore required — intentionally passing None to confirm the public
         # API rejects invalid user_id values at runtime, not just at the type-checker level.
@@ -65,14 +67,18 @@ def test_invalid_config_raises() -> None:
 def test_first_consume_allowed() -> None:
     """Fresh limiter with capacity=5: first consume returns True."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     assert limiter.consume("alice") is True
 
 
 def test_burst_up_to_capacity() -> None:
     """capacity=5: five successive consumes all return True."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     results = [limiter.consume("alice") for _ in range(5)]
     assert all(results)
 
@@ -80,7 +86,9 @@ def test_burst_up_to_capacity() -> None:
 def test_exceeds_capacity_throttled() -> None:
     """capacity=5: five succeed, sixth returns False (no refill, frozen clock)."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     for _ in range(5):
         limiter.consume("alice")
     assert limiter.consume("alice") is False
@@ -94,7 +102,9 @@ def test_exceeds_capacity_throttled() -> None:
 def test_per_user_isolation() -> None:
     """Draining user A's bucket does not affect user B."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     for _ in range(5):
         limiter.consume("alice")
     assert limiter.consume("alice") is False
@@ -111,7 +121,9 @@ def test_refill_restores_tokens() -> None:
     """Drain bucket; advance clock 3 s → 3 more consumes succeed."""
     now = [0.0]
     clock = lambda: now[0]  # noqa: E731
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     # drain
     for _ in range(5):
         limiter.consume("alice")
@@ -128,7 +140,9 @@ def test_refill_cap_at_capacity() -> None:
     """After very long idle the bucket does not exceed capacity."""
     now = [0.0]
     clock = lambda: now[0]  # noqa: E731
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     # Touch the bucket so it is initialised
     limiter.peek("alice")
     # Advance 1000 seconds — should still be capped at 5
@@ -140,7 +154,9 @@ def test_fractional_refill_accumulates() -> None:
     """refill=0.5/s: 1 s → 0.5 tokens (cannot consume 1). 2 more s → 1.5 total (can consume 1, 0.5 left)."""
     now = [0.0]
     clock = lambda: now[0]  # noqa: E731
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=0.5), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=0.5), clock=clock
+    )
     # Drain to 0
     for _ in range(5):
         limiter.consume("alice")
@@ -165,7 +181,9 @@ def test_fractional_refill_accumulates() -> None:
 def test_consume_invalid_tokens() -> None:
     """consume() raises ValueError for tokens <= 0."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     with pytest.raises(ValueError, match="tokens"):
         limiter.consume("alice", tokens=0)
     with pytest.raises(ValueError, match="tokens"):
@@ -175,7 +193,9 @@ def test_consume_invalid_tokens() -> None:
 def test_multi_token_consume() -> None:
     """consume(tokens=3) with 5 available → True; peek → 2."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     assert limiter.consume("alice", tokens=3) is True
     assert limiter.peek("alice") == pytest.approx(2.0, abs=1e-9)
 
@@ -183,7 +203,9 @@ def test_multi_token_consume() -> None:
 def test_multi_token_consume_insufficient() -> None:
     """consume(tokens=3) with 2 available → False; peek unchanged at 2."""
     clock = MagicMock(return_value=0.0)
-    limiter = MemoryRateLimiter(RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock)
+    limiter = MemoryRateLimiter(
+        RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
+    )
     # consume 3 to leave 2
     limiter.consume("alice", tokens=3)
     assert limiter.peek("alice") == pytest.approx(2.0, abs=1e-9)
@@ -237,7 +259,9 @@ def test_thread_safe_consume() -> None:
         t.join()
 
     assert len(results) == 1000
-    assert all(results), "All consumes should succeed: capacity=1000 >= 1000 total consumes"
+    assert all(results), (
+        "All consumes should succeed: capacity=1000 >= 1000 total consumes"
+    )
 
 
 def test_thread_safe_throttling() -> None:

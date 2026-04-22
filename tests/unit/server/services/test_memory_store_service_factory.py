@@ -66,7 +66,9 @@ def dirs(tmp_path: Path):
     return golden_repos_dir, server_data_dir
 
 
-def _build(golden_repos_dir: Path, server_data_dir: Path, **kwargs: Any) -> MemoryStoreService:
+def _build(
+    golden_repos_dir: Path, server_data_dir: Path, **kwargs: Any
+) -> MemoryStoreService:
     """Thin wrapper around build_memory_store_service with default mocks.
 
     Unpacks the returned MemoryStoreBundle and returns only the service,
@@ -111,7 +113,9 @@ def test_builds_service_with_lock_manager_rooted_outside_base_clone(dirs) -> Non
 def test_rate_limiter_capacity_honored(dirs) -> None:
     """rate_limit_capacity is passed through to RateLimitConfig.capacity."""
     golden_repos_dir, server_data_dir = dirs
-    service = _build(golden_repos_dir, server_data_dir, rate_limit_capacity=TEST_RATE_LIMIT_CAPACITY)
+    service = _build(
+        golden_repos_dir, server_data_dir, rate_limit_capacity=TEST_RATE_LIMIT_CAPACITY
+    )
 
     assert isinstance(service._rate_limiter, MemoryRateLimiter)
     assert service._rate_limiter._config.capacity == TEST_RATE_LIMIT_CAPACITY
@@ -126,13 +130,18 @@ def test_rate_limiter_refill_rate_honored(dirs) -> None:
         rate_limit_refill_per_second=TEST_RATE_LIMIT_REFILL_PER_SECOND,
     )
 
-    assert service._rate_limiter._config.refill_per_second == TEST_RATE_LIMIT_REFILL_PER_SECOND
+    assert (
+        service._rate_limiter._config.refill_per_second
+        == TEST_RATE_LIMIT_REFILL_PER_SECOND
+    )
 
 
 def test_max_summary_chars_passed_to_config(dirs) -> None:
     """max_summary_chars is passed through to MemoryStoreConfig."""
     golden_repos_dir, server_data_dir = dirs
-    service = _build(golden_repos_dir, server_data_dir, max_summary_chars=TEST_MAX_SUMMARY_CHARS)
+    service = _build(
+        golden_repos_dir, server_data_dir, max_summary_chars=TEST_MAX_SUMMARY_CHARS
+    )
 
     assert service._config.max_summary_chars == TEST_MAX_SUMMARY_CHARS
 

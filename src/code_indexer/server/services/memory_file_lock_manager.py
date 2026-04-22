@@ -43,9 +43,7 @@ def _validate_memory_id(memory_id: str) -> None:
             f"Unsafe memory_id {memory_id!r}: must not contain '/', '\\\\', or NUL"
         )
     if ".." in memory_id:
-        raise ValueError(
-            f"Unsafe memory_id {memory_id!r}: must not contain '..'"
-        )
+        raise ValueError(f"Unsafe memory_id {memory_id!r}: must not contain '..'")
 
 
 class MemoryFileLockManager:
@@ -156,7 +154,9 @@ class MemoryFileLockManager:
             logger.warning(f"Could not delete lock file for {memory_id!r}: {exc}")
             return False
 
-        logger.debug(f"Memory lock released: memory_id={memory_id!r} owner={owner_name!r}")
+        logger.debug(
+            f"Memory lock released: memory_id={memory_id!r} owner={owner_name!r}"
+        )
         return True
 
     def is_locked(self, memory_id: str) -> bool:
@@ -242,7 +242,9 @@ class MemoryFileLockManager:
         raw_ttl = content.get("ttl_seconds")
         ttl_seconds: int
         try:
-            ttl_seconds = int(raw_ttl) if raw_ttl is not None else DEFAULT_LOCK_TTL_SECONDS
+            ttl_seconds = (
+                int(raw_ttl) if raw_ttl is not None else DEFAULT_LOCK_TTL_SECONDS
+            )
         except (TypeError, ValueError):
             ttl_seconds = DEFAULT_LOCK_TTL_SECONDS
 

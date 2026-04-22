@@ -42,7 +42,9 @@ class MemoryRateLimiter:
         if config is None:
             raise ValueError("config must not be None")
         self._config = config
-        self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
+        self._clock: Callable[[], float] = (
+            clock if clock is not None else time.monotonic
+        )
         # Per-user state: user_id -> (tokens, last_refill_time)
         self._buckets: Dict[str, Tuple[float, float]] = {}
         self._lock = threading.Lock()

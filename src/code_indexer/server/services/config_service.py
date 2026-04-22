@@ -572,6 +572,28 @@ class ConfigService:
             "overfetch_multiplier": rerank_cfg.overfetch_multiplier,
         }
 
+        # Memory retrieval settings (Story #883)
+        from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
+
+        _raw_mem = config.memory_retrieval_config
+        if isinstance(_raw_mem, dict):
+            mem_cfg = MemoryRetrievalConfig(
+                **{
+                    k: v
+                    for k, v in _raw_mem.items()
+                    if k in MemoryRetrievalConfig.__dataclass_fields__
+                }
+            )
+        else:
+            mem_cfg = _raw_mem or MemoryRetrievalConfig()
+        settings["memory_retrieval"] = {
+            "memory_retrieval_enabled": mem_cfg.memory_retrieval_enabled,
+            "memory_voyage_min_score": mem_cfg.memory_voyage_min_score,
+            "memory_cohere_min_score": mem_cfg.memory_cohere_min_score,
+            "memory_retrieval_k_multiplier": mem_cfg.memory_retrieval_k_multiplier,
+            "memory_retrieval_max_body_chars": mem_cfg.memory_retrieval_max_body_chars,
+        }
+
         return settings
 
     def _get_delegation_settings(self) -> Dict[str, Any]:
@@ -673,6 +695,9 @@ class ConfigService:
         # Story #652 - Reranking configuration
         elif category == "rerank":
             self._update_rerank_setting(config, key, value)
+        # Story #883 - Memory retrieval configuration
+        elif category == "memory_retrieval":
+            self._update_memory_retrieval_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1127,6 +1152,28 @@ class ConfigService:
             rerank.overfetch_multiplier = int(value)
         else:
             raise ValueError(f"Unknown rerank setting: {key}")
+
+    def _update_memory_retrieval_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a memory retrieval configuration setting (Story #883)."""
+        from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
+
+        if config.memory_retrieval_config is None:
+            config.memory_retrieval_config = MemoryRetrievalConfig()
+        mem = config.memory_retrieval_config
+        if key == "memory_retrieval_enabled":
+            mem.memory_retrieval_enabled = _parse_bool(value)
+        elif key == "memory_voyage_min_score":
+            mem.memory_voyage_min_score = float(value)
+        elif key == "memory_cohere_min_score":
+            mem.memory_cohere_min_score = float(value)
+        elif key == "memory_retrieval_k_multiplier":
+            mem.memory_retrieval_k_multiplier = int(value)
+        elif key == "memory_retrieval_max_body_chars":
+            mem.memory_retrieval_max_body_chars = int(value)
+        else:
+            raise ValueError(f"Unknown memory_retrieval setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

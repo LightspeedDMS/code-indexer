@@ -175,9 +175,7 @@ def test_edit_memory_success_returns_200(client, mock_service):
 
 
 def test_edit_memory_stale_content_returns_409_with_current_hash(client, mock_service):
-    mock_service.edit_memory.side_effect = StaleContentError(
-        "newhash", "hash mismatch"
-    )
+    mock_service.edit_memory.side_effect = StaleContentError("newhash", "hash mismatch")
 
     resp = client.put(
         "/api/v1/memories/abc123",

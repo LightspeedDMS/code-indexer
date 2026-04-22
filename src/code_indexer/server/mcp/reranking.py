@@ -98,11 +98,14 @@ def _attempt_provider_rerank(
     instruction: Optional[str],
     top_k: int,
     monitor: ProviderHealthMonitor,
-) -> Tuple[Optional[List[int]], Optional[str]]:
-    """Try one reranker provider; return (reranked_indices, failure_reason).
+) -> Tuple[Optional[List[Tuple[int, float]]], Optional[str]]:
+    """Try one reranker provider; return (scored_pairs, failure_reason).
+
+    scored_pairs is a list of (original_index, relevance_score) tuples,
+    ordered by score descending (as returned by the reranker client).
 
     Returns:
-        (indices, None)       — success
+        (scored_pairs, None)  — success
         (None, "skipped")     — provider health=down, not attempted
         (None, "failed")      — provider raised an exception
     """
@@ -117,7 +120,7 @@ def _attempt_provider_rerank(
         rerank_results = client.rerank(
             query=query, documents=documents, instruction=instruction, top_k=top_k
         )
-        return [r.index for r in rerank_results], None
+        return [(r.index, r.relevance_score) for r in rerank_results], None
     except RerankerSinbinnedException:
         logger.info("%s reranker sin-binned, skipping", provider_name.capitalize())
         return None, "skipped"
@@ -133,13 +136,16 @@ def _run_provider_chain(
     documents: List[str],
     instruction: Optional[str],
     top_k: int,
-) -> Tuple[Optional[List[int]], Optional[str], Optional[str], int]:
-    """Run Voyage->Cohere chain; return (indices, provider_name, failure_reason, elapsed_ms).
+) -> Tuple[Optional[List[Tuple[int, float]]], Optional[str], Optional[str], int]:
+    """Run Voyage->Cohere chain; return (scored_pairs, provider_name, failure_reason, elapsed_ms).
+
+    scored_pairs is a list of (original_index, relevance_score) tuples ordered
+    by score descending. Carries scores so _apply_reranking_sync can attach them.
 
     Measures total chain elapsed time from first provider attempt to last.
     failure_reason is the worst-case reason across all providers:
       "failed" takes priority over "skipped" (actual error is more specific).
-    Returns (indices, provider, None, elapsed_ms) on success.
+    Returns (scored_pairs, provider, None, elapsed_ms) on success.
     Returns (None, None, failure_reason, elapsed_ms) when all providers fail/skip.
     """
     monitor = ProviderHealthMonitor.get_instance()
@@ -151,12 +157,12 @@ def _run_provider_chain(
     ]:
         if not model:
             continue
-        indices, failure_reason = _attempt_provider_rerank(
+        scored_pairs, failure_reason = _attempt_provider_rerank(
             name, hkey, cls, query, documents, instruction, top_k, monitor
         )
-        if indices is not None:
+        if scored_pairs is not None:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            return indices, name.lower(), None, elapsed_ms
+            return scored_pairs, name.lower(), None, elapsed_ms
         # Track worst failure: "failed" > "skipped"
         if worst_failure != "failed":
             worst_failure = failure_reason
@@ -208,10 +214,10 @@ def _apply_reranking_sync(
             status="disabled", provider=None, rerank_time_ms=None
         )
         return results[:0], meta
-    reranked_indices, active_provider, failure_reason, elapsed_ms = _run_provider_chain(
+    reranked_pairs, active_provider, failure_reason, elapsed_ms = _run_provider_chain(
         voyage_model, cohere_model, rerank_query, documents, rerank_instruction, top_k
     )
-    if reranked_indices is None:
+    if reranked_pairs is None:
         logger.warning(
             "Reranking failed for all providers, returning results in original order"
         )
@@ -232,20 +238,25 @@ def _apply_reranking_sync(
         meta = _build_metadata(False, "none", elapsed_ms)
         meta["reranker_status"] = reranker_status
         return results[:safe_limit], meta
-    valid_indices = [i for i in reranked_indices if 0 <= i < len(results)]
-    if len(valid_indices) != len(reranked_indices):
+    valid_pairs = [(i, score) for i, score in reranked_pairs if 0 <= i < len(results)]
+    if len(valid_pairs) != len(reranked_pairs):
         logger.warning(
             "Reranker returned %d out-of-range indices (dropped); results count: %d",
-            len(reranked_indices) - len(valid_indices),
+            len(reranked_pairs) - len(valid_pairs),
             len(results),
         )
+    reordered = []
+    for idx, score in valid_pairs:
+        result = results[idx]
+        result["rerank_score"] = score
+        reordered.append(result)
     meta = _build_metadata(True, active_provider, elapsed_ms)
     meta["reranker_status"] = _build_reranker_status(
         status="success",
         provider=active_provider,
         rerank_time_ms=elapsed_ms,
     )
-    return [results[i] for i in valid_indices], meta
+    return reordered, meta
 
 
 def calculate_overfetch_limit(
@@ -270,3 +281,77 @@ def calculate_overfetch_limit(
     reranker_limit = requested_limit * overfetch_multiplier
     effective = max(reranker_limit, requested_limit + access_filter_overfetch)
     return min(MAX_CANDIDATE_LIMIT, effective)
+
+
+# ---------------------------------------------------------------------------
+# Story #883 Phase D: Tagged pool helpers
+# ---------------------------------------------------------------------------
+
+
+def _tag_and_pool(code_results: list, memory_candidates: list) -> list:
+    """Merge code results and memory candidates into a single pooled list.
+
+    Code items are tagged with ``_source_tag="code"`` and left otherwise
+    unchanged (shallow copy to avoid mutating the caller's list).
+
+    Memory items are tagged with ``_source_tag="memory"`` and augmented with
+    fields extracted from the MemoryCandidate dataclass:
+      - ``memory_id``  — the HNSW point id
+      - ``memory_path`` — disk path from the payload (for Stage 8 hydration)
+      - ``hnsw_score`` — Voyage cosine similarity score (Scenario 16 ordering)
+      - ``title``      — memory headline (from frontmatter pre-load)
+      - ``summary``    — one-sentence gist (from frontmatter pre-load)
+
+    Code items appear first in the returned list, followed by memory items.
+
+    Args:
+        code_results: List of code-search result dicts.
+        memory_candidates: List of MemoryCandidate objects (with title/summary
+            pre-populated by the handler's frontmatter pre-load loop).
+
+    Returns:
+        Combined list with _source_tag (and memory fields) injected on each item.
+    """
+    pool = []
+    for item in code_results:
+        tagged = dict(item)
+        tagged["_source_tag"] = "code"
+        pool.append(tagged)
+    for candidate in memory_candidates:
+        pool.append(
+            {
+                "_source_tag": "memory",
+                "memory_id": candidate.memory_id,
+                "memory_path": candidate.memory_path,
+                "hnsw_score": candidate.hnsw_score,
+                "title": candidate.title,
+                "summary": candidate.summary,
+            }
+        )
+    return pool
+
+
+def _tagged_content_extractor(item: dict) -> str:
+    """Extract rerank-query-relevant text from a pooled item by its _source_tag.
+
+    For ``_source_tag="memory"``: returns ``title + ': ' + summary`` so the
+    Cohere / Voyage reranker can assess relevance against the query using the
+    memory's headline text.  Returns empty string when both fields are absent.
+
+    For ``_source_tag="code"`` (or unrecognised): returns ``item["content"]``
+    or falls back to ``item["code_snippet"]`` (mirrors existing extractor
+    lambdas in _apply_rerank_and_filter).
+
+    Args:
+        item: A dict from the pool built by _tag_and_pool.
+
+    Returns:
+        String used as the document text for reranking.
+    """
+    if item.get("_source_tag") == "memory":
+        title = item.get("title", "")
+        summary = item.get("summary", "")
+        if not title and not summary:
+            return ""
+        return f"{title}: {summary}" if title and summary else (title or summary)
+    return item.get("content", "") or item.get("code_snippet", "")

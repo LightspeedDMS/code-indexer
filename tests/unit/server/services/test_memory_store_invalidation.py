@@ -24,7 +24,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from code_indexer.server.services.memory_file_lock_manager import MemoryFileLockManager
-from code_indexer.server.services.memory_rate_limiter import MemoryRateLimiter, RateLimitConfig
+from code_indexer.server.services.memory_rate_limiter import (
+    MemoryRateLimiter,
+    RateLimitConfig,
+)
 from code_indexer.server.services.memory_schema import MemorySchemaValidationError
 from code_indexer.server.services.memory_store_service import (
     ConflictError,
@@ -45,6 +48,7 @@ FIXED_UUID = "aaaabbbbccccddddeeeeffff00001111"
 # Payload factory
 # ---------------------------------------------------------------------------
 
+
 def _valid_create_payload() -> Dict[str, Any]:
     return {
         "type": "architectural-fact",
@@ -57,6 +61,7 @@ def _valid_create_payload() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Infrastructure fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def memories_dir(tmp_path: Path) -> Path:
@@ -76,6 +81,7 @@ def rate_limiter() -> MemoryRateLimiter:
 # ---------------------------------------------------------------------------
 # Builder helper
 # ---------------------------------------------------------------------------
+
 
 def _build_service(
     memories_dir: Path,
@@ -129,8 +135,11 @@ def _create_one(
 # Test: invalidator called on successful create
 # ---------------------------------------------------------------------------
 
+
 def test_invalidator_called_on_successful_create(
-    memories_dir: Path, lock_manager: MemoryFileLockManager, rate_limiter: MemoryRateLimiter
+    memories_dir: Path,
+    lock_manager: MemoryFileLockManager,
+    rate_limiter: MemoryRateLimiter,
 ) -> None:
     invalidator = MagicMock()
     svc = _build_service(memories_dir, lock_manager, rate_limiter, invalidator)
@@ -144,8 +153,11 @@ def test_invalidator_called_on_successful_create(
 # Test: invalidator called on successful edit
 # ---------------------------------------------------------------------------
 
+
 def test_invalidator_called_on_successful_edit(
-    memories_dir: Path, lock_manager: MemoryFileLockManager, rate_limiter: MemoryRateLimiter
+    memories_dir: Path,
+    lock_manager: MemoryFileLockManager,
+    rate_limiter: MemoryRateLimiter,
 ) -> None:
     counter = [0]
     invalidator = MagicMock()
@@ -155,10 +167,15 @@ def test_invalidator_called_on_successful_edit(
     invalidator.reset_mock()
 
     edit_svc = _build_service(
-        memories_dir, lock_manager, rate_limiter, invalidator,
+        memories_dir,
+        lock_manager,
+        rate_limiter,
+        invalidator,
         id_factory=lambda: memory_id,
     )
-    edit_svc.edit_memory(memory_id, _valid_create_payload(), content_hash, username="alice")
+    edit_svc.edit_memory(
+        memory_id, _valid_create_payload(), content_hash, username="alice"
+    )
 
     invalidator.assert_called_once_with(memory_id)
 
@@ -167,8 +184,11 @@ def test_invalidator_called_on_successful_edit(
 # Test: invalidator called on successful delete
 # ---------------------------------------------------------------------------
 
+
 def test_invalidator_called_on_successful_delete(
-    memories_dir: Path, lock_manager: MemoryFileLockManager, rate_limiter: MemoryRateLimiter
+    memories_dir: Path,
+    lock_manager: MemoryFileLockManager,
+    rate_limiter: MemoryRateLimiter,
 ) -> None:
     counter = [0]
     invalidator = MagicMock()
@@ -178,7 +198,10 @@ def test_invalidator_called_on_successful_delete(
     invalidator.reset_mock()
 
     del_svc = _build_service(
-        memories_dir, lock_manager, rate_limiter, invalidator,
+        memories_dir,
+        lock_manager,
+        rate_limiter,
+        invalidator,
         id_factory=lambda: memory_id,
     )
     del_svc.delete_memory(memory_id, content_hash, username="alice")
@@ -189,6 +212,7 @@ def test_invalidator_called_on_successful_delete(
 # ---------------------------------------------------------------------------
 # Test: invalidator NOT called on rate-limit exceeded during create
 # ---------------------------------------------------------------------------
+
 
 def test_invalidator_not_called_on_rate_limit_exceeded(
     memories_dir: Path, lock_manager: MemoryFileLockManager
@@ -216,8 +240,11 @@ def test_invalidator_not_called_on_rate_limit_exceeded(
 # Test: invalidator NOT called on schema validation error during create
 # ---------------------------------------------------------------------------
 
+
 def test_invalidator_not_called_on_schema_validation_error(
-    memories_dir: Path, lock_manager: MemoryFileLockManager, rate_limiter: MemoryRateLimiter
+    memories_dir: Path,
+    lock_manager: MemoryFileLockManager,
+    rate_limiter: MemoryRateLimiter,
 ) -> None:
     invalidator = MagicMock()
     svc = _build_service(memories_dir, lock_manager, rate_limiter, invalidator)
@@ -235,8 +262,11 @@ def test_invalidator_not_called_on_schema_validation_error(
 # Test: invalidator NOT called on StaleContentError during edit
 # ---------------------------------------------------------------------------
 
+
 def test_invalidator_not_called_on_stale_content_error(
-    memories_dir: Path, lock_manager: MemoryFileLockManager, rate_limiter: MemoryRateLimiter
+    memories_dir: Path,
+    lock_manager: MemoryFileLockManager,
+    rate_limiter: MemoryRateLimiter,
 ) -> None:
     counter = [0]
     invalidator = MagicMock()
@@ -246,11 +276,16 @@ def test_invalidator_not_called_on_stale_content_error(
     invalidator.reset_mock()
 
     edit_svc = _build_service(
-        memories_dir, lock_manager, rate_limiter, invalidator,
+        memories_dir,
+        lock_manager,
+        rate_limiter,
+        invalidator,
         id_factory=lambda: memory_id,
     )
     with pytest.raises(StaleContentError):
-        edit_svc.edit_memory(memory_id, _valid_create_payload(), "wrong_hash", username="alice")
+        edit_svc.edit_memory(
+            memory_id, _valid_create_payload(), "wrong_hash", username="alice"
+        )
 
     invalidator.assert_not_called()
 
@@ -259,8 +294,11 @@ def test_invalidator_not_called_on_stale_content_error(
 # Test: invalidator NOT called on ConflictError (per-memory lock held)
 # ---------------------------------------------------------------------------
 
+
 def test_invalidator_not_called_on_conflict_error(
-    memories_dir: Path, lock_manager: MemoryFileLockManager, rate_limiter: MemoryRateLimiter
+    memories_dir: Path,
+    lock_manager: MemoryFileLockManager,
+    rate_limiter: MemoryRateLimiter,
 ) -> None:
     invalidator = MagicMock()
     svc = _build_service(memories_dir, lock_manager, rate_limiter, invalidator)

@@ -6,7 +6,6 @@ All tests written BEFORE implementation (RED phase).
 import hashlib
 import stat
 from collections import OrderedDict
-from pathlib import Path
 
 import pytest
 
