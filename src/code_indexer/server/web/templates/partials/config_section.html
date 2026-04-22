@@ -1678,12 +1678,12 @@ function saveLlmCredsConfig() {
             <div class="form-grid">
                 <label for="lifecycle-shell-timeout">
                     Shell Timeout (sec)
-                    <input type="number" id="lifecycle-shell-timeout" name="shell_timeout_seconds" value="{{ config.lifecycle_analysis.shell_timeout_seconds }}" min="60" step="30">
+                    <input type="number" id="lifecycle-shell-timeout" name="shell_timeout_seconds" value="{{ config.lifecycle_analysis.shell_timeout_seconds }}" min="60">
                     <small>Timeout for individual shell commands during lifecycle analysis</small>
                 </label>
                 <label for="lifecycle-outer-timeout">
                     Outer Timeout (sec)
-                    <input type="number" id="lifecycle-outer-timeout" name="outer_timeout_seconds" value="{{ config.lifecycle_analysis.outer_timeout_seconds }}" min="90" step="30">
+                    <input type="number" id="lifecycle-outer-timeout" name="outer_timeout_seconds" value="{{ config.lifecycle_analysis.outer_timeout_seconds }}" min="90">
                     <small>Hard wall-clock limit for the entire lifecycle analysis run</small>
                 </label>
             </div>
