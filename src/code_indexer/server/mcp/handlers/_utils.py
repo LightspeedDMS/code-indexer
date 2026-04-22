@@ -11,7 +11,8 @@ import difflib
 import json
 import logging
 import pathspec
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from code_indexer.services.hnsw_health_service import HNSWHealthService
@@ -19,8 +20,95 @@ from code_indexer.server.auth.user_manager import User
 from code_indexer.server import app as app_module
 from code_indexer.server.repositories.scip_audit import SCIPAuditRepository
 from code_indexer.server.logging_utils import format_error_log
+from code_indexer.server.services.config_service import get_config_service
 
 logger = logging.getLogger(__name__)
+
+HTTP_STATUS_BAD_REQUEST = 400
+
+
+@dataclass
+class CapBreach:
+    """Carries the fields of a wildcard expansion cap violation.
+
+    Returned by _check_wildcard_cap when expanded alias count exceeds the
+    configured omni_wildcard_expansion_cap. Callers convert to the format
+    appropriate for their transport: MCP envelope or HTTP 400.
+    """
+
+    pattern: str
+    observed_count: int
+    configured_cap: int
+
+
+def _cap_breach_message(breach: CapBreach) -> str:
+    """Build the human-readable message for a wildcard cap breach.
+
+    Shared by cap_breach_response and cap_breach_http_exception.
+
+    Raises:
+        ValueError: If breach is None.
+    """
+    if breach is None:
+        raise ValueError("breach must not be None")
+    return (
+        f"Wildcard pattern {breach.pattern!r} expanded to {breach.observed_count} "
+        f"repositories, exceeding the server cap of {breach.configured_cap}. "
+        "Narrow the pattern or pass an explicit list of repository aliases."
+    )
+
+
+def _check_wildcard_cap(
+    pattern: str, observed_count: int, configured_cap: int
+) -> "Optional[CapBreach]":
+    """Return CapBreach when observed_count exceeds configured_cap, else None.
+
+    The boundary is inclusive: observed_count == configured_cap is not a breach.
+
+    Raises:
+        ValueError: If pattern is None/empty or either count is negative.
+    """
+    if not pattern:
+        raise ValueError("pattern must be a non-empty string")
+    if observed_count < 0:
+        raise ValueError(f"observed_count must be non-negative, got {observed_count}")
+    if configured_cap < 0:
+        raise ValueError(f"configured_cap must be non-negative, got {configured_cap}")
+    if observed_count > configured_cap:
+        return CapBreach(
+            pattern=pattern,
+            observed_count=observed_count,
+            configured_cap=configured_cap,
+        )
+    return None
+
+
+def cap_breach_response(breach: CapBreach) -> "Dict[str, Any]":
+    """Build an MCP envelope dict for a wildcard cap breach."""
+    if breach is None:
+        raise ValueError("breach must not be None")
+    payload = {
+        "success": False,
+        "error": "wildcard_cap_exceeded",
+        "pattern": breach.pattern,
+        "observed": breach.observed_count,
+        "cap": breach.configured_cap,
+        "remediation": _cap_breach_message(breach),
+    }
+    return {"content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+def cap_breach_http_exception(breach: CapBreach) -> None:
+    """Raise HTTPException(400) for a wildcard cap breach."""
+    if breach is None:
+        raise ValueError("breach must not be None")
+    from fastapi import HTTPException
+
+    raise HTTPException(
+        status_code=HTTP_STATUS_BAD_REQUEST,
+        detail=_cap_breach_message(breach),
+    )
+
 
 # Fallback SCIP Audit Repository for standalone/SQLite mode (no backend)
 _scip_audit_repository_fallback: Optional[SCIPAuditRepository] = None
@@ -861,19 +949,61 @@ def _validate_symbol_format(symbol: Optional[str], param_name: str) -> Optional[
     return None
 
 
-def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
+def _enforce_wildcard_cap(
+    wildcard_match_counts: Dict[str, int],
+) -> "Optional[CapBreach]":
+    """Check per-pattern wildcard match counts against omni_wildcard_expansion_cap.
+
+    Reads cap fresh from config on each call so hot-reload takes effect
+    without a server restart.  Literal (non-wildcard) patterns are never passed
+    to this helper and are therefore never capped.
+
+    Args:
+        wildcard_match_counts: Mapping of wildcard pattern -> match count.
+
+    Returns:
+        First CapBreach found, or None if all patterns are within cap.
+    """
+    if not wildcard_match_counts:
+        return None
+    cap = (
+        get_config_service()
+        .get_config()
+        .multi_search_limits_config.omni_wildcard_expansion_cap
+    )
+    for pattern, count in wildcard_match_counts.items():
+        breach = _check_wildcard_cap(pattern, count, cap)
+        if breach is not None:
+            logger.warning(
+                format_error_log(
+                    "MCP-GENERAL-032",
+                    f"Wildcard expansion cap exceeded: pattern={pattern!r} "
+                    f"matched={count} cap={cap}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return breach
+    return None
+
+
+def _expand_wildcard_patterns(
+    patterns: List[str], user: "User"
+) -> "Union[List[str], CapBreach]":
     """Expand wildcard patterns to matching repository aliases.
 
     Story #331 AC2: Accepts a user parameter and filters the available_repos
     list through AccessFilteringService before wildcard matching, so that
     restricted users only see repos they have access to.
 
+    Bug #881 Phase 3: Returns CapBreach if a wildcard pattern matched more
+    aliases than omni_wildcard_expansion_cap. Literal patterns bypass the cap.
+
     Args:
         patterns: List of repo patterns (may include wildcards like '*-global')
         user: The authenticated user requesting the expansion.
 
     Returns:
-        Expanded list of unique repository aliases
+        Expanded list of unique repository aliases, or CapBreach on cap breach.
     """
     golden_repos_dir = _get_golden_repos_dir()
     if not golden_repos_dir:
@@ -883,7 +1013,6 @@ def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
         )
         return patterns
 
-    # Get available repos
     try:
         available_repos = [r["alias_name"] for r in _list_global_repos()]
     except Exception as e:
@@ -903,18 +1032,22 @@ def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
             available_repos, user.username
         )
 
-    expanded = []
+    expanded: List[str] = []
+    _wildcard_match_counts: Dict[str, int] = {}
     for pattern in patterns:
         if _has_wildcard(pattern):
-            # Expand wildcard using pathspec (gitignore-style matching)
-            # This correctly handles ** as "zero or more directories"
             spec = pathspec.PathSpec.from_lines("gitwildmatch", [pattern])
             matches = [repo for repo in available_repos if spec.match_file(repo)]
             if matches:
-                logger.debug(
-                    f"Expanded wildcard '{pattern}' -> {matches}",
+                # Bug #881 Phase 1: promoted from DEBUG to INFO
+                logger.info(
+                    f"Wildcard expansion: pattern={pattern!r} matched_count={len(matches)} "
+                    f"correlation_id={get_correlation_id()!r} "
+                    f"matches={matches}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+                # Bug #881 Phase 3: track per-pattern count for cap enforcement
+                _wildcard_match_counts[pattern] = len(matches)
                 expanded.extend(matches)
             else:
                 logger.warning(
@@ -925,15 +1058,20 @@ def _expand_wildcard_patterns(patterns: List[str], user: "User") -> List[str]:
                     )
                 )
         else:
-            # Keep literal pattern
+            # Literal pattern — never subject to expansion cap
             expanded.append(pattern)
 
     # Deduplicate while preserving order
-    seen = set()
-    result = []
+    seen: set = set()
+    result: List[str] = []
     for repo in expanded:
         if repo not in seen:
             seen.add(repo)
             result.append(repo)
+
+    # Bug #881 Phase 3: enforce cap after deduplication using per-pattern counts
+    cap_breach = _enforce_wildcard_cap(_wildcard_match_counts)
+    if cap_breach is not None:
+        return cap_breach
 
     return result

@@ -509,6 +509,8 @@ class ConfigService:
                 "omni_max_results_per_repo": config.multi_search_limits_config.omni_max_results_per_repo,
                 "omni_max_total_results_before_aggregation": config.multi_search_limits_config.omni_max_total_results_before_aggregation,
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
+                # Bug #881 Phase 3: wildcard fan-out cap
+                "omni_wildcard_expansion_cap": config.multi_search_limits_config.omni_wildcard_expansion_cap,
             },
             # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
             # Note: job history retention period moved to data_retention section (Story #400 - AC5)
@@ -1337,6 +1339,9 @@ class ConfigService:
             multi_search.omni_max_total_results_before_aggregation = int(value)
         elif key == "omni_pattern_metacharacters":
             multi_search.omni_pattern_metacharacters = str(value)
+        # Bug #881 Phase 3: wildcard fan-out cap
+        elif key == "omni_wildcard_expansion_cap":
+            multi_search.omni_wildcard_expansion_cap = int(value)
         else:
             raise ValueError(f"Unknown multi_search setting: {key}")
 

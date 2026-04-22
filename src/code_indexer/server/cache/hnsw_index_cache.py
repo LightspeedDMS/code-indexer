@@ -18,6 +18,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 import json
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -365,7 +366,9 @@ class HNSWIndexCache:
         try:
             hnsw_index, id_mapping = loader()
 
-            # Capture real index memory footprint
+            # Capture real index memory footprint.
+            # Bug #881 Phase 4: also add sys.getsizeof(id_mapping) so the cache
+            # size cap accounts for the Python dict held alongside the native index.
             index_size_bytes = 0
             try:
                 index_size_bytes = hnsw_index.index_file_size()
@@ -374,6 +377,7 @@ class HNSWIndexCache:
                     f"Could not get index file size for {repo_path}: {e}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+            index_size_bytes += sys.getsizeof(id_mapping)
 
             # Store result in cache (acquire lock for dict write)
             with self._cache_lock:
@@ -420,6 +424,48 @@ class HNSWIndexCache:
                     f"Invalidated cache for {repo_path}",
                     extra={"correlation_id": get_correlation_id()},
                 )
+
+    def invalidate_prefix(self, path_prefix: str) -> int:
+        """Evict all cache entries whose key equals path_prefix or is under path_prefix/.
+
+        Called by RefreshScheduler after swap_alias() to evict stale snapshot entries
+        immediately rather than waiting for TTL expiry (Bug #881 Phase 2).
+
+        Uses path separator guard: /a/b evicts /a/b/coll but NOT /a/barbaz.
+        Thread-safe via _cache_lock.
+
+        Args:
+            path_prefix: Snapshot directory path whose entries to evict.
+                         Must be non-empty.
+
+        Returns:
+            Number of entries evicted.
+
+        Raises:
+            ValueError: If path_prefix is None or empty string.
+        """
+        if not path_prefix:
+            raise ValueError("path_prefix must be a non-empty string")
+
+        path_prefix = str(Path(path_prefix).resolve())
+        prefix_with_sep = path_prefix + "/"
+
+        with self._cache_lock:
+            stale_keys = [
+                key
+                for key in self._cache
+                if key == path_prefix or key.startswith(prefix_with_sep)
+            ]
+            for key in stale_keys:
+                del self._cache[key]
+                self._eviction_count += 1
+
+        evicted_count = len(stale_keys)
+        logger.info(
+            f"Evicted {evicted_count} stale HNSW cache entries for old snapshot: {path_prefix}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return evicted_count
 
     def clear(self) -> None:
         """Clear all cache entries."""

@@ -817,6 +817,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.multi_search.omni_pattern_metacharacters }}</td>
                         <td class="config-note"><small>Characters treated as glob pattern metacharacters (default: *?[]^$+|)</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Omni Wildcard Expansion Cap</td>
+                        <td class="config-value">{{ config.multi_search.omni_wildcard_expansion_cap }}</td>
+                        <td class="config-note"><small>Max repos a wildcard pattern may expand to. Protects the server from fan-out memory pressure (default: 50).</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -896,6 +901,11 @@ function saveLlmCredsConfig() {
                     Omni Pattern Metacharacters
                     <input type="text" id="omni-pattern-metacharacters" name="omni_pattern_metacharacters" value="{{ config.multi_search.omni_pattern_metacharacters }}">
                     <small>Characters treated as glob pattern metacharacters (default: *?[]^$+|).</small>
+                </label>
+                <label for="omni-wildcard-expansion-cap">
+                    Omni Wildcard Expansion Cap
+                    <input type="number" id="omni-wildcard-expansion-cap" name="omni_wildcard_expansion_cap" value="{{ config.multi_search.omni_wildcard_expansion_cap }}" min="1" max="10000">
+                    <small>Maximum repos a wildcard MCP pattern may expand to (default: 50).</small>
                 </label>
             </div>
             <div class="form-actions">

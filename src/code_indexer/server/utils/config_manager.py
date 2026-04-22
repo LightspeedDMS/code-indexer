@@ -593,6 +593,9 @@ class MultiSearchLimitsConfig:
     omni_max_results_per_repo: int = 100
     omni_max_total_results_before_aggregation: int = 10000
     omni_pattern_metacharacters: str = "*?[]^$+|"
+    # Bug #881 Phase 3: cap on wildcard expansion to prevent unbounded fan-out
+    # and HNSW cache memory exhaustion. Default 50; operator-tunable via Web UI.
+    omni_wildcard_expansion_cap: int = 50
 
 
 @dataclass

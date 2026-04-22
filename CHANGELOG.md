@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.15
+
+### Bug Fixes
+
+- fix(#881): CIDX server HNSW index cache accumulated orphan entries and undersized the LRU cap, driving RSS to 22.5 GB within 45 minutes in production. Four coordinated fixes applied.
+
+  **Phase 1 — Diagnostic logging (MCP search path)**: Promoted/added 4 INFO log lines in `handlers/search.py` (`search_code` entry with correlation_id/user_id/query/alias/limit; `_omni_search_code` post-expansion with matched count and first 10 aliases; `search_code` success exit with result_count and elapsed_ms) and `handlers/_utils.py::_expand_wildcard_patterns` (wildcard expansion count). Operators can now observe wildcard blowup live via `sqlite3 logs.db` without restart. Coverage: `tests/unit/server/mcp/test_search_diagnostic_logging.py`.
+
+  **Phase 2 — Orphan eviction on snapshot swap**: `RefreshScheduler._execute_refresh()` previously atomic-swapped the alias to a new `v_{timestamp}` CoW snapshot without invalidating the old cache key, leaving `HNSWIndexCacheEntry` resident for the 10-minute TTL. With dual-provider parallel queries (voyage + cohere) each refresh orphaned 2+ entries. New `HNSWIndexCache.invalidate_prefix(path_prefix) -> int` method (thread-safe via `_cache_lock`) evicts all keys matching the prefix and is called by `refresh_scheduler.py` immediately after `swap_alias()` in a try/except that logs but does not re-raise. Coverage: `tests/unit/server/cache/test_invalidate_prefix.py`, `tests/integration/server/test_refresh_evicts_hnsw_cache.py`.
+
+  **Phase 3 — Wildcard expansion cap + Web UI setting + cache bypass on fan-out**: Wildcard patterns like `*-global` could expand to arbitrary counts, each loading a fresh `HNSWIndexCacheEntry` and pressuring the cap. New runtime-editable setting `multi_search_limits_config.omni_wildcard_expansion_cap` (default 50, validated 1..10000, hot-reloadable) exposed in Admin → Config → Multi-Search. `_expand_wildcard_patterns()` raises `WildcardExpansionCapExceeded` when the cap is breached; both MCP and REST paths return HTTP 400 with a user-facing message pointing to the Web UI setting. Wildcard fan-out now bypasses the HNSW cache by passing `hnsw_cache=None` through `MultiSearchService._search_semantic_sync`. Coverage: `tests/unit/server/mcp/test_wildcard_cap.py`, `test_cap_breach_helper.py`, `test_cache_bypass_on_fanout.py`.
+
+  **Phase 4 — Size cap accounting honesty**: `HNSWIndexCacheEntry.index_size_bytes` previously returned only `hnswlib.index_file_size()` (serialized on-disk bytes), excluding the Python `id_mapping` dict and hnswlib native runtime overhead. The 4096 MiB cap (Bug #878) therefore fired way too late. New accounting includes `sys.getsizeof(id_mapping) + sum(getsizeof(k)+getsizeof(v) for k,v in id_mapping.items())`. Residual gap: hnswlib native C++ overhead is not measurable from Python; documented as a known limitation so operators understand the cap is a floor, not a ceiling. Coverage: `tests/unit/server/cache/test_id_mapping_size_bytes.py`.
+
 ## v9.20.14
 
 ### Bug Fixes

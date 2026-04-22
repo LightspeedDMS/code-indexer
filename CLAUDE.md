@@ -1084,6 +1084,24 @@ sqlite3 ~/.cidx-server/logs.db \
 
 *Recorded 2026-04-21 (Bug #878)*
 
+### 3. Bug #881 Mitigations (v9.20.15+)
+
+Four mitigations shipped together to limit HNSW cache memory growth in multi-repo (omni) fan-out scenarios.
+
+**Phase 1: Fan-out audit logging** — `_omni_search_code` logs expanded alias count and preview at INFO level after wildcard expansion (error code `MCP-GENERAL-031`). Operators can audit fan-out factor in production logs.
+
+**Phase 2: omni_max_repos_per_search cap** — `MultiSearchLimitsConfig.omni_max_repos_per_search` (default 50, DB-backed, Web UI configurable) rejects requests that expand to more repositories than the cap before dispatching any searches. Returns HTTP 400 / MCP error `omni_too_many_repos`. Key files: `config_manager.py`, `config_service.py`, `_utils.py::_enforce_omni_max_repos`, `search.py::_omni_search_code`.
+
+**Phase 3: Wildcard expansion cap + cache bypass** — Two sub-mitigations:
+- `MultiSearchLimitsConfig.omni_wildcard_expansion_cap` (default 50, DB-backed, Web UI configurable) limits how many repos a single wildcard MCP pattern may expand to. `_expand_wildcard_patterns` now returns `Union[List[str], CapBreach]`. Callers (`_omni_search_code`, regex search) check `isinstance(result, CapBreach)` and return `cap_breach_response` / raise `cap_breach_http_exception`. Key types: `CapBreach` dataclass, `_check_wildcard_cap`, `cap_breach_response`, `cap_breach_http_exception` (all in `_utils.py`).
+- `MultiSearchService._search_semantic_sync` passes `hnsw_cache=None` to `search_service.search_repository_path`, which passes it to `BackendFactory.create`. Fan-out searches bypass the global `HNSWIndexCache` to prevent unbounded cache population. Single-repo hot path (default sentinel `_HNSW_CACHE_USE_SERVER_DEFAULT`) still uses `_server_hnsw_cache`. Key files: `multi_search_service.py`, `search_service.py`.
+
+**Phase 4: id_mapping overhead in index_size_bytes** — `HNSWIndexCache.get_or_load` now adds `sys.getsizeof(id_mapping)` to `index_size_bytes` after `hnsw_index.index_file_size()`. The id_mapping dict (label -> vector ID) was previously invisible to the cache size cap, causing systematic under-counting for large indexes. Key file: `hnsw_index_cache.py` (search for `Bug #881 Phase 4`).
+
+**NEVER** revert these without understanding the full memory impact. Each mitigation is independently testable — see `tests/unit/server/mcp/test_wildcard_cap.py`, `test_cap_breach_helper.py`, `test_cache_bypass_on_fanout.py`, `tests/unit/server/cache/test_id_mapping_size_bytes.py`.
+
+*Recorded 2026-04-21 (Bug #881)*
+
 ---
 
 ## 12. Where to Find More

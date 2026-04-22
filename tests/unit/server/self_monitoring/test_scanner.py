@@ -5,6 +5,7 @@ Tests Claude prompt assembly, log delta tracking, issue classification,
 and three-tier deduplication algorithm.
 """
 
+import datetime
 import json
 import shutil
 import sqlite3
@@ -224,7 +225,10 @@ class TestDeduplicationContext:
                     "abc123def456",
                     "1,2,3",
                     "src/auth.py",
-                    "2026-01-20T10:05:00",
+                    # Use current UTC time so the row is always within the
+                    # 90-day FINGERPRINT_RETENTION_DAYS window, regardless of
+                    # when the test runs (hardcoded dates rot over time).
+                    datetime.datetime.utcnow().isoformat(),
                 ),
             )
             conn.commit()
