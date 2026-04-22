@@ -1670,7 +1670,7 @@ function saveLlmCredsConfig() {
             </div>
         </div>
         <!-- Edit Mode -->
-        <form id="edit-form-lifecycle-analysis" method="post" action="/admin/config/lifecycle-analysis" style="display: none;">
+        <form id="edit-form-lifecycle-analysis" method="post" action="/admin/config/lifecycle_analysis" style="display: none;">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             {% if validation_errors.lifecycle_analysis %}
             <div class="validation-error">{{ validation_errors.lifecycle_analysis }}</div>

@@ -177,6 +177,8 @@ _VALID_CONFIG_SECTIONS = (
     "data_retention",
     # Story #652 - Reranking configuration
     "rerank",
+    # Story #885 - Lifecycle analysis timeouts
+    "lifecycle_analysis",
 )
 
 
