@@ -99,9 +99,11 @@ def execute(self) -> bool:
     self._ensure_new_config()  # ADD NEW CONFIG HERE
 ```
 
-**Examples**: `CIDX_REPO_ROOT` → `_ensure_cidx_repo_root()`, `--workers 1` → `_ensure_workers_config()`
+**Examples**: `CIDX_REPO_ROOT` → `_ensure_cidx_repo_root()`, `--workers 1` → `_ensure_workers_config()`, `CIDX_DATA_DIR` → `_ensure_data_dir_env_var()` (Bug #879)
 
-*Recorded 2026-01-30 (Bug #87)*
+**CIDX_DATA_DIR IPC path alignment (Bug #879)**: For deployments where `cidx-server` and `cidx-auto-update` run as different OS users (e.g., `User=code-indexer` vs `User=root`), module-level path constants (`RESTART_SIGNAL_PATH`, `PENDING_REDEPLOY_MARKER`, `AUTO_UPDATE_STATUS_FILE`) honor the `CIDX_DATA_DIR` env var so both processes resolve to the same IPC files. The auto-updater service file is patched idempotently by `_ensure_data_dir_env_var()` at Step 6.5 of `execute()` (error code `DEPLOY-GENERAL-058`). Same-user deployments (no `User=` directive in the server service file) are a no-op — `_get_server_data_dir()` returns `None` and no injection occurs.
+
+*Recorded 2026-01-30 (Bug #87), Updated 2026-04-21 (Bug #879)*
 
 ---
 

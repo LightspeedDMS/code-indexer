@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.20.16
+
+### Bug Fixes
+
+- fix(#879): IPC path misalignment between `cidx-server` (runs as `User=code-indexer`, `HOME=/opt/code-indexer`) and `cidx-auto-update` (runs as `User=root`, `HOME=/root`) caused the Restart Server admin UI button to silently fail in production. Each process computed `Path.home() / ".cidx-server"` independently, so the server wrote the restart signal file where the auto-updater never looked.
+
+  **Root cause**: Module-level path constants `RESTART_SIGNAL_PATH`, `PENDING_REDEPLOY_MARKER`, and `AUTO_UPDATE_STATUS_FILE` in `deployment_executor.py` were fixed at import time using `Path.home()`, inheriting whichever user ran the process.
+
+  **Fix — CIDX_DATA_DIR env var support**: All three constants now resolve via `os.environ.get("CIDX_DATA_DIR", Path.home() / ".cidx-server")` so both services can be pointed at the same data directory by setting the variable in their systemd unit files.
+
+  **Fix — `_ensure_data_dir_env_var()` self-heal method**: New `DeploymentExecutor._ensure_data_dir_env_var()` detects the auto-updater service file, reads the `User=` directive to determine the server user's home, and injects `Environment="CIDX_DATA_DIR=<server-user-home>/.cidx-server"` into the `[Service]` section if not already present. Wired into `execute()` as Step 6.5 between python/ripgrep ensure steps; emits `DEPLOY-GENERAL-058` warning on failure without aborting the overall deployment.
+
+  **Same-user short-circuit**: When the auto-updater service file has no `User=` directive (server and auto-updater run as the same user), `_ensure_data_dir_env_var()` returns immediately — no injection needed, no backward-compat break.
+
+  Tests: 12 pass including acceptance criterion #5 (same-user unaffected). Gates: server-fast-automation.sh (10216 pass / 0 fail). Codex review: APPROVED after 1 rejection/remediation cycle.
+
 ## v9.20.15
 
 ### Bug Fixes
