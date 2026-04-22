@@ -596,6 +596,13 @@ class ConfigService:
             "memory_retrieval_max_body_chars": mem_cfg.memory_retrieval_max_body_chars,
         }
 
+        # Story #885 Phase 5a: Lifecycle analysis timeout configuration (A7a)
+        # lifecycle_analysis_config is guaranteed non-None by ServerConfig.__post_init__
+        settings["lifecycle_analysis"] = {
+            "shell_timeout_seconds": config.lifecycle_analysis_config.shell_timeout_seconds,  # type: ignore[union-attr]
+            "outer_timeout_seconds": config.lifecycle_analysis_config.outer_timeout_seconds,  # type: ignore[union-attr]
+        }
+
         return settings
 
     def _get_delegation_settings(self) -> Dict[str, Any]:

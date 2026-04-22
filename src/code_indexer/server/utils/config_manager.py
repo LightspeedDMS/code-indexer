@@ -306,6 +306,24 @@ class ScipConfig:
 
 
 @dataclass
+class LifecycleAnalysisConfig:
+    """
+    Lifecycle analysis subprocess timeout configuration (Story #885 Phase 5a, A7a).
+
+    Controls the shell-level kill budget and the outer Python-level grace window
+    for Claude CLI invocations triggered by LifecycleClaudeCliInvoker.
+
+    Defaults bumped from the v3 module-level frozen constants (240s/300s) to
+    360s/420s per workshop decision #7 (Story #885).
+    """
+
+    # A7a: Shell kill budget in seconds (default 360s, was 240s in v3 module constants)
+    shell_timeout_seconds: int = 360
+    # A7a: Outer Python grace window in seconds (default 420s, was 300s in v3 module constants)
+    outer_timeout_seconds: int = 420
+
+
+@dataclass
 class GitTimeoutsConfig:
     """
     Git operation timeouts configuration (Story #3 - Phase 2, AC12-AC15, AC27-AC28).
@@ -1008,6 +1026,9 @@ class ServerConfig:
     # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
     memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
 
+    # Story #885 - Lifecycle analysis subprocess timeout configuration
+    lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
+
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
     cohere_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1109,6 +1130,9 @@ class ServerConfig:
         # Story #883 - Initialize memory retrieval config
         if self.memory_retrieval_config is None:
             self.memory_retrieval_config = MemoryRetrievalConfig()
+        # Story #885 - Initialize lifecycle analysis config
+        if self.lifecycle_analysis_config is None:
+            self.lifecycle_analysis_config = LifecycleAnalysisConfig()
 
 
 class ServerConfigManager:
