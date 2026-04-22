@@ -1,0 +1,44 @@
+stages:
+  - template
+
+template-dev-useast2:
+  stage: template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+  script:
+    - echo template dev useast2
+
+template-dev-uswest2:
+  stage: template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "dev"
+  script:
+    - echo template dev uswest2
+
+template-stage-useast2:
+  stage: template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "stage"
+  script:
+    - echo template stage useast2
+
+template-stage-uswest2:
+  stage: template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "stage"
+  script:
+    - echo template stage uswest2
+
+template-prod-useast2:
+  stage: template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "prod"
+  script:
+    - echo template prod useast2
+
+template-prod-uswest2:
+  stage: template
+  rules:
+    - if: $CI_COMMIT_BRANCH == "prod"
+  script:
+    - echo template prod uswest2

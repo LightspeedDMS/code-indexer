@@ -21,7 +21,26 @@ class MCPSelfRegistrationService:
 
     Provides idempotent registration that checks for existing registration,
     manages credentials persistently, and gracefully handles CLI unavailability.
+
+    Singleton support (A10 — Story #885): get_instance() / set_instance() allow
+    a single service object to be shared across invoke_claude_cli call sites so
+    the registration check is performed at most once per process.
     """
+
+    _instance: "Optional[MCPSelfRegistrationService]" = None
+    _instance_lock: threading.Lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "Optional[MCPSelfRegistrationService]":
+        """Return the process-wide singleton, or None if not yet set."""
+        with cls._instance_lock:
+            return cls._instance
+
+    @classmethod
+    def set_instance(cls, instance: "Optional[MCPSelfRegistrationService]") -> None:
+        """Set (or clear) the process-wide singleton."""
+        with cls._instance_lock:
+            cls._instance = instance
 
     def __init__(self, config_manager, mcp_credential_manager):
         """

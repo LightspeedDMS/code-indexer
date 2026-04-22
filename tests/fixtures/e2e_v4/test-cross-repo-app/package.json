@@ -1,0 +1,5 @@
+{
+  "name": "test-cross-repo-app",
+  "version": "1.0.0",
+  "description": "Synthetic source-only app fixture for AC-V4-14 E2E testing"
+}

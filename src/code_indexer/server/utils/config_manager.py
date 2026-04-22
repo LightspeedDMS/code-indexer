@@ -306,6 +306,24 @@ class ScipConfig:
 
 
 @dataclass
+class LifecycleAnalysisConfig:
+    """
+    Lifecycle analysis subprocess timeout configuration (Story #885 Phase 5a, A7a).
+
+    Controls the shell-level kill budget and the outer Python-level grace window
+    for Claude CLI invocations triggered by LifecycleClaudeCliInvoker.
+
+    Defaults bumped from the v3 module-level frozen constants (240s/300s) to
+    360s/420s per workshop decision #7 (Story #885).
+    """
+
+    # A7a: Shell kill budget in seconds (default 360s, was 240s in v3 module constants)
+    shell_timeout_seconds: int = 360
+    # A7a: Outer Python grace window in seconds (default 420s, was 300s in v3 module constants)
+    outer_timeout_seconds: int = 420
+
+
+@dataclass
 class GitTimeoutsConfig:
     """
     Git operation timeouts configuration (Story #3 - Phase 2, AC12-AC15, AC27-AC28).
@@ -910,6 +928,26 @@ class QueryOrchestrationConfig:
 
 
 @dataclass
+class MemoryRetrievalConfig:
+    """Server-side memory retrieval configuration (Story #883).
+
+    Controls automatic parallel memory lookup triggered by semantic/hybrid queries.
+    All keys are runtime (DB-backed) — NOT bootstrap config.json keys.
+    """
+
+    # Master kill-switch: set False to suppress memory retrieval and nudge entirely
+    memory_retrieval_enabled: bool = True
+    # HNSW cosine floor from Voyage embedding search
+    memory_voyage_min_score: float = 0.5
+    # Post-rerank floor from Cohere reranker (skipped when reranker is disabled)
+    memory_cohere_min_score: float = 0.4
+    # k = max(20, request.limit * k_multiplier) candidates fetched before reranking
+    memory_retrieval_k_multiplier: int = 5
+    # Maximum body characters included in each memory entry; excess is truncated
+    memory_retrieval_max_body_chars: int = 2000
+
+
+@dataclass
 class ServerConfig:
     """
     Server configuration data structure.
@@ -984,6 +1022,12 @@ class ServerConfig:
 
     # Story #652 - Reranking configuration (None = use defaults, both providers disabled)
     rerank_config: Optional[RerankConfig] = None
+
+    # Story #883 - Memory retrieval configuration (runtime only, not bootstrap)
+    memory_retrieval_config: Optional[MemoryRetrievalConfig] = None
+
+    # Story #885 - Lifecycle analysis subprocess timeout configuration
+    lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
 
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1083,6 +1127,12 @@ class ServerConfig:
             self.cohere_sinbin = ProviderSinBinConfig()
         if self.query_orchestration is None:
             self.query_orchestration = QueryOrchestrationConfig()
+        # Story #883 - Initialize memory retrieval config
+        if self.memory_retrieval_config is None:
+            self.memory_retrieval_config = MemoryRetrievalConfig()
+        # Story #885 - Initialize lifecycle analysis config
+        if self.lifecycle_analysis_config is None:
+            self.lifecycle_analysis_config = LifecycleAnalysisConfig()
 
 
 class ServerConfigManager:
@@ -1562,6 +1612,16 @@ class ServerConfigManager:
             config_dict["rerank_config"], dict
         ):
             config_dict["rerank_config"] = RerankConfig(**config_dict["rerank_config"])
+
+        # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to
+        # LifecycleAnalysisConfig so that _merge_runtime_config produces proper
+        # dataclass instances rather than plain dicts when loading from SQLite/PG.
+        if "lifecycle_analysis_config" in config_dict and isinstance(
+            config_dict["lifecycle_analysis_config"], dict
+        ):
+            config_dict["lifecycle_analysis_config"] = LifecycleAnalysisConfig(
+                **config_dict["lifecycle_analysis_config"]
+            )
 
         # Bug #678: Convert sinbin dicts to ProviderSinBinConfig
         for _sinbin_key in ("voyage_ai_sinbin", "cohere_sinbin"):

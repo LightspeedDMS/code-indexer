@@ -759,9 +759,14 @@ class TestBug744SinbinnedProviderSkipped:
         MockCohere.assert_not_called()
 
     def test_not_sinbinned_proceeds_to_client(self):
-        """Bug #744: non-sinbinned provider must still call the client."""
+        """Bug #744: non-sinbinned provider must still call the client.
+
+        _attempt_provider_rerank now returns List[Tuple[int,float]] (scored_pairs)
+        instead of List[int] — updated to match Component 4 (Story #883).
+        """
         rerank_result = MagicMock()
         rerank_result.index = 0
+        rerank_result.relevance_score = 0.9
 
         with (
             patch(
@@ -776,7 +781,7 @@ class TestBug744SinbinnedProviderSkipped:
             monitor_inst.is_sinbinned.return_value = False
             MockVoyage.return_value.rerank.return_value = [rerank_result]
 
-            indices, reason = self._fn(
+            scored_pairs, reason = self._fn(
                 provider_name="Voyage",
                 health_key="voyage-reranker",
                 client_cls=MockVoyage,
@@ -787,7 +792,10 @@ class TestBug744SinbinnedProviderSkipped:
                 monitor=monitor_inst,
             )
 
-        assert indices == [0]
+        # Now returns [(index, score)] tuples instead of [index]
+        assert len(scored_pairs) == 1
+        assert scored_pairs[0][0] == 0  # index
+        assert scored_pairs[0][1] == 0.9  # score
         assert reason is None
 
 
@@ -907,3 +915,121 @@ class TestCalculateOverfetchLimit:
         """1 * 1 = 1, no overfetch."""
         result = self._fn(requested_limit=1, overfetch_multiplier=1)
         assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# Phase D (Story #883): _tag_and_pool + _tagged_content_extractor
+# ---------------------------------------------------------------------------
+
+
+class TestTagAndPool:
+    """_tag_and_pool merges code and memory results with source_tag injection."""
+
+    def setup_method(self):
+        from code_indexer.server.mcp.reranking import _tag_and_pool
+
+        self._fn = _tag_and_pool
+
+    def _make_memory_candidate(
+        self, memory_id, hnsw_score, memory_path="", title="", summary=""
+    ):
+        from code_indexer.server.services.memory_candidate_retriever import (
+            MemoryCandidate,
+        )
+
+        return MemoryCandidate(
+            memory_id=memory_id,
+            hnsw_score=hnsw_score,
+            memory_path=memory_path,
+            title=title,
+            summary=summary,
+        )
+
+    def test_code_items_tagged_as_code(self):
+        """Code results must have _source_tag='code' after pooling."""
+        code_results = [{"content": "def foo(): pass"}, {"content": "def bar(): ..."}]
+        pooled = self._fn(code_results, [])
+        for item in pooled:
+            assert item["_source_tag"] == "code"
+
+    def test_memory_items_tagged_as_memory(self):
+        """Memory candidates must have _source_tag='memory' after pooling."""
+        mem = self._make_memory_candidate(
+            "mem-001", 0.8, "/cidx-meta/memories/mem-001.md"
+        )
+        pooled = self._fn([], [mem])
+        assert len(pooled) == 1
+        assert pooled[0]["_source_tag"] == "memory"
+
+    def test_memory_fields_injected_into_pool_item(self):
+        """memory_id, memory_path, hnsw_score, title, summary injected on memory pool items."""
+        mem = self._make_memory_candidate(
+            "mem-xyz",
+            0.72,
+            "/cidx-meta/memories/mem-xyz.md",
+            title="Caching Strategy",
+            summary="Redis for session caching.",
+        )
+        pooled = self._fn([], [mem])
+        item = pooled[0]
+        assert item["memory_id"] == "mem-xyz"
+        assert item["memory_path"] == "/cidx-meta/memories/mem-xyz.md"
+        assert item["hnsw_score"] == 0.72
+        assert item["title"] == "Caching Strategy"
+        assert item["summary"] == "Redis for session caching."
+
+    def test_pool_length_is_sum_of_both_lists(self):
+        """Pooled list length equals len(code_results) + len(memory_candidates)."""
+        code_results = [{"content": "code1"}, {"content": "code2"}]
+        memories = [
+            self._make_memory_candidate("m1", 0.9, "/p/m1.md"),
+            self._make_memory_candidate("m2", 0.8, "/p/m2.md"),
+            self._make_memory_candidate("m3", 0.7, "/p/m3.md"),
+        ]
+        pooled = self._fn(code_results, memories)
+        assert len(pooled) == 5
+
+    def test_code_items_appear_before_memory_items(self):
+        """Code items appear first in the pool; memory items follow."""
+        code_results = [{"content": "code-a"}, {"content": "code-b"}]
+        memories = [self._make_memory_candidate("m1", 0.9, "/p/m1.md")]
+        pooled = self._fn(code_results, memories)
+        assert pooled[0]["_source_tag"] == "code"
+        assert pooled[1]["_source_tag"] == "code"
+        assert pooled[2]["_source_tag"] == "memory"
+
+
+class TestTaggedContentExtractor:
+    """_tagged_content_extractor picks the right field based on _source_tag."""
+
+    def setup_method(self):
+        from code_indexer.server.mcp.reranking import _tagged_content_extractor
+
+        self._fn = _tagged_content_extractor
+
+    def test_code_item_returns_content_field(self):
+        """Code items: extractor returns the 'content' field."""
+        item = {"_source_tag": "code", "content": "def foo(): pass"}
+        assert self._fn(item) == "def foo(): pass"
+
+    def test_code_item_falls_back_to_code_snippet(self):
+        """Code items without 'content': extractor falls back to 'code_snippet'."""
+        item = {"_source_tag": "code", "code_snippet": "snippet text"}
+        assert self._fn(item) == "snippet text"
+
+    def test_memory_item_returns_title_and_summary(self):
+        """Memory items: extractor returns title + ': ' + summary."""
+        item = {
+            "_source_tag": "memory",
+            "title": "Caching Strategy",
+            "summary": "We use Redis for session caching.",
+        }
+        result = self._fn(item)
+        assert "Caching Strategy" in result
+        assert "We use Redis for session caching." in result
+
+    def test_memory_item_missing_fields_returns_empty_string(self):
+        """Memory items with no title or summary: extractor returns empty string."""
+        item = {"_source_tag": "memory"}
+        result = self._fn(item)
+        assert result == ""

@@ -393,7 +393,9 @@ class TestInitializeRuntimeDb:
         config = svc.get_config()
         assert config.service_display_name == "FromSQLite"
         assert config.jwt_expiration_minutes == 77
-        assert svc._db_config_version == 5
+        # Story #885 A7d: seed dict lacked lifecycle_analysis_config, so the
+        # auto-migration fires and bumps version 5 → 6.
+        assert svc._db_config_version == 6
 
 
 class TestSaveConfigSqlite:

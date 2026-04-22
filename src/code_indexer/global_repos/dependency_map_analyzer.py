@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
 
+from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
+
 logger = logging.getLogger(__name__)
 
 # Bug #838: journal hook constants.
@@ -1347,7 +1349,7 @@ Rules:
         fm += f"last_analyzed: {now}\n"
         fm += "participating_repos:\n"
         for repo in participating_repos:
-            fm += f"  - {repo}\n"
+            fm += f"  - {yaml_quote_if_unsafe(repo)}\n"
         fm += "---\n\n"
         return fm
 
@@ -1420,7 +1422,7 @@ Rules:
         frontmatter += "repos_analyzed:\n"
         for repo in repo_list:
             alias = repo.get("alias", repo.get("name", "unknown"))
-            frontmatter += f"  - {alias}\n"
+            frontmatter += f"  - {yaml_quote_if_unsafe(alias)}\n"
         frontmatter += "---\n\n"
 
         # Write index file (with graph section appended if edges exist)
@@ -1468,7 +1470,7 @@ Rules:
         fm += "repos_analyzed:\n"
         for repo in repo_list:
             alias = repo.get("alias", repo.get("name", "unknown"))
-            fm += f"  - {alias}\n"
+            fm += f"  - {yaml_quote_if_unsafe(alias)}\n"
         fm += "---\n\n"
         return fm
 
@@ -2303,10 +2305,6 @@ Rules:
             subprocess.CalledProcessError: If Claude CLI fails
             subprocess.TimeoutExpired: If timeout is exceeded
         """
-        # Auto-register CIDX as MCP server (Story #203)
-        if self._mcp_registration_service:
-            self._mcp_registration_service.ensure_registered()
-
         # Build command
         cmd = [
             "claude",

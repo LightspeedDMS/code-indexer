@@ -66,8 +66,20 @@ def split_frontmatter_and_body(content: str) -> Tuple[Dict[str, Any], str]:
     try:
         parsed = yaml.safe_load(yaml_text)
     except yaml.YAMLError as exc:
-        logger.warning(
-            "split_frontmatter_and_body: failed to parse frontmatter YAML: %s", exc
+        # Story #885 A9c: upgrade severity and add structured context so
+        # operators can diagnose frontmatter write-side bugs quickly.
+        # file_path is None because this function accepts raw content, not a
+        # file path; callers that have a path should log it separately.
+        first_line = None
+        if hasattr(exc, "problem_mark") and exc.problem_mark is not None:
+            first_line = exc.problem_mark.line + 1  # 1-indexed for display
+        logger.error(
+            "split_frontmatter_and_body: failed to parse frontmatter YAML: %s",
+            exc,
+            extra={
+                "file_path": None,
+                "first_offending_line": first_line,
+            },
         )
         return {}, content
 
@@ -181,6 +193,18 @@ def invoke_claude_cli(
             f"outer_timeout_seconds ({outer_timeout_seconds}) must exceed "
             f"shell_timeout_seconds ({shell_timeout_seconds})"
         )
+
+    # A10 (Story #885): centralized MCP self-registration at the subprocess boundary.
+    # All Claude CLI call sites funnel through invoke_claude_cli, so registering here
+    # guarantees exactly-once registration per process without duplicating the call
+    # in ClaudeCliManager._worker_loop or DependencyMapAnalyzer._run_claude_cli.
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    svc = MCPSelfRegistrationService.get_instance()
+    if svc is not None:
+        svc.ensure_registered()
 
     try:
         claude_cmd = (

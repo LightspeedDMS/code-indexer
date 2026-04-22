@@ -27,9 +27,10 @@ from typing import Any, Dict, List, Optional
 from code_indexer.global_repos.repo_analyzer import _clean_claude_output
 
 # Current lifecycle schema version emitted by this parser.
-# Bumped to 3 for Schema v3 amendment (Story #876) — adds optional
-# branching/ci/release sections. v2 files continue to parse without change.
-CURRENT_LIFECYCLE_SCHEMA_VERSION: int = 3
+# Bumped to 4 for Schema v4 amendment (Story #885) — adds optional
+# branch_environment_map field with cross-field consistency validation.
+# v3 files continue to parse without change.
+CURRENT_LIFECYCLE_SCHEMA_VERSION: int = 4
 
 # Confidence enum accepted by the unified contract.
 _VALID_CONFIDENCE = frozenset({"high", "medium", "low"})
@@ -169,6 +170,18 @@ class UnifiedResponseParseError(Exception):
         )
 
 
+class SchemaValidationError(UnifiedResponseParseError):
+    """
+    Raised when cross-field consistency is violated in the unified JSON response.
+
+    Story #885 A3 — Schema v4 HARD REJECT: if branch_environment_map is
+    populated, every value must appear in ci.environments. Violating this
+    contract raises SchemaValidationError (a subtype of
+    UnifiedResponseParseError) rather than a generic parse error so callers
+    can distinguish structural cross-field violations from missing-key errors.
+    """
+
+
 @dataclass
 class UnifiedResult:
     """
@@ -262,6 +275,10 @@ class UnifiedResponseParser:
         # Absent sections are silently skipped; present sections are fully
         # validated. Raises UnifiedResponseParseError on first violation.
         cls._validate_optional_sections(obj["lifecycle"], raw)
+
+        # v4 validation (Story #885): branch_environment_map type + invariants +
+        # cross-field consistency HARD REJECT.
+        cls._validate_v4_fields(obj["lifecycle"], raw)
 
         return UnifiedResult(
             description=obj["description"],
@@ -383,6 +400,123 @@ class UnifiedResponseParser:
             for field_name, spec in field_specs.items():
                 field_path = f"lifecycle.{section_name}.{field_name}"
                 cls._check_field_value(field_path, section_value[field_name], spec, raw)
+
+    @staticmethod
+    def _validate_branch_environment_membership(
+        bem: Dict[str, str], declared_envs: set, raw: str
+    ) -> None:
+        """Raise SchemaValidationError if any bem value is not in declared_envs."""
+        undeclared = sorted(
+            {v for v in bem.values() if isinstance(v, str) and v not in declared_envs}
+        )
+        if undeclared:
+            names = ", ".join(undeclared)
+            raise SchemaValidationError(
+                f"branch_environment_map references undeclared environment(s): {names}. "
+                f"All values must appear in lifecycle.ci.environments.",
+                raw=raw,
+                validation_errors=[
+                    f"branch_environment_map: undeclared environment(s): {names}"
+                ],
+            )
+
+    @staticmethod
+    def _validate_branch_environment_map_structure(bem: Any, raw: str) -> None:
+        """Validate branch_environment_map type and key/value cleanliness."""
+        if not isinstance(bem, dict):
+            raise UnifiedResponseParseError(
+                f"lifecycle.branch_environment_map must be a dict, got {type(bem).__name__!r}",
+                raw=raw,
+                validation_errors=[
+                    f"lifecycle.branch_environment_map: expected dict, got {type(bem).__name__!r}"
+                ],
+            )
+        for key, value in bem.items():
+            if not isinstance(key, str) or key != key.strip() or not key.strip():
+                raise UnifiedResponseParseError(
+                    f"lifecycle.branch_environment_map key {key!r} must be a non-empty stripped string",
+                    raw=raw,
+                    validation_errors=[f"lifecycle.branch_environment_map: invalid key {key!r}"],
+                )
+            if not isinstance(value, str):
+                raise UnifiedResponseParseError(
+                    f"lifecycle.branch_environment_map value for {key!r} must be a string, "
+                    f"got {type(value).__name__!r}",
+                    raw=raw,
+                    validation_errors=[
+                        f"lifecycle.branch_environment_map[{key!r}]: value is not a str"
+                    ],
+                )
+            if value != value.strip() or not value.strip():
+                raise UnifiedResponseParseError(
+                    f"lifecycle.branch_environment_map value {value!r} must be a non-empty stripped string",
+                    raw=raw,
+                    validation_errors=[
+                        f"lifecycle.branch_environment_map[{key!r}]: invalid value {value!r}"
+                    ],
+                )
+
+    @staticmethod
+    def _validate_ci_environments_items(environments: List[Any], raw: str) -> None:
+        """Validate each item in ci.environments: str, stripped, non-empty, no duplicates."""
+        seen: set = set()
+        for item in environments:
+            if not isinstance(item, str):
+                raise UnifiedResponseParseError(
+                    f"lifecycle.ci.environments item {item!r} must be a string",
+                    raw=raw,
+                    validation_errors=[f"lifecycle.ci.environments: item {item!r} is not a str"],
+                )
+            if item != item.strip():
+                raise UnifiedResponseParseError(
+                    f"lifecycle.ci.environments item {item!r} has leading/trailing whitespace",
+                    raw=raw,
+                    validation_errors=[f"lifecycle.ci.environments: item {item!r} has whitespace"],
+                )
+            if not item:
+                raise UnifiedResponseParseError(
+                    "lifecycle.ci.environments item must be non-empty",
+                    raw=raw,
+                    validation_errors=["lifecycle.ci.environments: empty string item"],
+                )
+            if item in seen:
+                raise UnifiedResponseParseError(
+                    f"lifecycle.ci.environments contains duplicate: {item!r}",
+                    raw=raw,
+                    validation_errors=[f"lifecycle.ci.environments: duplicate item {item!r}"],
+                )
+            seen.add(item)
+
+    @classmethod
+    def _validate_v4_fields(cls, lifecycle: Dict[str, Any], raw: str) -> None:
+        """
+        3-path coordinator for Schema v4 validation (Story #885).
+
+        Path 1: if ci.environments is present and a list, validate each item
+                (str, stripped, non-empty, no duplicates).
+        Path 2: if branch_environment_map is absent or an empty dict, return
+                early — omitted and {} are semantically identical.
+        Path 3: validate branch_environment_map dict[str, str] structure, then
+                cross-field membership: every value must appear in ci.environments.
+                Raises SchemaValidationError on cross-field violation.
+        """
+        # Path 1 — validate ci.environments items when present
+        ci = lifecycle.get("ci")
+        declared_envs: set = set()
+        if isinstance(ci, dict):
+            environments = ci.get("environments")
+            if isinstance(environments, list):
+                cls._validate_ci_environments_items(environments, raw)
+                declared_envs = set(environments)
+
+        # Path 2 — absent or empty branch_environment_map: return early
+        bem = lifecycle.get("branch_environment_map")
+        if bem is None or bem == {}:
+            return
+
+        # Path 3 — validate structure then cross-field membership
+        cls._validate_branch_environment_map_structure(bem, raw)
+        cls._validate_branch_environment_membership(bem, declared_envs, raw)
 
     @staticmethod
     def _validate(obj: Dict[str, Any]) -> List[str]:

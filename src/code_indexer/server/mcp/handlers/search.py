@@ -13,7 +13,8 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+import time
+from typing import Dict, Any, List, Optional, cast
 from pathlib import Path
 
 from code_indexer.server.auth.user_manager import User
@@ -22,6 +23,12 @@ from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
+from code_indexer.server.mcp.memory_retrieval_pipeline import (
+    MemoryRetrievalPipeline,
+    MemoryRetrievalPipelineConfig,
+    _build_empty_nudge_entry,
+    _hydrate_memory_bodies,
+)
 from ._utils import (
     CapBreach,
     cap_breach_response,
@@ -59,6 +66,8 @@ _DEFAULT_EDIT_DISTANCE = 0
 _DEFAULT_SNIPPET_LINES = 5
 _DEFAULT_REGEX_MAX_RESULTS = 100
 _DEFAULT_REGEX_CONTEXT_LINES = 0
+# Filesystem subdirectory name for the memory HNSW index (Story #883).
+_CIDX_META_DIR_NAME = "cidx-meta"
 
 # Bug #881 Phase 1: query_text is truncated to this length in INFO logs to avoid
 # logging potentially large or sensitive query strings at INFO level.
@@ -448,6 +457,150 @@ def _apply_rerank_and_filter(
     return results, rerank_meta
 
 
+# Modes that trigger memory retrieval alongside code search (Story #883).
+_MEMORY_SEMANTIC_MODES = frozenset({"semantic", "hybrid"})
+
+
+def _compute_memory_query_vector(query_text: str) -> List[float]:
+    """Compute a Voyage embedding for query_text using VoyageAIClient.
+
+    Uses VoyageAIClient(VoyageAIConfig()) which picks up VOYAGE_API_KEY from
+    the environment — the same provider and key used by code search internally.
+    This is called once per request and the vector is shared with memory
+    retrieval (GAP 1: zero duplicate Voyage API calls).
+
+    Returns:
+        A non-empty list of floats on success.
+        An empty list on any error (logged at WARNING); the caller must check
+        for emptiness and skip memory retrieval when [] is returned.
+    """
+    try:
+        from code_indexer.config import VoyageAIConfig
+        from code_indexer.services.voyage_ai import VoyageAIClient
+
+        provider = VoyageAIClient(VoyageAIConfig())
+        # cast: EmbeddingProvider.get_embedding is typed as returning Any upstream
+        # (broad protocol), but for VoyageAIClient it always yields a List[float].
+        return cast(
+            List[float], provider.get_embedding(query_text, embedding_purpose="query")
+        )
+    except Exception as exc:
+        logger.warning(
+            "Memory retrieval: could not compute query vector — %s. "
+            "Memory retrieval skipped for this request.",
+            exc,
+        )
+        return []
+
+
+# Story #883 Phase C: shared alias so callers are explicit about the intent.
+# _compute_shared_query_vector is the single Voyage call per semantic request;
+# the resulting vector is reused by both code search and memory retrieval.
+_compute_shared_query_vector = _compute_memory_query_vector
+
+
+def _run_memory_retrieval(
+    params: Dict[str, Any],
+    user: User,
+    config_service: Any,
+    reranker_status: str,
+    query_vector: Optional[List[float]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Run memory retrieval and return candidate list, or None to suppress.
+
+    Returns None when:
+      - search_mode not in {semantic, hybrid}
+      - memory_retrieval_enabled is False (kill-switch)
+
+    Preconditions (enforced by caller):
+      - params["query_text"] is a non-empty string
+      - user.username is a non-empty string
+      - config_service is a live ConfigService with a memory_retrieval_config attribute
+      - reranker_status is the "status" string extracted from rerank_meta by the caller
+
+    Args:
+        params: Raw MCP params dict (query_text, search_mode, limit, ...).
+        user: Authenticated caller; user.username for candidate partitioning.
+        config_service: Live config service forwarded to build_relevant_memories.
+        reranker_status: "status" value from rerank_meta["reranker_status"]["status"],
+            extracted by the caller after _apply_rerank_and_filter returns.
+        query_vector: Optional pre-computed Voyage embedding vector (Story #883 Phase C).
+            When not None, this vector is reused directly and _compute_memory_query_vector
+            is NOT called — eliminating the duplicate Voyage API call.
+            When None (legacy callers), the vector is computed internally.
+    """
+    search_mode = params.get("search_mode", "semantic")
+    if search_mode not in _MEMORY_SEMANTIC_MODES:
+        return None
+
+    raw_mem_cfg = config_service.get_config().memory_retrieval_config
+    if not raw_mem_cfg.memory_retrieval_enabled:
+        return None
+
+    # Normalise query_text to a plain string; guard against None/non-string values.
+    raw_query = params.get("query_text")
+    query_text = str(raw_query) if raw_query is not None else ""
+
+    # Story #883 Phase C: reuse caller-supplied vector when not None to avoid a
+    # second Voyage API round-trip.  Use `is None` (not falsy) so an explicitly
+    # supplied non-empty vector is always used; only compute internally when the
+    # caller did not supply a vector at all.
+    if query_vector is None:
+        query_vector = _compute_memory_query_vector(query_text)
+    if not query_vector:
+        # Empty list: either compute returned [] (WARNING logged there) or caller
+        # passed an empty list (treated as "no vector available").
+        return None
+
+    pipeline_config = MemoryRetrievalPipelineConfig(
+        memory_retrieval_enabled=raw_mem_cfg.memory_retrieval_enabled,
+        memory_voyage_min_score=raw_mem_cfg.memory_voyage_min_score,
+        memory_cohere_min_score=raw_mem_cfg.memory_cohere_min_score,
+        memory_retrieval_k_multiplier=raw_mem_cfg.memory_retrieval_k_multiplier,
+        memory_retrieval_max_body_chars=raw_mem_cfg.memory_retrieval_max_body_chars,
+    )
+    store_base_path = str(Path(_get_golden_repos_dir()) / _CIDX_META_DIR_NAME)
+    pipeline = MemoryRetrievalPipeline(
+        config=pipeline_config,
+        store_base_path=store_base_path,
+    )
+
+    requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
+    # GAP 1: pass real vector so retriever does not raise ValueError on empty [].
+    memory_candidates = pipeline.get_memory_candidates(
+        query_vector=query_vector,
+        user_id=user.username,
+        requested_limit=requested_limit,
+        search_mode=search_mode,
+    )
+    filtered_candidates = pipeline.apply_voyage_floor(memory_candidates)
+
+    assembled = pipeline.build_relevant_memories(
+        memory_candidates=filtered_candidates,
+        query=query_text,
+        config_service=config_service,
+        reranker_status=reranker_status,
+    )
+
+    # GAP 2: order by hnsw_score desc (reranker disabled) or keep reranker order;
+    # then apply Cohere floor (skipped when reranker_status == "disabled").
+    ordered = pipeline.order_memory_items(assembled, reranker_status)
+    floor_filtered = pipeline.apply_cohere_floor(ordered, reranker_status)
+
+    # GAP 4: hydrate body from disk for each real candidate.
+    # cast: _hydrate_memory_bodies is typed correctly in memory_retrieval_pipeline.py
+    # but mypy loses the return-type annotation across the module import boundary.
+    hydrated: List[Dict[str, Any]] = cast(
+        List[Dict[str, Any]], _hydrate_memory_bodies(floor_filtered, store_base_path)
+    )
+
+    # GAP 3: inject empty-state nudge when no memories survived all filters.
+    if not hydrated:
+        return [_build_empty_nudge_entry()]
+
+    return hydrated
+
+
 def _repo_lookup_error(
     user: User, error_msg: str, attempted_value: str
 ) -> Dict[str, Any]:
@@ -564,8 +717,6 @@ def _execute_tracked_search(
     Returns:
         (results, execution_time_ms, timeout_occurred)
     """
-    import time
-
     if limit <= 0:
         raise ValueError(f"limit must be > 0, got {limit}")
 
@@ -673,15 +824,35 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
     """Handle search against an activated (non-global) repository.
 
     Extracted from search_code activated-repo branch (_legacy.py lines 636-791).
+
+    Story #883 Phase C: when search_mode is semantic/hybrid and memory retrieval is
+    enabled, the Voyage embedding vector is computed ONCE here via
+    _compute_shared_query_vector and reused by both code search (via
+    precomputed_query_vector kwarg to query_user_repositories) and memory retrieval
+    (via query_vector kwarg to _run_memory_retrieval).  This guarantees exactly one
+    Voyage API call per semantic request regardless of whether memories are retrieved.
     """
     requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     effective_limit = _compute_effective_limit(requested_limit, user)
     effective_limit = _compute_rerank_limit(params, requested_limit, effective_limit)
 
+    # Story #883 Phase C: compute shared Voyage vector once for semantic/hybrid modes
+    # when memory retrieval is enabled.  The same vector is threaded through to both
+    # code search and memory retrieval so only one Voyage API call is made per request.
+    search_mode = params.get("search_mode", "semantic")
+    config_service = get_config_service()
+    shared_query_vector: Optional[List[float]] = None
+    if search_mode in _MEMORY_SEMANTIC_MODES:
+        mem_cfg = config_service.get_config().memory_retrieval_config
+        if mem_cfg.memory_retrieval_enabled:
+            query_text = params.get("query_text", "") or ""
+            shared_query_vector = _compute_shared_query_vector(str(query_text))
+
     kwargs = _build_search_kwargs(params, user, [], effective_limit)
     # query_user_repositories uses repository_alias, not user_repos
     del kwargs["user_repos"]
     kwargs["repository_alias"] = params.get("repository_alias")
+    kwargs["precomputed_query_vector"] = shared_query_vector
     result = _utils.app_module.semantic_query_manager.query_user_repositories(**kwargs)
 
     _enrich_activated_results(result, params)
@@ -699,6 +870,19 @@ def _search_activated_repo(params: Dict[str, Any], user: User) -> Dict[str, Any]
         qm["reranker_used"] = rerank_meta["reranker_used"]
         qm["reranker_provider"] = rerank_meta["reranker_provider"]
         qm["rerank_time_ms"] = rerank_meta["rerank_time_ms"]
+        # Story #883: parallel memory retrieval — reranker_status extracted here so
+        # _run_memory_retrieval receives a plain string, not a nested dict.
+        reranker_status: str = rerank_meta["reranker_status"]["status"]
+        # Story #883 Phase C: pass shared vector to avoid second Voyage API call
+        relevant_memories = _run_memory_retrieval(
+            params,
+            user,
+            config_service,
+            reranker_status,
+            query_vector=shared_query_vector,
+        )
+        if relevant_memories is not None:
+            qm["relevant_memories"] = relevant_memories
 
     return _mcp_response({"success": True, "results": result})
 
@@ -760,7 +944,6 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     Extracted from _legacy.py lines 1957-2041.
     """
     import json as json_module
-    import time
 
     repo_aliases = _expand_wildcard_patterns(args.get("repository_alias", []), user)
     if isinstance(repo_aliases, CapBreach):
