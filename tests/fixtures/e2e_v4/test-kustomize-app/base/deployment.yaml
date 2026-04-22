@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-kustomize-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-kustomize-app
+  template:
+    metadata:
+      labels:
+        app: test-kustomize-app
+    spec:
+      containers:
+        - name: app
+          image: test-kustomize-app:latest
