@@ -2303,10 +2303,6 @@ Rules:
             subprocess.CalledProcessError: If Claude CLI fails
             subprocess.TimeoutExpired: If timeout is exceeded
         """
-        # Auto-register CIDX as MCP server (Story #203)
-        if self._mcp_registration_service:
-            self._mcp_registration_service.ensure_registered()
-
         # Build command
         cmd = [
             "claude",

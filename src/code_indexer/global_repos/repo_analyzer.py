@@ -182,6 +182,18 @@ def invoke_claude_cli(
             f"shell_timeout_seconds ({shell_timeout_seconds})"
         )
 
+    # A10 (Story #885): centralized MCP self-registration at the subprocess boundary.
+    # All Claude CLI call sites funnel through invoke_claude_cli, so registering here
+    # guarantees exactly-once registration per process without duplicating the call
+    # in ClaudeCliManager._worker_loop or DependencyMapAnalyzer._run_claude_cli.
+    from code_indexer.server.services.mcp_self_registration_service import (
+        MCPSelfRegistrationService,
+    )
+
+    svc = MCPSelfRegistrationService.get_instance()
+    if svc is not None:
+        svc.ensure_registered()
+
     try:
         claude_cmd = (
             f"timeout {shell_timeout_seconds} claude "
