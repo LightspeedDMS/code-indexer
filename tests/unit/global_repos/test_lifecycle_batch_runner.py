@@ -23,7 +23,10 @@ import pytest
 from code_indexer.global_repos.lifecycle_batch_runner import (
     LifecycleBatchRunner,
 )
-from code_indexer.global_repos.unified_response_parser import UnifiedResult
+from code_indexer.global_repos.unified_response_parser import (
+    CURRENT_LIFECYCLE_SCHEMA_VERSION,
+    UnifiedResult,
+)
 
 # ---------------------------------------------------------------------------
 # Named constants — self-documenting, no magic literals in tests
@@ -335,19 +338,19 @@ def test_run_completes_despite_per_alias_lock_failure(golden_repos_dir: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# 6. LifecycleBatchRunner emits lifecycle_schema_version == 3 in written .md
+# 6. LifecycleBatchRunner emits current schema version in written .md
 # ---------------------------------------------------------------------------
 
 
-def test_process_one_repo_emits_v3_schema_version(golden_repos_dir: Path) -> None:
+def test_process_one_repo_emits_current_schema_version(golden_repos_dir: Path) -> None:
     """
     The YAML frontmatter written by _process_one_repo must contain
-    lifecycle_schema_version: 3 (not 2), reflecting CURRENT_LIFECYCLE_SCHEMA_VERSION
+    lifecycle_schema_version equal to CURRENT_LIFECYCLE_SCHEMA_VERSION imported
     from unified_response_parser, which is the single canonical source of truth.
 
     This test exists to catch the duplicate-constant bug: if lifecycle_batch_runner.py
-    defines its own CURRENT_LIFECYCLE_SCHEMA_VERSION = 2 instead of importing the
-    canonical 3 from unified_response_parser, this test will fail.
+    defines its own stale CURRENT_LIFECYCLE_SCHEMA_VERSION instead of importing the
+    canonical value from unified_response_parser, this test will fail.
     """
     import yaml
 
@@ -366,8 +369,9 @@ def test_process_one_repo_emits_v3_schema_version(golden_repos_dir: Path) -> Non
     assert len(parts) >= 3, "Written .md must have YAML frontmatter delimiters"
     fm = yaml.safe_load(parts[1])
 
-    assert fm.get("lifecycle_schema_version") == 3, (
-        f"Expected lifecycle_schema_version=3, got {fm.get('lifecycle_schema_version')!r}. "
+    assert fm.get("lifecycle_schema_version") == CURRENT_LIFECYCLE_SCHEMA_VERSION, (
+        f"Expected lifecycle_schema_version={CURRENT_LIFECYCLE_SCHEMA_VERSION}, "
+        f"got {fm.get('lifecycle_schema_version')!r}. "
         "lifecycle_batch_runner.py must import CURRENT_LIFECYCLE_SCHEMA_VERSION from "
         "unified_response_parser, not define its own stale constant."
     )
