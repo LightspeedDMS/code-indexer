@@ -20,16 +20,14 @@ Thread-safety:
   The adapter is called concurrently from LifecycleBatchRunner's thread
   pool.  The unified prompt is loaded ONCE at import time into a module-
   level frozen string (_PROMPT_TEXT) so there is no shared mutable state
-  and no lock is required on the hot path.  The timeout constants follow
-  the same frozen-at-import pattern: immutable integers shared across
-  all worker threads without locking.
+  and no lock is required on the hot path.
 
-Timeout budget (Schema v3 amendment — Story #876):
-  Shell timeout bumped 180s → 240s: the v3 prompt reads additional
-  per-repo files (CI workflow files, branch topology, manifest files)
-  to populate the branching/ci/release optional sections.
-  Outer Python timeout bumped 240s → 300s: 60s grace window between
-  shell kill signal and Python-level process termination.
+Timeout budget (Story #885 Phase 5a — config-driven):
+  Shell timeout and outer Python timeout are read from ConfigService at
+  each call via lifecycle_analysis_config.  Defaults are 360s/420s
+  (bumped from 240s/300s in v3 per workshop decision #7, Story #885).
+  Operators may hot-reload these values via the Web UI without restarting
+  the server — each invocation reads the current config at call time.
 
 Failure contract:
   - On subprocess failure, raises RuntimeError with the alias and the
@@ -48,14 +46,7 @@ from code_indexer.global_repos.unified_response_parser import (
     UnifiedResponseParser,
     UnifiedResult,
 )
-
-# Subprocess timeouts (seconds) — module-level frozen constants, same
-# pattern as _PROMPT_TEXT.  Bumped for Schema v3 amendment (Story #876):
-# v3 prompt reads more files per repo (CI config, branch topology,
-# manifests) requiring a larger time budget.
-# Shell kill budget: 240s (was 180s). Outer Python grace: 300s (was 240s).
-_SHELL_TIMEOUT_SECONDS: int = 240
-_OUTER_TIMEOUT_SECONDS: int = 300
+from code_indexer.server.services.config_service import get_config_service
 
 # Absolute path to the packaged unified prompt.  Resolved once at import
 # time.
@@ -147,11 +138,16 @@ class LifecycleClaudeCliInvoker:
             )
 
         # -- Subprocess invocation -----------------------------------------
+        # Read timeouts from ConfigService at call time so Web UI changes
+        # take effect on the next invocation without a server restart
+        # (AC-V4-7, Story #885 Phase 5a).  get_config_service is imported at
+        # module level so tests can patch it via the module namespace.
+        _lifecycle_cfg = get_config_service().get_config().lifecycle_analysis_config
         success, raw_output = invoke_claude_cli(
             str(path_obj),
             _PROMPT_TEXT,
-            _SHELL_TIMEOUT_SECONDS,
-            _OUTER_TIMEOUT_SECONDS,
+            _lifecycle_cfg.shell_timeout_seconds,
+            _lifecycle_cfg.outer_timeout_seconds,
         )
 
         if not success:

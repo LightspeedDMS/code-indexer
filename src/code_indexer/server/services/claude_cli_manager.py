@@ -639,14 +639,6 @@ class ClaudeCliManager:
             f"{thread_name} started", extra={"correlation_id": get_correlation_id()}
         )
 
-        # Story #203 AC6: Ensure MCP self-registration before processing work
-        # Double-check locking pattern for thread-safe one-time registration
-        if self._mcp_registration_service and not self._mcp_registration_attempted:
-            with self._cli_state_lock:
-                if not self._mcp_registration_attempted:
-                    self._mcp_registration_service.ensure_registered()
-                    self._mcp_registration_attempted = True
-
         while not self._shutdown_event.is_set():
             try:
                 item = self._work_queue.get(timeout=1.0)

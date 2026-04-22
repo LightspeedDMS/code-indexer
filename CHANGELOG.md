@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.22.1
+
+### Refactor
+
+- refactor: **clean up redundant local `datetime` imports + unused `recent_ts` variable in `tests/unit/server/self_monitoring/test_scanner.py`**. The two removed local imports were shadowing the module-level `import datetime` at line 8; `recent_ts` was assigned but never referenced elsewhere in the file. Zero functional change — 32/32 tests in the file still pass. Not in Story #885 scope; bundled here as a patch because the remote `v9.22.0` tag is immutable (per CLAUDE.md's "never replace a tag on a remote" rule) but the staging auto-deployer requires `git describe --exact-match HEAD` to succeed, which demands HEAD itself be tagged.
+
+## v9.22.0
+
+### Features
+
+- feat(#885): **Schema v4 lifecycle metadata — environments + branch→environment mapping**. Builds on Story #876's v3 foundation with two new fields that let downstream consumers (research-assistant agents, MCP clients) answer branch-read questions deterministically without hallucinating:
+  - `ci.environments` — now evidence-grounded and cross-repo investigable (not just null by default)
+  - `branch_environment_map` (NEW) — dict mapping git branch names to environment names with strict cross-field consistency enforced by `SchemaValidationError` (HARD REJECT on hallucinated mappings; no silent recovery — failed parses cause re-invocation with the error as feedback)
+
+  The `lifecycle_unified.md` prompt gets a new Section 6 with three load-bearing clauses: (a) no query budget cap on `cidx-local` MCP — precision > query count, (b) ANTI-RULE: branch-name coincidence is NOT evidence for branch_environment_map, (c) YAML quoting requirement for scalars starting with reserved indicators (fixes A9 production bug where bare `@scoped/pkg` list entries broke `yaml.safe_load`).
+
+  `CURRENT_LIFECYCLE_SCHEMA_VERSION` bumped 3→4. Parser accepts v3 legacy responses (no `branch_environment_map` field required) for backward compatibility.
+
+- feat(#885 A7): **Lifecycle analysis timeouts moved to Web UI Config Screen**. Shell and outer timeouts (defaults bumped 240/300 → 360/420 to accommodate unbounded cross-repo investigation) are now stored in DB-backed runtime config, editable via the Web UI, and hot-reloaded on next job without server restart. Auto-migration follows Story #578's pattern: on first boot after upgrade, `lifecycle_analysis_config` is auto-populated with defaults — no manual operator intervention required. Cross-field validation enforces `outer_timeout_seconds >= shell_timeout_seconds + 30` at save time.
+
+- feat(#885 A9): **YAML emitter safety helper**. New `yaml_quote_if_unsafe()` in `src/code_indexer/global_repos/yaml_emitter_utils.py` wraps scalars starting with YAML reserved indicators (`@ ` ! & * ? | > % # { } [ ] ,`) in double quotes with proper escaping. Applied to 5 hand-rolled frontmatter emitter sites (`dependency_map_analyzer._build_domain_frontmatter`, `run_pass_3_index`, `_build_index_frontmatter`; `dep_map_repair_executor._rebuild_frontmatter_repos_block`; `dep_map_index_regenerator._format_index_md`) that previously used bare f-string interpolation. Prevents scoped npm package names (`@org/pkg`) and other reserved-char scalars from poisoning frontmatter round-trip via `yaml.safe_load`.
+
+### Refactor
+
+- refactor(#885 A10): **MCP self-registration unified at `invoke_claude_cli` boundary (Option B-clean)**. The `MCPSelfRegistrationService.ensure_registered()` call is now at the top of `src/code_indexer/global_repos/repo_analyzer.py::invoke_claude_cli` — the single subprocess boundary that all Claude CLI invocations route through. Removed redundant calls from `ClaudeCliManager._worker_loop` and `DependencyMapAnalyzer._run_claude_cli`. Prior to this change, the lifecycle Claude CLI path (`LifecycleClaudeCliInvoker`) bypassed both call sites by deliberately not using `ClaudeCliManager`'s work queue — creating a silent gap where `cidx-local` MCP was NOT registered for lifecycle jobs, making cross-repo investigation impossible. New pattern: any future adapter that invokes Claude CLI via `invoke_claude_cli` inherits MCP access automatically. Rationale and architectural principle (preconditions belong at the boundary they guard) documented as a load-bearing pattern.
+
+### Logging
+
+- fix(#885 A9c): **`split_frontmatter_and_body` log severity upgraded WARNING → ERROR** with structured context (`file_path`, `first_offending_line`). Behavior unchanged — still returns `({}, content)` on parse failure — but operator observability elevated so broken frontmatter is visible in log triage without manual filtering.
+
+### Tests
+
+- 56 new unit tests for A9 YAML emitter safety (10 reserved indicators × 5 emitter sites = 50 matrix cells + scoped-package round-trip + log-severity assertion)
+- 18 parser tests covering v4 branch_environment_map type validation, trim/non-empty invariants, omitted-vs-empty-dict semantics, cross-field HARD REJECT
+- 2 invoker tests covering hot-reload of timeout config without restart
+- 5 Web UI tests covering validation rejection (outer < shell + 30) and auto-migration default population
+- 2 A4 anti-regression tests (grep-based) preventing future `lifecycle_schema_version == N` literal comparisons from reappearing
+- 5 prompt-clause invariant tests (AC-V4-15) encoding the no-budget-cap and anti-coincidence rules
+- 2 A10 tests covering `ensure_registered` call-site centralization + cache short-circuit behavior
+- 7 synthetic golden-repo fixtures under `tests/fixtures/e2e_v4/` + 187-line MANUAL_TEST_PLAN.md for AC-V4-14 E2E gate execution by manual-test-executor against a running localhost:8000 CIDX server with VoyageAI credentials
+
+### Bug Fixes
+
+Post-landing fixes caught during Story #885 validation/verification and bundled into v9.22.0:
+
+- fix(#885 A7d persistence): **Codex-caught AC-V4-17 blocker — `lifecycle_analysis_config` defaults were merged into the in-memory `ServerConfig` but never persisted to SQLite**. `ConfigService.initialize_runtime_db()` now writes the defaults back via `_save_runtime_to_sqlite()` and bumps the `server_config` row version once when the key is newly added; idempotent on subsequent boots (no re-persist, no re-log). AC-V4-17 now passes end-to-end: upgraded server surfaces `lifecycle_analysis_config` in Web UI without operator action. Two new persistence-invariant tests (`test_first_boot_persists_defaults_to_sqlite_row`, `test_second_boot_is_no_op_on_already_migrated_row`) close the gap that let the in-memory-only defaults look correct to unit tests while silently failing on disk.
+
+- fix(#885 /admin/config 500): **GET /admin/config raised `UndefinedError: 'dict object' has no attribute 'lifecycle_analysis'`**. The Phase 5b Jinja2 template referenced `{{ config.lifecycle_analysis.* }}` but `_get_current_config()` in `routes.py` never added the key to the template context dict. Added `"lifecycle_analysis": settings.get("lifecycle_analysis", asdict(LifecycleAnalysisConfig()))` alongside the existing Story-numbered runtime config entries.
+
+- fix(#885 Invalid section on Save): **Three coupled integration-layer gaps on the POST /admin/config/lifecycle_analysis path**: (a) template form `action` used hyphenated `lifecycle-analysis` instead of the underscored convention every other config section uses (fixed: action → `/admin/config/lifecycle_analysis`); (b) `_VALID_CONFIG_SECTIONS` whitelist in `routes.py` omitted `lifecycle_analysis` so the POST handler rejected the request before reaching the validator (fixed: entry added with Story #885 comment); (c) `ConfigService.update_setting()`'s dispatch elif-chain lacked a branch for `lifecycle_analysis`, raising `ValueError("Unknown category: lifecycle_analysis")` (fixed: new `elif category == "lifecycle_analysis"` branch + `_update_lifecycle_analysis_setting` helper mirroring the `_update_mcp_session_setting` pattern).
+
+- fix(#885 UX): **`step="30"` forced HTML number inputs to multiples of 30** from their current value. Removed — any integer is now accepted. Server-side `outer >= shell + 30` cross-field rule remains the real invariant; step attribute was stylistic noise.
+
+- chore(#885): **server-fast-automation fixups** — `ruff format` applied to 3 files (`dep_map_index_regenerator.py`, two new test files), plus `lifecycle_analysis_config` added to the `_KNOWN_RUNTIME_KEYS` frozenset in `test_config_service_bootstrap_keys_story_746.py` to close the Story #746 classification audit gap introduced when the new runtime config field was added.
+
+Root-cause note: the three integration-layer gaps (template URL, whitelist, dispatch) would have been caught by a single FastAPI TestClient-based POST test covering the full Save flow. Phase 5b's unit tests exercised `_validate_config_section()` directly, short-circuiting all three layers. Filing a follow-up for a integration test covering the complete `/admin/config/{section}` POST pipeline across all existing config sections.
+
 ## v9.21.2
 
 ### Bug Fixes

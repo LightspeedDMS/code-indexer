@@ -103,9 +103,13 @@ def _with_lifecycle_override(section_name: str, section_value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_constant_is_3() -> None:
-    """CURRENT_LIFECYCLE_SCHEMA_VERSION must equal 3 (AC-V3-1)."""
-    assert CURRENT_LIFECYCLE_SCHEMA_VERSION == 3
+def test_schema_version_constant_at_least_3() -> None:
+    """CURRENT_LIFECYCLE_SCHEMA_VERSION must be at least 3 (AC-V3-1 baseline).
+
+    Written at v3; the >= form survives future version bumps without needing
+    a mechanical update every time the schema advances.
+    """
+    assert CURRENT_LIFECYCLE_SCHEMA_VERSION >= 3
 
 
 # ---------------------------------------------------------------------------

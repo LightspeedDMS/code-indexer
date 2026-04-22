@@ -116,6 +116,7 @@ class SemanticSearchService:
         repo_path: str,
         search_request: SemanticSearchRequest,
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search in repository using direct path.
@@ -127,6 +128,9 @@ class SemanticSearchService:
                 When omitted (default sentinel), the server-global
                 _server_hnsw_cache is used (single-repo hot path).
                 Pass ``None`` explicitly to bypass the cache (fan-out path).
+            precomputed_query_vector: Optional pre-computed Voyage embedding vector.
+                When supplied (Story #883 Phase C), the vector is forwarded to
+                _perform_semantic_search to avoid a duplicate Voyage API call.
 
         Returns:
             Semantic search response with ranked results
@@ -144,7 +148,7 @@ class SemanticSearchService:
 
         # CLAUDE.md Foundation #1: Real semantic search with vector embeddings
         # 1. Load repository-specific configuration
-        # 2. Generate embeddings for the query
+        # 2. Generate embeddings for the query (or reuse precomputed_query_vector)
         # 3. Search vector store with correct collection name
         # 4. Rank results by semantic similarity
 
@@ -159,6 +163,7 @@ class SemanticSearchService:
             exclude_path=search_request.exclude_path,
             accuracy=search_request.accuracy,
             hnsw_cache=hnsw_cache,
+            precomputed_query_vector=precomputed_query_vector,
         )
 
         return SemanticSearchResponse(
@@ -277,6 +282,7 @@ class SemanticSearchService:
         accuracy: Optional[str] = None,
         provider_name_override: Optional[str] = None,
         hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
+        precomputed_query_vector: Optional[List[float]] = None,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -374,9 +380,22 @@ class SemanticSearchService:
                 accuracy_to_ef = {"fast": 20, "balanced": 50, "high": 200}
                 ef_value = accuracy_to_ef.get(accuracy, 50) if accuracy else 50
 
+                # Story #883 Component 1: reuse a precomputed Voyage vector when
+                # provided (avoids a second API call in the parallel memory branch).
+                if precomputed_query_vector is not None:
+                    from code_indexer.server.services.memory_candidate_retriever import (
+                        _PrecomputedEmbeddingProvider,
+                    )
+
+                    effective_embedding_provider = _PrecomputedEmbeddingProvider(
+                        precomputed_query_vector
+                    )
+                else:
+                    effective_embedding_provider = embedding_service
+
                 search_kwargs = dict(
                     query=query,
-                    embedding_provider=embedding_service,
+                    embedding_provider=effective_embedding_provider,
                     collection_name=collection_name,
                     limit=limit,
                     return_timing=True,

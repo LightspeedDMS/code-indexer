@@ -71,6 +71,8 @@ def test_all_server_config_fields_are_classified() -> None:
             "query_orchestration",
             "clone_backend",
             "cow_daemon",
+            "memory_retrieval_config",
+            "lifecycle_analysis_config",
         }
     )
 

@@ -324,8 +324,10 @@ from .files import handle_directory_tree  # noqa: F401, E402
 
 # Register file operation handlers from files.py (Story #496)
 from .files import _register as _files_register  # noqa: E402
+from .memory import _register as _memory_register  # noqa: E402
 
 _files_register(HANDLER_REGISTRY)
+_memory_register(HANDLER_REGISTRY)
 _search_register(HANDLER_REGISTRY)
 
 

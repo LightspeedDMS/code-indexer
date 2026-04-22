@@ -50,6 +50,7 @@ from ..routers.indexing import router as indexing_router
 from ..routers.cache import router as cache_router
 from ..routers.delegation_callbacks import router as delegation_callbacks_router
 from ..routers.maintenance_router import router as maintenance_router
+from ..routers.memories import router as memories_router
 from ..routers.api_keys import router as api_keys_router
 from ..routers.diagnostics import router as diagnostics_router
 from ..routers.research_assistant import router as research_assistant_router
@@ -243,6 +244,7 @@ def register_inline_routes(
     app.include_router(ssh_keys_router)
     app.include_router(scip_queries_router)
     app.include_router(files_router)
+    app.include_router(memories_router)
     app.include_router(git_router)
     app.include_router(indexing_router)
     app.include_router(cache_router)

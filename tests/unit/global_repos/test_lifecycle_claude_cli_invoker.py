@@ -101,9 +101,9 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     # -- subprocess wiring ----------------------------------------------
     # Repo path must be passed as string (cwd for subprocess).
     assert captured["repo_path"] == str(repo_path)
-    # v3 timeouts: 240s inner shell timeout + 300s outer Python timeout.
-    assert captured["shell_timeout"] == 240
-    assert captured["outer_timeout"] == 300
+    # v4 timeouts: 360s inner shell timeout + 420s outer Python timeout.
+    assert captured["shell_timeout"] == 360
+    assert captured["outer_timeout"] == 420
     # Prompt must be loaded from the packaged lifecycle_unified.md file.
     assert captured["prompt"], "prompt must be non-empty"
     assert "description" in captured["prompt"]
