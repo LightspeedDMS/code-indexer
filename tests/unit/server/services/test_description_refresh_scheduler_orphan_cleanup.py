@@ -114,7 +114,9 @@ class TestReconcileOrphanTracking:
         ]
         golden = MagicMock()
         golden.get_repo.side_effect = lambda alias: (
-            {"alias": alias, "clone_path": "/some/path"} if alias == "valid-repo" else None
+            {"alias": alias, "clone_path": "/some/path"}
+            if alias == "valid-repo"
+            else None
         )
 
         scheduler = _make_scheduler(tracking, golden)
@@ -124,7 +126,9 @@ class TestReconcileOrphanTracking:
         tracking.delete_tracking.assert_any_call("orphan-1")
         tracking.delete_tracking.assert_any_call("orphan-2")
         for c in tracking.delete_tracking.call_args_list:
-            assert c != call("valid-repo"), "delete_tracking must not be called for valid-repo"
+            assert c != call("valid-repo"), (
+                "delete_tracking must not be called for valid-repo"
+            )
 
     def test_reconcile_orphan_tracking_zero_orphans_returns_zero(self):
         """
@@ -188,10 +192,12 @@ class TestReconcileOrphanTracking:
         ):
             scheduler.reconcile_orphan_tracking()
 
-        assert call_count[0] == 2, "Both orphans must be attempted regardless of first failure"
-        assert any(
-            r.levelno == logging.ERROR for r in caplog.records
-        ), "Expected ERROR log for the failing delete"
+        assert call_count[0] == 2, (
+            "Both orphans must be attempted regardless of first failure"
+        )
+        assert any(r.levelno == logging.ERROR for r in caplog.records), (
+            "Expected ERROR log for the failing delete"
+        )
 
     def test_reconcile_orphan_tracking_swallows_sweep_errors(self, caplog):
         """
@@ -210,9 +216,9 @@ class TestReconcileOrphanTracking:
             result = scheduler.reconcile_orphan_tracking()
 
         assert result == 0
-        assert any(
-            r.levelno == logging.ERROR for r in caplog.records
-        ), "Expected ERROR log when sweep fails"
+        assert any(r.levelno == logging.ERROR for r in caplog.records), (
+            "Expected ERROR log when sweep fails"
+        )
 
     def test_start_calls_reconcile_via_observable_state(self, tmp_path):
         """
@@ -307,10 +313,13 @@ class TestGetStaleReposOrphanPrune:
             result = scheduler.get_stale_repos()
 
         tracking.delete_tracking.assert_called_once_with("ghost")
-        assert result == [], f"Orphan 'ghost' must be excluded from results, got {result}"
+        assert result == [], (
+            f"Orphan 'ghost' must be excluded from results, got {result}"
+        )
 
         prune_records = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if "ghost" in r.message and "prune" in r.message.lower()
         ]
         assert prune_records, "Expected a log record mentioning 'ghost' and 'prune'"
@@ -327,7 +336,10 @@ class TestGetStaleReposOrphanPrune:
         row = _make_tracking_row("real-repo")
         tracking.get_stale_repos.return_value = [row]
         golden = MagicMock()
-        golden.get_repo.return_value = {"alias": "real-repo", "clone_path": "/path/to/real"}
+        golden.get_repo.return_value = {
+            "alias": "real-repo",
+            "clone_path": "/path/to/real",
+        }
 
         scheduler = _make_scheduler(tracking, golden)
         result = scheduler.get_stale_repos()
@@ -347,7 +359,9 @@ class TestGetStaleReposOrphanPrune:
         ]
         golden = MagicMock()
         golden.get_repo.side_effect = lambda alias: (
-            None if alias == "orphan-broken" else {"alias": alias, "clone_path": "/path"}
+            None
+            if alias == "orphan-broken"
+            else {"alias": alias, "clone_path": "/path"}
         )
         tracking.delete_tracking.side_effect = RuntimeError("write failed")
 
@@ -359,10 +373,12 @@ class TestGetStaleReposOrphanPrune:
             result = scheduler.get_stale_repos()
 
         valid = [r for r in result if r["repo_alias"] == "valid-repo"]
-        assert len(valid) == 1, "valid-repo must appear in results despite orphan delete failure"
-        assert any(
-            r.levelno == logging.ERROR for r in caplog.records
-        ), "Expected ERROR log when delete_tracking raises during scan"
+        assert len(valid) == 1, (
+            "valid-repo must appear in results despite orphan delete failure"
+        )
+        assert any(r.levelno == logging.ERROR for r in caplog.records), (
+            "Expected ERROR log when delete_tracking raises during scan"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +464,12 @@ class TestDualBackendProtocol:
         required_methods = ["get_all_tracking", "delete_tracking", "get_stale_repos"]
 
         for method_name in required_methods:
-            sqlite_method = getattr(DescriptionRefreshTrackingBackend, method_name, None)
-            pg_method = getattr(DescriptionRefreshTrackingPostgresBackend, method_name, None)
+            sqlite_method = getattr(
+                DescriptionRefreshTrackingBackend, method_name, None
+            )
+            pg_method = getattr(
+                DescriptionRefreshTrackingPostgresBackend, method_name, None
+            )
 
             assert sqlite_method is not None, (
                 f"SQLite backend missing required method: {method_name}"

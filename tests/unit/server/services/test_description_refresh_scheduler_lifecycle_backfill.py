@@ -106,7 +106,9 @@ class TestReconcileBrokenLifecycleMetadataWiringGuard:
         ]
         assert any(
             "lifecycle_invoker" in m and "not wired" in m for m in warning_messages
-        ), f"Expected WARNING about 'lifecycle_invoker not wired', got: {warning_messages}"
+        ), (
+            f"Expected WARNING about 'lifecycle_invoker not wired', got: {warning_messages}"
+        )
         sched._golden_backend.list_repos.assert_not_called()
 
     def test_returns_zero_when_golden_repos_dir_not_wired(self, caplog):
@@ -123,7 +125,9 @@ class TestReconcileBrokenLifecycleMetadataWiringGuard:
         ]
         assert any(
             "golden_repos_dir" in m and "not wired" in m for m in warning_messages
-        ), f"Expected WARNING about 'golden_repos_dir not wired', got: {warning_messages}"
+        ), (
+            f"Expected WARNING about 'golden_repos_dir not wired', got: {warning_messages}"
+        )
         sched._golden_backend.list_repos.assert_not_called()
 
     def test_returns_zero_when_lifecycle_debouncer_not_wired(self, caplog):
@@ -140,7 +144,9 @@ class TestReconcileBrokenLifecycleMetadataWiringGuard:
         ]
         assert any(
             "lifecycle_debouncer" in m and "not wired" in m for m in warning_messages
-        ), f"Expected WARNING about 'lifecycle_debouncer not wired', got: {warning_messages}"
+        ), (
+            f"Expected WARNING about 'lifecycle_debouncer not wired', got: {warning_messages}"
+        )
         sched._golden_backend.list_repos.assert_not_called()
 
     def test_returns_zero_when_refresh_scheduler_not_wired(self, caplog):
@@ -157,7 +163,9 @@ class TestReconcileBrokenLifecycleMetadataWiringGuard:
         ]
         assert any(
             "refresh_scheduler" in m and "not wired" in m for m in warning_messages
-        ), f"Expected WARNING about 'refresh_scheduler not wired', got: {warning_messages}"
+        ), (
+            f"Expected WARNING about 'refresh_scheduler not wired', got: {warning_messages}"
+        )
         sched._golden_backend.list_repos.assert_not_called()
 
     def test_returns_zero_when_job_tracker_not_wired(self, caplog):
@@ -172,9 +180,9 @@ class TestReconcileBrokenLifecycleMetadataWiringGuard:
         warning_messages = [
             r.message for r in caplog.records if r.levelno == logging.WARNING
         ]
-        assert any(
-            "job_tracker" in m and "not wired" in m for m in warning_messages
-        ), f"Expected WARNING about 'job_tracker not wired', got: {warning_messages}"
+        assert any("job_tracker" in m and "not wired" in m for m in warning_messages), (
+            f"Expected WARNING about 'job_tracker not wired', got: {warning_messages}"
+        )
         sched._golden_backend.list_repos.assert_not_called()
 
 
@@ -197,9 +205,9 @@ class TestReconcileBrokenLifecycleMetadataScan:
 
         assert result == 0
         info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
-        assert any(
-            "no golden repos" in m for m in info_messages
-        ), f"Expected INFO 'no golden repos', got: {info_messages}"
+        assert any("no golden repos" in m for m in info_messages), (
+            f"Expected INFO 'no golden repos', got: {info_messages}"
+        )
 
     def test_returns_zero_when_no_broken_aliases_found(self, caplog):
         """list_repos() returns 3 aliases; scanner finds none broken → INFO, return 0."""
@@ -223,9 +231,9 @@ class TestReconcileBrokenLifecycleMetadataScan:
 
         assert result == 0
         info_messages = [r.message for r in caplog.records if r.levelno == logging.INFO]
-        assert any(
-            "no broken lifecycle metadata" in m for m in info_messages
-        ), f"Expected INFO about no broken metadata, got: {info_messages}"
+        assert any("no broken lifecycle metadata" in m for m in info_messages), (
+            f"Expected INFO about no broken metadata, got: {info_messages}"
+        )
 
     def test_list_repos_exception_returns_zero_and_logs_error(self, caplog):
         """list_repos() raises → ERROR log, return 0, no thread dispatched."""
@@ -247,12 +255,12 @@ class TestReconcileBrokenLifecycleMetadataScan:
         error_messages = [
             r.message for r in caplog.records if r.levelno == logging.ERROR
         ]
-        assert any(
-            "list_repos failed" in m for m in error_messages
-        ), f"Expected ERROR 'list_repos failed', got: {error_messages}"
-        assert (
-            len(dispatched) == 0
-        ), "Thread must NOT be dispatched when list_repos fails"
+        assert any("list_repos failed" in m for m in error_messages), (
+            f"Expected ERROR 'list_repos failed', got: {error_messages}"
+        )
+        assert len(dispatched) == 0, (
+            "Thread must NOT be dispatched when list_repos fails"
+        )
 
     def test_fleet_scan_exception_returns_zero_and_logs_error(self, caplog):
         """Fleet scan raises → ERROR log, return 0, no thread dispatched."""
@@ -286,9 +294,9 @@ class TestReconcileBrokenLifecycleMetadataScan:
         error_messages = [
             r.message for r in caplog.records if r.levelno == logging.ERROR
         ]
-        assert any(
-            "fleet scan failed" in m for m in error_messages
-        ), f"Expected ERROR 'fleet scan failed', got: {error_messages}"
+        assert any("fleet scan failed" in m for m in error_messages), (
+            f"Expected ERROR 'fleet scan failed', got: {error_messages}"
+        )
         assert len(thread_started) == 0, "Thread must NOT be dispatched when scan fails"
 
 
@@ -388,9 +396,9 @@ class TestReconcileBrokenLifecycleMetadataDispatch:
         mock_scanner_cls.assert_called_once()
         call_kwargs = mock_scanner_cls.call_args[1]
         passed_aliases = call_kwargs.get("repo_aliases")
-        assert passed_aliases == [
-            "good"
-        ], f"Only 'good' should pass the alias filter, got: {passed_aliases}"
+        assert passed_aliases == ["good"], (
+            f"Only 'good' should pass the alias filter, got: {passed_aliases}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +495,6 @@ class TestRunLifecycleBackfillAsync:
         error_messages = [
             r.message for r in caplog.records if r.levelno == logging.ERROR
         ]
-        assert any(
-            "repair thread failed" in m for m in error_messages
-        ), f"Expected ERROR 'repair thread failed', got: {error_messages}"
+        assert any("repair thread failed" in m for m in error_messages), (
+            f"Expected ERROR 'repair thread failed', got: {error_messages}"
+        )

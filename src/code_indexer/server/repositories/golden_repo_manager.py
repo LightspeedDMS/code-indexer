@@ -356,9 +356,7 @@ class GoldenRepoManager:
             nonlocal default_branch
             try:
                 # Clone repository
-                clone_path = self._clone_repository(
-                    repo_url, alias, default_branch
-                )
+                clone_path = self._clone_repository(repo_url, alias, default_branch)
 
                 # Bug #699: When no branch was specified, resolve the actual
                 # checked-out branch so metadata always stores a concrete value
@@ -1079,7 +1077,9 @@ class GoldenRepoManager:
             )
             return False
 
-    def _clone_repository(self, repo_url: str, alias: str, branch: Optional[str] = None) -> str:
+    def _clone_repository(
+        self, repo_url: str, alias: str, branch: Optional[str] = None
+    ) -> str:
         """
         Clone a git repository to the golden repos directory.
 
