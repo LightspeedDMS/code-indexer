@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 2 A10 tests covering `ensure_registered` call-site centralization + cache short-circuit behavior
 - 7 synthetic golden-repo fixtures under `tests/fixtures/e2e_v4/` + 187-line MANUAL_TEST_PLAN.md for AC-V4-14 E2E gate execution by manual-test-executor against a running localhost:8000 CIDX server with VoyageAI credentials
 
+### Bug Fixes
+
+Post-landing fixes caught during Story #885 validation/verification and bundled into v9.22.0:
+
+- fix(#885 A7d persistence): **Codex-caught AC-V4-17 blocker — `lifecycle_analysis_config` defaults were merged into the in-memory `ServerConfig` but never persisted to SQLite**. `ConfigService.initialize_runtime_db()` now writes the defaults back via `_save_runtime_to_sqlite()` and bumps the `server_config` row version once when the key is newly added; idempotent on subsequent boots (no re-persist, no re-log). AC-V4-17 now passes end-to-end: upgraded server surfaces `lifecycle_analysis_config` in Web UI without operator action. Two new persistence-invariant tests (`test_first_boot_persists_defaults_to_sqlite_row`, `test_second_boot_is_no_op_on_already_migrated_row`) close the gap that let the in-memory-only defaults look correct to unit tests while silently failing on disk.
+
+- fix(#885 /admin/config 500): **GET /admin/config raised `UndefinedError: 'dict object' has no attribute 'lifecycle_analysis'`**. The Phase 5b Jinja2 template referenced `{{ config.lifecycle_analysis.* }}` but `_get_current_config()` in `routes.py` never added the key to the template context dict. Added `"lifecycle_analysis": settings.get("lifecycle_analysis", asdict(LifecycleAnalysisConfig()))` alongside the existing Story-numbered runtime config entries.
+
+- fix(#885 Invalid section on Save): **Three coupled integration-layer gaps on the POST /admin/config/lifecycle_analysis path**: (a) template form `action` used hyphenated `lifecycle-analysis` instead of the underscored convention every other config section uses (fixed: action → `/admin/config/lifecycle_analysis`); (b) `_VALID_CONFIG_SECTIONS` whitelist in `routes.py` omitted `lifecycle_analysis` so the POST handler rejected the request before reaching the validator (fixed: entry added with Story #885 comment); (c) `ConfigService.update_setting()`'s dispatch elif-chain lacked a branch for `lifecycle_analysis`, raising `ValueError("Unknown category: lifecycle_analysis")` (fixed: new `elif category == "lifecycle_analysis"` branch + `_update_lifecycle_analysis_setting` helper mirroring the `_update_mcp_session_setting` pattern).
+
+- fix(#885 UX): **`step="30"` forced HTML number inputs to multiples of 30** from their current value. Removed — any integer is now accepted. Server-side `outer >= shell + 30` cross-field rule remains the real invariant; step attribute was stylistic noise.
+
+- chore(#885): **server-fast-automation fixups** — `ruff format` applied to 3 files (`dep_map_index_regenerator.py`, two new test files), plus `lifecycle_analysis_config` added to the `_KNOWN_RUNTIME_KEYS` frozenset in `test_config_service_bootstrap_keys_story_746.py` to close the Story #746 classification audit gap introduced when the new runtime config field was added.
+
+Root-cause note: the three integration-layer gaps (template URL, whitelist, dispatch) would have been caught by a single FastAPI TestClient-based POST test covering the full Save flow. Phase 5b's unit tests exercised `_validate_config_section()` directly, short-circuiting all three layers. Filing a follow-up for a integration test covering the complete `/admin/config/{section}` POST pipeline across all existing config sections.
+
 ## v9.21.2
 
 ### Bug Fixes
