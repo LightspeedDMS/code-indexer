@@ -237,6 +237,9 @@ class TestSemanticQueryManagerImplementation:
                 )
 
                 # Verify search_repository_path was called with correct parameters
+                # Story #883 Phase C: precomputed_query_vector=None when no vector supplied
                 mock_service.search_repository_path.assert_called_once_with(
-                    repo_path=self.test_repo_path, search_request=mock_request
+                    repo_path=self.test_repo_path,
+                    search_request=mock_request,
+                    precomputed_query_vector=None,
                 )

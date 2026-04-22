@@ -201,6 +201,13 @@ class TestDeduplicationContext:
 
     def test_assemble_dedup_context_includes_fingerprints(self, scanner, temp_db):
         """Test that deduplication context includes stored fingerprints."""
+        import datetime
+
+        # Use a timestamp always within the 90-day retention window
+        recent_ts = (datetime.datetime.utcnow() - datetime.timedelta(days=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+
         # Store a scan and issue with fingerprint
         conn = sqlite3.connect(temp_db)
         try:

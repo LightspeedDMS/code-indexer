@@ -177,6 +177,10 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "depmap_get_domain_summary",
         "depmap_get_stale_domains",
         "depmap_get_cross_domain_graph",
+        # Story #877: memory store handlers
+        "create_memory",
+        "edit_memory",
+        "delete_memory",
     }
 )
 

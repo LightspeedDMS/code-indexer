@@ -94,6 +94,11 @@ class AppState:
     # Logging database path (set in lifespan)
     log_db_path: Optional[str]  # str path to SQLite log DB
 
+    # Shared technical memory store (set in lifespan, Story #877)
+    # Optional[Any] avoids circular import — concrete type is MemoryStoreService
+    # from code_indexer.server.services.memory_store_service (wired at runtime).
+    memory_store_service: Optional[Any]  # MemoryStoreService
+
     def __init__(self) -> None:
         """Initialize all attributes to None."""
         self.golden_repo_manager = None
@@ -131,6 +136,7 @@ class AppState:
         self.langfuse_sync_service = None
         self.ssh_migration_result = None
         self.log_db_path = None
+        self.memory_store_service = None
 
 
 def get_app_state(request: Request) -> AppState:
