@@ -30,7 +30,7 @@ MCP tools (registered globally, always available):
    - `protected_branches` (required within section): list of branch names from `.github/settings.yml` or CONTRIBUTING.md; use `null` if no evidence found.
 
 4. **lifecycle.ci** (REQUIRED in v3 — always emit; use empty lists (`[]`) and `"none"` enum when no CI config exists):
-   - `trigger_events` (required within section): list of trigger event strings extracted from the `on:` block of `.github/workflows/*.yml`, `.gitlab-ci.yml`, or `Jenkinsfile`. MUST be a subset of: `push | pull_request | tag | schedule | workflow_dispatch | manual`. Use empty list `[]` if no CI config found.
+   - `trigger_events` (required within section): list of trigger event strings extracted from the `on:` block of `.github/workflows/*.yml`, `.gitlab-ci.yml`, or `Jenkinsfile`. MUST be a subset of: `push | pull_request | merge_request | tag | schedule | workflow_dispatch | manual`. Use `pull_request` for GitHub PR events and `merge_request` for GitLab MR events — do not conflate them. Use empty list `[]` if no CI config found.
    - `required_checks` (required within section): list of job names that act as required status checks (from workflow files); use empty list `[]` if none found.
    - `deploy_on` (required within section): condition that gates deployment. MUST be exactly one of: `tag | merge-to-main | merge-to-release-branch | manual | none`. Infer from `startsWith(github.ref, 'refs/tags/')` → `"tag"`, branch filter on main → `"merge-to-main"`, release branch filter → `"merge-to-release-branch"`, manual approval gate → `"manual"`, no deployment job → `"none"`.
    - `environments` (required within section): list of environment names from `jobs.*.environment` keys in workflow files; use `null` if none found.
@@ -106,7 +106,7 @@ The JSON object MUST match this schema. The six lifecycle fields are REQUIRED. A
     },
 
     "ci": {
-      "trigger_events": ["<subset of: push | pull_request | tag | schedule | workflow_dispatch | manual>"],
+      "trigger_events": ["<subset of: push | pull_request | merge_request | tag | schedule | workflow_dispatch | manual>"],
       "required_checks": ["<string>", ...],
       "deploy_on": "<exactly one of: tag | merge-to-main | merge-to-release-branch | manual | none>",
       "environments": ["<string>", ...] or null

@@ -288,14 +288,26 @@ class DeploymentExecutor:
         """Wait for jobs to drain before restart.
 
         Bug #135: Uses dynamic timeout from server config instead of hardcoded value.
+        Bug #882: Exits early if the server is unreachable for several
+        STRICTLY CONSECUTIVE polls — if cidx-server is already down, there is
+        nothing to drain, and holding the auto-update systemd unit past its
+        TimeoutStartSec would kill the whole upgrade cycle. Any non-
+        ConnectionError iteration outcome (HTTP response received, auth
+        failure, generic exception) resets the counter so cumulative errors
+        of mixed kinds do not trigger the early exit.
 
         Returns:
-            True if drained, False if timeout
+            True if drained (or server unreachable), False if timeout
         """
         # Get dynamic timeout from server
         drain_timeout = self._get_drain_timeout()
 
         start_time = time.time()
+        # Bug #882: cap wasted time when cidx-server is unreachable. At the
+        # default 10s poll interval this is ~30s — well under the 120s systemd
+        # TimeoutStartSec budget on the auto-update unit.
+        consecutive_conn_errors = 0
+        max_consecutive_conn_errors = 3
 
         while time.time() - start_time < drain_timeout:
             try:
@@ -309,12 +321,18 @@ class DeploymentExecutor:
                             extra={"correlation_id": get_correlation_id()},
                         )
                     )
+                    # Auth-token failure is not a connection failure — reset
+                    # the consecutive counter so it does not trigger the
+                    # Bug #882 early-exit path.
+                    consecutive_conn_errors = 0
                     time.sleep(self.drain_poll_interval)
                     continue
 
                 url = f"{self.server_url}/api/admin/maintenance/drain-status"
                 headers = {"Authorization": f"Bearer {token}"}
                 response = requests.get(url, headers=headers, timeout=10)
+                # Server responded (even non-200) → reset the unreachable counter.
+                consecutive_conn_errors = 0
 
                 if response.status_code == 200:
                     data = response.json()
@@ -332,14 +350,30 @@ class DeploymentExecutor:
                     )
 
             except requests.exceptions.ConnectionError:
+                consecutive_conn_errors += 1
                 logger.warning(
                     format_error_log(
                         "DEPLOY-GENERAL-004",
-                        "Could not connect to server for drain status",
+                        f"Could not connect to server for drain status "
+                        f"(consecutive failures: {consecutive_conn_errors})",
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
+                if consecutive_conn_errors >= max_consecutive_conn_errors:
+                    logger.warning(
+                        format_error_log(
+                            "DEPLOY-GENERAL-140",
+                            f"Server unreachable for {consecutive_conn_errors} "
+                            "consecutive polls — assuming drained and proceeding "
+                            "with deployment (Bug #882: avoids burning systemd "
+                            "TimeoutStartSec budget).",
+                            extra={"correlation_id": get_correlation_id()},
+                        )
+                    )
+                    return True
             except Exception as e:
+                # A non-connection exception breaks the "consecutive" chain.
+                consecutive_conn_errors = 0
                 logger.error(
                     format_error_log(
                         "DEPLOY-GENERAL-005",
