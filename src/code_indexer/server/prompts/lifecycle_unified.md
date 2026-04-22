@@ -126,3 +126,38 @@ The JSON object MUST match this schema. The six lifecycle fields are REQUIRED. A
 Example of a valid v3 response (copy the structure, not the values):
 
 {"description": "A Python service for semantic code search using VoyageAI embeddings and HNSW vector indexing.", "lifecycle": {"ci_system": "github-actions", "deployment_target": "pypi", "language_ecosystem": "python/poetry", "build_system": "poetry", "testing_framework": "pytest", "confidence": "high", "branching": {"default_branch": "main", "model": "github-flow", "release_branch_pattern": null, "protected_branches": ["main"]}, "ci": {"trigger_events": ["push", "pull_request"], "required_checks": ["lint", "test"], "deploy_on": "tag", "environments": null}, "release": {"versioning": "semver", "version_source": "pyproject.toml", "changelog": "CHANGELOG.md", "auto_publish": true, "artifact_types": ["wheel", "sdist"]}}}
+
+---
+
+**6. Schema v4 additions — environment and branch→environment mapping**
+
+The v4 schema adds one new cross-field contract on top of v3:
+
+- `lifecycle.ci.environments` now requires evidence-grounded population (already declared in v3; v4 enforces it more strictly — see Evidence trail below).
+- `lifecycle.branch_environment_map` (NEW in v4): dict mapping git branch names to environment names that must also appear in `ci.environments`. Example: `{"master": "prod", "dev": "dev"}`. Use `{}` or omit the field when no mapping evidence exists — the two forms are semantically identical.
+
+**Investigation authorization — use `cidx-local` MCP freely**
+
+Deploy wiring frequently lives in separate terraform / helm / argocd / GitOps repos rather than in the repo being analyzed. When in-repo evidence is insufficient to populate `ci.environments` or `branch_environment_map`, consult sibling repos via the `cidx-local` MCP tools (already registered for this job).
+
+**There is no query budget cap on cidx-local.** Investigate as many siblings as needed to find deploy-wiring evidence. Precision matters more than query count. Do not self-impose a numeric cap or early-stop heuristic on cidx-local queries; continue investigating until the evidence trail is complete.
+
+**ANTI-RULE**: branch-name coincidence is NOT evidence for `branch_environment_map`. A branch literally named `dev` does NOT imply a `dev` environment is mapped to it. Explicit deploy-wiring evidence is required — one of:
+
+- CI rule like `rules: - if: $CI_COMMIT_BRANCH == "<branch>"` paired with a job that deploys to a specific environment
+- ArgoCD `Application` spec with `source.targetRevision: <branch>` paired with a `destination` pointing at a specific environment
+- GitOps sync configuration with branch-scoped environment bindings
+- Terraform tfvars or helm values files that are scoped by branch name AND also name the environment
+
+Without such evidence, omit `branch_environment_map` entirely or set it to `{}`.
+
+**Evidence trail**: every environment name in `ci.environments` and every entry in `branch_environment_map` must be traceable to a specific file path — in this repo or a sibling repo searched via `cidx-local`. The parser will REJECT responses where `branch_environment_map` references environments not present in `ci.environments` (HARD REJECT; the job fails and re-invokes with your error as feedback).
+
+**YAML quoting requirement** (critical for frontmatter round-trip)
+
+When your output includes scalar values starting with a YAML reserved indicator (`@`, `` ` ``, `!`, `&`, `*`, `?`, `|`, `>`, `%`, `#`) — including scoped package names like `@org/pkg` — you MUST wrap them in double quotes.
+
+- CORRECT: `- "@lightspeed/webhook-producer-nod"` or `key: "@vendia/serverless-express"`
+- INCORRECT: `- @lightspeed/webhook-producer-nod` (causes `yaml.scanner.ScannerError` on read)
+
+Apply this to every list item and scalar value that starts with a reserved indicator. Your frontmatter MUST parse cleanly via `yaml.safe_load()` — unquoted reserved-indicator scalars break the entire metadata file, not just the offending line.
