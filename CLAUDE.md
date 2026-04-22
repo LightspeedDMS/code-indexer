@@ -305,6 +305,8 @@ Token expiry: 10 minutes. Timing display: CLI only, not MCP/REST.
 
 Rationale: batch processing needs rate limiting for API cost; interactive UX expects immediate response, persistence through nav-away/back.
 
+**MCP self-registration — SINGLE source of truth at `invoke_claude_cli`** (Story #885 A10). `MCPSelfRegistrationService.ensure_registered()` lives at the top of `src/code_indexer/global_repos/repo_analyzer.py::invoke_claude_cli` — every subprocess invocation of the Claude CLI that routes through this function automatically inherits `cidx-local` MCP availability. NEVER add parallel `ensure_registered()` calls in other adapters (the lifecycle path previously silently lost MCP access by bypassing ClaudeCliManager — A10 fixed this by centralizing at the subprocess boundary). Preconditions belong at the boundary they guard.
+
 No fallbacks — research and propose solutions. JSON errors: use `_validate_and_debug_prompt()`, check non-ASCII characters, long lines, quotes.
 
 ---
