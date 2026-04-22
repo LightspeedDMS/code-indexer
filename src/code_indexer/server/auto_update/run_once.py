@@ -23,29 +23,36 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_server_url() -> str:
-    """Resolve CIDX server URL from ~/.cidx-server/config.json (Bug #882).
+    """Resolve CIDX server URL from config.json (Bug #882 follow-up v9.21.2).
 
     The auto-updater runs as a systemd unit on the same host as cidx-server.
     The operator-configured host/port live in config.json (bootstrap settings);
     if that file is missing, cidx-server itself cannot have started, so the
     auto-updater has nothing to manage. Fail loud instead of guessing a URL.
 
+    The auto-updater service injects CIDX_DATA_DIR (via _ensure_data_dir_env_var
+    in deployment_executor.py).  We read that env var explicitly and pass it to
+    the constructor so the correct data directory is resolved even when the
+    process runs as root (where Path.home() would point to /root instead of the
+    real data directory under /opt/code-indexer/).
+
     Returns:
         Fully-qualified server URL, e.g. "http://0.0.0.0:8080".
 
     Raises:
         RuntimeError: if config.json cannot be loaded — the operator must run
-            the CIDX installer or write a valid config.json before the
-            auto-updater can function.
+            the CIDX installer or write a valid config.json at the path
+            referenced by CIDX_DATA_DIR before the auto-updater can function.
     """
-    cfg = ServerConfigManager().load_config()
+    data_dir = os.environ.get("CIDX_DATA_DIR")
+    cfg = ServerConfigManager(data_dir).load_config()
     if cfg is None:
         raise RuntimeError(
             "Bug #882: cannot resolve cidx-server URL — no config.json found. "
-            "The auto-updater requires ~/.cidx-server/config.json (or the path "
-            "referenced by CIDX_SERVER_DIR) to discover the operator-configured "
-            "host/port. Run the CIDX installer or create a valid config.json "
-            "before re-running the auto-updater."
+            "The auto-updater requires a valid config.json at the path referenced "
+            "by CIDX_DATA_DIR (or ~/.cidx-server/ when that env var is unset) to "
+            "discover the operator-configured host/port. Run the CIDX installer or "
+            "create a valid config.json before re-running the auto-updater."
         )
     return f"http://{cfg.host}:{cfg.port}"
 
