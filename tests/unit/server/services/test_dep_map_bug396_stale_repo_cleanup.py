@@ -346,7 +346,6 @@ class TestRunDeltaAnalysisStaleRepoCleanup:
         assert result == {
             "status": "completed",
             "affected_domains": 0,
-            "lifecycle_backfill_queued": 0,
         }
         mock_cleanup.assert_called_once()
         call_kwargs = mock_cleanup.call_args[1]

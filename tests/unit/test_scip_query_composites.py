@@ -87,8 +87,10 @@ class TestAnalyzeImpactFunctionality:
         # Use real engine with test fixture
         engine = SCIPQueryEngine(scip_fixture_path)
 
-        # Query for transitive dependents (depth > 1)
-        results = engine.get_dependents("Logger", depth=3, exact=False)
+        # Query for transitive dependents (depth > 1).
+        # Fixture has exactly one calls-edge: Calculator#add(). -> MathUtils#,
+        # so MathUtils has one dependent at depth=1 (Calculator#add().).
+        results = engine.get_dependents("MathUtils", depth=3, exact=False)
 
         # Should return results with depth information
         assert len(results) > 0, "Should find dependents in test fixture"
@@ -130,7 +132,7 @@ class TestAnalyzeImpactFunctionality:
 
         with patch.object(SCIPQueryEngine, "get_dependents", counting_get_dependents):
             result = _bfs_traverse_dependents(
-                symbol="Logger",
+                symbol="MathUtils",
                 scip_dir=scip_dir,
                 depth=3,
                 project=None,

@@ -110,7 +110,7 @@ def _run_on_repo_added(
         ),
         patch(
             "code_indexer.global_repos.meta_description_hook._generate_repo_description",
-            return_value=(_ORIGINAL_BODY, "success"),
+            return_value=_ORIGINAL_BODY,
         ),
         patch(
             "code_indexer.global_repos.meta_description_hook.atomic_write_description",

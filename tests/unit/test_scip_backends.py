@@ -46,12 +46,15 @@ class TestDatabaseBackend:
 
         backend = DatabaseBackend(db_fixture_path)
 
-        results = backend.find_definition("UserService", exact=True)
+        # Use "Calculator" which exists in the fixture as Calculator# (class)
+        # exact=False because the fixture symbols lack a package path prefix
+        # required by the exact=True FTS/LIKE pattern (e.g. .../ClassName#)
+        results = backend.find_definition("Calculator", exact=False)
 
         assert len(results) > 0
         assert all(isinstance(r, QueryResult) for r in results)
         assert all(r.kind == "definition" for r in results)
-        assert any("UserService" in r.symbol for r in results)
+        assert any("Calculator" in r.symbol for r in results)
 
     def test_database_backend_find_references(self, db_fixture_path):
         """Should find symbol references using database queries."""
@@ -60,8 +63,11 @@ class TestDatabaseBackend:
 
         backend = DatabaseBackend(db_fixture_path)
 
+        # Use "Calculator#add()." which exists as a reference in the fixture
+        # exact=False because the fixture symbols lack a package path prefix
+        # required by the exact=True FTS/LIKE pattern (e.g. .../ClassName#method)
         results = backend.find_references(
-            "UserService#authenticate().", limit=10, exact=True
+            "Calculator#add().", limit=10, exact=False
         )
 
         assert len(results) > 0
@@ -82,9 +88,9 @@ class TestDatabaseBackend:
 
         backend = DatabaseBackend(db_fixture_path)
 
-        # Test substring matching: "UserService" should match full symbols like
-        # ".../.../UserService#authenticate()." in the database
-        results = backend.find_references("UserService", limit=10, exact=False)
+        # Test substring matching: "Calculator" should match full symbols like
+        # "scip-python python test 1.0.0 Calculator#add()." in the database
+        results = backend.find_references("Calculator", limit=10, exact=False)
 
         # Should find references (not empty)
         assert len(results) > 0, (
@@ -92,8 +98,8 @@ class TestDatabaseBackend:
         )
         assert all(isinstance(r, QueryResult) for r in results)
         assert all(r.kind == "reference" for r in results)
-        # Verify substring matching worked - all symbols should contain "UserService"
-        assert all("UserService" in r.symbol for r in results)
+        # Verify substring matching worked - all symbols should contain "Calculator"
+        assert all("Calculator" in r.symbol for r in results)
 
     def test_database_backend_get_dependencies(self, db_fixture_path):
         """Should find symbol dependencies using database queries."""

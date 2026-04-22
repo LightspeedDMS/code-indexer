@@ -85,6 +85,7 @@ class ToolDocLoader:
         "guides",
         "cicd",
         "tracing",
+        "depmap",
     }
 
     def __init__(self, docs_dir: Path):

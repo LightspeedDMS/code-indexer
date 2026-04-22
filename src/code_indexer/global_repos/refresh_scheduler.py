@@ -26,6 +26,7 @@ from .query_tracker import QueryTracker
 from .cleanup_manager import CleanupManager
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
+from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
 from code_indexer.server.utils.config_manager import ScipConfig, ServerResourceConfig
 
 if TYPE_CHECKING:
@@ -187,10 +188,6 @@ class RefreshScheduler:
         self._fetch_failure_counts: Dict[str, int] = {}
         self._reclone_cooldowns: Dict[str, float] = {}
 
-        # Bug #869: active lifecycle_backfill aggregate job_id shared by
-        # DependencyMapService so progress updates can reference it.
-        self._active_backfill_job_id: Optional[str] = None
-
     def _get_repo_lock(self, alias_name: str) -> threading.Lock:
         """
         Get or create a lock for a specific repository.
@@ -207,17 +204,6 @@ class RefreshScheduler:
             if alias_name not in self._repo_locks:
                 self._repo_locks[alias_name] = threading.Lock()
             return self._repo_locks[alias_name]
-
-    def set_active_backfill_job_id(self, job_id: Optional[str]) -> None:
-        """Store the lifecycle_backfill aggregate job_id (Bug #869).
-
-        Called by DependencyMapService after registering the aggregate job so
-        the scheduler can reference it for progress updates and cancellation.
-
-        Args:
-            job_id: The aggregate lifecycle_backfill job_id, or None to clear.
-        """
-        self._active_backfill_job_id = job_id
 
     # ------------------------------------------------------------------
     # Story #295: Auto-recovery for corrupted git object databases
@@ -1177,12 +1163,8 @@ class RefreshScheduler:
                         # NOT in global_repos.  repo_info comes from global_repos which
                         # has no default_branch column, so .get() always returned "main".
                         # Read the real value from GoldenRepoMetadataSqliteBackend.
-                        default_branch = repo_info.get("default_branch", "main")
+                        default_branch = repo_info.get("default_branch")  # None if absent; later layers fill in
                         try:
-                            from code_indexer.server.storage.sqlite_backends import (
-                                GoldenRepoMetadataSqliteBackend,
-                            )
-
                             db_path = str(
                                 self.golden_repos_dir.parent / "cidx_server.db"
                             )
@@ -1200,7 +1182,38 @@ class RefreshScheduler:
                                 e,
                             )
 
-                        if current_branch and current_branch != default_branch:
+                        # Third fallback: if neither repo_info nor golden_repos_metadata
+                        # had a default_branch (e.g., orphan global_repos row with no
+                        # golden_repos_metadata partner), read the authoritative answer
+                        # from the clone itself via git symbolic-ref.  This eliminates
+                        # the pre-fix hard-coded "main" that caused `git checkout main`
+                        # to fail on master-default repos like dotnet-playground-global.
+                        if not default_branch:
+                            try:
+                                symref_result = subprocess.run(
+                                    [
+                                        "git",
+                                        "symbolic-ref",
+                                        "--short",
+                                        "refs/remotes/origin/HEAD",
+                                    ],
+                                    cwd=master_path,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=10,
+                                )
+                                if symref_result.returncode == 0:
+                                    ref = symref_result.stdout.strip()
+                                    if ref.startswith("origin/"):
+                                        default_branch = ref[len("origin/"):]
+                            except Exception as e:
+                                logger.debug(
+                                    "git symbolic-ref fallback failed for %s: %s",
+                                    alias_name,
+                                    e,
+                                )
+
+                        if default_branch and current_branch and current_branch != default_branch:
                             logger.warning(
                                 f"Base clone for {alias_name} on '{current_branch}' instead of "
                                 f"'{default_branch}', resetting to default branch"

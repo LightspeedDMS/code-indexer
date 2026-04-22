@@ -14,17 +14,9 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, cast
 
-import yaml
-
-from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
-from code_indexer.global_repos.meta_description_hook import atomic_write_description
-from code_indexer.global_repos.meta_directory_updater import _SAFE_ALIAS_PATTERN
-from code_indexer.global_repos.repo_analyzer import (
-    invoke_lifecycle_detection,
-    split_frontmatter_and_body,
-)
+from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
@@ -38,12 +30,6 @@ logger = logging.getLogger(__name__)
 # required for Claude CLI in non-interactive environments.
 _CLAUDE_CLI_SOFT_TIMEOUT_SECONDS = 90  # inner shell ``timeout`` budget
 _CLAUDE_CLI_HARD_TIMEOUT_SECONDS = 120  # Python subprocess.run cap
-
-# Backfill aggregate job progress reporting constants.
-# Intermediate updates are capped at 99 so the terminal complete_job/fail_job
-# call is the only event that transitions the job to 100 / completed.
-_BACKFILL_PROGRESS_PERCENT_SCALE = 100
-_BACKFILL_INTERMEDIATE_PROGRESS_MAX = 99
 
 
 def _build_claude_command(prompt: str, analysis_model: str) -> list:
@@ -222,6 +208,10 @@ class DescriptionRefreshScheduler:
         mcp_registration_service=None,
         tracking_backend=None,
         golden_backend=None,
+        lifecycle_invoker=None,
+        golden_repos_dir: Optional[Path] = None,
+        lifecycle_debouncer=None,
+        refresh_scheduler=None,
     ) -> None:
         """
         Initialize the scheduler.
@@ -239,6 +229,20 @@ class DescriptionRefreshScheduler:
                 When provided together with golden_backend, db_path is not required.
             golden_backend: Optional pre-constructed GoldenRepoMetadataSqliteBackend.
                 When provided together with tracking_backend, db_path is not required.
+            lifecycle_invoker: Optional LifecycleClaudeCliInvoker callable (Story #876 D3).
+                When wired along with golden_repos_dir, lifecycle_debouncer and
+                refresh_scheduler, the scheduler hands each refresh event to
+                LifecycleBatchRunner.
+                Messi Rule #2 anti-fallback: missing wiring emits a WARNING and skips
+                the runner — no silent legacy-path execution.
+            golden_repos_dir: Optional filesystem root of golden repos (Story #876 D3).
+                Passed to LifecycleBatchRunner so it can resolve cidx-meta/<alias>.md
+                paths under a single controlled root.
+            lifecycle_debouncer: Optional MetaWriteDebouncer instance (Story #876 D3).
+                Forwarded to LifecycleBatchRunner for cidx-meta write coalescing.
+            refresh_scheduler: Optional global RefreshScheduler instance (Story #876 D3).
+                Provides the write-lock acquire/release interface the batch runner
+                uses to serialise cidx-meta updates across the fleet.
         """
         if db_path is None and (tracking_backend is None or golden_backend is None):
             raise ValueError(
@@ -251,6 +255,13 @@ class DescriptionRefreshScheduler:
         self._analysis_model = analysis_model
         self._job_tracker = job_tracker
         self._mcp_registration_service = mcp_registration_service
+        # Story #876 D3 wiring — four optional collaborators that together
+        # activate the LifecycleBatchRunner refresh path.  Any None sinks the
+        # refresh back to a WARNING-guarded skip (Messi Rule #2 anti-fallback).
+        self._lifecycle_invoker = lifecycle_invoker
+        self._golden_repos_dir = golden_repos_dir
+        self._lifecycle_debouncer = lifecycle_debouncer
+        self._refresh_scheduler = refresh_scheduler
         if tracking_backend is not None:
             self._tracking_backend = tracking_backend
         else:
@@ -280,33 +291,6 @@ class DescriptionRefreshScheduler:
         max_workers = max(1, _configured)
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-        # Bug #853: active lifecycle_backfill aggregate job_id for cancellation propagation.
-        # Protected by _backfill_job_id_lock for thread-safe access from the scheduler
-        # thread and the DependencyMapService thread.
-        self._active_backfill_job_id: Optional[str] = None
-        self._backfill_job_id_lock = threading.Lock()
-
-        # Bug #851: in-memory count of repos that have been attempted (success OR failure)
-        # in the current backfill cycle.  When processed_count reaches cluster_wide_total
-        # and some repos failed, _maybe_fail_backfill_job closes the aggregate job so it
-        # does not stay "running" forever when all repos fail (100% parse-failure scenario).
-        # Protected by _backfill_job_id_lock (reuses the same lock for simplicity).
-        self._backfill_processed_count: int = 0
-
-    def set_active_backfill_job_id(self, job_id: Optional[str]) -> None:
-        """
-        Store the active lifecycle_backfill aggregate job_id (thread-safe).
-
-        Called by DependencyMapService after registering the aggregate job so
-        this scheduler can check for cancellation before processing each repo
-        (Bug #853 Fix 5).
-
-        Args:
-            job_id: The job_id to store, or None to clear it.
-        """
-        with self._backfill_job_id_lock:
-            self._active_backfill_job_id = job_id
-
     def start(self) -> None:
         """Start daemon thread if enabled in config."""
         config = self._config_manager.load_config()
@@ -330,6 +314,9 @@ class DescriptionRefreshScheduler:
         logger.info(
             f"Description refresh scheduler started (interval: {interval_hours}h, {buckets} buckets)"
         )
+
+        self.reconcile_orphan_tracking()
+        self.reconcile_broken_lifecycle_metadata()
 
         # Start daemon thread
         self._shutdown_event.clear()
@@ -472,11 +459,237 @@ class DescriptionRefreshScheduler:
                 merged = {**tracking, "clone_path": golden_repo["clone_path"]}
                 result.append(merged)
             else:
-                logger.warning(
-                    f"Tracking record exists for {alias} but golden repo not found"
-                )
+                try:
+                    self._tracking_backend.delete_tracking(alias)
+                    logger.info(
+                        "Pruned orphan tracking row for %s (golden repo not found)",
+                        alias,
+                    )
+                except Exception:
+                    logger.error(
+                        "Failed to prune orphan tracking row for %s",
+                        alias,
+                        exc_info=True,
+                    )
 
         return result
+
+    def reconcile_orphan_tracking(self) -> int:
+        """One-shot sweep: delete tracking rows whose golden_repo is missing.
+
+        Returns the number of rows pruned. Self-defensive: any exception in the
+        sweep is logged and swallowed so scheduler startup cannot be blocked.
+        """
+        deleted = 0
+        try:
+            rows = self._tracking_backend.get_all_tracking()
+        except Exception:
+            logger.error(
+                "Orphan tracking reconciliation: get_all_tracking failed",
+                exc_info=True,
+            )
+            return 0
+
+        for row in rows:
+            alias = row.get("repo_alias")
+            if not alias:
+                continue
+            try:
+                golden = self._golden_backend.get_repo(alias)
+            except Exception:
+                logger.error(
+                    "Orphan tracking reconciliation: get_repo failed for %s",
+                    alias,
+                    exc_info=True,
+                )
+                continue
+            if golden:
+                continue
+            try:
+                self._tracking_backend.delete_tracking(alias)
+                deleted += 1
+            except Exception:
+                logger.error(
+                    "Orphan tracking reconciliation: delete failed for %s",
+                    alias,
+                    exc_info=True,
+                )
+
+        logger.info("Orphan tracking reconciliation: pruned %d rows", deleted)
+        return deleted
+
+    def reconcile_broken_lifecycle_metadata(self) -> int:
+        """One-shot backfill sweep: scan all golden repos for broken cidx-meta
+        lifecycle frontmatter and asynchronously route them through
+        LifecycleBatchRunner for repair.
+
+        Runs once at start(), after reconcile_orphan_tracking() and before the
+        periodic daemon thread spawns.  Closes Story #876 gap: pre-existing
+        aliases with stale v2 or 'confidence: unknown' metadata are never repaired
+        by any event-driven code path.
+
+        Returns the number of broken aliases queued for async repair, or 0 on
+        any error or empty result.  Self-defensive: all failures are logged and
+        swallowed so scheduler startup cannot be blocked.
+        """
+        if not self._check_lifecycle_backfill_wiring():
+            return 0
+
+        aliases = self._list_golden_aliases()
+        if aliases is None:
+            return 0
+        if not aliases:
+            logger.info("Lifecycle backfill: no golden repos to scan")
+            return 0
+
+        broken = self._find_broken_lifecycle_aliases(aliases)
+        if broken is None:
+            return 0
+        if not broken:
+            logger.info(
+                "Lifecycle backfill: no broken lifecycle metadata found "
+                "(%d aliases clean)",
+                len(aliases),
+            )
+            return 0
+
+        logger.info(
+            "Lifecycle backfill: identified %d broken aliases — "
+            "dispatching async repair thread",
+            len(broken),
+        )
+        try:
+            self._dispatch_lifecycle_backfill_thread(broken)
+        except Exception:
+            logger.error(
+                "Lifecycle backfill: failed to dispatch async repair thread",
+                exc_info=True,
+            )
+            return 0
+        return len(broken)
+
+    def _check_lifecycle_backfill_wiring(self) -> bool:
+        """Return True if all five lifecycle collaborators are wired; log WARNING and
+        return False for the first missing one (Messi Rule #2 — no silent fallback)."""
+        for name, value in (
+            ("lifecycle_invoker", self._lifecycle_invoker),
+            ("golden_repos_dir", self._golden_repos_dir),
+            ("lifecycle_debouncer", self._lifecycle_debouncer),
+            ("refresh_scheduler", self._refresh_scheduler),
+            ("job_tracker", self._job_tracker),
+        ):
+            if value is None:
+                logger.warning(
+                    "Lifecycle backfill skipped at startup: %s not wired",
+                    name,
+                )
+                return False
+        return True
+
+    def _list_golden_aliases(self) -> Optional[List[str]]:
+        """Return a list of valid alias strings from the golden backend.
+
+        Returns None on error (caller should skip the sweep).
+        Returns [] when the backend has no repos yet.
+        Alias filter: must be a non-empty str (excludes None, int, empty string).
+        """
+        try:
+            repos = self._golden_backend.list_repos() or []
+        except Exception:
+            logger.error(
+                "Lifecycle backfill: list_repos failed — skipping startup sweep",
+                exc_info=True,
+            )
+            return None
+
+        aliases: List[str] = []
+        for repo in repos:
+            alias = repo.get("alias") if isinstance(repo, dict) else None
+            if isinstance(alias, str) and alias:
+                aliases.append(alias)
+        return aliases
+
+    def _find_broken_lifecycle_aliases(self, aliases: List[str]) -> Optional[List[str]]:
+        """Run LifecycleFleetScanner over *aliases* and return the broken subset.
+
+        Returns None on scanner error (caller should skip the sweep).
+        Returns [] when all aliases have valid lifecycle metadata.
+        """
+        try:
+            from code_indexer.global_repos.lifecycle_batch_runner import (
+                LifecycleFleetScanner,
+            )
+
+            scanner = LifecycleFleetScanner(
+                golden_repos_dir=self._golden_repos_dir,
+                repo_aliases=aliases,
+            )
+            return scanner.find_broken_or_missing()
+        except Exception:
+            logger.error(
+                "Lifecycle backfill: fleet scan failed — skipping startup sweep",
+                exc_info=True,
+            )
+            return None
+
+    def _dispatch_lifecycle_backfill_thread(self, broken: List[str]) -> None:
+        """Spawn a daemon thread to run LifecycleBatchRunner on *broken* aliases."""
+        thread = threading.Thread(
+            target=self._run_lifecycle_backfill_async,
+            args=(list(broken),),
+            daemon=True,
+            name="lifecycle-backfill",
+        )
+        thread.start()
+
+    def _run_lifecycle_backfill_async(self, aliases: List[str]) -> None:
+        """Background worker: run LifecycleBatchRunner on broken aliases.
+
+        Generates a UUID job_id, registers it with JobTracker (operation_type
+        'lifecycle_backfill', username 'system'), then invokes
+        LifecycleBatchRunner.run(aliases, parent_job_id=job_id) — which itself
+        handles sub-batching, concurrency, per-alias locking, debouncer signal,
+        and job_tracker.complete_job.
+
+        All exceptions are logged and swallowed — a sweep failure must not crash
+        the daemon thread or leak back into scheduler startup.
+        """
+        try:
+            if self._job_tracker is None:
+                logger.error(
+                    "Lifecycle backfill async: job_tracker missing — "
+                    "cannot route repair through LifecycleBatchRunner"
+                )
+                return
+
+            import uuid
+
+            job_id = str(uuid.uuid4())
+            self._job_tracker.register_job(
+                job_id=job_id,
+                operation_type="lifecycle_backfill",
+                username="system",
+                metadata={"total": len(aliases), "source": "startup_backfill"},
+            )
+
+            runner = LifecycleBatchRunner(
+                golden_repos_dir=self._golden_repos_dir,
+                job_tracker=self._job_tracker,
+                refresh_scheduler=self._refresh_scheduler,
+                debouncer=self._lifecycle_debouncer,
+                claude_cli_invoker=self._lifecycle_invoker,
+                tracking_backend=self._tracking_backend,
+            )
+            runner.run(aliases, parent_job_id=job_id)
+            logger.info(
+                "Lifecycle backfill async: completed repair for %d aliases",
+                len(aliases),
+            )
+        except Exception:
+            logger.error(
+                "Lifecycle backfill async: repair thread failed",
+                exc_info=True,
+            )
 
     def on_refresh_complete(
         self,
@@ -599,63 +812,14 @@ class DescriptionRefreshScheduler:
         Extracted from _run_loop() to enable unit testing of job registration behavior.
         For each stale repo with changes, registers a description_refresh job in the
         job_tracker (if configured) and spawns a background thread (AC2, Story #313).
-
-        Checks for cancellation of the active lifecycle_backfill aggregate job before
-        processing any repo. If cancelled, calls fail_job and returns immediately (Bug #853).
         """
         import uuid
-
-        with self._backfill_job_id_lock:
-            active_backfill_job_id = self._active_backfill_job_id
-
-        if active_backfill_job_id is not None and self._job_tracker is not None:
-            if self._job_tracker.is_cancelled(active_backfill_job_id):
-                logger.warning(
-                    "_run_loop_single_pass: backfill job %s was cancelled, "
-                    "stopping repo processing",
-                    active_backfill_job_id,
-                )
-                # Cancellation is not a failure — use update_status, not fail_job
-                # (Codex Issue 2b)
-                self._job_tracker.update_status(
-                    active_backfill_job_id, status="cancelled"
-                )
-                # Conditional clear: only clear if id still matches this cycle's job
-                # to avoid erasing a new backfill cycle's id (Codex Issue 3)
-                with self._backfill_job_id_lock:
-                    if self._active_backfill_job_id == active_backfill_job_id:
-                        self._active_backfill_job_id = None
-                return
 
         stale_repos = self.get_stale_repos()
 
         for repo in stale_repos:
             alias = repo["repo_alias"]
             clone_path = repo["clone_path"]
-
-            # Check for lifecycle backfill need — bypasses change gate if stale.
-            # A missing lifecycle_schema_version (None) or a value below LIFECYCLE_SCHEMA_VERSION
-            # both indicate that lifecycle backfill is required. None means the tracking record
-            # predates the column or the backend didn't expose it; treated as version 0 (stale).
-            # Such repos must be processed even when no code changes have occurred (Bug #835).
-            lifecycle_version = repo.get("lifecycle_schema_version")
-            needs_lifecycle_backfill = (
-                lifecycle_version is None
-                or lifecycle_version < LIFECYCLE_SCHEMA_VERSION
-            )
-
-            # Skip only when lifecycle is current AND no code changes
-            if not needs_lifecycle_backfill and not self.has_changes_since_last_run(
-                clone_path, repo
-            ):
-                # No changes and no lifecycle backfill needed - reschedule without work
-                now = datetime.now(timezone.utc).isoformat()
-                self._tracking_backend.upsert_tracking(
-                    repo_alias=alias,
-                    next_run=self.calculate_next_run(alias),
-                    updated_at=now,
-                )
-                continue
 
             # Submit refresh job (if ClaudeCliManager available)
             if self._claude_cli_manager:
@@ -718,12 +882,14 @@ class DescriptionRefreshScheduler:
                     success = True
                     error_dict = None
                     try:
-                        # AC5 Story #727: Phase 1 + Phase 2 lifecycle detection run
-                        # unconditionally through _run_two_phase_task.
-                        self._run_two_phase_task(alias, clone_path)
+                        # Story #876 D3: route through LifecycleBatchRunner.
+                        # Wiring guards emit a WARNING and skip the runner when
+                        # any collaborator is missing (Messi Rule #2 anti-fallback).
+                        self._run_lifecycle_via_batch_runner(alias, job_id)
                     except Exception as e:
                         logger.error(
-                            f"Two-phase refresh failed for {alias}: {e}", exc_info=True
+                            f"Lifecycle batch runner failed for {alias}: {e}",
+                            exc_info=True,
                         )
                         success = False
                         error_dict = {"error": str(e)}
@@ -758,6 +924,43 @@ class DescriptionRefreshScheduler:
 
             else:
                 logger.debug(f"ClaudeCliManager not available, skipping {alias}")
+
+    def _run_lifecycle_via_batch_runner(
+        self, alias: str, job_id: Optional[str]
+    ) -> None:
+        """
+        Route one refresh event through LifecycleBatchRunner (Story #876 D3).
+
+        Any missing wiring slot (lifecycle_invoker, golden_repos_dir,
+        lifecycle_debouncer, refresh_scheduler, job_tracker, job_id) emits a
+        WARNING and skips the runner — never a silent fallback (Messi Rule #2).
+        Runner exceptions propagate to refresh_task for sidecar handling.
+        """
+        wiring = {
+            "lifecycle_invoker": self._lifecycle_invoker,
+            "golden_repos_dir": self._golden_repos_dir,
+            "lifecycle_debouncer": self._lifecycle_debouncer,
+            "refresh_scheduler": self._refresh_scheduler,
+            "job_tracker": self._job_tracker,
+            "job_id": job_id,
+        }
+        for name, value in wiring.items():
+            if value is None:
+                logger.warning(
+                    "Skipping lifecycle refresh for %s: %s not wired",
+                    alias,
+                    name,
+                )
+                return
+
+        runner = LifecycleBatchRunner(
+            golden_repos_dir=self._golden_repos_dir,
+            job_tracker=self._job_tracker,
+            refresh_scheduler=self._refresh_scheduler,
+            debouncer=self._lifecycle_debouncer,
+            claude_cli_invoker=self._lifecycle_invoker,
+        )
+        runner.run([alias], parent_job_id=job_id)
 
     def _get_interval_hours(self) -> int:
         """Get refresh interval from config."""
@@ -874,7 +1077,7 @@ class DescriptionRefreshScheduler:
         Get refresh prompt staging the existing description to a temp file (Bug #840 Site #5).
 
         Returns a prompt string with the temp file path embedded, or None on failure.
-        The temp dir persists for the CLI subprocess; _run_phase1 cleans up afterwards.
+        The temp dir persists until the calling thread completes the CLI invocation.
         """
         repo_path_obj = self._validate_refresh_inputs(repo_alias, repo_path)
         if repo_path_obj is None:
@@ -1005,448 +1208,6 @@ class DescriptionRefreshScheduler:
                 f"Failed to update description file for {repo_alias}: {e}",
                 exc_info=True,
             )
-
-    def _run_phase1(
-        self, alias: str, clone_path: str
-    ) -> Optional[Tuple[Dict[str, Any], str]]:
-        """
-        Execute Phase 1: build a refresh prompt and invoke Claude CLI.
-
-        Args:
-            alias: Repository alias (used by _get_refresh_prompt).
-            clone_path: Absolute path to the repository clone (subprocess cwd).
-
-        Returns:
-            Tuple of (frontmatter dict, body str) on success, or None on any
-            failure (missing prompt, CLI error).
-        """
-        prompt = self._get_refresh_prompt(alias, clone_path)
-        if prompt is None:
-            return None
-        success, phase1_output = invoke_claude_cli(
-            repo_path=clone_path,
-            prompt=prompt,
-            cli_manager=self._claude_cli_manager,
-            analysis_model=self._analysis_model,
-        )
-        if not success:
-            logger.warning("_run_phase1: Phase 1 CLI call failed for %s", alias)
-            return None
-        result: tuple = split_frontmatter_and_body(phase1_output)
-        return result
-
-    def _run_phase2_merge_write(
-        self,
-        alias: str,
-        clone_path: str,
-        frontmatter: Dict[str, Any],
-        body: str,
-    ) -> str:
-        """
-        Execute Phase 2 lifecycle detection, merge into *frontmatter*, and write.
-
-        Calls invoke_lifecycle_detection, loads the prior lifecycle block via
-        _load_prior_lifecycle, merges via _merge_lifecycle_result, serialises
-        via _serialize_description, and writes atomically via
-        atomic_write_description.
-
-        Args:
-            alias: Repository alias (used for file path and prior lifecycle lookup).
-            clone_path: Absolute path to the repository clone (Phase 2 cwd).
-            frontmatter: Phase-1 frontmatter dict to be updated in place.
-            body: Markdown body from Phase 1 output.
-
-        Returns:
-            phase2_outcome: One of "success", "failed_preserved_prior",
-            or "failed_degraded_to_unknown" indicating how the lifecycle block
-            was resolved.  Used by the caller to decide whether to self-close
-            the backfill tracking record (Story #728 AC3).
-        """
-        phase2_result = invoke_lifecycle_detection(
-            clone_path, cli_manager=self._claude_cli_manager
-        )
-        prior_lifecycle, prior_schema_version = self._load_prior_lifecycle(alias)
-
-        # Determine outcome before mutating frontmatter
-        if phase2_result is not None and "lifecycle" in phase2_result:
-            phase2_outcome = "success"
-        elif prior_lifecycle is not None:
-            phase2_outcome = "failed_preserved_prior"
-        else:
-            phase2_outcome = "failed_degraded_to_unknown"
-
-        frontmatter = self._merge_lifecycle_result(
-            frontmatter, phase2_result, prior_lifecycle, prior_schema_version
-        )
-        md_file = self._meta_dir / f"{alias}.md"  # type: ignore[operator]
-        atomic_write_description(
-            md_file, self._serialize_description(frontmatter, body)
-        )
-        return phase2_outcome
-
-    def _load_prior_lifecycle(self, alias: str) -> tuple:
-        """
-        Read the existing .md file for *alias* and extract lifecycle metadata.
-
-        Validates *alias* against _SAFE_ALIAS_PATTERN before constructing the
-        filesystem path to prevent path traversal.
-
-        Returns:
-            Tuple of (prior_lifecycle, prior_schema_version); each element is
-            None when the file does not exist or contains no lifecycle block.
-        """
-        if not _SAFE_ALIAS_PATTERN.match(alias):
-            logger.warning("_load_prior_lifecycle: unsafe alias %r rejected", alias)
-            return None, None
-        if not self._meta_dir:
-            return None, None
-        md_file = self._meta_dir / f"{alias}.md"
-        if not md_file.exists():
-            return None, None
-        try:
-            prior_fm, _ = split_frontmatter_and_body(
-                md_file.read_text(encoding="utf-8")
-            )
-            return prior_fm.get("lifecycle"), prior_fm.get("lifecycle_schema_version")
-        except Exception as exc:
-            logger.warning(
-                "_load_prior_lifecycle: failed to read prior .md for %s: %s",
-                alias,
-                exc,
-            )
-            return None, None
-
-    def _merge_lifecycle_result(
-        self,
-        frontmatter: Dict[str, Any],
-        phase2_result: Optional[Dict[str, Any]],
-        prior_lifecycle: Optional[Dict[str, Any]],
-        prior_schema_version: Optional[int],
-    ) -> Dict[str, Any]:
-        """
-        Merge Phase-2 lifecycle detection result into *frontmatter*.
-
-        Rules:
-        - Phase 2 succeeded  → use new lifecycle block; set LIFECYCLE_SCHEMA_VERSION
-        - Phase 2 failed + prior exists  → preserve prior block and schema version
-        - Phase 2 failed + no prior  → set ``confidence: unknown`` fallback
-
-        Returns:
-            The updated *frontmatter* dict (mutated in place).
-        """
-        if phase2_result is not None and "lifecycle" in phase2_result:
-            frontmatter["lifecycle"] = phase2_result["lifecycle"]
-            frontmatter["lifecycle_schema_version"] = LIFECYCLE_SCHEMA_VERSION
-        elif prior_lifecycle is not None:
-            frontmatter["lifecycle"] = prior_lifecycle
-            if prior_schema_version is not None:
-                frontmatter["lifecycle_schema_version"] = prior_schema_version
-        else:
-            frontmatter["lifecycle"] = {"confidence": "unknown"}
-        return frontmatter
-
-    @staticmethod
-    def _serialize_description(frontmatter: Dict[str, Any], body: str) -> str:
-        """
-        Serialise *frontmatter* dict + *body* into a YAML-frontmatter markdown string.
-
-        Returns:
-            String of the form ``---\\n<yaml>---\\n<body>``.
-        """
-        return (
-            f"---\n"
-            f"{yaml.safe_dump(frontmatter, default_flow_style=False, allow_unicode=True)}"
-            f"---\n"
-            f"{body}"
-        )
-
-    def _count_repos_needing_backfill(self) -> int:
-        """
-        Count tracking rows where lifecycle_schema_version IS NULL or stale.
-
-        Matches the update criteria in _self_close_backfill so the "all done"
-        check is consistent with the per-repo update logic.
-        """
-
-        def _count(conn) -> int:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM description_refresh_tracking "
-                "WHERE lifecycle_schema_version IS NULL "
-                "OR lifecycle_schema_version < ?",
-                (LIFECYCLE_SCHEMA_VERSION,),
-            )
-            row = cursor.fetchone()
-            return int(row[0]) if row else 0
-
-        return int(self._tracking_backend._conn_manager.execute_atomic(_count))
-
-    def _maybe_complete_backfill_job(self) -> None:
-        """
-        Complete the aggregate lifecycle_backfill job when all repos are done.
-
-        Called from _self_close_backfill after a successful per-repo update.
-        Checks remaining count, calls complete_job on the active aggregate job
-        if count == 0, and clears _active_backfill_job_id only on success
-        and only when the stored id still matches (conditional clear).
-
-        No-op when _active_backfill_job_id is None or _job_tracker is None.
-        """
-        with self._backfill_job_id_lock:
-            active_job_id = self._active_backfill_job_id
-
-        if active_job_id is None or self._job_tracker is None:
-            return
-
-        try:
-            remaining = self._count_repos_needing_backfill()
-        except Exception as exc:
-            logger.warning(
-                "_maybe_complete_backfill_job: failed to count remaining repos: %s",
-                exc,
-            )
-            return
-
-        if remaining > 0:
-            # Emit intermediate progress when some — but not all — repos are done.
-            try:
-                job = self._job_tracker.get_job(active_job_id)
-                if job is not None:
-                    cluster_wide_total = (job.metadata or {}).get("cluster_wide_total")
-                    if cluster_wide_total:
-                        processed = cluster_wide_total - remaining
-                        if processed > 0:
-                            progress_pct = min(
-                                _BACKFILL_INTERMEDIATE_PROGRESS_MAX,
-                                int(
-                                    processed
-                                    * _BACKFILL_PROGRESS_PERCENT_SCALE
-                                    / cluster_wide_total
-                                ),
-                            )
-                            self._job_tracker.update_status(
-                                active_job_id,
-                                progress=progress_pct,
-                                progress_info=f"{processed}/{cluster_wide_total} repos processed",
-                            )
-            except Exception as exc:
-                logger.warning(
-                    "_maybe_complete_backfill_job: could not emit intermediate progress for %s: %s",
-                    active_job_id,
-                    exc,
-                )
-            return
-
-        logger.info(
-            "_maybe_complete_backfill_job: all repos done, completing job %s",
-            active_job_id,
-        )
-        try:
-            self._job_tracker.complete_job(active_job_id)
-            with self._backfill_job_id_lock:
-                if self._active_backfill_job_id == active_job_id:
-                    self._active_backfill_job_id = None
-        except Exception as exc:
-            logger.warning(
-                "_maybe_complete_backfill_job: complete_job failed for %s: %s",
-                active_job_id,
-                exc,
-            )
-
-    def _maybe_fail_backfill_job(self, alias: str) -> None:
-        """
-        Close the aggregate lifecycle_backfill job with fail_job when all repos
-        have been attempted but Phase 2 failed (Bug #851 failure-path sweeper).
-
-        Called from _run_two_phase_task when phase2_outcome != "success".  Increments
-        _backfill_processed_count atomically under _backfill_job_id_lock.  When the
-        count reaches cluster_wide_total (read from job metadata via get_job), calls
-        fail_job on the active aggregate job and clears _active_backfill_job_id.
-
-        Uses fail_job (NOT complete_job) so the terminal status is distinguishable from
-        a successful backfill run.  The success path (_self_close_backfill ->
-        _maybe_complete_backfill_job) is unchanged.
-
-        No-op when _active_backfill_job_id is None, _job_tracker is None, or
-        get_job returns None (job already gone).
-
-        Args:
-            alias: Repository alias that just completed with a failure outcome.
-        """
-        with self._backfill_job_id_lock:
-            active_job_id = self._active_backfill_job_id
-
-        if active_job_id is None or self._job_tracker is None:
-            return
-
-        # Atomically increment the processed counter
-        with self._backfill_job_id_lock:
-            self._backfill_processed_count += 1
-            processed = self._backfill_processed_count
-
-        # Read cluster_wide_total from the job metadata
-        try:
-            job = self._job_tracker.get_job(active_job_id)
-        except Exception as exc:
-            logger.warning(
-                "_maybe_fail_backfill_job: get_job failed for %s: %s",
-                active_job_id,
-                exc,
-            )
-            return
-
-        if job is None:
-            return
-
-        cluster_wide_total = (job.metadata or {}).get("cluster_wide_total")
-        if cluster_wide_total is None or processed < cluster_wide_total:
-            # Emit intermediate progress when some — but not all — repos have been attempted.
-            if cluster_wide_total and 0 < processed < cluster_wide_total:
-                try:
-                    progress_pct = min(
-                        _BACKFILL_INTERMEDIATE_PROGRESS_MAX,
-                        int(
-                            processed
-                            * _BACKFILL_PROGRESS_PERCENT_SCALE
-                            / cluster_wide_total
-                        ),
-                    )
-                    self._job_tracker.update_status(
-                        active_job_id,
-                        progress=progress_pct,
-                        progress_info=f"{processed}/{cluster_wide_total} repos processed",
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "_maybe_fail_backfill_job: could not emit intermediate progress for %s: %s",
-                        active_job_id,
-                        exc,
-                    )
-            return
-
-        # All repos attempted — close the aggregate as failed
-        logger.info(
-            "_maybe_fail_backfill_job: all %d repos processed, %d had failures — "
-            "closing aggregate job %s as failed",
-            cluster_wide_total,
-            processed,
-            active_job_id,
-        )
-        try:
-            self._job_tracker.fail_job(
-                active_job_id,
-                error=(
-                    f"lifecycle_backfill: {processed}/{cluster_wide_total} repos "
-                    f"attempted; all completed without a valid lifecycle block. "
-                    f"Last failing alias: {alias!r}."
-                ),
-            )
-            with self._backfill_job_id_lock:
-                if self._active_backfill_job_id == active_job_id:
-                    self._active_backfill_job_id = None
-        except Exception as exc:
-            logger.warning(
-                "_maybe_fail_backfill_job: fail_job failed for %s: %s",
-                active_job_id,
-                exc,
-            )
-
-    def _self_close_backfill(self, alias: str) -> None:
-        """
-        Update lifecycle_schema_version in description_refresh_tracking after
-        a successful Phase 2 refresh (Story #728 AC3 self-close).
-
-        The UPDATE handles both NULL and stale versions so its criteria match
-        the counting logic in _count_repos_needing_backfill (Codex Issue 2a).
-
-        On success, delegates to _maybe_complete_backfill_job() which calls
-        complete_job on the aggregate job when all repos are done.
-
-        Args:
-            alias: Repository alias whose tracking row to update.
-        """
-        try:
-
-            def _update(conn) -> None:
-                conn.execute(
-                    "UPDATE description_refresh_tracking "
-                    "SET lifecycle_schema_version = ? "
-                    "WHERE repo_alias = ? "
-                    "AND (lifecycle_schema_version IS NULL "
-                    "     OR lifecycle_schema_version < ?)",
-                    (LIFECYCLE_SCHEMA_VERSION, alias, LIFECYCLE_SCHEMA_VERSION),
-                )
-
-            self._tracking_backend._conn_manager.execute_atomic(_update)
-            logger.debug(
-                "_self_close_backfill: set lifecycle_schema_version=%d for %s",
-                LIFECYCLE_SCHEMA_VERSION,
-                alias,
-            )
-        except Exception as exc:
-            logger.warning(
-                "_self_close_backfill: failed to update tracking for %s: %s",
-                alias,
-                exc,
-            )
-            return
-
-        self._maybe_complete_backfill_job()
-
-    def _run_two_phase_task(self, alias: str, clone_path: str) -> None:
-        """
-        Orchestrate the two-phase description refresh for one repository.
-
-        Validates *alias* and *meta_dir*, then delegates to helpers:
-        1. _run_phase1  — Claude CLI Phase 1
-        2. _mcp_registration_service.ensure_registered (or warning when absent)
-        3. _run_phase2_merge_write  — lifecycle detection, merge, atomic write
-        4. _self_close_backfill (Story #728 AC3) — update lifecycle_schema_version
-           in DB on success so the backfill scheduler does not re-queue this repo.
-
-        Returns early without writing if validation fails or Phase 1 fails.
-
-        Args:
-            alias: Repository alias (validated before any path construction).
-            clone_path: Absolute path to the repository clone.
-        """
-        if not _SAFE_ALIAS_PATTERN.match(alias):
-            logger.warning("_run_two_phase_task: unsafe alias %r rejected", alias)
-            return
-        if not self._meta_dir:
-            logger.warning("_run_two_phase_task: meta_dir not set, skipping %s", alias)
-            return
-
-        phase1 = self._run_phase1(alias, clone_path)
-        if phase1 is None:
-            return
-
-        frontmatter, body = phase1
-
-        if self._mcp_registration_service is not None:
-            self._mcp_registration_service.ensure_registered()
-        else:
-            logger.warning(
-                "_run_two_phase_task: MCPSelfRegistrationService not configured"
-                " for repo %s; skipping ensure_registered before Phase 2",
-                alias,
-            )
-
-        phase2_outcome = self._run_phase2_merge_write(
-            alias, clone_path, frontmatter, body
-        )
-
-        # Story #728 AC3: Self-close — update lifecycle_schema_version in DB
-        # when Phase 2 wrote a real lifecycle block (outcome == "success").
-        # Failure outcomes (prior preserved or degraded) must NOT advance the
-        # version so the backfill scheduler retries on the next cycle.
-        if phase2_outcome == "success":
-            self._self_close_backfill(alias)
-        else:
-            # Bug #851: failure-path sweeper — advance processed counter and close
-            # the aggregate job with fail_job when all repos have been attempted.
-            # This prevents the aggregate staying "running" at 0% forever when all
-            # repos fail (e.g., 100% YAML parse failure from bare CSI sequences).
-            self._maybe_fail_backfill_job(alias)
 
     def close(self) -> None:
         """Clean up resources."""

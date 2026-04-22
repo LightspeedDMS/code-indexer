@@ -9,8 +9,16 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
 
 from code_indexer.server.storage.database_manager import DatabaseSchema
+
+# DDL-heavy tests: each test calls initialize_database() which creates 20+ tables.
+# Under fast-automation.sh load (background daemons contending for CPU/disk),
+# individual DDL statements can take 10-100ms each.  Override the global 15s
+# timeout so these tests get 30s — consistent with the observed 14-15s range
+# in isolation.
+pytestmark = pytest.mark.timeout(30)
 
 
 class TestRepoCategoriesSchema:

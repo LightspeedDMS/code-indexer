@@ -16,6 +16,7 @@ import subprocess
 import logging
 import time
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, TYPE_CHECKING, cast
@@ -34,6 +35,13 @@ if TYPE_CHECKING:
 from pydantic import BaseModel
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.git.git_subprocess_env import build_non_interactive_git_env
+
+# Story #876 D4 — cluster-atomic lifecycle registration hook.
+# Imported at module level so the symbol is attachable via
+# @patch("code_indexer.server.repositories.golden_repo_manager.LifecycleBatchRunner")
+# from the D4 unit tests, matching the D2/D3 pattern in DependencyMapService.
+from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.server.services.job_tracker import DuplicateJobError
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +130,15 @@ class GoldenRepoManager:
     activated_repo_manager: "ActivatedRepoManager"
     group_access_manager: Optional["GroupAccessManager"] = None
     _repo_category_service: Optional[Any] = None  # RepoCategoryService (Story #181)
+    # Story #876 D4 — cluster-atomic lifecycle registration hook collaborators.
+    # All four must be non-None for the hook to fire; any None causes the hook
+    # to log a WARNING and skip (staged-rollout safety).
+    job_tracker: Optional[Any] = None  # JobTracker
+    lifecycle_invoker: Optional[Any] = None  # LifecycleClaudeCliInvoker (callable)
+    lifecycle_debouncer: Optional[Any] = None  # CidxMetaRefreshDebouncer
+    _refresh_scheduler: Optional[Any] = (
+        None  # RefreshScheduler (existing, re-declared for clarity)
+    )
 
     def __init__(
         self,
@@ -339,9 +356,7 @@ class GoldenRepoManager:
             nonlocal default_branch
             try:
                 # Clone repository
-                clone_path = self._clone_repository(
-                    repo_url, alias, default_branch or ""
-                )
+                clone_path = self._clone_repository(repo_url, alias, default_branch)
 
                 # Bug #699: When no branch was specified, resolve the actual
                 # checked-out branch so metadata always stores a concrete value
@@ -463,6 +478,26 @@ class GoldenRepoManager:
                         f"Golden repository added but may not be accessible to expected groups."
                     )
 
+                # Lifecycle hook: Cluster-atomic lifecycle detection rebuild
+                # (Story #876 Phase B-1 Deliverable 4).  The helper claims a
+                # lifecycle_registration job via the idx_active_job_per_repo
+                # partial unique index so at most one cluster node runs the
+                # rebuild for this alias.  The helper is internally sidecar-
+                # disciplined (catches DuplicateJobError, swallows runner
+                # exceptions), but we wrap the call in a belt-and-suspenders
+                # try/except for consistency with the other hooks and to
+                # guard against any unexpected error in the wiring itself.
+                try:
+                    self._register_lifecycle_after_registration(
+                        alias, submitter_username
+                    )
+                except Exception as hook_error:
+                    logging.error(
+                        f"Lifecycle registration hook failed for '{alias}': "
+                        f"{hook_error}. Golden repository added but lifecycle "
+                        f"detection rebuild was not scheduled."
+                    )
+
                 return {
                     "success": True,
                     "alias": alias,
@@ -494,6 +529,118 @@ class GoldenRepoManager:
             repo_alias=alias,  # AC5: Fix unknown repo bug
         )
         return cast(str, job_id)
+
+    def _register_lifecycle_after_registration(
+        self, alias: str, submitter_username: str
+    ) -> None:
+        """
+        Story #876 Phase B-1 Deliverable 4 — cluster-atomic lifecycle
+        registration hook.
+
+        Fires after a new golden repo stub .md exists on disk.  Guarantees at
+        most one active lifecycle_registration job per (operation_type,
+        repo_alias) across the cluster, using the idx_active_job_per_repo
+        partial unique index in background_jobs as the atomic gate.
+
+        Flow:
+          1. If any of the four lifecycle collaborators is None, log WARNING
+             and return (staged-rollout safety).
+          2. Generate a fresh job_id and call
+             job_tracker.register_job_if_no_conflict(...).  On DuplicateJobError
+             (another node already claimed this alias), log INFO and return
+             silently — never instantiate a runner.
+          3. On successful claim, construct LifecycleBatchRunner and call
+             runner.run([alias], parent_job_id=<job_id>).
+          4. If runner.run raises, call fail_job(job_id, error=str(e)) and
+             swallow the exception.  Sidecar discipline: the outer
+             registration worker must remain alive so the stub .md stays
+             visible to subsequent processes.
+
+        Args:
+            alias: The golden repo alias just registered.
+            submitter_username: Username recorded in the tracked job row.
+        """
+        # Staged-rollout skip guard RETIRED per Story #876 constraint #5.
+        # Missing mandatory collaborators are a hard misconfiguration error so
+        # operators see a loud failure instead of silent pre-#876 .md content.
+        missing = [
+            name
+            for name, value in (
+                ("job_tracker", self.job_tracker),
+                ("lifecycle_invoker", self.lifecycle_invoker),
+                ("lifecycle_debouncer", self.lifecycle_debouncer),
+                ("_refresh_scheduler", self._refresh_scheduler),
+            )
+            if value is None
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Lifecycle registration hook for '{alias}' cannot run: "
+                f"required collaborators not wired: {missing}. "
+                "Verify lifespan startup wired all four lifecycle collaborators "
+                "into GoldenRepoManager before any golden repo is added."
+            )
+
+        # Defensive-Invariants (Messi Rule #15): narrow Optional[Any] for mypy
+        # so callers below can call methods without union-attr warnings.
+        assert self.job_tracker is not None  # guaranteed by missing-guard above
+        assert self._refresh_scheduler is not None  # guaranteed by missing-guard above
+
+        # Optional — defaults to None if not wired (tracking_backend is not
+        # required for the core lifecycle write path, only for DB version stamp).
+        lifecycle_tracking_backend = getattr(self, "lifecycle_tracking_backend", None)
+
+        job_id = uuid.uuid4().hex
+        try:
+            self.job_tracker.register_job_if_no_conflict(
+                job_id=job_id,
+                operation_type="lifecycle_registration",
+                username=submitter_username,
+                repo_alias=alias,
+            )
+        except DuplicateJobError:
+            logger.info(
+                "Lifecycle registration hook: another node is already "
+                "processing alias '%s'; deferring to that worker.",
+                alias,
+            )
+            return
+
+        runner = LifecycleBatchRunner(
+            golden_repos_dir=self.golden_repos_dir,
+            job_tracker=self.job_tracker,
+            refresh_scheduler=self._refresh_scheduler,
+            debouncer=self.lifecycle_debouncer,
+            claude_cli_invoker=self.lifecycle_invoker,
+            tracking_backend=lifecycle_tracking_backend,
+        )
+
+        try:
+            runner.run([alias], parent_job_id=job_id)
+        except Exception as runner_error:  # noqa: BLE001 — sidecar discipline
+            # Do NOT re-raise: the outer registration worker must survive so
+            # downstream state (stub .md, group assignments) is preserved.
+            # Record the failure on the tracked job row so operators can see
+            # which alias broke and why.
+            logger.error(
+                "Lifecycle batch runner failed for alias '%s': %s",
+                alias,
+                runner_error,
+            )
+            try:
+                self.job_tracker.fail_job(job_id, error=str(runner_error))
+            except Exception as fail_error:  # noqa: BLE001
+                # If we cannot even mark the job failed, there's nothing more
+                # to do — log at ERROR and continue.  The row stays in
+                # 'running' state, which is acceptable: the cluster's
+                # atomic-gate contract still holds (no duplicate job can be
+                # created for this alias until manual intervention).
+                logger.error(
+                    "Failed to mark lifecycle_registration job '%s' as "
+                    "failed after runner error: %s",
+                    job_id,
+                    fail_error,
+                )
 
     def list_golden_repos(self) -> List[Dict[str, str]]:
         """
@@ -664,6 +811,21 @@ class GoldenRepoManager:
                     group_access_on_repo_added(alias, self.group_access_manager)
             except Exception as hook_error:
                 logging.error(f"Group access hook failed for '{alias}': {hook_error}")
+
+            # Lifecycle hook: Cluster-atomic lifecycle detection rebuild
+            # (Story #876 Phase B-1 Deliverable 4).  See _register_lifecycle_
+            # after_registration for contract details.  register_local_repo
+            # has no submitter_username parameter (it is a synchronous
+            # system-level path for Langfuse, cidx-meta, etc.), so the job
+            # is recorded against the "system" pseudo-user.
+            try:
+                self._register_lifecycle_after_registration(
+                    alias, submitter_username="system"
+                )
+            except Exception as hook_error:
+                logging.error(
+                    f"Lifecycle registration hook failed for '{alias}': {hook_error}"
+                )
 
         return True
 
@@ -915,7 +1077,9 @@ class GoldenRepoManager:
             )
             return False
 
-    def _clone_repository(self, repo_url: str, alias: str, branch: str) -> str:
+    def _clone_repository(
+        self, repo_url: str, alias: str, branch: Optional[str] = None
+    ) -> str:
         """
         Clone a git repository to the golden repos directory.
 
@@ -1050,7 +1214,7 @@ class GoldenRepoManager:
             # Only pass --branch when explicitly requested; omitting it lets git
             # resolve the remote HEAD, which works for any default branch name.
             cmd = ["git", "clone"]
-            if branch is not None:
+            if branch:
                 cmd.extend(["--branch", branch])
             cmd.extend([repo_url, clone_path])
 

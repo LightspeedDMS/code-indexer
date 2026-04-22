@@ -14,6 +14,7 @@ Provides:
 
 import json
 import logging
+import sqlite3
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -83,6 +84,31 @@ class DuplicateJobError(Exception):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+class _BackendUniqueViolation(Exception):
+    """
+    Private marker raised by the backend-insert wrapper when the database
+    backend signals a unique-index violation (psycopg IntegrityError /
+    UniqueViolation). Narrow type so the atomic-gate logic can catch a
+    single specific exception without a broad except Exception net.
+
+    Added by Story #876 Phase B-1. Used by the _atomic_insert_impl /
+    _atomic_insert_or_raise helpers on JobTracker (added in follow-up edits).
+    """
+
+
+def _require_non_empty_str(name: str, value: Any) -> None:
+    """
+    Raise ValueError if value is not a non-empty string.
+
+    Module-level primitive validator shared by atomic job registration
+    (Story #876 Phase B-1). Callers invoke it per field rather than via a
+    higher-level aggregate helper; the single-primitive approach keeps the
+    abstraction boundary minimal and consistent with KISS.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string, got: {value!r}")
 
 
 def _dt_to_iso(dt: Optional[datetime]) -> Optional[str]:
@@ -301,6 +327,59 @@ class JobTracker:
 
         logger.debug(
             f"JobTracker: registered job {job_id} ({operation_type}, repo={repo_alias})"
+        )
+        return job
+
+    def register_job_if_no_conflict(
+        self,
+        job_id: str,
+        operation_type: str,
+        username: str,
+        repo_alias: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> TrackedJob:
+        """
+        Atomically register a new pending job unless an active duplicate exists.
+
+        Cluster-atomic replacement for the two-call TOCTOU pattern
+        (check_operation_conflict + register_job). The partial unique index
+        idx_active_job_per_repo rejects duplicate active jobs at the DB layer,
+        so there is no read-then-write race window across cluster nodes.
+
+        repo_alias must be non-empty because the index predicate excludes
+        NULL — passing None would silently disable the atomic gate.
+
+        Raises:
+            ValueError: If any required string field is None, empty, or
+                not a string.
+            DuplicateJobError: If an active/pending job already exists for
+                the same (operation_type, repo_alias) pair. .existing_job_id
+                is populated so callers may join the blocking job.
+        """
+        _require_non_empty_str("job_id", job_id)
+        _require_non_empty_str("operation_type", operation_type)
+        _require_non_empty_str("username", username)
+        _require_non_empty_str("repo_alias", repo_alias)
+
+        job = TrackedJob(
+            job_id=job_id,
+            operation_type=operation_type,
+            status="pending",
+            username=username,
+            repo_alias=repo_alias,
+            metadata=metadata,
+        )
+
+        self._atomic_insert_or_raise(job)
+
+        with self._lock:
+            self._active_jobs[job_id] = job
+
+        logger.debug(
+            "JobTracker: atomically registered job %s (%s, repo=%s)",
+            job_id,
+            operation_type,
+            repo_alias,
         )
         return job
 
@@ -841,6 +920,148 @@ class JobTracker:
     # ------------------------------------------------------------------
     # Private SQLite helpers
     # ------------------------------------------------------------------
+
+    def _atomic_insert_or_raise(self, job: TrackedJob) -> None:
+        """
+        Insert a job row atomically, translating a unique-index violation on
+        idx_active_job_per_repo (Story #876 Phase C) into DuplicateJobError.
+
+        Precondition: job.repo_alias must be non-null (the partial index
+        predicate excludes NULL — callers guard via _require_non_empty_str).
+
+        SQLite path catches sqlite3.IntegrityError directly.
+        Backend path catches the narrow _BackendUniqueViolation marker that
+        _atomic_insert_impl raises in place of psycopg's IntegrityError.
+
+        If the lookup for the blocking row returns None, raises RuntimeError
+        — treating an inconsistent database state as a hard error rather
+        than substituting a fallback value (Messi Rule #2 anti-fallback).
+        """
+        assert job.repo_alias is not None, (
+            "atomic insert requires non-null repo_alias — partial index excludes NULL"
+        )
+        try:
+            self._atomic_insert_impl(job)
+            return
+        except (sqlite3.IntegrityError, _BackendUniqueViolation):
+            pass
+
+        existing_id = self._find_blocking_active_job_id(
+            job.operation_type, job.repo_alias
+        )
+        if existing_id is None:
+            raise RuntimeError(
+                f"atomic insert raised IntegrityError for "
+                f"({job.operation_type}, {job.repo_alias}) but no active row "
+                f"was found in the lookup; database state is inconsistent"
+            )
+        raise DuplicateJobError(
+            operation_type=job.operation_type,
+            repo_alias=job.repo_alias,
+            existing_job_id=existing_id,
+        )
+
+    def _atomic_insert_impl(self, job: TrackedJob) -> None:
+        """
+        Raw INSERT that surfaces partial-unique-index violations.
+
+        Avoids INSERT OR IGNORE / OR REPLACE so sqlite3.IntegrityError is
+        raised on duplicates. On the backend path, wraps save_job() in a
+        narrow try/except that translates psycopg's IntegrityError /
+        UniqueViolation into the _BackendUniqueViolation marker without
+        importing psycopg. All other exceptions are re-raised.
+        """
+        if self._backend is not None:
+            try:
+                self._backend.save_job(
+                    job_id=job.job_id,
+                    operation_type=job.operation_type,
+                    status=job.status,
+                    created_at=_dt_to_iso(job.created_at) or "",
+                    username=job.username,
+                    progress=job.progress,
+                    started_at=_dt_to_iso(job.started_at),
+                    completed_at=_dt_to_iso(job.completed_at),
+                    result=job.result,
+                    error=job.error,
+                    repo_alias=job.repo_alias,
+                    progress_info=job.progress_info,
+                    metadata=job.metadata,
+                )
+            except Exception as exc:
+                # Narrow detection: translate only the known unique-violation
+                # shapes into the marker; re-raise anything else untouched.
+                if type(exc).__name__ in ("IntegrityError", "UniqueViolation"):
+                    raise _BackendUniqueViolation(str(exc)) from exc
+                raise
+            return
+
+        def operation(conn) -> None:
+            conn.execute(
+                """INSERT INTO background_jobs
+                   (job_id, operation_type, status, created_at, started_at,
+                    completed_at, result, error, progress, username,
+                    is_admin, cancelled, repo_alias, resolution_attempts,
+                    progress_info, metadata)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?)""",
+                (
+                    job.job_id,
+                    job.operation_type,
+                    job.status,
+                    _dt_to_iso(job.created_at),
+                    _dt_to_iso(job.started_at),
+                    _dt_to_iso(job.completed_at),
+                    json.dumps(job.result) if job.result is not None else None,
+                    job.error,
+                    job.progress,
+                    job.username,
+                    job.repo_alias,
+                    job.progress_info,
+                    json.dumps(job.metadata) if job.metadata is not None else None,
+                ),
+            )
+
+        self._conn_manager.execute_atomic(operation)
+
+    def _find_blocking_active_job_id(
+        self, operation_type: str, repo_alias: str
+    ) -> Optional[str]:
+        """
+        Return the job_id of the active (pending or running) row currently
+        blocking a duplicate INSERT for (operation_type, repo_alias).
+
+        Called only after a unique-index violation on
+        idx_active_job_per_repo, so the caller can populate
+        DuplicateJobError.existing_job_id.
+
+        Returns None if no blocking row is visible — the caller treats that
+        as an inconsistent database state (row vanished between INSERT and
+        lookup) and raises RuntimeError rather than substituting a fallback.
+        """
+        if self._backend is not None:
+            for status in ("running", "pending"):
+                rows = self._backend.list_jobs(
+                    status=status, operation_type=operation_type
+                )
+                for row in rows:
+                    if row.get("repo_alias") == repo_alias:
+                        # Explicit type narrowing: list_jobs returns
+                        # List[Dict[str, Any]], so row.get("job_id") is Any.
+                        # A well-formed row has a string job_id; guard
+                        # defensively rather than suppress mypy.
+                        candidate = row.get("job_id")
+                        return candidate if isinstance(candidate, str) else None
+            return None
+
+        conn = self._conn_manager.get_connection()
+        cursor = conn.execute(
+            "SELECT job_id FROM background_jobs "
+            "WHERE operation_type = ? AND repo_alias = ? "
+            "AND status IN ('pending', 'running') LIMIT 1",
+            (operation_type, repo_alias),
+        )
+        row = cursor.fetchone()
+        return row[0] if row is not None else None
 
     def _insert_job(self, job: TrackedJob) -> None:
         """Insert a new job row into background_jobs."""

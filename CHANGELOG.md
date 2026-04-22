@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.21.0
+
+### Features
+
+- feat(#876): **Schema v3 lifecycle metadata — operational workflow enrichment**. The per-golden-repo `cidx-meta.md` now captures how the repo ships, not just what it is. Three new required sections are written on every analyze pass:
+  - `branching` — `default_branch`, `model` (github-flow/gitflow/trunk-based/release-branch/unknown), `release_branch_pattern`, `protected_branches`
+  - `ci` — `trigger_events` (push/pull_request/tag/schedule/workflow_dispatch/manual), `required_checks`, `deploy_on` (tag/merge-to-main/merge-to-release-branch/manual/none), `environments`
+  - `release` — `versioning` (semver/calver/custom/none/unknown), `version_source`, `changelog`, `auto_publish`, `artifact_types`
+
+  Purely additive: v2 classification keys (description + 6 lifecycle identification keys) remain unchanged; v2 `.md` files continue to be valid. Schema v3 is enforced by a type- and enum-aware validator in `UnifiedResponseParser` with escape values (`null`, `[]`, `"unknown"`, `"none"`) for each required-within-section field so the Claude CLI never has to invent values. Timeouts bumped from 180s/240s to 240s/300s to accommodate the wider investigation scope. Parser version gate changed from `== CURRENT_LIFECYCLE_SCHEMA_VERSION` to `>= 2` across both SQLite and PostgreSQL backends so consumers accept both v2 and v3 files during rolling upgrade.
+
+  Post-deploy backfill path (startup sweep + delta/full dep-analysis pre-flight + golden-repo add + description-refresh event + repair executor) detects any `schema_version < 3` `.md` and routes through `LifecycleBatchRunner` to rewrite as v3. No operator action required.
+
+- feat(#854): **Epic #854 — DepMap MCP tools suite** (5 new tools for dependency analysis workflow):
+  - `depmap_find_consumers` (Story #855): given a symbol, return all repos that depend on it
+  - `depmap_get_repo_domains` + `depmap_get_domain_summary` (Story #856): enumerate a repo's domain decomposition and fetch a per-domain summary (entry points, dependencies, consumers)
+  - `depmap_get_stale_domains` (Story #857): list domains whose last_analyzed timestamp is older than a threshold, surfacing backfill candidates
+  - `depmap_get_cross_domain_graph` (Story #858): build a cross-domain dependency graph for a repo or a set of repos
+  - `dependency_analysis_workflow` guide + MCP handler + cross-refs (Story #859): narrative workflow that stitches the tools together for agent-driven investigations
+
+### Bug Fixes
+
+- fix(#876): Startup lifecycle backfill sweep — on server boot, `LifecycleFleetScanner` scans all golden repos, flags any `.md` with `schema_version < CURRENT_LIFECYCLE_SCHEMA_VERSION`, and routes them through `LifecycleBatchRunner` for auto-repair. Closes gaps where broken or missing `cidx-meta.md` files previously required manual intervention.
+
+- fix: `golden_repo_manager._clone_repository` coerced `default_branch=None` to `""` via `default_branch or ""`, which then passed the `is not None` guard in `_clone_remote_repository` and produced `git clone --branch ""` — fails with "fatal: Remote branch not found in upstream origin". Three surgical fixes: remove `or ""` coercion at call site, widen `_clone_repository.branch` to `Optional[str] = None`, change guard from `is not None` to truthy check.
+
+- fix: `refresh_scheduler.py` hard-coded the default branch to `"main"` when an orphan description_refresh_tracking row needed a fallback. Repos whose default branch is `master` (or any non-main) silently ran refresh against a non-existent branch. Now reads from golden-repo metadata.
+
+- fix: `description_refresh_scheduler` now self-heals orphan `description_refresh_tracking` rows (rows referencing aliases whose golden repo no longer exists). Previously these accumulated indefinitely and caused scheduler warnings on every tick.
+
+- fix: `fast-automation.sh` captured `PYTEST_EXIT_CODE=$?` after piping pytest through `tee`, which returned tee's exit code (always 0) and masked real pytest failures as green SUCCESS banners. Replaced with `PYTEST_EXIT_CODE=${PIPESTATUS[0]}` to capture pytest's actual exit status.
+
+- fix(#876): Close codex-review blockers on lifecycle backfill sweep — stricter default_branch escape handling, prompt guard test hardening, converged cidx-meta writers through `write_meta_md`, strict JSON parser with `_strip_code_fence`/`_strip_preamble`, retired staged-rollout guard.
+
+- fix(#857): E2E — serialize `last_analyzed` as ISO-8601 string (not datetime object) in MCP handler responses; reject naive datetimes at parse boundary.
+
 ## v9.20.16
 
 ### Bug Fixes

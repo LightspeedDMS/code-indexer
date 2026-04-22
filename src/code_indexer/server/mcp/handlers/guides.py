@@ -716,11 +716,49 @@ def handle_wiki_article_analytics(params: Dict[str, Any], user: User) -> Dict[st
 # ---------------------------------------------------------------------------
 
 
+def dependency_analysis_workflow(args: Dict[str, Any], user: User) -> Dict[str, Any]:
+    """Handler for dependency_analysis_workflow tool - returns the workflow guide body.
+
+    Loads the markdown body of guides/dependency_analysis_workflow.md via the
+    ToolDocLoader singleton's public API and returns it as structured content.
+    This lets an MCP client read the two-phase dep-map workflow programmatically,
+    mirroring the pattern used by first_time_user_guide and cidx_quick_reference.
+    """
+    from ..tool_doc_loader import _get_tool_doc_loader
+
+    loader = _get_tool_doc_loader()
+    docs = loader.load_all_docs()
+    doc = docs.get("dependency_analysis_workflow")
+    if doc is None:
+        logger.error(
+            "dependency_analysis_workflow guide missing from ToolDocLoader cache — "
+            "the file guides/dependency_analysis_workflow.md is expected on disk"
+        )
+        return _mcp_response(
+            {
+                "success": False,
+                "error": "dependency_analysis_workflow guide not found in tool docs cache",
+                "guide": "",
+            }
+        )
+
+    return _mcp_response(
+        {
+            "success": True,
+            "name": doc.name,
+            "category": doc.category,
+            "tl_dr": doc.tl_dr,
+            "guide": doc.description,
+        }
+    )
+
+
 def _register(registry: dict) -> None:
     """Register guide and analytics handlers into HANDLER_REGISTRY."""
     registry["cidx_quick_reference"] = quick_reference
     registry["first_time_user_guide"] = first_time_user_guide
     registry["get_tool_categories"] = get_tool_categories
+    registry["dependency_analysis_workflow"] = dependency_analysis_workflow
     registry["start_trace"] = handle_start_trace
     registry["end_trace"] = handle_end_trace
     registry["wiki_article_analytics"] = handle_wiki_article_analytics

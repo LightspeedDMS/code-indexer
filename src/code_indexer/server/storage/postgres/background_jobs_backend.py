@@ -52,7 +52,8 @@ _SELECT_COLS = """
     job_id, operation_type, status, created_at, started_at, completed_at,
     result, error, progress, username, is_admin, cancelled, repo_alias,
     resolution_attempts, claude_actions, failure_reason, extended_error,
-    language_resolution_status, progress_info, metadata
+    language_resolution_status, progress_info, metadata,
+    executing_node, claimed_at
 """
 
 
@@ -119,6 +120,8 @@ class BackgroundJobsPostgresBackend:
             "language_resolution_status": _json_col(row[17]),
             "progress_info": row[18] if len(row) > 18 else None,
             "metadata": json.loads(row[19]) if len(row) > 19 and row[19] else None,
+            "executing_node": row[20] if len(row) > 20 else None,
+            "claimed_at": row[21] if len(row) > 21 else None,
         }
 
     # ------------------------------------------------------------------
@@ -147,6 +150,8 @@ class BackgroundJobsPostgresBackend:
         language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
         progress_info: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
     ) -> None:
         """Insert a new background job row.
 
@@ -165,12 +170,14 @@ class BackgroundJobsPostgresBackend:
                             completed_at, result, error, progress, username, is_admin,
                             cancelled, repo_alias, resolution_attempts, claude_actions,
                             failure_reason, extended_error, language_resolution_status,
-                            progress_info, metadata
+                            progress_info, metadata,
+                            executing_node, claimed_at
                         ) VALUES (
                             %s, %s, %s, %s, %s,
                             %s, %s, %s, %s, %s, %s,
                             %s, %s, %s, %s,
                             %s, %s, %s,
+                            %s, %s,
                             %s, %s
                         )
                         """,
@@ -207,6 +214,8 @@ class BackgroundJobsPostgresBackend:
                             ),
                             progress_info,
                             json.dumps(metadata) if metadata is not None else None,
+                            executing_node,
+                            claimed_at,
                         ),
                     )
         except Exception as exc:

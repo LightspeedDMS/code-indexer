@@ -185,13 +185,14 @@ class TestLifecycleGateBypass:
             f"got status='{record['status']}'"
         )
 
-    def test_lifecycle_fresh_repo_with_no_changes_is_skipped(self, tmp_path):
+    def test_lifecycle_fresh_repo_with_no_changes_is_still_queued(self, tmp_path):
         """
-        A repo with lifecycle_schema_version == LIFECYCLE_SCHEMA_VERSION and no code
-        changes must be skipped — status stays 'pending', next_run is rescheduled.
-
-        No external collaborators patched: the change gate fires and reschedules
-        without touching the CLI or analysis layer.
+        Post Story #876 D3 the has_changes and needs_lifecycle_backfill gates
+        are both removed — every stale repo transitions to 'queued' regardless
+        of lifecycle schema version or code-change state.  The prior contract
+        ('stays pending when fresh and unchanged') is the exact behavior D3
+        eliminates.  External collaborators are patched with the same shape
+        used by the sibling test above so this unit test does not shell out.
         """
         from code_indexer.global_repos.lifecycle_schema import LIFECYCLE_SCHEMA_VERSION
         from code_indexer.server.storage.database_manager import DatabaseSchema
@@ -209,15 +210,15 @@ class TestLifecycleGateBypass:
         meta_dir = _seed_meta_md(tmp_path, alias)
         scheduler = _make_scheduler(db_file, meta_dir)
 
-        scheduler._run_loop_single_pass()
+        with (
+            patch(f"{_MODULE}.invoke_claude_cli", return_value=(False, "test-skipped")),
+            patch(_REPO_ANALYZER, return_value="refresh prompt"),
+        ):
+            scheduler._run_loop_single_pass()
 
         record = DescriptionRefreshTrackingBackend(db_file).get_tracking_record(alias)
         assert record is not None
-        assert record["status"] == "pending", (
-            f"Lifecycle-fresh repo with no changes must stay 'pending', "
-            f"got status='{record['status']}'"
-        )
-        assert record["next_run"] > _STALE_NEXT_RUN, (
-            f"Expected next_run rescheduled beyond {_STALE_NEXT_RUN}, "
-            f"got: {record['next_run']}"
+        assert record["status"] == "queued", (
+            f"D3: lifecycle-fresh repo with no changes must still transition to "
+            f"'queued', got status='{record['status']}'"
         )

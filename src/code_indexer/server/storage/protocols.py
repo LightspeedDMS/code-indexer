@@ -199,6 +199,8 @@ class BackgroundJobsBackend(Protocol):
         language_resolution_status: Optional[Dict[str, Dict[str, Any]]] = None,
         progress_info: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        executing_node: Optional[str] = None,
+        claimed_at: Optional[str] = None,
     ) -> None: ...
 
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]: ...
@@ -752,6 +754,7 @@ class LogsBackend(Protocol):
         request_path: Optional[str] = None,
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
+        alias: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -765,6 +768,8 @@ class LogsBackend(Protocol):
             request_path: Optional HTTP request path.
             extra_data: Optional JSON-serialised extra fields.
             node_id: Optional cluster node identifier (NULL in standalone).
+            alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
+                ERROR rows so the admin UI can filter logs by repo.
         """
         ...
 

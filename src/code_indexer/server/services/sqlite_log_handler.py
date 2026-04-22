@@ -127,7 +127,8 @@ class SQLiteLogHandler(logging.Handler):
         def _do_init(conn: sqlite3.Connection) -> None:
             cursor = conn.cursor()
 
-            # Create logs table with schema from AC5
+            # Create logs table with schema from AC5 (Story #876 Phase C adds
+            # the `alias` column for lifecycle-runner row tagging).
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS logs (
@@ -140,12 +141,20 @@ class SQLiteLogHandler(logging.Handler):
                     user_id TEXT,
                     request_path TEXT,
                     extra_data TEXT,
+                    alias TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                 )
                 """
             )
 
-            # Create indexes from AC5
+            # Migrate pre-existing databases in-place: add alias if missing.
+            existing_columns = {
+                row[1] for row in cursor.execute("PRAGMA table_info(logs)").fetchall()
+            }
+            if "alias" not in existing_columns:
+                cursor.execute("ALTER TABLE logs ADD COLUMN alias TEXT")
+
+            # Create indexes from AC5 + new alias index (Story #876 Phase C).
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(timestamp)"
             )
@@ -154,6 +163,7 @@ class SQLiteLogHandler(logging.Handler):
                 "CREATE INDEX IF NOT EXISTS idx_logs_correlation_id ON logs(correlation_id)"
             )
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_source ON logs(source)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_alias ON logs(alias)")
 
         DatabaseConnectionManager.get_instance(str(self.db_path)).execute_atomic(
             _do_init
@@ -205,12 +215,15 @@ class SQLiteLogHandler(logging.Handler):
             correlation_id = getattr(record, "correlation_id", None)
             user_id = getattr(record, "user_id", None)
             request_path = getattr(record, "request_path", None)
+            # Story #876 Phase C: repo alias tag for lifecycle-runner ERROR rows.
+            alias = getattr(record, "alias", None)
 
             # Extract additional extra data (exclude known fields)
             known_fields = {
                 "correlation_id",
                 "user_id",
                 "request_path",
+                "alias",
                 # Standard LogRecord attributes
                 "name",
                 "msg",
@@ -240,11 +253,13 @@ class SQLiteLogHandler(logging.Handler):
                 if key not in known_fields:
                     extra_data[key] = value
 
-            # Remove correlation_id, user_id, request_path from extra_data
-            # (they have dedicated columns)
+            # Remove dedicated-column fields from extra_data defensively —
+            # they must never leak back into the JSON blob (Story #876 Phase C
+            # adds `alias` to this list).
             extra_data.pop("correlation_id", None)
             extra_data.pop("user_id", None)
             extra_data.pop("request_path", None)
+            extra_data.pop("alias", None)
 
             # Serialize extra data as JSON (or NULL if empty)
             extra_data_json: Optional[str] = None
@@ -255,6 +270,8 @@ class SQLiteLogHandler(logging.Handler):
                 # Delegated path (Story #500 AC4): route through injected LogsBackend.
                 # Supports both SQLite and PostgreSQL backends transparently.
                 # node_id is injected by set_node_id() in cluster mode (Story #501 AC3).
+                # alias carries the repo tag for lifecycle-runner rows
+                # (Story #876 Phase C).
                 self._logs_backend.insert_log(
                     timestamp=timestamp,
                     level=level,
@@ -265,14 +282,17 @@ class SQLiteLogHandler(logging.Handler):
                     request_path=request_path,
                     extra_data=extra_data_json,
                     node_id=self._node_id,
+                    alias=alias,
                 )
             else:
                 # Direct-SQLite path (backwards compatible, no backend injected).
+                # alias is persisted to its own column to stay consistent with
+                # the delegated path (Story #876 Phase C).
                 def _do_insert(conn: sqlite3.Connection) -> None:
                     conn.execute(
                         """
-                    INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO logs (timestamp, level, source, message, correlation_id, user_id, request_path, extra_data, alias)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
                             timestamp,
@@ -283,6 +303,7 @@ class SQLiteLogHandler(logging.Handler):
                             user_id,
                             request_path,
                             extra_data_json,
+                            alias,
                         ),
                     )
 

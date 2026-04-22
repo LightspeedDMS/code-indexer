@@ -28,10 +28,12 @@ Anomaly types handled:
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
 from code_indexer.server.services.dep_map_file_utils import (
     load_domains_json as _load_domains_json_util,
     parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
@@ -44,6 +46,12 @@ from code_indexer.server.services.dep_map_health_detector import (
 from code_indexer.server.services.dep_map_index_regenerator import IndexRegenerator
 
 logger = logging.getLogger(__name__)
+
+# Sentinel for branch-separated progress events. The numeric percent is -1
+# so scalar dashboards cannot accidentally render it; consumers MUST parse
+# the JSON payload in ``info`` to extract dep_map / lifecycle status
+# (Story #876 Phase B-2 D2).
+_BRANCH_PROGRESS_SENTINEL: int = -1
 
 
 @dataclass
@@ -95,6 +103,8 @@ class DepMapRepairExecutor:
         discovery_callback: Optional[Callable] = None,
         journal_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[int, str], None]] = None,
+        lifecycle_invoker: Optional[Callable] = None,
+        golden_repos_dir: Optional[Path] = None,
     ) -> None:
         self._health_detector = health_detector
         self._index_regenerator = index_regenerator
@@ -102,22 +112,20 @@ class DepMapRepairExecutor:
         self._discovery_callback = discovery_callback
         self._journal_callback = journal_callback
         self._progress_callback = progress_callback
+        self._lifecycle_invoker = lifecycle_invoker
+        self._golden_repos_dir = golden_repos_dir
 
-    def execute(self, output_dir: Path, health_report: HealthReport) -> RepairResult:
-        """
-        Execute repair based on health report anomalies.
-
-        Phase 1: Re-analyze broken domains (Claude CLI -- expensive, optional)
-        Phase 2: Remove orphan files (free)
-        Phase 3: Reconcile _domains.json (free)
-        Phase 4: Regenerate _index.md (free -- programmatic)
-        Phase 5: Re-validate via health detector
-
-        Returns:
-            RepairResult with status, fixed/error lists, and post-repair health status.
-        """
+    def execute(
+        self,
+        output_dir: Path,
+        health_report: HealthReport,
+        parent_job_id: Optional[str] = None,
+    ) -> RepairResult:
+        """Fork/join Branch A (dep_map) and Branch B (lifecycle).  Branch B
+        fires only when lifecycle is non-empty AND both lifecycle_invoker
+        and golden_repos_dir are wired; its exceptions land in errors
+        without swallowing Branch A."""
         output_dir = Path(output_dir)
-
         if health_report.is_healthy:
             self._report_progress(100, "Nothing to repair")
             return RepairResult(
@@ -126,72 +134,105 @@ class DepMapRepairExecutor:
                 anomalies_before=0,
                 anomalies_after=0,
             )
-
         anomalies_before = len(health_report.anomalies)
         fixed: List[str] = []
         errors: List[str] = []
-
-        self._log(
-            f"Repair started: {anomalies_before} anomalies detected "
-            f"(status={health_report.status})"
+        lifecycle_active = bool(
+            health_report.lifecycle
+            and self._lifecycle_invoker is not None
+            and self._golden_repos_dir is not None
         )
-
-        # Phase 0: Discover uncovered repos (Story #716)
-        self._report_progress(5, "Phase 0: Discovering uncovered repos")
-        self._run_phase0(output_dir, health_report, fixed, errors)
-
-        # Phase 1: Re-analyze broken domains (EXPENSIVE -- Claude CLI)
-        self._report_progress(10, "Phase 1: Re-analyzing broken domains")
-        self._run_phase1(output_dir, health_report, fixed, errors)
-
-        # Phase 1.5: Stale repo cleanup (FREE -- Story #717)
-        self._report_progress(60, "Phase 1.5: Cleaning stale repo references")
-        self._run_phase15(output_dir, health_report, fixed, errors)
-
-        # Phase 2: Remove orphan files (FREE)
-        self._report_progress(65, "Phase 2: Removing orphan files")
-        self._run_phase2(output_dir, health_report, fixed, errors)
-
-        # Phase 3: Reconcile _domains.json (FREE)
-        self._report_progress(70, "Phase 3: Reconciling domains.json")
-        self._run_phase3(output_dir, health_report, fixed, errors)
-
-        # Phase 3.5: Backfill JSON metadata from .md files (FREE -- Bug #687 Fix 4)
-        self._report_progress(75, "Phase 3.5: Backfilling JSON metadata from markdown")
-        self._run_phase35(output_dir, fixed, errors)
-
-        # Phase 4: Regenerate _index.md (FREE -- programmatic)
-        self._report_progress(80, "Phase 4: Regenerating index")
-        self._run_phase4(output_dir, health_report, fixed, errors)
-
-        # Phase 5: Re-validate
-        self._report_progress(90, "Phase 5: Validating repair")
-        new_report = self._health_detector.detect(output_dir)
-        anomalies_after = len(new_report.anomalies)
-
+        if lifecycle_active:
+            self._report_progress(
+                _BRANCH_PROGRESS_SENTINEL,
+                json.dumps({"dep_map": "running", "lifecycle": "running"}),
+            )
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fa = pool.submit(
+                    self._run_branch_a_dep_map, output_dir, health_report, fixed, errors
+                )
+                fb = pool.submit(
+                    self._run_branch_b_lifecycle,
+                    list(health_report.lifecycle),
+                    parent_job_id,
+                )
+                new_report = fa.result()
+                try:
+                    fb.result()
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"lifecycle: {exc}")
+        else:
+            new_report = self._run_branch_a_dep_map(
+                output_dir, health_report, fixed, errors
+            )
         self._log(
             f"Repair complete: {len(fixed)} fixed, {len(errors)} errors, "
             f"final status={new_report.status}"
         )
-
         self._report_progress(100, "Repair complete")
-
-        # Determine result status
-        if len(errors) == 0 and new_report.is_healthy:
-            status = "completed"
-        elif len(fixed) > 0:
-            status = "partial"
-        else:
-            status = "failed"
-
+        status = (
+            "completed"
+            if not errors and new_report.is_healthy
+            else "partial"
+            if fixed
+            else "failed"
+        )
         return RepairResult(
             status=status,
             fixed=fixed,
             errors=errors,
             final_health_status=new_report.status,
             anomalies_before=anomalies_before,
-            anomalies_after=anomalies_after,
+            anomalies_after=len(new_report.anomalies),
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Fork/join branches (Story #876 Phase B-2 D2)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_branch_a_dep_map(
+        self,
+        output_dir: Path,
+        health_report: HealthReport,
+        fixed: List[str],
+        errors: List[str],
+    ) -> HealthReport:
+        """Branch A: existing dep_map Phase 0 -> 5 pipeline (with start log)."""
+        self._log(
+            f"Repair started: {len(health_report.anomalies)} anomalies detected "
+            f"(status={health_report.status})"
+        )
+        self._report_progress(5, "Phase 0: Discovering uncovered repos")
+        self._run_phase0(output_dir, health_report, fixed, errors)
+        self._report_progress(10, "Phase 1: Re-analyzing broken domains")
+        self._run_phase1(output_dir, health_report, fixed, errors)
+        self._report_progress(60, "Phase 1.5: Cleaning stale repo references")
+        self._run_phase15(output_dir, health_report, fixed, errors)
+        self._report_progress(65, "Phase 2: Removing orphan files")
+        self._run_phase2(output_dir, health_report, fixed, errors)
+        self._report_progress(70, "Phase 3: Reconciling domains.json")
+        self._run_phase3(output_dir, health_report, fixed, errors)
+        self._report_progress(75, "Phase 3.5: Backfilling JSON metadata from markdown")
+        self._run_phase35(output_dir, fixed, errors)
+        self._report_progress(80, "Phase 4: Regenerating index")
+        self._run_phase4(output_dir, health_report, fixed, errors)
+        self._report_progress(90, "Phase 5: Validating repair")
+        return self._health_detector.detect(output_dir)
+
+    def _run_branch_b_lifecycle(
+        self,
+        aliases: List[str],
+        parent_job_id: Optional[str],
+    ) -> None:
+        """Branch B: LifecycleBatchRunner.run(aliases, parent_job_id)."""
+        runner = LifecycleBatchRunner(
+            golden_repos_dir=self._golden_repos_dir,
+            job_tracker=None,
+            refresh_scheduler=None,
+            debouncer=None,
+            claude_cli_invoker=self._lifecycle_invoker,
+        )
+        runner.run(aliases, parent_job_id=parent_job_id)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 0: Discover uncovered repos (Story #716)

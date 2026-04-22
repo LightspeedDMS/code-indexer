@@ -148,12 +148,11 @@ Output ONLY a JSON object (no markdown, no explanation) with these exact fields:
 # Centralized parameter sets (single source of truth for test data)
 # ---------------------------------------------------------------------------
 
-# All four externalized prompt names
+# All active externalized prompt names
 ALL_PROMPT_NAMES = [
     "repo_description_create",
     "repo_description_refresh",
     "repo_description_extract_json",
-    "lifecycle_detection",
 ]
 
 # (name, expected_content) tuples for byte-identity tests
@@ -209,12 +208,6 @@ class TestPromptLoader:
         assert get_prompt("repo_description_create") == get_prompt(
             "repo_description_create"
         )
-
-    def test_lifecycle_detection_does_not_start_with_yaml_frontmatter(self):
-        """lifecycle_detection prompt is plain text — no frontmatter stripping by loader."""
-        from code_indexer.global_repos.prompts import get_prompt
-
-        assert not get_prompt("lifecycle_detection").startswith("---\n")
 
 
 class TestByteIdentity:

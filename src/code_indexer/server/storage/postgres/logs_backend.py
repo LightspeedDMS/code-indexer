@@ -62,10 +62,15 @@ class LogsPostgresBackend:
                         request_path TEXT,
                         extra_data TEXT,
                         node_id TEXT,
+                        alias TEXT,
                         created_at TIMESTAMPTZ DEFAULT NOW()
                     )
                     """
                 )
+                # Story #876 Phase C: tag rows with repo alias so operators
+                # can filter lifecycle-runner failures by repo. ALTER is idempotent
+                # so legacy deployments migrate cleanly on next boot.
+                conn.execute("ALTER TABLE logs ADD COLUMN IF NOT EXISTS alias TEXT")
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_logs_pg_timestamp ON logs(timestamp)"
                 )
@@ -77,6 +82,9 @@ class LogsPostgresBackend:
                 )
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_logs_pg_correlation_id ON logs(correlation_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_logs_pg_alias ON logs(alias)"
                 )
                 conn.commit()
         except Exception as exc:
@@ -93,6 +101,7 @@ class LogsPostgresBackend:
         request_path: Optional[str] = None,
         extra_data: Optional[str] = None,
         node_id: Optional[str] = None,
+        alias: Optional[str] = None,
     ) -> None:
         """Insert a single log record.
 
@@ -109,6 +118,8 @@ class LogsPostgresBackend:
             request_path: Optional HTTP request path.
             extra_data: Optional JSON-serialised extra fields.
             node_id: Optional cluster node identifier (NULL in standalone).
+            alias: Optional repo alias (Story #876 Phase C). Tags lifecycle-runner
+                ERROR rows so the admin UI can filter logs by repo.
         """
         try:
             with self._pool.connection() as conn:
@@ -116,8 +127,8 @@ class LogsPostgresBackend:
                     """
                     INSERT INTO logs
                         (timestamp, level, source, message, correlation_id,
-                         user_id, request_path, extra_data, node_id)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         user_id, request_path, extra_data, node_id, alias)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         timestamp,
@@ -129,6 +140,7 @@ class LogsPostgresBackend:
                         request_path,
                         extra_data,
                         node_id,
+                        alias,
                     ),
                 )
                 conn.commit()
@@ -169,9 +181,14 @@ class LogsPostgresBackend:
         return where_clause, params
 
     def _row_to_log_dict(self, row: tuple) -> Dict[str, Any]:
-        """Convert a database row tuple to a log record dict."""
+        """Convert a database row tuple to a log record dict.
+
+        Column order matches the SELECT list in query_logs(): id, timestamp,
+        level, source, message, correlation_id, user_id, request_path,
+        extra_data, node_id, alias, created_at.
+        """
         # created_at may come back as a datetime from PostgreSQL
-        created_at = row[10]
+        created_at = row[11]
         if isinstance(created_at, datetime):
             created_at = created_at.isoformat()
 
@@ -186,6 +203,7 @@ class LogsPostgresBackend:
             "request_path": row[7],
             "extra_data": row[8],
             "node_id": row[9],
+            "alias": row[10],
             "created_at": created_at,
         }
 
@@ -230,7 +248,7 @@ class LogsPostgresBackend:
             rows = conn.execute(
                 f"""
                 SELECT id, timestamp, level, source, message, correlation_id,
-                       user_id, request_path, extra_data, node_id, created_at
+                       user_id, request_path, extra_data, node_id, alias, created_at
                 FROM logs {where_clause}
                 ORDER BY timestamp DESC
                 LIMIT %s OFFSET %s

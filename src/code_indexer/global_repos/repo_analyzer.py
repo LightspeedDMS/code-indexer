@@ -26,11 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Phase 2 lifecycle detection timeouts (spec-mandated values per Story #727 AC).
-# shell timeout: inner `timeout` command budget; outer timeout: Python subprocess.run cap.
-_PHASE2_SHELL_TIMEOUT = 180
-_PHASE2_OUTER_TIMEOUT = 240
-
 
 def split_frontmatter_and_body(content: str) -> Tuple[Dict[str, Any], str]:
     """
@@ -84,84 +79,6 @@ def split_frontmatter_and_body(content: str) -> Tuple[Dict[str, Any], str]:
         return {}, content
 
     return parsed, body
-
-
-def invoke_lifecycle_detection(
-    repo_path: str,
-    cli_manager: Optional["ClaudeCliManager"] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Run Phase 2 lifecycle detection via Claude CLI.
-
-    Loads the ``lifecycle_detection`` prompt template, invokes Claude CLI
-    inside *repo_path* with Phase 2 timeouts (shell=180 s, outer=240 s),
-    and parses the raw stdout as YAML.  Returns the parsed dict only when
-    the output is valid YAML **and** contains a ``lifecycle`` key.
-
-    Args:
-        repo_path: Absolute path to the repository to analyse.
-        cli_manager: Reserved for future ClaudeCliManager integration
-            (API key sync, CLI availability checks). Currently unused;
-            the call always invokes ``invoke_claude_cli`` directly.
-
-    Returns:
-        Parsed YAML dict on success, ``None`` on any failure (timeout,
-        non-zero exit, malformed YAML, missing ``lifecycle`` key, empty
-        output).
-    """
-    from code_indexer.global_repos.prompts import get_prompt
-
-    try:
-        prompt = get_prompt("lifecycle_detection")
-    except (FileNotFoundError, ValueError) as exc:
-        logger.warning("invoke_lifecycle_detection: failed to load prompt: %s", exc)
-        return None
-
-    success, output = invoke_claude_cli(
-        repo_path,
-        prompt,
-        _PHASE2_SHELL_TIMEOUT,
-        _PHASE2_OUTER_TIMEOUT,
-    )
-
-    if not success:
-        logger.warning(
-            "invoke_lifecycle_detection: CLI invocation failed for %s: %s",
-            repo_path,
-            output,
-        )
-        return None
-
-    if not output:
-        logger.warning(
-            "invoke_lifecycle_detection: CLI returned empty output for %s", repo_path
-        )
-        return None
-
-    try:
-        parsed = yaml.safe_load(output)
-    except yaml.YAMLError as exc:
-        logger.warning(
-            "invoke_lifecycle_detection: failed to parse YAML from CLI output: %s", exc
-        )
-        return None
-
-    if not isinstance(parsed, dict):
-        logger.warning(
-            "invoke_lifecycle_detection: YAML parsed to %s, expected dict",
-            type(parsed).__name__,
-        )
-        return None
-
-    if "lifecycle" not in parsed:
-        logger.warning(
-            "invoke_lifecycle_detection: parsed YAML missing required 'lifecycle' key; "
-            "keys present: %s",
-            list(parsed.keys()),
-        )
-        return None
-
-    return parsed
 
 
 # Portable null device for the `script` pseudo-TTY wrapper.

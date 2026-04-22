@@ -495,6 +495,7 @@ _cicd_register(HANDLER_REGISTRY)
 # Delegation handlers extracted to delegation.py (Story #496)
 # =============================================================================
 
+from .depmap import _register as _depmap_register  # noqa: E402
 from .delegation import _register as _delegation_register  # noqa: E402
 from .delegation import (  # noqa: F401, E402
     handle_list_delegation_functions,
@@ -584,6 +585,7 @@ from .admin import (  # noqa: F401, E402
 )
 
 _admin_register(HANDLER_REGISTRY)
+_depmap_register(HANDLER_REGISTRY)
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +622,7 @@ class _LegacyForwardingModule(types.ModuleType):
                 "code_indexer.server.mcp.handlers.files",
                 "code_indexer.server.mcp.handlers.repos",
                 "code_indexer.server.mcp.handlers.search",
+                "code_indexer.server.mcp.handlers.depmap",
             ):
                 _submod = sys.modules.get(_submod_name)
                 if _submod is not None and name in _submod.__dict__:

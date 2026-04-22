@@ -117,12 +117,19 @@ class HealthReport:
         anomalies: List of detected Anomaly objects
         repairable_count: Number of anomalies that can be auto-repaired
         output_dir: The directory that was inspected
+        lifecycle: Aliases whose lifecycle metadata is missing, broken,
+            outdated, or poisoned (Story #876 Phase B-2).  Populated by
+            the caller (typically DepMapRepairExecutor composing the output
+            of LifecycleFleetScanner.find_broken_or_missing()) — the
+            health detector itself does NOT invoke the scanner.  Empty
+            list when no lifecycle breakage is detected.
     """
 
     status: str
     anomalies: List[Anomaly] = field(default_factory=list)
     repairable_count: int = 0
     output_dir: Optional[Path] = None
+    lifecycle: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dict."""
@@ -131,6 +138,7 @@ class HealthReport:
             "anomalies": [a.to_dict() for a in self.anomalies],
             "repairable_count": self.repairable_count,
             "output_dir": str(self.output_dir) if self.output_dir else None,
+            "lifecycle": self.lifecycle,
         }
 
     @property
@@ -140,8 +148,9 @@ class HealthReport:
 
     @property
     def needs_repair(self) -> bool:
-        """True when anomalies exist (status is not 'healthy')."""
-        return self.status != "healthy"
+        """True when anomalies exist (status is not 'healthy') or when
+        lifecycle breakage was supplied by the fleet scanner."""
+        return self.status != "healthy" or bool(self.lifecycle)
 
 
 class DepMapHealthDetector:
