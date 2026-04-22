@@ -5350,6 +5350,8 @@ def _get_current_config() -> dict:
         DataRetentionConfig,
         # Story #652 - Reranking configuration
         RerankConfig,
+        # Story #885 - Lifecycle analysis configuration
+        LifecycleAnalysisConfig,
     )
     from dataclasses import asdict
 
@@ -5554,6 +5556,8 @@ def _get_current_config() -> dict:
         "data_retention": settings.get("data_retention", asdict(DataRetentionConfig())),
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
+        # Story #885: Lifecycle analysis configuration
+        "lifecycle_analysis": settings.get("lifecycle_analysis", asdict(LifecycleAnalysisConfig())),
     }
 
 
