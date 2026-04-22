@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.22.1
+
+### Refactor
+
+- refactor: **clean up redundant local `datetime` imports + unused `recent_ts` variable in `tests/unit/server/self_monitoring/test_scanner.py`**. The two removed local imports were shadowing the module-level `import datetime` at line 8; `recent_ts` was assigned but never referenced elsewhere in the file. Zero functional change — 32/32 tests in the file still pass. Not in Story #885 scope; bundled here as a patch because the remote `v9.22.0` tag is immutable (per CLAUDE.md's "never replace a tag on a remote" rule) but the staging auto-deployer requires `git describe --exact-match HEAD` to succeed, which demands HEAD itself be tagged.
+
 ## v9.22.0
 
 ### Features
