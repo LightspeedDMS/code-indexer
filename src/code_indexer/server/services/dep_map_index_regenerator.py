@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 from code_indexer.global_repos.dependency_map_analyzer import DependencyMapAnalyzer
+from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 from code_indexer.server.services.dep_map_file_utils import (
     load_domains_json as _load_domains_json_util,
     parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
@@ -218,7 +219,7 @@ class IndexRegenerator:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Build repos_analyzed YAML list
-        repos_yaml = "\n".join(f"  - {r}" for r in repos) if repos else ""
+        repos_yaml = "\n".join(f"  - {yaml_quote_if_unsafe(r)}" for r in repos) if repos else ""
         repos_analyzed_block = (
             f"repos_analyzed:\n{repos_yaml}" if repos else "repos_analyzed: []"
         )

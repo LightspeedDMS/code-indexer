@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 from code_indexer.server.services.dep_map_file_utils import (
     load_domains_json as _load_domains_json_util,
     parse_yaml_frontmatter as _parse_yaml_frontmatter_util,
@@ -714,7 +715,7 @@ class DepMapRepairExecutor:
         new_repos_lines: List[str]
         if json_repos:
             new_repos_lines = ["participating_repos:"] + [
-                f"  - {r}" for r in json_repos
+                f"  - {yaml_quote_if_unsafe(r)}" for r in json_repos
             ]
         else:
             new_repos_lines = ["participating_repos: []"]
