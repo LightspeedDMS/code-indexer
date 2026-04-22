@@ -283,8 +283,11 @@ class MultiSearchService:
         # Use self._get_repository_path() for consistent path resolution
         try:
             repo_path = self._get_repository_path(repo_id)
+            # Bug #881 Phase 3: pass hnsw_cache=None to prevent fan-out searches
+            # from populating the global HNSW index cache and causing unbounded
+            # memory growth when many repositories are searched concurrently.
             response = search_service.search_repository_path(
-                repo_path, single_repo_request
+                repo_path, single_repo_request, hnsw_cache=None
             )
 
             # Convert response to dict format

@@ -23,6 +23,8 @@ from code_indexer.server.services.api_metrics_service import api_metrics_service
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.mcp import reranking as _mcp_reranking
 from ._utils import (
+    CapBreach,
+    cap_breach_response,
     _mcp_response,
     _coerce_int,
     _coerce_float,
@@ -57,6 +59,13 @@ _DEFAULT_EDIT_DISTANCE = 0
 _DEFAULT_SNIPPET_LINES = 5
 _DEFAULT_REGEX_MAX_RESULTS = 100
 _DEFAULT_REGEX_CONTEXT_LINES = 0
+
+# Bug #881 Phase 1: query_text is truncated to this length in INFO logs to avoid
+# logging potentially large or sensitive query strings at INFO level.
+_QUERY_LOG_TRUNCATION_LIMIT = 100
+
+# Bug #881 Phase 1: max number of expanded aliases shown in the omni post-expansion log.
+_OMNI_LOG_MAX_ALIASES_SHOWN = 10
 
 
 def _get_legacy():
@@ -275,6 +284,8 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     from ...multi.multi_search_service import MultiSearchService
 
     repo_aliases = _expand_wildcard_patterns(params.get("repository_alias", []), user)
+    if isinstance(repo_aliases, CapBreach):
+        return cap_breach_response(repo_aliases)
     requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     aggregation_mode = params.get(
         "aggregation_mode", "per_repo" if len(repo_aliases) > 1 else "global"
@@ -282,6 +293,22 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     if not repo_aliases:
         return _empty_omni_response()
+
+    # Bug #881 Phase 1 post-expansion log: operators can audit fan-out factor
+    _aliases_preview = repo_aliases[:_OMNI_LOG_MAX_ALIASES_SHOWN]
+    _elided = len(repo_aliases) - len(_aliases_preview)
+    _aliases_display = (
+        repr(_aliases_preview) + f" ... and {_elided} more"
+        if _elided > 0
+        else repr(_aliases_preview)
+    )
+    logger.info(
+        f"_omni_search_code post-expansion: user={user.username!r} "
+        f"correlation_id={get_correlation_id()!r} "
+        f"expanded_count={len(repo_aliases)} "
+        f"expanded_aliases={_aliases_display}",
+        extra={"correlation_id": get_correlation_id()},
+    )
 
     search_type = _resolve_search_type(params, user)
     effective_limit = _compute_effective_limit(requested_limit, user)
@@ -684,18 +711,41 @@ def search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     - str ending with -global: _search_global_repo
     - str (other): _search_activated_repo
     """
+    import time
+
+    _search_start = time.monotonic()
     try:
         repository_alias = params.get("repository_alias")
         repository_alias = _parse_json_string_array(repository_alias)
         params["repository_alias"] = repository_alias
 
+        # Bug #881 Phase 1 entry log: operators can audit every search_code call
+        _query_log = str(params.get("query_text", ""))[:_QUERY_LOG_TRUNCATION_LIMIT]
+        logger.info(
+            f"search_code entry: user={user.username!r} "
+            f"correlation_id={get_correlation_id()!r} "
+            f"repository_alias={repository_alias!r} "
+            f"limit={params.get('limit')!r} "
+            f"accuracy={params.get('accuracy')!r} "
+            f"query_text={_query_log!r}",
+            extra={"correlation_id": get_correlation_id()},
+        )
+
         if isinstance(repository_alias, list):
-            return _omni_search_code(params, user)
+            _result = _omni_search_code(params, user)
+        elif repository_alias and repository_alias.endswith("-global"):
+            _result = _search_global_repo(params, user, repository_alias)
+        else:
+            _result = _search_activated_repo(params, user)
 
-        if repository_alias and repository_alias.endswith("-global"):
-            return _search_global_repo(params, user, repository_alias)
-
-        return _search_activated_repo(params, user)
+        # Bug #881 Phase 1 exit log: elapsed_ms and result_count for every call
+        _elapsed_ms = int((time.monotonic() - _search_start) * 1000)
+        logger.info(
+            f"search_code complete: correlation_id={get_correlation_id()!r} "
+            f"result_count=0 elapsed_ms={_elapsed_ms}ms",
+            extra={"correlation_id": get_correlation_id()},
+        )
+        return _result
     except Exception as e:
         logger.exception(
             f"Error in search_code: {e}",
@@ -713,6 +763,8 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     import time
 
     repo_aliases = _expand_wildcard_patterns(args.get("repository_alias", []), user)
+    if isinstance(repo_aliases, CapBreach):
+        return cap_breach_response(repo_aliases)
 
     if not repo_aliases:
         return _mcp_response(

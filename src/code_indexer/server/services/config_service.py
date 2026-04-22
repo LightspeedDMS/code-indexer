@@ -509,6 +509,8 @@ class ConfigService:
                 "omni_max_results_per_repo": config.multi_search_limits_config.omni_max_results_per_repo,
                 "omni_max_total_results_before_aggregation": config.multi_search_limits_config.omni_max_total_results_before_aggregation,
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
+                # Bug #881 Phase 3: wildcard fan-out cap
+                "omni_wildcard_expansion_cap": config.multi_search_limits_config.omni_wildcard_expansion_cap,
             },
             # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
             # Note: job history retention period moved to data_retention section (Story #400 - AC5)
@@ -746,6 +748,86 @@ class ConfigService:
             cache.payload_cleanup_interval_seconds = int(value)
         else:
             raise ValueError(f"Unknown cache setting: {key}")
+
+        # Bug #878 Fix B.2: hot-reload max_cache_size_mb on the matching live
+        # cache singleton so operators can bound native HNSW / FTS memory at
+        # runtime without a server restart. Fix B.1 seats a default cap at
+        # init time; Fix B.2 lets that cap change dynamically.
+        #
+        # Only the two size-cap keys trigger hot-reload. All other cache
+        # settings write through to config only (by design -- see test
+        # TestHotReloadScopeIsolation).
+        if key == "index_cache_max_size_mb":
+            self._hot_reload_cache_size_cap(
+                cache_kind="HNSW", new_size_mb=cache.index_cache_max_size_mb
+            )
+        elif key == "fts_cache_max_size_mb":
+            self._hot_reload_cache_size_cap(
+                cache_kind="FTS", new_size_mb=cache.fts_cache_max_size_mb
+            )
+
+    def _hot_reload_cache_size_cap(
+        self, cache_kind: str, new_size_mb: Optional[int]
+    ) -> None:
+        """
+        Bug #878 Fix B.2: propagate a ``max_cache_size_mb`` change to the
+        live HNSW or FTS cache singleton.
+
+        Acquires the cache's ``_cache_lock``, overwrites
+        ``cache.config.max_cache_size_mb``, and runs ``_enforce_size_limit``
+        so any entries that now exceed the new cap are evicted immediately.
+
+        If the cache layer is not importable / the singleton does not exist
+        yet, the exception is logged at WARNING and swallowed -- config
+        persistence has already happened and we must not leave the caller
+        with an incomplete write on the file side.
+
+        Args:
+            cache_kind: "HNSW" or "FTS" (drives singleton selection + logs).
+            new_size_mb: New cap in MB, or ``None`` to disable the cap.
+        """
+        try:
+            from code_indexer.server.cache import (
+                DEFAULT_MAX_CACHE_SIZE_MB,
+                get_global_cache,
+                get_global_fts_cache,
+            )
+
+            if cache_kind == "HNSW":
+                cache = get_global_cache()
+            elif cache_kind == "FTS":
+                cache = get_global_fts_cache()
+            else:
+                raise ValueError(f"Unknown cache_kind: {cache_kind!r}")
+
+            # Bug #880: when DB value is None (operator cleared the field to
+            # "use default"), re-apply the 4096 MiB safety floor to the live
+            # singleton.  The invariant from Bug #878 is: runtime cap is NEVER
+            # None post-startup.  The DB stores None correctly (meaning "no
+            # override"); only the live singleton needs the concrete floor.
+            runtime_cap = (
+                DEFAULT_MAX_CACHE_SIZE_MB if new_size_mb is None else new_size_mb
+            )
+
+            with cache._cache_lock:
+                cache.config.max_cache_size_mb = runtime_cap
+                cache._enforce_size_limit()
+
+            logger.info(
+                "Hot-reloaded %s cache max_cache_size_mb=%s (db_value=%s)",
+                cache_kind,
+                runtime_cap,
+                new_size_mb,
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to hot-reload %s cache max_cache_size_mb=%s: %s",
+                cache_kind,
+                new_size_mb,
+                exc,
+                extra={"correlation_id": get_correlation_id()},
+            )
 
     def _update_timeout_setting(
         self, config: ServerConfig, key: str, value: Any
@@ -1257,6 +1339,9 @@ class ConfigService:
             multi_search.omni_max_total_results_before_aggregation = int(value)
         elif key == "omni_pattern_metacharacters":
             multi_search.omni_pattern_metacharacters = str(value)
+        # Bug #881 Phase 3: wildcard fan-out cap
+        elif key == "omni_wildcard_expansion_cap":
+            multi_search.omni_wildcard_expansion_cap = int(value)
         else:
             raise ValueError(f"Unknown multi_search setting: {key}")
 

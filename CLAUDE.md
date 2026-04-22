@@ -1028,6 +1028,82 @@ Log audit: new ERRORs/WARNINGs?
 
 ---
 
+## CRITICAL: Server Memory Management (Bug #878, v9.20.13+)
+
+The CIDX server has two invariants that protect long-running deployments from FD exhaustion and unbounded cache growth. **DO NOT** break either.
+
+### 1. DatabaseConnectionManager Cleanup Daemon
+
+**Invariant**: A single background daemon thread (`DatabaseConnectionManager-cleanup-daemon`, `daemon=True`) must run for the lifetime of the FastAPI application and sweep stale SQLite connections across **all** registered singletons every 60 seconds.
+
+- Started in lifespan startup: `DatabaseConnectionManager.start_cleanup_daemon()` (error code `APP-GENERAL-034` on failure)
+- Stopped in lifespan shutdown: `DatabaseConnectionManager.stop_cleanup_daemon()` (error code `APP-GENERAL-035` on failure)
+- Idempotent: `start_cleanup_daemon()` is a no-op if already running; `stop_cleanup_daemon()` is a no-op if none is running
+- Identity-guarded clear in `stop_cleanup_daemon()`: never null class references if a newer daemon has replaced the one being joined
+
+**NEVER**:
+- Re-introduce the piggyback cleanup trigger inside `get_connection()` — it lost races to thread churn (RC-3) in production (gaps of 1-16 min)
+- Call `_cleanup_all_instances()` from the daemon loop — it is throttled by its own 60s interval and would double-throttle. The daemon calls `_sweep_all_instances_unthrottled()` directly, because the daemon's wall-clock interval IS the throttle
+- Remove the `try/finally` in `BackgroundJobManager._execute_job` (or in `_execute_with_cancellation_check`) that calls `_close_thread_connections_on_all_managers(job_id)` — even a 60s-cadence daemon cannot keep up with job-thread churn, which is why Fix A.3 closes at the source
+- Remove the close-on-clobber guard in `DatabaseConnectionManager.get_connection()` — Linux TID recycling will leak FDs silently without it
+
+**Files**:
+- Daemon lifecycle: `src/code_indexer/server/storage/database_manager.py` (search for `start_cleanup_daemon`, `_cleanup_daemon_loop`, `close_thread_connection`)
+- Lifespan wiring: `src/code_indexer/server/startup/lifespan.py` (search for `Bug #878 Fix A.2`)
+- Finally-close in jobs: `src/code_indexer/server/repositories/background_jobs.py` (search for `_close_thread_connections_on_all_managers`)
+
+**Operational check**:
+```bash
+# On any running CIDX server, verify daemon is up:
+sqlite3 ~/.cidx-server/logs.db \
+  "SELECT timestamp, message FROM logs \
+   WHERE message LIKE '%cleanup daemon%' \
+   ORDER BY timestamp DESC LIMIT 5;"
+# Expect one 'started' entry per process lifecycle + periodic 'Cleaned up N stale SQLite connections' entries under churn.
+```
+
+### 2. Opinionated HNSW/FTS Cache Size Cap (4096 MB)
+
+**Invariant**: `HNSWIndexCache` and `FTSIndexCache` singletons always have a finite `max_cache_size_mb`. When the loaded config has `max_cache_size_mb is None`, the cache layer overlays `DEFAULT_MAX_CACHE_SIZE_MB = 4096` at singleton init, logs an INFO message, and enforces the cap via TTL + size-based eviction.
+
+- Default: `src/code_indexer/server/cache/__init__.py::DEFAULT_MAX_CACHE_SIZE_MB = 4096`
+- Applied by `_apply_default_size_cap()` inside `get_global_cache()` and `get_global_fts_cache()`
+- **Dataclass defaults remain `None`**. Do not change `HNSWIndexCacheConfig.max_cache_size_mb` or `FTSIndexCacheConfig.max_cache_size_mb` to a non-None literal default — the overlay logic relies on the `None` sentinel to distinguish "operator explicitly set a value" from "operator left it unset"
+- Operators can override via server config (any value wins over the default, including explicit very-large values that effectively disable the cap)
+
+**Hot-reload**: `ConfigService._hot_reload_cache_size_cap()` runs when `index_cache_max_size_mb` or `fts_cache_max_size_mb` is updated. It acquires the singleton's `_cache_lock`, overwrites `cache.config.max_cache_size_mb`, and calls `_enforce_size_limit()` so entries exceeding the new cap evict immediately. Scope is narrow: only these two keys trigger hot-reload. All other cache settings write through to config only.
+
+**NEVER**:
+- Remove the `DEFAULT_MAX_CACHE_SIZE_MB` overlay without operator-facing migration — existing production configs rely on it
+- Widen hot-reload scope to other cache keys without explicit user approval and tests — `TestHotReloadScopeIsolation` asserts the current boundary
+- Swallow hot-reload exceptions silently without a WARNING log — operators need to see when a cap change failed to propagate
+
+**Files**:
+- Cap default + overlay: `src/code_indexer/server/cache/__init__.py`
+- Hot-reload: `src/code_indexer/server/services/config_service.py` (search for `_hot_reload_cache_size_cap`)
+
+*Recorded 2026-04-21 (Bug #878)*
+
+### 3. Bug #881 Mitigations (v9.20.15+)
+
+Four mitigations shipped together to limit HNSW cache memory growth in multi-repo (omni) fan-out scenarios.
+
+**Phase 1: Fan-out audit logging** — `_omni_search_code` logs expanded alias count and preview at INFO level after wildcard expansion (error code `MCP-GENERAL-031`). Operators can audit fan-out factor in production logs.
+
+**Phase 2: omni_max_repos_per_search cap** — `MultiSearchLimitsConfig.omni_max_repos_per_search` (default 50, DB-backed, Web UI configurable) rejects requests that expand to more repositories than the cap before dispatching any searches. Returns HTTP 400 / MCP error `omni_too_many_repos`. Key files: `config_manager.py`, `config_service.py`, `_utils.py::_enforce_omni_max_repos`, `search.py::_omni_search_code`.
+
+**Phase 3: Wildcard expansion cap + cache bypass** — Two sub-mitigations:
+- `MultiSearchLimitsConfig.omni_wildcard_expansion_cap` (default 50, DB-backed, Web UI configurable) limits how many repos a single wildcard MCP pattern may expand to. `_expand_wildcard_patterns` now returns `Union[List[str], CapBreach]`. Callers (`_omni_search_code`, regex search) check `isinstance(result, CapBreach)` and return `cap_breach_response` / raise `cap_breach_http_exception`. Key types: `CapBreach` dataclass, `_check_wildcard_cap`, `cap_breach_response`, `cap_breach_http_exception` (all in `_utils.py`).
+- `MultiSearchService._search_semantic_sync` passes `hnsw_cache=None` to `search_service.search_repository_path`, which passes it to `BackendFactory.create`. Fan-out searches bypass the global `HNSWIndexCache` to prevent unbounded cache population. Single-repo hot path (default sentinel `_HNSW_CACHE_USE_SERVER_DEFAULT`) still uses `_server_hnsw_cache`. Key files: `multi_search_service.py`, `search_service.py`.
+
+**Phase 4: id_mapping overhead in index_size_bytes** — `HNSWIndexCache.get_or_load` now adds `sys.getsizeof(id_mapping)` to `index_size_bytes` after `hnsw_index.index_file_size()`. The id_mapping dict (label -> vector ID) was previously invisible to the cache size cap, causing systematic under-counting for large indexes. Key file: `hnsw_index_cache.py` (search for `Bug #881 Phase 4`).
+
+**NEVER** revert these without understanding the full memory impact. Each mitigation is independently testable — see `tests/unit/server/mcp/test_wildcard_cap.py`, `test_cap_breach_helper.py`, `test_cache_bypass_on_fanout.py`, `tests/unit/server/cache/test_id_mapping_size_bytes.py`.
+
+*Recorded 2026-04-21 (Bug #881)*
+
+---
+
 ## 12. Where to Find More
 
 - **Architecture**: `/docs/architecture.md`

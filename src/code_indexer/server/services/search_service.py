@@ -9,7 +9,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 import logging
 
 from ..models.api_models import (
@@ -23,6 +23,10 @@ from ...services.embedding_factory import EmbeddingProviderFactory
 from code_indexer.server.logging_utils import format_error_log
 
 logger = logging.getLogger(__name__)
+
+# Sentinel: when hnsw_cache is this object, use the server-global _server_hnsw_cache.
+# When hnsw_cache is None, pass None to BackendFactory.create (cache bypass for fan-out).
+_HNSW_CACHE_USE_SERVER_DEFAULT = object()
 
 
 def _get_golden_repos_dir() -> str:
@@ -108,7 +112,10 @@ class SemanticSearchService:
         return self.search_repository_path(repo_path, search_request)
 
     def search_repository_path(
-        self, repo_path: str, search_request: SemanticSearchRequest
+        self,
+        repo_path: str,
+        search_request: SemanticSearchRequest,
+        hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
     ) -> SemanticSearchResponse:
         """
         Perform semantic search in repository using direct path.
@@ -116,6 +123,10 @@ class SemanticSearchService:
         Args:
             repo_path: Direct path to repository directory
             search_request: Search request parameters
+            hnsw_cache: HNSW index cache to pass to BackendFactory.create.
+                When omitted (default sentinel), the server-global
+                _server_hnsw_cache is used (single-repo hot path).
+                Pass ``None`` explicitly to bypass the cache (fan-out path).
 
         Returns:
             Semantic search response with ranked results
@@ -147,6 +158,7 @@ class SemanticSearchService:
             exclude_language=search_request.exclude_language,
             exclude_path=search_request.exclude_path,
             accuracy=search_request.accuracy,
+            hnsw_cache=hnsw_cache,
         )
 
         return SemanticSearchResponse(
@@ -264,6 +276,7 @@ class SemanticSearchService:
         exclude_path: Optional[str] = None,
         accuracy: Optional[str] = None,
         provider_name_override: Optional[str] = None,
+        hnsw_cache: object = _HNSW_CACHE_USE_SERVER_DEFAULT,
     ) -> List[SearchResultItem]:
         """
         Perform real semantic search using repository-specific configuration.
@@ -298,14 +311,24 @@ class SemanticSearchService:
                 extra={"correlation_id": get_correlation_id()},
             )
 
-            # Create backend using BackendFactory (Story #526: pass server cache)
-            # Import here to avoid circular dependency
-            from ..app import _server_hnsw_cache
+            # Create backend using BackendFactory (Story #526: pass server cache).
+            # Bug #881 Phase 3: fan-out callers pass hnsw_cache=None to prevent
+            # global cache pollution; single-repo hot path uses server singleton.
+            # resolved_hnsw_cache is Any: the parameter is typed `object` to hold
+            # the sentinel, but the resolved value is Optional[HNSWIndexCache].
+            # The type system cannot narrow from sentinel identity check to the
+            # concrete cache type without Any.
+            if hnsw_cache is _HNSW_CACHE_USE_SERVER_DEFAULT:
+                from ..app import _server_hnsw_cache
+
+                resolved_hnsw_cache: Any = _server_hnsw_cache
+            else:
+                resolved_hnsw_cache = hnsw_cache
 
             backend = BackendFactory.create(
                 config=config,
                 project_root=Path(repo_path),
-                hnsw_cache=_server_hnsw_cache,
+                hnsw_cache=resolved_hnsw_cache,
             )
             vector_store_client = backend.get_vector_store_client()
 

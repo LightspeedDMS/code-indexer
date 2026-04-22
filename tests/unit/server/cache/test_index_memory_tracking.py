@@ -15,6 +15,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+import sys
 from typing import Any, Dict, Tuple
 from unittest.mock import MagicMock
 
@@ -72,14 +73,20 @@ class TestHNSWIndexCacheGetOrLoadCapturesRealSize(unittest.TestCase):
         self.cache.stop_background_cleanup()
 
     def test_get_or_load_stores_index_size_bytes_from_index_file_size(self) -> None:
-        """After get_or_load, cache entry index_size_bytes must match index_file_size()."""
-        expected_bytes = 104857600  # 100 MB
+        """After get_or_load, index_size_bytes must equal index_file_size() + sys.getsizeof(id_mapping).
+
+        Bug #881 Phase 4: id_mapping dict overhead is now included so the cache
+        size cap has an accurate view of total Python memory usage.
+        """
+        file_size_bytes = 104857600  # 100 MB
+        empty_id_mapping: Dict = {}
+        expected_bytes = file_size_bytes + sys.getsizeof(empty_id_mapping)
 
         mock_index = MagicMock()
-        mock_index.index_file_size.return_value = expected_bytes
+        mock_index.index_file_size.return_value = file_size_bytes
 
         def loader() -> Tuple[Any, Dict]:
-            return mock_index, {}
+            return mock_index, empty_id_mapping
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.cache.get_or_load(tmpdir, loader)
@@ -92,13 +99,16 @@ class TestHNSWIndexCacheGetOrLoadCapturesRealSize(unittest.TestCase):
             assert entry is not None
             self.assertEqual(entry.index_size_bytes, expected_bytes)
 
-    def test_get_or_load_stores_zero_when_index_file_size_raises(self) -> None:
-        """When index_file_size() raises AttributeError, index_size_bytes must be 0."""
+    def test_get_or_load_stores_id_mapping_size_when_index_file_size_raises_attribute_error(
+        self,
+    ) -> None:
+        """When index_file_size() raises AttributeError, index_size_bytes must equal sys.getsizeof(id_mapping)."""
+        empty_id_mapping: Dict = {}
         mock_index = MagicMock()
         mock_index.index_file_size.side_effect = AttributeError("no such method")
 
         def loader() -> Tuple[Any, Dict]:
-            return mock_index, {}
+            return mock_index, empty_id_mapping
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.cache.get_or_load(tmpdir, loader)
@@ -109,17 +119,18 @@ class TestHNSWIndexCacheGetOrLoadCapturesRealSize(unittest.TestCase):
 
             self.assertIsNotNone(entry)
             assert entry is not None
-            self.assertEqual(entry.index_size_bytes, 0)
+            self.assertEqual(entry.index_size_bytes, sys.getsizeof(empty_id_mapping))
 
-    def test_get_or_load_stores_zero_when_index_file_size_raises_general_exception(
+    def test_get_or_load_stores_id_mapping_size_when_index_file_size_raises_exception(
         self,
     ) -> None:
-        """When index_file_size() raises any Exception, index_size_bytes must be 0."""
+        """When index_file_size() raises any Exception, index_size_bytes must equal sys.getsizeof(id_mapping)."""
+        empty_id_mapping: Dict = {}
         mock_index = MagicMock()
         mock_index.index_file_size.side_effect = RuntimeError("unexpected error")
 
         def loader() -> Tuple[Any, Dict]:
-            return mock_index, {}
+            return mock_index, empty_id_mapping
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.cache.get_or_load(tmpdir, loader)
@@ -130,7 +141,7 @@ class TestHNSWIndexCacheGetOrLoadCapturesRealSize(unittest.TestCase):
 
             self.assertIsNotNone(entry)
             assert entry is not None
-            self.assertEqual(entry.index_size_bytes, 0)
+            self.assertEqual(entry.index_size_bytes, sys.getsizeof(empty_id_mapping))
 
 
 class TestHNSWIndexCacheGetStatsUsesRealSize(unittest.TestCase):

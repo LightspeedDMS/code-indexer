@@ -11,6 +11,7 @@ from code_indexer.server.middleware.correlation import get_correlation_id
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.services.sqlite_log_handler import SQLiteLogHandler
 from code_indexer.server.startup.bootstrap import _detect_repo_root
+from code_indexer.server.storage.database_manager import DatabaseConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -2007,6 +2008,27 @@ def make_lifespan(
         # Story #746: wire fault injection harness from bootstrap config
         _apply_fault_injection_state(app, startup_config)
 
+        # Bug #878 Fix A.2: start the DatabaseConnectionManager cleanup daemon.
+        # The former get_connection() piggyback trigger was removed because it
+        # lost races against thread churn (RC-3).  A dedicated wall-clock
+        # daemon now sweeps stale connections across ALL registered instances
+        # on a fixed cadence, decoupled from request/query traffic.
+        try:
+            DatabaseConnectionManager.start_cleanup_daemon()
+            logger.info(
+                "DatabaseConnectionManager cleanup daemon started (Bug #878 Fix A.2)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-034",
+                    f"Failed to start DatabaseConnectionManager cleanup daemon: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         yield  # Server is now running
 
         # Story #578: Stop config reload thread before cluster services
@@ -2284,6 +2306,26 @@ def make_lifespan(
                         extra={"correlation_id": get_correlation_id()},
                     )
                 )
+
+        # Bug #878 Fix A.2: stop the DatabaseConnectionManager cleanup daemon.
+        # Symmetric with the startup call; ensures the daemon thread joins
+        # cleanly within DEFAULT_CLEANUP_STOP_TIMEOUT_SECONDS so the process
+        # exits promptly and does not leak a background sweep thread.
+        try:
+            DatabaseConnectionManager.stop_cleanup_daemon()
+            logger.info(
+                "DatabaseConnectionManager cleanup daemon stopped (Bug #878 Fix A.2)",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-035",
+                    f"Error stopping DatabaseConnectionManager cleanup daemon: {e}",
+                    exc_info=True,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
 
         # Shutdown: Clean up other resources
         logger.info(

@@ -20,6 +20,21 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
+# Bug #878 Fix A.2: Named operational constants for the wall-clock cleanup
+# daemon. Centralised here so they can be overridden by future config wiring
+# and kept consistent with the historical CLEANUP_INTERVAL (60 s).
+#
+# DEFAULT_CLEANUP_INTERVAL_SECONDS: sweep cadence for the daemon. Matches the
+# legacy DatabaseConnectionManager.CLEANUP_INTERVAL so production behaviour
+# is unchanged when no interval is passed explicitly.
+DEFAULT_CLEANUP_INTERVAL_SECONDS: float = 60.0
+
+# DEFAULT_CLEANUP_STOP_TIMEOUT_SECONDS: maximum time stop_cleanup_daemon()
+# will wait for the daemon thread to exit.  2 s is comfortably larger than
+# one Event.wait() tick yet short enough to keep shutdown snappy.
+DEFAULT_CLEANUP_STOP_TIMEOUT_SECONDS: float = 2.0
+
+
 class DatabaseSchema:
     """
     Manages SQLite database schema creation and initialization.
@@ -1220,26 +1235,40 @@ class DatabaseConnectionManager:
     _last_global_cleanup: float = 0.0
     _global_cleanup_lock: threading.Lock = threading.Lock()
 
+    # Bug #878 Fix A.2: Dedicated wall-clock cleanup daemon state.  Piggybacked
+    # cleanup on get_connection() traffic was demand-driven and lost races to
+    # short-lived thread churn (observed cleanup gaps of 1-16 minutes in
+    # production).  A background daemon thread wakes on a fixed wall-clock
+    # cadence and sweeps every registered instance regardless of traffic.
+    _cleanup_thread: Optional[threading.Thread] = None
+    _cleanup_stop_event: Optional[threading.Event] = None
+    _cleanup_daemon_lock: threading.Lock = threading.Lock()
+
     @classmethod
     def _cleanup_all_instances(cls) -> None:
         """
-        Clean stale connections across ALL singleton instances.
+        Clean stale connections across ALL singleton instances (throttled).
 
         Bug #517: When only per-instance cleanup existed, infrequently-accessed
-        instances never had their dead-thread connections removed.  Now, whenever
-        ANY instance's get_connection() fires the 60 s timer, every instance in
-        the registry is swept, bounding FD growth regardless of access pattern.
+        instances never had their dead-thread connections removed.  Every
+        registered instance is swept, bounding FD growth regardless of access
+        pattern.
 
         Throttled by _last_global_cleanup / _global_cleanup_lock at the class
         level so the sweep runs at most once per CLEANUP_INTERVAL across the
-        entire process.
+        entire process.  Retained for backward compatibility with historical
+        callers (e.g. tests asserting Bug #517 throttle semantics).  The
+        dedicated cleanup daemon (Bug #878 Fix A.2) calls
+        _sweep_all_instances_unthrottled directly instead, because the daemon's
+        wall-clock interval already provides throttling.
         """
         with cls._global_cleanup_lock:
             now = time.time()
             # Re-check inside the lock (double-checked locking pattern)
             # CLEANUP_INTERVAL is an instance attribute; use a sentinel default
             interval = next(
-                (inst.CLEANUP_INTERVAL for inst in cls._instances.values()), 60.0
+                (inst.CLEANUP_INTERVAL for inst in cls._instances.values()),
+                DEFAULT_CLEANUP_INTERVAL_SECONDS,
             )
             if (now - cls._last_global_cleanup) <= interval:
                 return
@@ -1248,6 +1277,164 @@ class DatabaseConnectionManager:
 
         for inst in instances_snapshot:
             inst._cleanup_stale_connections()
+
+    @classmethod
+    def _sweep_all_instances_unthrottled(cls) -> None:
+        """
+        Unthrottled sweep across ALL singleton instances.
+
+        Bug #878 Fix A.2: The cleanup daemon calls this on every tick because
+        the daemon's wall-clock interval IS the throttle.  We still update
+        _last_global_cleanup for telemetry continuity so dashboards and log
+        audits that watch that timestamp keep working.
+        """
+        with cls._global_cleanup_lock:
+            cls._last_global_cleanup = time.time()
+            instances_snapshot = list(cls._instances.values())
+
+        for inst in instances_snapshot:
+            inst._cleanup_stale_connections()
+
+    @classmethod
+    def start_cleanup_daemon(
+        cls, interval: float = DEFAULT_CLEANUP_INTERVAL_SECONDS
+    ) -> None:
+        """
+        Start the wall-clock cleanup daemon. Idempotent.
+
+        Bug #878 Fix A.2: Spawns a single background thread that wakes every
+        `interval` seconds and invokes cls._cleanup_all_instances(), sweeping
+        every registered DatabaseConnectionManager regardless of whether any
+        thread called get_connection() recently.  This replaces the
+        demand-driven piggyback cleanup that lost races to short-lived
+        BackgroundJob thread churn.
+
+        If a daemon is already running, this is a no-op: the existing thread
+        keeps its prior interval.  Use stop_cleanup_daemon() +
+        start_cleanup_daemon() to change cadence.
+
+        Args:
+            interval: Seconds between sweeps.  Must be > 0.  Defaults to
+                DEFAULT_CLEANUP_INTERVAL_SECONDS (60 s), matching the
+                historical CLEANUP_INTERVAL.
+
+        Raises:
+            ValueError: If `interval` is not strictly positive.
+        """
+        if not interval > 0:
+            raise ValueError(
+                f"start_cleanup_daemon: interval must be > 0, got {interval}"
+            )
+        with cls._cleanup_daemon_lock:
+            if cls._cleanup_thread is not None and cls._cleanup_thread.is_alive():
+                return
+            cls._cleanup_stop_event = threading.Event()
+            cls._cleanup_thread = threading.Thread(
+                target=cls._cleanup_daemon_loop,
+                args=(interval,),
+                name="DatabaseConnectionManager-cleanup-daemon",
+                daemon=True,
+            )
+            cls._cleanup_thread.start()
+            logger.info(
+                "DatabaseConnectionManager cleanup daemon started (interval=%ss)",
+                interval,
+            )
+
+    @classmethod
+    def stop_cleanup_daemon(
+        cls, timeout: float = DEFAULT_CLEANUP_STOP_TIMEOUT_SECONDS
+    ) -> None:
+        """
+        Stop the cleanup daemon cleanly.
+
+        Bug #878 Fix A.2: Signals the daemon's stop Event, joins with a bounded
+        timeout, and -- only if the thread has actually exited AND the class
+        references still point to the thread we were asked to stop -- clears
+        those references so a subsequent start_cleanup_daemon() call can spawn
+        a fresh daemon.
+
+        The identity check (`cls._cleanup_thread is thread`) is required
+        because, while this method is blocked in `thread.join()`, another
+        caller may observe the old thread exit, invoke start_cleanup_daemon(),
+        and install a brand-new thread/event pair.  Blindly clearing the
+        class references after the outer join would then null out the newer
+        daemon's bookkeeping while the newer daemon is still running,
+        breaking the single-daemon invariant.
+
+        If join() times out (thread still alive), the class references are
+        preserved so a later start call remains a no-op rather than spawning
+        a second daemon alongside the stuck one.
+
+        Safe to call when no daemon is running (no-op).
+
+        Args:
+            timeout: Max seconds to wait for the daemon thread to exit.  Must
+                be >= 0.  Defaults to DEFAULT_CLEANUP_STOP_TIMEOUT_SECONDS (2 s).
+
+        Raises:
+            ValueError: If `timeout` is negative.
+        """
+        if timeout < 0:
+            raise ValueError(
+                f"stop_cleanup_daemon: timeout must be >= 0, got {timeout}"
+            )
+        with cls._cleanup_daemon_lock:
+            thread = cls._cleanup_thread
+            stop = cls._cleanup_stop_event
+        if thread is None or stop is None:
+            return
+        stop.set()
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            # Join timed out.  Do NOT clear class references -- keeping the
+            # live thread recorded preserves the single-daemon invariant so a
+            # later start_cleanup_daemon() call remains a no-op instead of
+            # spawning a second daemon alongside this stuck one.
+            logger.warning(
+                "DatabaseConnectionManager cleanup daemon did not exit within "
+                "%ss; keeping thread reference to preserve single-daemon "
+                "invariant",
+                timeout,
+            )
+            return
+        with cls._cleanup_daemon_lock:
+            # Identity-guarded clear: only null the class references if they
+            # still point to the thread/event pair we just joined.  A
+            # concurrent start_cleanup_daemon() between our thread.join()
+            # returning and reacquiring this lock may have already installed
+            # a newer daemon.
+            if cls._cleanup_thread is thread and cls._cleanup_stop_event is stop:
+                cls._cleanup_thread = None
+                cls._cleanup_stop_event = None
+                logger.info("DatabaseConnectionManager cleanup daemon stopped")
+            else:
+                logger.info(
+                    "DatabaseConnectionManager cleanup daemon stopped; "
+                    "a newer daemon is already running (class references "
+                    "preserved)"
+                )
+
+    @classmethod
+    def _cleanup_daemon_loop(cls, interval: float) -> None:
+        """
+        Daemon loop body.
+
+        Wakes every `interval` seconds (or earlier if the stop event is set)
+        and invokes cls._sweep_all_instances_unthrottled().  The daemon's
+        own wall-clock interval IS the throttle, so bypassing the
+        60-second Bug #517 throttle on _cleanup_all_instances is
+        intentional.  Any exception raised by the sweep is logged and
+        swallowed so a single bad iteration cannot kill the daemon --
+        the next tick will retry.
+        """
+        stop = cls._cleanup_stop_event
+        assert stop is not None, "cleanup daemon started without stop event"
+        while not stop.wait(interval):
+            try:
+                cls._sweep_all_instances_unthrottled()
+            except Exception as exc:
+                logger.warning("Cleanup daemon sweep raised, continuing: %s", exc)
 
     @classmethod
     def get_instance(cls, db_path: str) -> "DatabaseConnectionManager":
@@ -1318,6 +1505,60 @@ class DatabaseConnectionManager:
             if stale_ids:
                 logger.info(f"Cleaned up {len(stale_ids)} stale SQLite connections")
 
+    def close_thread_connection(self) -> None:
+        """
+        Close and untrack the calling thread's connection.  Bug #878 Fix A.3.
+
+        Called from BackgroundJobManager._execute_job's outer finally block
+        to proactively release SQLite file descriptors at thread exit
+        instead of relying on the wall-clock cleanup daemon
+        (Bug #878 Fix A.2) to discover the TID as stale some seconds
+        later.  Under heavy job-thread churn the daemon cannot keep up
+        (see Root Cause RC-3), so closing at the source of the churn
+        eliminates the race entirely.
+
+        Semantics:
+          - Pops any tracked connection for the current TID out of
+            self._connections (under self._lock).
+          - Closes both the tracked connection and the thread-local
+            connection reference, if they differ.  Double-close is
+            harmless on sqlite3.Connection, but we guard against it
+            anyway by only closing each object once.
+          - Resets self._local.connection to None so a subsequent
+            get_connection() on this same thread would open a fresh
+            connection (rather than reuse the just-closed one).
+          - Swallows individual close() exceptions with a WARNING log
+            so a single broken connection cannot leave state half-
+            cleaned up.  The outer finally in _execute_job also
+            catches exceptions raised by this whole method so one
+            broken manager cannot stop cleanup on sibling managers.
+        """
+        tid = threading.get_ident()
+        with self._lock:
+            tracked = self._connections.pop(tid, None)
+        local_conn = getattr(self._local, "connection", None)
+        try:
+            if local_conn is not None:
+                try:
+                    local_conn.close()
+                except Exception as exc:
+                    logger.warning(
+                        "close_thread_connection: local close raised for tid=%s: %s",
+                        tid,
+                        exc,
+                    )
+            if tracked is not None and tracked is not local_conn:
+                try:
+                    tracked.close()
+                except Exception as exc:
+                    logger.warning(
+                        "close_thread_connection: tracked close raised for tid=%s: %s",
+                        tid,
+                        exc,
+                    )
+        finally:
+            self._local.connection = None
+
     def get_connection(self) -> sqlite3.Connection:
         """
         Get thread-local database connection.
@@ -1337,15 +1578,40 @@ class DatabaseConnectionManager:
             conn.execute("PRAGMA busy_timeout = 30000")
             self._local.connection = conn
 
-            # Track connection for cleanup
+            # Track connection for cleanup.
+            # Bug #878 Fix A.1: Close-on-clobber. When a Linux OS thread ID
+            # (TID) is recycled, a new BackgroundJob thread may land on the
+            # same TID as a previous dead thread. Its threading.local is
+            # empty, so a fresh connection is opened, but the prior
+            # connection remains tracked at this TID. Without the explicit
+            # close below, that connection leaks silently until Python GC
+            # collects it -- and GC timing is non-deterministic, so FDs can
+            # accumulate faster than GC drains them.
             with self._lock:
+                existing = self._connections.get(thread_id)
+                if existing is not None and existing is not conn:
+                    try:
+                        existing.close()
+                    except Exception as exc:
+                        # Best-effort close: log and continue so the new
+                        # connection still replaces the stale entry.
+                        logger.warning(
+                            "Failed to close clobbered SQLite connection "
+                            "for thread %s: %s",
+                            thread_id,
+                            exc,
+                        )
                 self._connections[thread_id] = conn
 
-        # Piggyback stale connection cleanup (throttled).
-        # Bug #517: use class-level global cleanup so ALL instances are swept,
-        # not just this one.
-        if (time.time() - self.__class__._last_global_cleanup) > self.CLEANUP_INTERVAL:
-            self.__class__._cleanup_all_instances()
+        # Bug #878 Fix A.2: The piggyback cleanup check that used to fire
+        # here has been removed.  Cleanup is now driven by the dedicated
+        # wall-clock daemon started via DatabaseConnectionManager
+        # .start_cleanup_daemon() during FastAPI lifespan startup.  That
+        # daemon sweeps all registered instances on a fixed cadence
+        # regardless of get_connection() traffic, eliminating the
+        # demand-driven race (Root Cause RC-3) where short-lived thread
+        # churn outpaced the piggyback sweep.  _last_global_cleanup is
+        # still maintained by _cleanup_all_instances() for telemetry.
 
         connection: sqlite3.Connection = self._local.connection
         return connection

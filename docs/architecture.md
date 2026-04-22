@@ -585,6 +585,39 @@ Pass 3 parses all domain `.md` files to construct a directed edge list showing w
 - `dependency_map_pass_timeout_seconds`: Per-pass timeout (default: 1800s)
 - `dependency_map_pass{1,2,3}_max_turns`: Claude CLI turn limits per pass
 
+## Server Memory Management (v9.20.13+)
+
+Long-running CIDX server deployments accumulate two classes of native-memory pressure under sustained background-job traffic. Bug #878 addressed both with a defensive runtime architecture.
+
+### SQLite Connection Lifecycle (Bug #878 Fix A)
+
+`DatabaseConnectionManager` keeps one `sqlite3.Connection` per OS thread via `threading.local` plus a class-level `_connections: Dict[thread_id, connection]` registry. Long-lived uvicorn worker threads hold these connections across request boundaries; short-lived `BackgroundJob` threads, however, can churn faster than any demand-driven cleanup can keep up. Three fixes address three distinct leak vectors:
+
+| Fix | Vector | Mitigation |
+|-----|--------|------------|
+| A.1 | **TID recycling** — Linux reuses thread IDs; a new thread landing on a dead thread's TID previously clobbered the old connection in `_connections` without closing it, leaking FDs until GC | `get_connection()` now checks the existing entry under `self._lock` and explicitly `.close()`s it before storing the new connection |
+| A.2 | **Demand-driven sweep** — piggyback cleanup fired from `get_connection()` lost races to bursty thread churn (observed cleanup gaps of 1-16 minutes) | Dedicated `DatabaseConnectionManager-cleanup-daemon` thread wakes every `DEFAULT_CLEANUP_INTERVAL_SECONDS` (60s) on a `threading.Event` and sweeps all registered instances. Started from FastAPI lifespan (`start_cleanup_daemon`), stopped with bounded join and identity-guarded reference clearing |
+| A.3 | **Daemon catch-up lag** — even a 60s-cadence daemon cannot reclaim connections opened by a worker thread that exits 500ms after spawning | `BackgroundJobManager._execute_job` outer finally + `_execute_with_cancellation_check` inner worker finally iterate `DatabaseConnectionManager._instances` and call `close_thread_connection()` on each, releasing FDs at the source of churn |
+
+Operational visibility: startup emits `DatabaseConnectionManager cleanup daemon started (interval=60.0s)`; each sweep that reaps connections emits `Cleaned up N stale SQLite connections`; shutdown emits `DatabaseConnectionManager cleanup daemon stopped`. Error codes `APP-GENERAL-034`/`035` wrap startup/shutdown failures.
+
+### HNSW/FTS Cache Size Cap (Bug #878 Fix B)
+
+`HNSWIndexCache` and `FTSIndexCache` are singletons with access-based TTL eviction. Without a hard byte cap, hot repositories that continuously refresh TTL kept growing native memory indefinitely. Two fixes:
+
+- **B.1 — opinionated default cap**: `src/code_indexer/server/cache/__init__.py` exports `DEFAULT_MAX_CACHE_SIZE_MB = 4096`. When `get_global_cache()` / `get_global_fts_cache()` constructs the singleton and finds `config.max_cache_size_mb is None`, the helper `_apply_default_size_cap()` overlays 4096MB and logs `Applying default max_cache_size_mb=4096MB for HNSW/FTS cache. Set an explicit value in server config to override.` Dataclass defaults remain `None`, so explicit operator configuration — including explicit "no cap" (a very large number) — is preserved verbatim.
+- **B.2 — runtime hot-reload**: `ConfigService._update_cache_setting()` detects writes to `index_cache_max_size_mb` or `fts_cache_max_size_mb` and calls `_hot_reload_cache_size_cap()`, which acquires the live singleton's `_cache_lock`, overwrites `cache.config.max_cache_size_mb`, and runs `_enforce_size_limit()`. Entries exceeding the new cap are evicted immediately — no server restart required. Scope is narrow by design: only the two size-cap keys hot-reload; all other cache settings write through to config only.
+
+### Where It Is Wired
+
+| Concern | Module | Symbol |
+|---------|--------|--------|
+| Cleanup daemon lifecycle | `src/code_indexer/server/startup/lifespan.py` | `DatabaseConnectionManager.start_cleanup_daemon()` / `stop_cleanup_daemon()` |
+| Close-on-clobber | `src/code_indexer/server/storage/database_manager.py` | `DatabaseConnectionManager.get_connection()` |
+| Finally-close | `src/code_indexer/server/repositories/background_jobs.py` | `BackgroundJobManager._close_thread_connections_on_all_managers()` |
+| Cap default | `src/code_indexer/server/cache/__init__.py` | `DEFAULT_MAX_CACHE_SIZE_MB`, `_apply_default_size_cap()` |
+| Cap hot-reload | `src/code_indexer/server/services/config_service.py` | `ConfigService._hot_reload_cache_size_cap()` |
+
 ## Related Documentation
 
 - **[Algorithms](algorithms.md)** - Detailed algorithm descriptions and complexity analysis

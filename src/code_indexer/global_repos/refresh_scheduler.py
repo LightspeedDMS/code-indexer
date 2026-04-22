@@ -1310,6 +1310,36 @@ class RefreshScheduler:
                     old_target=current_target,
                 )
 
+                # Bug #881 Phase 2: Evict stale HNSW cache entries for the old snapshot
+                # immediately after swap, rather than waiting for 10-minute TTL.
+                # format_error_log imported before try so it is always bound in except.
+                # get_global_cache and get_correlation_id imported inside try because they
+                # are only available in server context; the except guard covers import failures.
+                from code_indexer.server.logging_utils import (
+                    format_error_log as _fmt_err,
+                )
+
+                try:
+                    from code_indexer.server.cache import get_global_cache
+                    from code_indexer.server.middleware.correlation import (
+                        get_correlation_id as _get_corr_id,
+                    )
+
+                    _evicted = get_global_cache().invalidate_prefix(current_target)
+                    logger.info(
+                        f"[REFRESH-{alias_name}] Evicted {_evicted} HNSW cache entries "
+                        f"for old snapshot {current_target}",
+                        extra={"correlation_id": _get_corr_id()},
+                    )
+                except Exception as _cache_evict_err:
+                    logger.warning(
+                        _fmt_err(
+                            "REPO-GENERAL-055",
+                            f"Failed to evict HNSW cache for old snapshot "
+                            f"{current_target}: {_cache_evict_err}",
+                        )
+                    )
+
                 # Story #236 Fix 1: Only schedule cleanup for versioned snapshots.
                 # Never schedule cleanup for the master golden repo (golden-repos/{alias}/).
                 # On first refresh, current_target IS the master golden repo — scheduling it

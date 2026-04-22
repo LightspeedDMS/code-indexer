@@ -817,6 +817,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.multi_search.omni_pattern_metacharacters }}</td>
                         <td class="config-note"><small>Characters treated as glob pattern metacharacters (default: *?[]^$+|)</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Omni Wildcard Expansion Cap</td>
+                        <td class="config-value">{{ config.multi_search.omni_wildcard_expansion_cap }}</td>
+                        <td class="config-note"><small>Max repos a wildcard pattern may expand to. Protects the server from fan-out memory pressure (default: 50).</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -896,6 +901,11 @@ function saveLlmCredsConfig() {
                     Omni Pattern Metacharacters
                     <input type="text" id="omni-pattern-metacharacters" name="omni_pattern_metacharacters" value="{{ config.multi_search.omni_pattern_metacharacters }}">
                     <small>Characters treated as glob pattern metacharacters (default: *?[]^$+|).</small>
+                </label>
+                <label for="omni-wildcard-expansion-cap">
+                    Omni Wildcard Expansion Cap
+                    <input type="number" id="omni-wildcard-expansion-cap" name="omni_wildcard_expansion_cap" value="{{ config.multi_search.omni_wildcard_expansion_cap }}" min="1" max="10000">
+                    <small>Maximum repos a wildcard MCP pattern may expand to (default: 50).</small>
                 </label>
             </div>
             <div class="form-actions">
@@ -1350,7 +1360,8 @@ function saveLlmCredsConfig() {
                     </tr>
                     <tr>
                         <td class="config-label">Index Cache Max Size (MB)</td>
-                        <td class="config-value">{{ config.cache.index_cache_max_size_mb or 'Unlimited' }}</td>
+                        {# Bug #880: use explicit `is none` to avoid conflating None/0/"" (old `or` shorthand was a lie after hot-reload cleared the cap) #}
+                        <td class="config-value">{% if config.cache.index_cache_max_size_mb is none %}4096 (default){% else %}{{ config.cache.index_cache_max_size_mb }}{% endif %}</td>
                         <td class="config-note"></td>
                     </tr>
                     <tr>
@@ -1365,7 +1376,8 @@ function saveLlmCredsConfig() {
                     </tr>
                     <tr>
                         <td class="config-label">FTS Cache Max Size (MB)</td>
-                        <td class="config-value">{{ config.cache.fts_cache_max_size_mb or 'Unlimited' }}</td>
+                        {# Bug #880: use explicit `is none` to avoid conflating None/0/"" (old `or` shorthand was a lie after hot-reload cleared the cap) #}
+                        <td class="config-value">{% if config.cache.fts_cache_max_size_mb is none %}4096 (default){% else %}{{ config.cache.fts_cache_max_size_mb }}{% endif %}</td>
                         <td class="config-note"></td>
                     </tr>
                     <tr>
@@ -1414,6 +1426,11 @@ function saveLlmCredsConfig() {
                     Index Cache Cleanup Interval (sec)
                     <input type="number" id="cache-index-cleanup" name="index_cache_cleanup_interval" value="{{ config.cache.index_cache_cleanup_interval }}" min="1">
                 </label>
+                <label for="cache-index-max-size">
+                    Index Cache Max Size (MB)
+                    <input type="number" id="cache-index-max-size" name="index_cache_max_size_mb" value="{% if config.cache.index_cache_max_size_mb is none %}{% else %}{{ config.cache.index_cache_max_size_mb }}{% endif %}" min="1">
+                    <small>Leave empty to use the 4096 MiB default</small>
+                </label>
                 <label for="cache-fts-ttl">
                     FTS Cache TTL (minutes)
                     <input type="number" id="cache-fts-ttl" name="fts_cache_ttl_minutes" value="{{ config.cache.fts_cache_ttl_minutes }}" min="1" step="0.1">
@@ -1421,6 +1438,11 @@ function saveLlmCredsConfig() {
                 <label for="cache-fts-cleanup">
                     FTS Cache Cleanup Interval (sec)
                     <input type="number" id="cache-fts-cleanup" name="fts_cache_cleanup_interval" value="{{ config.cache.fts_cache_cleanup_interval }}" min="1">
+                </label>
+                <label for="cache-fts-max-size">
+                    FTS Cache Max Size (MB)
+                    <input type="number" id="cache-fts-max-size" name="fts_cache_max_size_mb" value="{% if config.cache.fts_cache_max_size_mb is none %}{% else %}{{ config.cache.fts_cache_max_size_mb }}{% endif %}" min="1">
+                    <small>Leave empty to use the 4096 MiB default</small>
                 </label>
                 <label for="cache-payload-preview">
                     Payload Preview Size (chars)

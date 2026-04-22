@@ -231,6 +231,9 @@ class TestDeduplicationContext:
                     "abc123def456",
                     "1,2,3",
                     "src/auth.py",
+                    # Computed from utcnow() above so the row is always within
+                    # the 90-day FINGERPRINT_RETENTION_DAYS window, regardless
+                    # of when the test runs (hardcoded dates rot over time).
                     _issue_created_at,
                 ),
             )
