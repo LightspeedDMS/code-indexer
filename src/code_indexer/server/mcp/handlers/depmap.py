@@ -12,10 +12,30 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+from code_indexer.server.services.dep_map_parser_hygiene import (
+    AnomalyAggregate,
+    AnomalyEntry,
+)
+
 from . import _utils
 from ._utils import _mcp_response
 
 logger = logging.getLogger(__name__)
+
+
+def _anomaly_to_dict(anomaly: "AnomalyEntry | AnomalyAggregate") -> Dict[str, str]:
+    """Convert an AnomalyEntry or AnomalyAggregate to a JSON-serializable dict.
+
+    AnomalyEntry    → {"file": entry.file, "error": entry.message}
+    AnomalyAggregate → {"file": "<aggregated>",
+                        "error": "<N> occurrences: <type>"}
+    """
+    if isinstance(anomaly, AnomalyAggregate):
+        return {
+            "file": "<aggregated>",
+            "error": f"{anomaly.count} occurrences: {anomaly.type.value}",
+        }
+    return {"file": anomaly.file, "error": anomaly.message}
 
 
 def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str, Any]:
@@ -205,15 +225,35 @@ def depmap_get_cross_domain_graph_handler(
 
     Returns:
         MCP-compliant response dict:
-        - success=true:  {"success": true, "edges": [...], "anomalies": [...]}
-        - success=false: {"success": false, "error": "...", "edges": [], "anomalies": []}
+        - success=true:  {"success": true, "edges": [...], "anomalies": [...],
+                          "parser_anomalies": [...], "data_anomalies": [...]}
+        - success=false: {"success": false, "error": "...", "edges": [],
+                          "anomalies": [], "parser_anomalies": [], "data_anomalies": []}
     """
     parser, err = _resolve_parser("depmap_get_cross_domain_graph")
     if err is not None:
-        return _mcp_response({**err, "edges": [], "anomalies": []})
+        return _mcp_response(
+            {
+                **err,
+                "edges": [],
+                "anomalies": [],
+                "parser_anomalies": [],
+                "data_anomalies": [],
+            }
+        )
 
-    edges, anomalies = parser.get_cross_domain_graph()
-    return _mcp_response({"success": True, "edges": edges, "anomalies": anomalies})
+    edges, all_anomalies, parser_anomalies, data_anomalies = (
+        parser.get_cross_domain_graph_with_channels()
+    )
+    return _mcp_response(
+        {
+            "success": True,
+            "edges": edges,
+            "anomalies": [_anomaly_to_dict(a) for a in all_anomalies],
+            "parser_anomalies": [_anomaly_to_dict(a) for a in parser_anomalies],
+            "data_anomalies": [_anomaly_to_dict(a) for a in data_anomalies],
+        }
+    )
 
 
 def _register(registry: Dict[str, Any]) -> None:
