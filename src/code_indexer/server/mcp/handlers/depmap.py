@@ -521,8 +521,7 @@ def depmap_get_cross_domain_graph_handler(
         if isinstance(value, list) and all(isinstance(el, str) for el in value):
             return value, None
         return None, (
-            f"'{field}' must be a string or list of strings, "
-            f"got {type(value).__name__}"
+            f"'{field}' must be a string or list of strings, got {type(value).__name__}"
         )
 
     # Strict validation: min_count accepts only None or plain int >= 1.
@@ -534,13 +533,10 @@ def depmap_get_cross_domain_graph_handler(
             return None, None
         if type(value) is not int:
             return None, (
-                f"'min_count' must be a positive integer, "
-                f"got {type(value).__name__}"
+                f"'min_count' must be a positive integer, got {type(value).__name__}"
             )
         if value < 1:
-            return None, (
-                f"'min_count' must be >= 1 (schema minimum), got {value}"
-            )
+            return None, (f"'min_count' must be >= 1 (schema minimum), got {value}")
         return value, None
 
     def _invalid_graph_response(error_msg: str) -> Dict[str, Any]:
