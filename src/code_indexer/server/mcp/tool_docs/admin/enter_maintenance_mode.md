@@ -3,6 +3,13 @@ name: enter_maintenance_mode
 category: admin
 required_permission: manage_users
 tl_dr: Enter server maintenance mode (admin only).
+inputSchema:
+  type: object
+  properties:
+    message:
+      type: string
+      description: Optional custom maintenance message
+  required: []
 ---
 
 Enter server maintenance mode (admin only). Stops accepting new background jobs while allowing running jobs to complete. Query endpoints remain available during maintenance.

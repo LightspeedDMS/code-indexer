@@ -3,6 +3,72 @@ name: git_file_history
 category: git
 required_permission: query_repos
 tl_dr: Get all commits that modified a specific file.
+inputSchema:
+  type: object
+  properties:
+    repository_alias:
+      type: string
+      description: Repository alias or full path.
+    path:
+      type: string
+      description: 'Path to file (relative to repo root). Must be a file path, not directory. Examples: ''src/auth/login.py'',
+        ''package.json'', ''docs/API.md''.'
+    limit:
+      type: integer
+      description: 'Maximum commits to return. Default: 50. Range: 1-500. For files with long history, start with lower limits
+        and use date filters to narrow results.'
+      default: 50
+      minimum: 1
+      maximum: 500
+    follow_renames:
+      type: boolean
+      description: 'Follow file history across renames. Default: true.'
+      default: true
+    rerank_query:
+      type: string
+      description: 'Query for cross-encoder reranking. When set, file history commits are semantically reranked before return. Leave empty to preserve the default chronological order.'
+    rerank_instruction:
+      type: string
+      description: 'Optional instruction prefix for the reranker (e.g. ''Find commits that introduced bugs''). Has no effect without rerank_query. Steers ranking only; does not change which commits are included.'
+  required:
+  - repository_alias
+  - path
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+    path:
+      type: string
+    commits:
+      type: array
+    total_count:
+      type: integer
+    truncated:
+      type: boolean
+    renamed_from:
+      type:
+      - string
+      - 'null'
+    query_metadata:
+      type: object
+      description: Reranking telemetry when rerank_query is provided
+      properties:
+        reranker_used:
+          type: boolean
+          description: Whether cross-encoder reranking was actually applied
+        reranker_provider:
+          type:
+          - string
+          - 'null'
+          description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+        rerank_time_ms:
+          type: integer
+          description: Time spent in the reranking stage in milliseconds
+    error:
+      type: string
+  required:
+  - success
 ---
 
 TL;DR: Get all commits that modified a specific file. WHEN TO USE: (1) Track file evolution, (2) Find when bug was introduced, (3) See who worked on a file. WHEN NOT TO USE: Repo-wide history -> git_log | Line attribution -> git_blame | View old version -> git_file_at_revision. RELATED TOOLS: git_log (repo-wide history, can also filter by path), git_blame (who wrote each line), git_file_at_revision (view file at commit).

@@ -3,6 +3,18 @@ name: admin_delete_user_mcp_credential
 category: admin
 required_permission: manage_users
 tl_dr: Delete an MCP credential for a specific user (admin only).
+inputSchema:
+  type: object
+  properties:
+    username:
+      type: string
+      description: The username whose MCP credential to delete
+    credential_id:
+      type: string
+      description: The unique identifier of the MCP credential to delete
+  required:
+  - username
+  - credential_id
 ---
 
 Delete an MCP credential for a specific user (admin only). The credential will be immediately invalidated.

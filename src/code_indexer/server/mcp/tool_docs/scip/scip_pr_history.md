@@ -3,6 +3,16 @@ name: scip_pr_history
 category: scip
 required_permission: manage_users
 tl_dr: Get SCIP self-healing PR creation history (admin only).
+inputSchema:
+  type: object
+  properties:
+    limit:
+      type: integer
+      description: Maximum number of history entries to return
+      default: 100
+      minimum: 1
+      maximum: 1000
+  required: []
 ---
 
 Get SCIP self-healing PR creation history (admin only). Returns history of pull requests created by the SCIP self-healing system for dependency resolution and fix proposals.

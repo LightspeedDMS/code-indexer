@@ -3,6 +3,14 @@ name: get_group
 category: admin
 required_permission: manage_users
 tl_dr: Get detailed information about a specific group.
+inputSchema:
+  type: object
+  properties:
+    group_id:
+      type: string
+      description: The unique identifier of the group to retrieve
+  required:
+  - group_id
 ---
 
 TL;DR: Get detailed information about a specific group. Get detailed information about a specific group including its members and accessible repositories. Use this tool to see who belongs to a group and what repositories they can access.

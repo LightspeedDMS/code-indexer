@@ -3,6 +3,20 @@ name: add_repos_to_group
 category: admin
 required_permission: manage_users
 tl_dr: Grant a group access to one or more repositories.
+inputSchema:
+  type: object
+  properties:
+    group_id:
+      type: string
+      description: The unique identifier of the group
+    repo_names:
+      type: array
+      items:
+        type: string
+      description: Array of repository names to grant access to
+  required:
+  - group_id
+  - repo_names
 ---
 
 Grant a group access to one or more repositories. Users in the group will be able to query these repositories.

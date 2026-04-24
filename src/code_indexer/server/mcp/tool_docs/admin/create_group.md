@@ -3,6 +3,17 @@ name: create_group
 category: admin
 required_permission: manage_users
 tl_dr: Create a new custom group for organizing users and repository access.
+inputSchema:
+  type: object
+  properties:
+    name:
+      type: string
+      description: Unique group name (1-100 characters)
+    description:
+      type: string
+      description: Optional group description
+  required:
+  - name
 ---
 
 TL;DR: Create a new custom group for organizing users and repository access. Custom groups can be assigned users and granted access to specific repositories. Default groups (admins, powerusers, users) cannot be created - they exist automatically.

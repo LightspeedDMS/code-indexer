@@ -3,6 +3,20 @@ name: update_group
 category: admin
 required_permission: manage_users
 tl_dr: Update a custom group name and/or description.
+inputSchema:
+  type: object
+  properties:
+    group_id:
+      type: string
+      description: The unique identifier of the group to update
+    name:
+      type: string
+      description: New group name (optional)
+    description:
+      type: string
+      description: New group description (optional)
+  required:
+  - group_id
 ---
 
 TL;DR: Update a custom group name and/or description. Update a custom group's name and/or description. Default groups (admins, powerusers, users) cannot be updated.

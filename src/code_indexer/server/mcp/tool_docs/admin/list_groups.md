@@ -3,6 +3,10 @@ name: list_groups
 category: admin
 required_permission: manage_users
 tl_dr: List all groups with member counts and repository access information.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
 ---
 
 List all groups with member counts and repository access information. Returns the default groups (admins, powerusers, users) and any custom groups. Use this tool to see what groups exist and their basic statistics before performing group management operations.

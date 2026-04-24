@@ -3,6 +3,10 @@ name: scip_cleanup_workspaces
 category: scip
 required_permission: manage_users
 tl_dr: Trigger SCIP workspace cleanup job (admin only).
+inputSchema:
+  type: object
+  properties: {}
+  required: []
 ---
 
 Trigger SCIP workspace cleanup job (admin only). Starts an async cleanup job to remove expired SCIP self-healing workspaces and reclaim disk space.

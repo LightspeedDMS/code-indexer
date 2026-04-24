@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.2
+
+### Bug Fixes
+
+- fix: **Revert v9.23.1 tool_docs regeneration — MCP tool registry collapsed on staging (~200 → 30 tools)**. The v9.23.1 maintenance step that regenerated 165 MCP `tool_docs/*.md` files via `tools/convert_tool_docs.py` produced output that, once deployed, caused the MCP server to register only ~30 of the expected tools (including losing `search_code`, which surfaced as `"Invalid params: Unknown tool: search_code"` errors on the staging MCP endpoint). Recovery: reverted all 135 modified tool_docs files to their v9.23.0 content and deleted the 30 tool_docs files that v9.23.1 newly added. The #898 analyzer prompting fix (see below) is preserved untouched — the revert is scoped to `src/code_indexer/server/mcp/tool_docs/` only.
+
 ## v9.23.1
 
 ### Bug Fixes

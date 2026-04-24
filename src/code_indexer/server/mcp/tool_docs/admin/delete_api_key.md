@@ -3,6 +3,14 @@ name: delete_api_key
 category: admin
 required_permission: query_repos
 tl_dr: Delete an API key and immediately invalidate it.
+inputSchema:
+  type: object
+  properties:
+    key_id:
+      type: string
+      description: The unique identifier of the API key to delete
+  required:
+  - key_id
 ---
 
 TL;DR: Delete an API key and immediately invalidate it. Delete an API key belonging to the authenticated user. The key will be immediately invalidated.

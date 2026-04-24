@@ -3,6 +3,10 @@ name: get_maintenance_status
 category: admin
 required_permission: query_repos
 tl_dr: Get current server maintenance mode status.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
 ---
 
 Get current server maintenance mode status. Returns whether the server is in maintenance mode and job statistics.
