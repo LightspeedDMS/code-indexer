@@ -3,6 +3,13 @@ name: create_mcp_credential
 category: admin
 required_permission: query_repos
 tl_dr: Create a new MCP credential for MCP client connections.
+inputSchema:
+  type: object
+  properties:
+    description:
+      type: string
+      description: Optional human-readable description for the credential
+  required: []
 ---
 
 TL;DR: Create a new MCP credential for MCP client connections. Returns the full credential (one-time display - save it immediately).

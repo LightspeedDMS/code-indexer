@@ -2,8 +2,142 @@
 name: execute_open_delegation
 category: admin
 required_permission: delegate_open
-tl_dr: Submit any free-form coding objective to Claude Server with engine and mode
-  selection.
+tl_dr: Submit any free-form coding objective to Claude Server with engine and mode selection.
+inputSchema:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: Free-form coding objective or task description for the delegated agent
+    repositories:
+      type: array
+      items:
+        type: string
+      description: List of repository aliases the agent should have access to
+    engine:
+      type: string
+      description: Agent engine to use for single mode (claude-code, codex, gemini, opencode, q). Defaults to claude-code.
+      enum:
+      - claude-code
+      - codex
+      - gemini
+      - opencode
+      - q
+    mode:
+      type: string
+      description: "Execution mode: single (one agent), collaborative (DAG-based multi-step), competitive (parallel competing agents). Defaults to single."
+      enum:
+      - single
+      - collaborative
+      - competitive
+    model:
+      type: string
+      description: Optional model override for the agent engine (e.g., claude-opus-4-5). Used in single mode.
+    timeout:
+      type: integer
+      description: Optional job timeout in seconds for single mode (default 5400 / 90 minutes)
+    steps:
+      type: array
+      description: "Required for collaborative mode. List of DAG steps (max 10). Each step has step_id, engine, prompt, and optional depends_on, repository, repositories, timeout_seconds, options."
+      items:
+        type: object
+        properties:
+          step_id:
+            type: string
+            description: Unique identifier for this step
+          engine:
+            type: string
+            description: Agent engine for this step
+            enum:
+            - claude-code
+            - codex
+            - gemini
+            - opencode
+            - q
+          prompt:
+            type: string
+            description: Task description for this step
+          depends_on:
+            type: array
+            items:
+              type: string
+            description: List of step_ids this step depends on
+          repository:
+            type: string
+            description: Single repository alias for this step
+          repositories:
+            type: array
+            items:
+              type: string
+            description: List of repository aliases for this step
+          timeout_seconds:
+            type: integer
+            description: Timeout for this step in seconds
+          options:
+            type: object
+            description: Additional options for this step
+        required:
+        - step_id
+        - engine
+        - prompt
+    engines:
+      type: array
+      items:
+        type: string
+      description: "Required for competitive mode. List of engine names for competing agents."
+    distribution_strategy:
+      type: string
+      description: "Competitive mode: how work is distributed. round-robin or decomposer-decides."
+      enum:
+      - round-robin
+      - decomposer-decides
+    approach_count:
+      type: integer
+      description: "Competitive mode: number of parallel approaches (2-10, default 3)."
+    min_success_threshold:
+      type: integer
+      description: "Competitive mode: minimum successful approaches needed (1 to approach_count, default 3)."
+    approach_timeout_seconds:
+      type: integer
+      description: "Competitive mode: timeout per approach in seconds."
+    decomposer:
+      type: object
+      description: "Competitive mode: engine configuration for the decomposer step."
+      properties:
+        engine:
+          type: string
+          description: Engine name for decomposer
+    judge:
+      type: object
+      description: "Competitive mode: engine configuration for the judge step."
+      properties:
+        engine:
+          type: string
+          description: Engine name for judge
+        model:
+          type: string
+          description: Optional model override for judge
+    options:
+      type: object
+      description: "Competitive mode: additional options."
+  required:
+  - prompt
+  - repositories
+  additionalProperties: false
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: True if job was created and started
+    job_id:
+      type: string
+      description: ID of the created job for async polling via poll_delegation_job
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
 ---
 
 Submit any free-form coding objective to Claude Server with engine and mode selection. Creates an async job that can be polled for results via poll_delegation_job.

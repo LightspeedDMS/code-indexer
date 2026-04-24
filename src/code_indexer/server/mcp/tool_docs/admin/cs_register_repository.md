@@ -2,16 +2,36 @@
 name: cs_register_repository
 category: admin
 required_permission: delegate_open
-tl_dr: 'Register a CIDX golden repo alias on Claude Server so it can be used in delegation
-  jobs.
-
-
-  REQUIRED PERMISSION: delegate_open (power_user or admin role)
-
-
-  BEHAVIOR:
-
-  1.'
+tl_dr: Register a CIDX golden repo alias on Claude Server for delegation use.
+inputSchema:
+  type: object
+  properties:
+    alias:
+      type: string
+      description: CIDX golden repo alias to register on Claude Server. Must be an existing CIDX golden repo alias.
+  required:
+  - alias
+  additionalProperties: false
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: True if registration succeeded or repo was already registered
+    clone_status:
+      type: string
+      description: Current clone status on Claude Server (unknown/cloning/completed/failed)
+    message:
+      type: string
+      description: Human-readable status message
+    repository:
+      type: object
+      description: Full repository data returned by Claude Server
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
 ---
 
 Register a CIDX golden repo alias on Claude Server so it can be used in delegation jobs.

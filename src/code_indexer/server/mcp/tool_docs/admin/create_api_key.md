@@ -3,6 +3,13 @@ name: create_api_key
 category: admin
 required_permission: query_repos
 tl_dr: Create a new API key for programmatic access.
+inputSchema:
+  type: object
+  properties:
+    description:
+      type: string
+      description: Optional human-readable description for the API key
+  required: []
 ---
 
 TL;DR: Create a new API key for programmatic access. Create a new API key for the authenticated user. Returns the full key value (one-time display - save it immediately).

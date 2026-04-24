@@ -2,13 +2,47 @@
 name: manage_composite_repository
 category: repos
 required_permission: activate_repos
-tl_dr: 'Perform operations on composite repositories (multi-repo activations).
-
-
-  WHAT IS A COMPOSITE REPOSITORY:
-
-  A composite repository is a virtual repository that combines multiple golden repositories
-  into a single searchable unit.'
+tl_dr: Perform operations on composite repositories (multi-repo activations).
+inputSchema:
+  type: object
+  properties:
+    operation:
+      type: string
+      description: Operation type
+      enum:
+      - create
+      - update
+      - delete
+    user_alias:
+      type: string
+      description: Composite repository alias
+    golden_repo_aliases:
+      type: array
+      items:
+        type: string
+      description: Golden repository aliases
+  required:
+  - operation
+  - user_alias
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    job_id:
+      type:
+      - string
+      - 'null'
+      description: Background job ID
+    message:
+      type: string
+      description: Status message
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 Perform operations on composite repositories (multi-repo activations).

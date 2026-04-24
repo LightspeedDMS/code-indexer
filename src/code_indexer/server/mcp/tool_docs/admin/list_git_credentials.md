@@ -2,7 +2,11 @@
 name: list_git_credentials
 category: admin
 required_permission: query_repos
-tl_dr: List all git forge credentials configured for your account.
+tl_dr: List your configured git forge credentials.
+inputSchema:
+  type: object
+  properties: {}
+  required: []
 ---
 
 TL;DR: List all git forge credentials configured for your account. Tokens are redacted (only last 4 characters shown).

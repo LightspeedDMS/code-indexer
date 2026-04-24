@@ -2,7 +2,53 @@
 name: poll_delegation_job
 category: admin
 required_permission: query_repos
-tl_dr: Non-blocking check for delegation job result.
+tl_dr: Non-blocking check for delegation job result. Returns immediately with result or waiting status.
+inputSchema:
+  type: object
+  properties:
+    job_id:
+      type: string
+      description: Job ID from execute_delegation_function or execute_open_delegation
+  required:
+  - job_id
+  additionalProperties: false
+outputSchema:
+  type: object
+  properties:
+    status:
+      type: string
+      enum:
+      - in_progress
+      - completed
+      - failed
+      description: Current job status
+    phase:
+      type: string
+      enum:
+      - repo_registration
+      - repo_cloning
+      - cidx_indexing
+      - job_running
+      - done
+      description: Current phase of job execution
+    progress:
+      type: object
+      description: Phase-specific progress metrics
+    message:
+      type: string
+      description: Human-readable status message
+    result:
+      type: string
+      description: Final result (only when completed)
+    error:
+      type: string
+      description: Error message (only when failed)
+    continue_polling:
+      type: boolean
+      description: Whether to continue polling for updates
+    success:
+      type: boolean
+      description: False if request failed (job not found, not configured)
 ---
 
 Non-blocking check for delegation job result. Returns immediately with result or waiting status. Use this tool after execute_delegation_function or execute_open_delegation to get the AI's response.

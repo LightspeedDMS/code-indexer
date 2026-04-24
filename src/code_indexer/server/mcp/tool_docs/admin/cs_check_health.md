@@ -3,6 +3,40 @@ name: cs_check_health
 category: admin
 required_permission: delegate_open
 tl_dr: Check Claude Server connectivity and health status.
+inputSchema:
+  type: object
+  properties: {}
+  additionalProperties: false
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: True if health check succeeded
+    health:
+      type: object
+      description: Health data from Claude Server
+      properties:
+        status:
+          type: string
+          description: Overall health status (e.g. healthy, degraded, unhealthy)
+        nodeId:
+          type: string
+          description: Unique identifier of the Claude Server node
+        version:
+          type: string
+          description: Claude Server version string
+        checks:
+          type: object
+          description: Component health checks (database, storage, queueService)
+        metrics:
+          type: object
+          description: Server metrics (queueDepth, runningJobs)
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
 ---
 
 Check Claude Server connectivity and health status. Returns component health checks and server metrics.

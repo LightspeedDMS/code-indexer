@@ -2,13 +2,34 @@
 name: deactivate_repository
 category: repos
 required_permission: activate_repos
-tl_dr: 'Remove a user-specific repository activation and delete associated user indexes.
-
-
-  WHAT IT DOES:
-
-  Removes repository from your personal activated repositories list and deletes all
-  user-specific indexes (composite indexes, branch-specific indexes).'
+tl_dr: Remove a user-specific repository activation and delete associated user indexes.
+inputSchema:
+  type: object
+  properties:
+    user_alias:
+      type: string
+      description: User alias of repository to deactivate
+  required:
+  - user_alias
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether operation succeeded
+    job_id:
+      type:
+      - string
+      - 'null'
+      description: Background job ID for tracking deactivation
+    message:
+      type: string
+      description: Human-readable status message
+    error:
+      type: string
+      description: Error message if failed
+  required:
+  - success
 ---
 
 Remove a user-specific repository activation and delete associated user indexes.

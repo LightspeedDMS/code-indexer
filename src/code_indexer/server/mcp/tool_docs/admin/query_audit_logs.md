@@ -3,6 +3,28 @@ name: query_audit_logs
 category: admin
 required_permission: manage_users
 tl_dr: Query security audit logs with optional filtering (admin only).
+inputSchema:
+  type: object
+  properties:
+    user:
+      type: string
+      description: Filter by username
+    action:
+      type: string
+      description: Filter by action type (e.g., 'login', 'password_change', 'token_refresh')
+    from_date:
+      type: string
+      description: Start date for time range filter (ISO 8601 format, e.g., '2024-01-01')
+    to_date:
+      type: string
+      description: End date for time range filter (ISO 8601 format, e.g., '2024-12-31')
+    limit:
+      type: integer
+      description: Maximum number of entries to return
+      default: 100
+      minimum: 1
+      maximum: 1000
+  required: []
 ---
 
 Query security audit logs with optional filtering (admin only). Returns audit log entries for authentication, authorization, and administrative actions.

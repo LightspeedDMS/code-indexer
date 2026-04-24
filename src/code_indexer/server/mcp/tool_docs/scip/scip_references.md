@@ -2,7 +2,115 @@
 name: scip_references
 category: scip
 required_permission: query_repos
-tl_dr: Find all locations where a symbol is used (called, imported, referenced).
+tl_dr: '[SCIP] Find all places where a symbol is used (imports, calls, instances).'
+inputSchema:
+  type: object
+  properties:
+    symbol:
+      type: string
+      description: Symbol name to find references for (e.g., 'UserService', 'authenticate', 'DatabaseManager')
+    limit:
+      type: integer
+      default: 100
+      description: Maximum number of references to return. Default 100.
+    exact:
+      type: boolean
+      default: false
+      description: Use exact matching instead of fuzzy substring matching. Default false for flexible exploration.
+    project:
+      type:
+      - string
+      - 'null'
+      default: null
+      description: Optional project filter to limit search to specific project
+    repository_alias:
+      type:
+      - string
+      - 'null'
+      default: null
+      description: Repository alias to filter SCIP search. String for single repo, null/omit for all repos.
+    rerank_query:
+      type: string
+      description: 'Query for cross-encoder reranking. When set, references are semantically reranked before return. Leave empty to preserve the default order.'
+    rerank_instruction:
+      type: string
+      description: 'Optional instruction prefix for the reranker (e.g. ''Focus on instantiation and production use, not imports or tests''). Has no effect without rerank_query. Steers ranking only; does not change which references are included.'
+  required:
+  - symbol
+outputSchema:
+  type: object
+  properties:
+    success:
+      type: boolean
+      description: Whether the operation succeeded
+    symbol:
+      type: string
+      description: Symbol name that was searched for
+    total_results:
+      type: integer
+      description: Total number of references found
+    results:
+      type: array
+      description: List of reference locations
+      items:
+        type: object
+        properties:
+          symbol:
+            type: string
+            description: Full SCIP symbol identifier
+          project:
+            type: string
+            description: Project path
+          file_path:
+            type: string
+            description: File path relative to project root
+          line:
+            type: integer
+            description: Line number (1-indexed)
+          column:
+            type: integer
+            description: Column number (0-indexed)
+          kind:
+            type: string
+            description: Symbol kind (reference)
+          relationship:
+            type:
+            - string
+            - 'null'
+            description: Relationship type (import, call, instantiation, etc.)
+          context:
+            type:
+            - string
+            - 'null'
+            description: Code context where reference occurs
+        required:
+        - symbol
+        - project
+        - file_path
+        - line
+        - column
+        - kind
+    query_metadata:
+      type: object
+      description: Reranking telemetry when rerank_query is provided
+      properties:
+        reranker_used:
+          type: boolean
+          description: Whether cross-encoder reranking was actually applied
+        reranker_provider:
+          type:
+          - string
+          - 'null'
+          description: Provider that performed reranking ('voyage', 'cohere'), or null when reranking was not used
+        rerank_time_ms:
+          type: integer
+          description: Time spent in the reranking stage in milliseconds
+    error:
+      type: string
+      description: Error message if operation failed
+  required:
+  - success
+  - results
 ---
 
 Find all locations where a symbol is used (called, imported, referenced). Returns list of file paths, line numbers, and reference kinds.
