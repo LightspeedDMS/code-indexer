@@ -182,7 +182,7 @@ Pattern in `deployment_executor.py`: each config step is `_ensure_X_config()` �
 
 **CIDX_DATA_DIR IPC alignment (Bug #879)**: When `cidx-server` and `cidx-auto-update` run as different OS users (e.g. `code-indexer` vs `root`), module-level IPC path constants (`RESTART_SIGNAL_PATH`, `PENDING_REDEPLOY_MARKER`, `AUTO_UPDATE_STATUS_FILE`) honor `CIDX_DATA_DIR` so both processes resolve to the same files. Patched idempotently at Step 6.5 of `execute()` (error code `DEPLOY-GENERAL-058`). Same-user deployments are a no-op.
 
-### Server Memory Invariants (Bug #878, Bug #881)
+### Server Memory Invariants (Bug #878, Bug #881, Bug #897)
 
 **FD/connection hygiene (Bug #878)**: A single `DatabaseConnectionManager-cleanup-daemon` thread runs for the app lifetime, sweeping stale SQLite connections across all registered singletons every 60s. Started/stopped in lifespan (error codes `APP-GENERAL-034`/`035`). Idempotent. Identity-guarded clear.
 
@@ -190,9 +190,16 @@ NEVER: re-introduce the piggyback cleanup trigger in `get_connection()` (lost ra
 
 **HNSW/FTS cache cap (Bug #878)**: Singletons always carry a finite `max_cache_size_mb`. When config has `None`, `DEFAULT_MAX_CACHE_SIZE_MB = 4096` is overlaid at `get_global_cache()` / `get_global_fts_cache()` init. Dataclass defaults stay `None` (sentinel distinguishes explicit operator value from unset). Hot-reload via `ConfigService._hot_reload_cache_size_cap()` is narrow-scoped to `index_cache_max_size_mb` and `fts_cache_max_size_mb` only — `TestHotReloadScopeIsolation` asserts the boundary.
 
-**Bug #881 omni fan-out mitigations**: `omni_max_repos_per_search` cap (default 50, Web UI), `omni_wildcard_expansion_cap` (default 50, Web UI) — wildcard expansion returns `Union[List[str], CapBreach]` and callers handle via `cap_breach_response` / `cap_breach_http_exception`; fan-out searches pass `hnsw_cache=None` to bypass the global HNSW cache; `sys.getsizeof(id_mapping)` added to `index_size_bytes` so label→id dict is no longer invisible to the size cap.
+**Bug #881 omni fan-out mitigations**: two caps enforced in sequence — (1) `omni_wildcard_expansion_cap` (default 50, Web UI): per-pattern wildcard expansion cap, enforced inside `_expand_wildcard_patterns`, error code `wildcard_cap_exceeded`; (2) `omni_max_repos_per_search` (default 50, Web UI, Bug #894): total alias fan-out cap after wildcard expansion + literal union, enforced by `_enforce_repo_count_cap` in `_omni_search_code` and `_omni_regex_search`, error code `repo_count_cap_exceeded`. Both return `Union[List[str], CapBreach]` and callers handle via `cap_breach_response` / `cap_breach_http_exception`. Fan-out searches pass `hnsw_cache=None` to bypass the global HNSW cache; `sys.getsizeof(id_mapping)` added to `index_size_bytes` so label→id dict is no longer invisible to the size cap.
 
-Files: `src/code_indexer/server/storage/database_manager.py`, `src/code_indexer/server/startup/lifespan.py`, `src/code_indexer/server/repositories/background_jobs.py`, `src/code_indexer/server/cache/__init__.py`, `src/code_indexer/server/services/config_service.py`, `src/code_indexer/server/mcp/_utils.py`, `src/code_indexer/server/cache/hnsw_index_cache.py`. Tests: `tests/unit/server/mcp/test_wildcard_cap.py`, `test_cap_breach_helper.py`, `test_cache_bypass_on_fanout.py`, `tests/unit/server/cache/test_id_mapping_size_bytes.py`.
+**Bug #897 glibc arena fragmentation mitigations** (both default OFF, bootstrap-only flags in `config.json`): After a bulk lifecycle backfill that cycles 500+ HNSW indexes through the LRU cache, process RSS can pin ~23 GB because glibc's multi-arena brk segments hold small `label_lookup_` / `linkLists_` allocations. Two opt-in mitigations behind feature flags (measure on staging before enabling in production):
+
+- `enable_malloc_trim: bool = False` -- calls `glibc malloc_trim(0)` at the end of each `_cleanup_expired_entries()` cycle (implemented in `_maybe_malloc_trim()` in `hnsw_index_cache.py`). Linux + glibc only; silently no-ops on musl/macOS.
+- `enable_malloc_arena_max: bool = False` -- idempotently injects `Environment=MALLOC_ARENA_MAX=2` into the cidx-server systemd unit file on each auto-updater run (`_ensure_malloc_arena_max()` in `deployment_executor.py`, step 6.6, error code `DEPLOY-GENERAL-143`). Reverting the flag removes the line on the next auto-updater cycle.
+
+Both flags are bootstrap-only (read from `config.json` before DB is available) and default False so production is unchanged until an operator explicitly opts in. Tests: `tests/unit/server/cache/test_malloc_trim_flag_bug_897.py`, `tests/unit/server/auto_update/test_malloc_arena_max_bug_897.py`.
+
+Files: `src/code_indexer/server/storage/database_manager.py`, `src/code_indexer/server/startup/lifespan.py`, `src/code_indexer/server/repositories/background_jobs.py`, `src/code_indexer/server/cache/__init__.py`, `src/code_indexer/server/services/config_service.py`, `src/code_indexer/server/mcp/handlers/_utils.py`, `src/code_indexer/server/cache/hnsw_index_cache.py`. Tests: `tests/unit/server/mcp/test_wildcard_cap.py`, `test_cap_breach_helper.py`, `test_repo_count_cap.py`, `test_cache_bypass_on_fanout.py`, `tests/unit/server/cache/test_id_mapping_size_bytes.py`.
 
 Operational check:
 ```bash

@@ -72,26 +72,34 @@ def main():
         lock_file = Path("/tmp/cidx-auto-update.lock")
         check_interval = 60  # seconds (not used in oneshot mode)
 
-        # Bug #882: Resolve real server URL from config.json so maintenance-mode
-        # calls hit the operator-configured port, not the hardcoded default.
-        server_url = _resolve_server_url()
-
-        # Initialize components
+        # Initialize components — construct executor first (Bug #884: must happen
+        # before _resolve_server_url so _should_retry_on_startup can run even
+        # when config.json is missing).  server_url is assigned below once known.
         change_detector = ChangeDetector(repo_path=repo_path, branch=branch)
         deployment_lock = DeploymentLock(lock_file=lock_file)
         deployment_executor = DeploymentExecutor(
             repo_path=repo_path,
             branch=branch,
             service_name="cidx-server",
-            server_url=server_url,
         )
 
-        # Check if we need to retry deployment from previous run
+        # Check if we need to retry deployment from previous run — BEFORE
+        # resolving the server URL so a missing config.json cannot prevent
+        # recovery from a pending_restart/failed status (Bug #884).
         if deployment_executor._should_retry_on_startup():
             logger.info(
                 "Pending deployment detected, retrying",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Bug #884: Resolve URL inside the retry branch; failure here means
+            # we cannot reach the server API — write failed status and exit.
+            try:
+                server_url = _resolve_server_url()
+                deployment_executor.server_url = server_url
+            except Exception as e:
+                deployment_executor._write_status_file("failed", str(e))
+                sys.exit(1)
+
             deployment_executor._write_status_file(
                 "in_progress", "Retrying deployment after restart"
             )
@@ -119,6 +127,11 @@ def main():
                 )
 
             sys.exit(0 if success else 1)
+
+        # Bug #882: Resolve real server URL from config.json so maintenance-mode
+        # calls hit the operator-configured port, not the hardcoded default.
+        server_url = _resolve_server_url()
+        deployment_executor.server_url = server_url
 
         # Initialize service
         service = AutoUpdateService(

@@ -35,10 +35,15 @@ def _make_repo(tmp_path: Path, provider: str = "voyage-ai") -> Path:
 def _make_config_service(
     voyageai_key: str = "vk-test", cohere_key: str = "ck-test"
 ) -> MagicMock:
-    """Create a mock config service with the expected attribute structure."""
+    """Create a mock config service with the correct nested ClaudeIntegrationConfig structure.
+
+    Bug #895 fix: keys live on claude_integration_config, not top-level ServerConfig.
+    """
+    mock_ci_config = MagicMock()
+    mock_ci_config.voyageai_api_key = voyageai_key
+    mock_ci_config.cohere_api_key = cohere_key
     mock_config = MagicMock()
-    mock_config.voyageai_api_key = voyageai_key
-    mock_config.cohere_api_key = cohere_key
+    mock_config.claude_integration_config = mock_ci_config
     mock_service = MagicMock()
     mock_service.get_config.return_value = mock_config
     return mock_service

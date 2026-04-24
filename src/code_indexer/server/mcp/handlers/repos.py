@@ -1355,6 +1355,28 @@ def _remove_provider_from_config(repo_path: str, provider_name: str) -> None:
         )
 
 
+def _resolve_provider_api_key(provider_name: str) -> Optional[str]:
+    """Return the API key for the given provider from ClaudeIntegrationConfig.
+
+    Reads from the nested claude_integration_config on the server config, not
+    from the top-level ServerConfig (Bug #895 fix).
+    Returns None for invalid input, missing nested config, or unrecognised
+    provider names.
+    """
+    if not provider_name or not isinstance(provider_name, str):
+        return None
+    ci_config = getattr(
+        get_config_service().get_config(), "claude_integration_config", None
+    )
+    if ci_config is None:
+        return None
+    if provider_name == "cohere":
+        return getattr(ci_config, "cohere_api_key", None)
+    if provider_name == "voyage-ai":
+        return getattr(ci_config, "voyageai_api_key", None)
+    return None
+
+
 def _build_provider_api_key_env(provider_name: str) -> dict:
     """Build a subprocess env dict with the correct API key for a provider."""
     import os
@@ -1364,14 +1386,11 @@ def _build_provider_api_key_env(provider_name: str) -> dict:
         return os.environ.copy()
 
     env = os.environ.copy()
-    server_config = get_config_service().get_config()
-    if provider_name == "cohere":
-        api_key = getattr(server_config, "cohere_api_key", None)
-        if api_key:
+    api_key = _resolve_provider_api_key(provider_name)
+    if api_key:
+        if provider_name == "cohere":
             env["CO_API_KEY"] = api_key
-    elif provider_name == "voyage-ai":
-        api_key = getattr(server_config, "voyageai_api_key", None)
-        if api_key:
+        elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
     return env
 
@@ -1731,14 +1750,11 @@ def _provider_index_job(
         return {"success": False, "error": error, "provider": provider_name}
 
     env = os.environ.copy()
-    server_config = get_config_service().get_config()
-    if provider_name == "cohere":
-        api_key = getattr(server_config, "cohere_api_key", None)
-        if api_key:
+    api_key = _resolve_provider_api_key(provider_name)
+    if api_key:
+        if provider_name == "cohere":
             env["CO_API_KEY"] = api_key
-    elif provider_name == "voyage-ai":
-        api_key = getattr(server_config, "voyageai_api_key", None)
-        if api_key:
+        elif provider_name == "voyage-ai":
             env["VOYAGE_API_KEY"] = api_key
 
     cmd = ["cidx", "index", "--progress-json"]

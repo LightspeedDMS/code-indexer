@@ -1490,6 +1490,127 @@ class DeploymentExecutor:
             )
             return False
 
+    # ------------------------------------------------------------------
+    # Bug #897 mitigation 2: MALLOC_ARENA_MAX=2 in the server unit file
+    # ------------------------------------------------------------------
+
+    _MALLOC_ARENA_ENV_LINE = "Environment=MALLOC_ARENA_MAX=2"
+
+    def _render_malloc_arena_max_content(self, content: str, inject: bool) -> str:
+        """Return updated service file content with MALLOC_ARENA_MAX=2 added or removed.
+
+        inject=True: line is inserted after the last existing Environment= line,
+            or after [Service] if none exist, or appended when neither anchor exists.
+        inject=False: all lines whose stripped form equals _MALLOC_ARENA_ENV_LINE
+            are removed.
+
+        Args:
+            content: Current service file text.
+            inject: True to add the line, False to remove it.
+
+        Returns:
+            Updated service file content (newline-terminated).
+        """
+        if not inject:
+            filtered = [
+                line
+                for line in content.splitlines()
+                if line.strip() != self._MALLOC_ARENA_ENV_LINE
+            ]
+            return "\n".join(filtered) + "\n"
+
+        lines = content.splitlines()
+        env_indices = [
+            i for i, line in enumerate(lines) if line.strip().startswith("Environment=")
+        ]
+        service_indices = [
+            i for i, line in enumerate(lines) if line.strip() == "[Service]"
+        ]
+
+        if env_indices:
+            insert_after = env_indices[-1]
+        elif service_indices:
+            insert_after = service_indices[-1]
+        else:
+            # No usable anchor: append to the end of the file.
+            return "\n".join(lines) + "\n" + self._MALLOC_ARENA_ENV_LINE + "\n"
+
+        new_lines: list = []
+        for i, line in enumerate(lines):
+            new_lines.append(line)
+            if i == insert_after:
+                new_lines.append(self._MALLOC_ARENA_ENV_LINE)
+        return "\n".join(new_lines) + "\n"
+
+    def _ensure_malloc_arena_max(self) -> bool:
+        """Bug #897 mitigation 2: idempotently manage MALLOC_ARENA_MAX=2 in the
+        cidx-server systemd service file.
+
+        Reads the `enable_malloc_arena_max` bootstrap flag from config.json and
+        ensures the service file matches: inject when True, remove when False.
+        Calls `sudo systemctl daemon-reload` after any write.
+
+        Returns:
+            True if service file is in the correct state or was corrected,
+            False on read/write error (execute() logs DEPLOY-GENERAL-143).
+        """
+        try:
+            from code_indexer.server.utils.config_manager import ServerConfigManager
+
+            config = ServerConfigManager().load_config()
+            flag_enabled = bool(
+                config and getattr(config, "enable_malloc_arena_max", False)
+            )
+
+            service_path = SYSTEMD_UNIT_DIR / f"{self.service_name}.service"
+            current_content = self._read_service_file(service_path)
+            if current_content is None:
+                return False
+
+            # Use line-level match to avoid false positives from comments/partial text.
+            line_present = any(
+                line.strip() == self._MALLOC_ARENA_ENV_LINE
+                for line in current_content.splitlines()
+            )
+            if flag_enabled == line_present:
+                logger.debug(
+                    "MALLOC_ARENA_MAX already in correct state (flag=%s)",
+                    flag_enabled,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+                return True
+
+            action = "Injecting" if flag_enabled else "Removing"
+            logger.info(
+                "%s MALLOC_ARENA_MAX=2 in %s",
+                action,
+                service_path,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            new_content = self._render_malloc_arena_max_content(
+                current_content, flag_enabled
+            )
+            if not self._write_service_file_and_reload(service_path, new_content):
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-143",
+                        f"Failed to write MALLOC_ARENA_MAX change to {service_path}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+            return True
+
+        except Exception as exc:
+            logger.error(
+                format_error_log(
+                    "DEPLOY-GENERAL-143",
+                    f"Error managing MALLOC_ARENA_MAX in service file: {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
     def pip_install(self) -> bool:
         """Execute pip install to update dependencies.
 
@@ -2573,6 +2694,47 @@ class DeploymentExecutor:
                 "Auto-updater code changed, initiating self-restart",
                 extra={"correlation_id": get_correlation_id()},
             )
+            # Bug #884: Smoke-test the new auto-updater code before self-restarting.
+            # If the updated run_once.py has an import-time error, restarting the
+            # service would crash-loop it.  Run a quick import check first.
+            try:
+                smoke = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from code_indexer.server.auto_update.run_once import main",
+                    ],
+                    timeout=10,
+                    capture_output=True,
+                    env=os.environ.copy(),
+                )
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-141",
+                        "Self-restart smoke-test timed out (>10s) — aborting self-restart "
+                        "(Bug #884): new auto-updater code may have import-time side effect.",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                self._write_status_file("failed", "self-restart smoke-test timed out")
+                return False
+            if smoke.returncode != 0:
+                logger.error(
+                    format_error_log(
+                        "DEPLOY-GENERAL-142",
+                        f"Self-restart smoke-test failed (rc={smoke.returncode}) — aborting "
+                        f"self-restart (Bug #884). stderr: "
+                        f"{smoke.stderr.decode('utf-8', errors='replace')}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                self._write_status_file(
+                    "failed",
+                    f"self-restart smoke-test failed rc={smoke.returncode}",
+                )
+                return False
+            # Smoke passed — proceed with pending_restart + marker + systemctl restart
             self._write_status_file(
                 "pending_restart", "Auto-updater code updated, restarting service"
             )
@@ -2646,6 +2808,17 @@ class DeploymentExecutor:
                     "DEPLOY-GENERAL-058",
                     "CIDX_DATA_DIR could not be verified/injected — "
                     "restart signal and redeploy marker paths may diverge",
+                ),
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+        # Step 6.6: Bug #897 - Idempotently inject or remove MALLOC_ARENA_MAX=2
+        # from the cidx-server systemd unit file based on bootstrap config flag.
+        if not self._ensure_malloc_arena_max():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-143",
+                    "MALLOC_ARENA_MAX could not be verified — glibc arena cap not enforced",
                 ),
                 extra={"correlation_id": get_correlation_id()},
             )

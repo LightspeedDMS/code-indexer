@@ -5559,7 +5559,9 @@ def _get_current_config() -> dict:
         # Story #652: Reranking configuration
         "rerank": settings.get("rerank", asdict(RerankConfig())),
         # Story #885: Lifecycle analysis configuration
-        "lifecycle_analysis": settings.get("lifecycle_analysis", asdict(LifecycleAnalysisConfig())),
+        "lifecycle_analysis": settings.get(
+            "lifecycle_analysis", asdict(LifecycleAnalysisConfig())
+        ),
     }
 
 

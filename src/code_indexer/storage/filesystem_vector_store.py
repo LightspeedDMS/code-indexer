@@ -20,6 +20,7 @@ import msgpack
 from .vector_quantizer import VectorQuantizer
 from .projection_matrix_manager import ProjectionMatrixManager
 from .temporal_metadata_store import TemporalMetadataStore
+from .hnsw_stale_logger import log_hnsw_stale
 
 # Minimum and default timeout (seconds) for git subprocess calls.
 # GIT_TIMEOUT_SECONDS env var overrides the default; values below the minimum are clamped.
@@ -2386,9 +2387,11 @@ class FilesystemVectorStore:
 
         if hnsw_manager.is_stale(collection_path):
             if not hnsw_manager.index_exists(collection_path):
-                self.logger.warning(
-                    f"HNSW index is stale and missing for '{collection_name}'. "
-                    "Run 'cidx index' to build the index. Returning empty results."
+                log_hnsw_stale(
+                    self.logger,
+                    collection_path=collection_path,
+                    collection_name=collection_name,
+                    alias=None,  # Alias not threaded through this call path; collection_path is sufficient for operator triage.
                 )
                 return ([], timing) if return_timing else []
             self.logger.warning(
