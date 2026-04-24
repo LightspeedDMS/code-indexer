@@ -1055,13 +1055,14 @@ class ServerConfig:
     fault_injection_nonprod_ack: bool = False
 
     # Bug #897 - glibc arena fragmentation mitigations (bootstrap-only, never DB).
-    # Both default False so tests and production are unchanged until operator opts in.
-    # Set in config.json; readable before the DB is available (cleanup daemon thread).
+    # Both default True since v9.23.3 so fresh installs automatically inherit the
+    # protections. Operators can disable either by setting the flag to false in
+    # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
     enable_malloc_trim: bool = (
-        False  # Mitigation 1: call malloc_trim(0) after eviction.
+        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
     )
     enable_malloc_arena_max: bool = (
-        False  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd.
+        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
     )
 
     def __post_init__(self):
