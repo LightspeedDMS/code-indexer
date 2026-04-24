@@ -161,9 +161,32 @@
 </article>
 {% endif %}
 
-<!-- AC9 (Story #216): Run history metrics table -->
+<!-- AC9 (Story #216): Run history metrics table — Story D Bug #874 redesign -->
 {% if job_status.run_history %}
-<article style="margin-top: 1rem;">
+<style>
+.run-type-badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.25rem;
+    font-family: monospace;
+}
+.run-type-full    { background: #dbeafe; color: #1d4ed8; }
+.run-type-delta   { background: #dcfce7; color: #15803d; }
+.run-type-refinement { background: #ede9fe; color: #6d28d9; }
+.phase-pill {
+    display: inline-block;
+    font-size: 0.75rem;
+    background: #f3f4f6;
+    color: #374151;
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.2rem;
+    margin-right: 0.2rem;
+    white-space: nowrap;
+}
+</style>
+<article id="recent-run-metrics" style="margin-top: 1rem;">
     <header>
         <h3>Recent Run Metrics</h3>
     </header>
@@ -172,26 +195,47 @@
             <thead>
                 <tr>
                     <th>Timestamp</th>
+                    <th>Type</th>
                     <th>Domains</th>
                     <th>Chars</th>
                     <th>Edges</th>
                     <th>Repos</th>
-                    <th>P1 (s)</th>
-                    <th>P2 (s)</th>
+                    <th>Phase timings</th>
                 </tr>
             </thead>
             <tbody>
                 {% for run in job_status.run_history %}
                 <tr>
                     <td style="white-space: nowrap;">
-                        {% if run.timestamp %}{{ run.timestamp[:16] | replace("T", " ") }}{% else %}-{% endif %}
+                        {% if run.timestamp %}{{ run.timestamp[:16] | replace("T", " ") }}{% else %}—{% endif %}
+                    </td>
+                    <td>
+                        {% if run.run_type %}
+                            <span class="run-type-badge run-type-{{ run.run_type }}">{{ run.run_type }}</span>
+                        {% else %}
+                            —
+                        {% endif %}
                     </td>
                     <td>{{ run.domain_count or 0 }}</td>
                     <td>{{ run.total_chars or 0 }}</td>
                     <td>{{ run.edge_count or 0 }}</td>
                     <td>{{ run.repos_analyzed or 0 }}</td>
-                    <td>{{ "%.1f"|format(run.pass1_duration_s or 0) }}</td>
-                    <td>{{ "%.1f"|format(run.pass2_duration_s or 0) }}</td>
+                    <td>
+                        {% if run.phase_timings_parsed %}
+                            {% for key, value in run.phase_timings_parsed.items() %}
+                                <span class="phase-pill">{{ key.replace("_s", "") }} {{ "%.1f"|format(value) }}s</span>
+                            {% endfor %}
+                        {% elif run.pass1_duration_s is not none or run.pass2_duration_s is not none %}
+                            {% if run.pass1_duration_s is not none %}
+                                <span class="phase-pill">P1 {{ "%.1f"|format(run.pass1_duration_s) }}s</span>
+                            {% endif %}
+                            {% if run.pass2_duration_s is not none %}
+                                <span class="phase-pill">P2 {{ "%.1f"|format(run.pass2_duration_s) }}s</span>
+                            {% endif %}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>

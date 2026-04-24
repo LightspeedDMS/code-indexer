@@ -72,9 +72,12 @@ class TestProviderIndexJobProgress:
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="test-key", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "test-key"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             result = _provider_index_job(
                 repo_path=str(repo_dir),
@@ -119,9 +122,12 @@ class TestProviderIndexJobProgress:
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="my-cohere-key-12345", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "my-cohere-key-12345"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             result = _provider_index_job(
                 repo_path=str(repo_dir),
@@ -174,9 +180,12 @@ class TestProviderIndexJobProgress:
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="test-key", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "test-key"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             result = _provider_index_job(
                 repo_path=str(repo_dir),
@@ -211,9 +220,12 @@ class TestProviderIndexJobProgress:
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="test-key", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "test-key"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             # Must not raise - should complete successfully
             result = _provider_index_job(
@@ -246,9 +258,12 @@ class TestProviderIndexJobProgress:
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="test-key", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "test-key"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             # No progress_callback passed - must not crash
             result = _provider_index_job(
@@ -278,9 +293,12 @@ class TestProviderIndexJobProgress:
                 "code_indexer.server.mcp.handlers._post_provider_index_snapshot"
             ) as mock_snapshot,
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="test-key", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "test-key"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             # Patch run_with_popen_progress at the handlers import level
             import code_indexer.services.progress_subprocess_runner as runner_module
@@ -327,9 +345,12 @@ class TestProviderIndexJobProgress:
             patch("code_indexer.server.mcp.handlers.get_config_service") as mock_cfg,
             patch("code_indexer.server.mcp.handlers._post_provider_index_snapshot"),
         ):
-            mock_cfg.return_value.get_config.return_value = MagicMock(
-                cohere_api_key="test-key", voyageai_api_key=None
-            )
+            mock_ci_config = MagicMock()
+            mock_ci_config.cohere_api_key = "test-key"
+            mock_ci_config.voyageai_api_key = None
+            mock_config = MagicMock()
+            mock_config.claude_integration_config = mock_ci_config
+            mock_cfg.return_value.get_config.return_value = mock_config
 
             result = _provider_index_job(
                 repo_path=str(repo_dir),

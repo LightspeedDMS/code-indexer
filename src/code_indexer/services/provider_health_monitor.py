@@ -11,6 +11,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+import numpy as np
+
 if TYPE_CHECKING:
     from code_indexer.server.utils.config_manager import ProviderSinBinConfig
 
@@ -466,9 +468,12 @@ class ProviderHealthMonitor:
 
     @staticmethod
     def _percentile(sorted_values: List[float], pct: int) -> float:
-        """Calculate percentile from sorted values using floor-based index."""
+        """Calculate percentile using linear interpolation (numpy default).
+
+        Bug #873: replaced floor-based nearest-rank with linear interpolation
+        so p50/p95/p99 produce distinct values even for small N (which is the
+        typical operating condition on a 60-minute rolling window).
+        """
         if not sorted_values:
             return 0.0
-        idx = int(len(sorted_values) * pct / 100)
-        idx = min(idx, len(sorted_values) - 1)
-        return sorted_values[idx]
+        return float(np.percentile(sorted_values, pct))

@@ -745,10 +745,14 @@ def _make_fake_dep_map_service(repo_list=None, enrich_adds_fields=True):
       - _get_activated_repos()  -> returns repo_list (default: two fake repos)
       - _enrich_repo_sizes()    -> returns the input list unchanged (or with sizes added)
       - _analyzer               -> a recording object that captures run_pass_2_per_domain args
-      - _config_manager         -> None (max_turns will use default 25)
+      - _config_manager         -> MagicMock returning default ClaudeIntegrationConfig
+                                   (Bug #895 fix: must not be None — closure returns False when None)
       - _activity_journal       -> None (journal_path will be None)
     """
     from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from code_indexer.server.utils.config_manager import ClaudeIntegrationConfig
 
     if repo_list is None:
         repo_list = [
@@ -804,11 +808,16 @@ def _make_fake_dep_map_service(repo_list=None, enrich_adds_fields=True):
                 r.setdefault("total_bytes", 1024)
         return repos
 
+    fake_config_manager = MagicMock()
+    fake_config_manager.get_claude_integration_config.return_value = (
+        ClaudeIntegrationConfig()
+    )
+
     service = SimpleNamespace(
         _get_activated_repos=fake_get_activated_repos,
         _enrich_repo_sizes=fake_enrich_repo_sizes,
         _analyzer=fake_analyzer,
-        _config_manager=None,
+        _config_manager=fake_config_manager,
         _activity_journal=None,
     )
     return service, captured_calls

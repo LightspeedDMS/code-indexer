@@ -822,6 +822,11 @@ function saveLlmCredsConfig() {
                         <td class="config-value">{{ config.multi_search.omni_wildcard_expansion_cap }}</td>
                         <td class="config-note"><small>Max repos a wildcard pattern may expand to. Protects the server from fan-out memory pressure (default: 50).</small></td>
                     </tr>
+                    <tr>
+                        <td class="config-label">Omni Max Repos Per Search</td>
+                        <td class="config-value">{{ config.multi_search.omni_max_repos_per_search }}</td>
+                        <td class="config-note"><small>Max total repositories per omni search (after wildcard expansion + literal union). Caps total fan-out regardless of how aliases are specified (default: 50).</small></td>
+                    </tr>
                 </tbody>
             </table>
             <div class="section-actions">
@@ -906,6 +911,11 @@ function saveLlmCredsConfig() {
                     Omni Wildcard Expansion Cap
                     <input type="number" id="omni-wildcard-expansion-cap" name="omni_wildcard_expansion_cap" value="{{ config.multi_search.omni_wildcard_expansion_cap }}" min="1" max="10000">
                     <small>Maximum repos a wildcard MCP pattern may expand to (default: 50).</small>
+                </label>
+                <label for="omni-max-repos-per-search">
+                    Omni Max Repos Per Search
+                    <input type="number" id="omni-max-repos-per-search" name="omni_max_repos_per_search" value="{{ config.multi_search.omni_max_repos_per_search }}" min="1" max="10000">
+                    <small>Maximum total repositories per omni search after wildcard expansion + literal union (default: 50).</small>
                 </label>
             </div>
             <div class="form-actions">

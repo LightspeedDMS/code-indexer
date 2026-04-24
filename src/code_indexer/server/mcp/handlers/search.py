@@ -46,6 +46,7 @@ from ._utils import (
     _is_temporal_query,
     _get_temporal_status,
     _expand_wildcard_patterns,
+    _enforce_repo_count_cap,
     _get_query_tracker,
     _get_access_filtering_service,
     _list_global_repos,
@@ -295,6 +296,10 @@ def _omni_search_code(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     repo_aliases = _expand_wildcard_patterns(params.get("repository_alias", []), user)
     if isinstance(repo_aliases, CapBreach):
         return cap_breach_response(repo_aliases)
+    # Bug #894: enforce total fan-out cap after wildcard expansion + literal union
+    _repo_count_breach = _enforce_repo_count_cap(repo_aliases)
+    if _repo_count_breach is not None:
+        return cap_breach_response(_repo_count_breach)
     requested_limit = _coerce_int(params.get("limit"), _DEFAULT_SEARCH_LIMIT)
     aggregation_mode = params.get(
         "aggregation_mode", "per_repo" if len(repo_aliases) > 1 else "global"
@@ -948,6 +953,10 @@ async def _omni_regex_search(args: Dict[str, Any], user: User) -> Dict[str, Any]
     repo_aliases = _expand_wildcard_patterns(args.get("repository_alias", []), user)
     if isinstance(repo_aliases, CapBreach):
         return cap_breach_response(repo_aliases)
+    # Bug #894: enforce total fan-out cap after wildcard expansion + literal union
+    _repo_count_breach = _enforce_repo_count_cap(repo_aliases)
+    if _repo_count_breach is not None:
+        return cap_breach_response(_repo_count_breach)
 
     if not repo_aliases:
         return _mcp_response(

@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.3
+
+### Changes
+
+- **Bug #897: `enable_malloc_trim` and `enable_malloc_arena_max` now default to `true`** (previously `false`). Both glibc arena-fragmentation mitigations ship enabled by default so fresh installs and existing installs that don't explicitly pin the flags automatically get the protection. Operators can still disable either by setting the flag to `false` in `~/.cidx-server/config.json` (bootstrap-only — both flags are read before the database is available).
+- **Bug #897 follow-up: `_ensure_malloc_arena_max()` config discovery under split-user auto-updater deployments** (`deployment_executor.py:1560`). The auto-updater's idempotent-apply function now passes `server_dir_path=str(_cidx_data_dir)` to `ServerConfigManager`, honoring `CIDX_DATA_DIR` (Bug #879) so the auto-updater running as root reads the same `config.json` the cidx-server process (running as e.g. code-indexer) reads. Previously the function silently no-opped under split-user deployment because `Path.home()` resolved to `/root/.cidx-server` which did not contain the server's config file. Includes new test `test_ensure_malloc_arena_max_honors_cidx_data_dir_across_users` that exercises the cross-HOME path end-to-end using the real `ServerConfigManager` and a monkeypatched `_cidx_data_dir`.
+
+## v9.23.2
+
+### Bug Fixes
+
+- fix: **Revert v9.23.1 tool_docs regeneration — MCP tool registry collapsed on staging (~200 → 30 tools)**. The v9.23.1 maintenance step that regenerated 165 MCP `tool_docs/*.md` files via `tools/convert_tool_docs.py` produced output that, once deployed, caused the MCP server to register only ~30 of the expected tools (including losing `search_code`, which surfaced as `"Invalid params: Unknown tool: search_code"` errors on the staging MCP endpoint). Recovery: reverted all 135 modified tool_docs files to their v9.23.0 content and deleted the 30 tool_docs files that v9.23.1 newly added. The #898 analyzer prompting fix (see below) is preserved untouched — the revert is scoped to `src/code_indexer/server/mcp/tool_docs/` only.
+
+## v9.23.1
+
+### Bug Fixes
+
+- fix(#898): **Claude CLI invoked MCP `search_code` with bare golden-repo aliases during dep-map lifecycle analysis**. Subprocess Claude CLI (dep-map Pass 2, via `LifecycleBatchRunner` / `description_refresh_scheduler`) was calling `search_code(repository_alias="humanize")` instead of `search_code(repository_alias="humanize-global")`. The server registry keys are `-global`-suffixed, so the bare form raised `FileNotFoundError: Repository not found in global repositories`, surfacing as 12× `REPO-GENERAL-024/025/026` ERRORs per delta run on staging v9.23.0 (4 per peer repo queried). Non-blocking — delta completed — but degraded investigation quality and polluted logs. Fix at the prompting layer (per bug body recommendation, rejecting the broader registry-level lenience that would have required coordinated changes across SQLite + Postgres backends + the Protocol contract): extended the "### How to Use" Claude CLI instruction block in `dependency_map_analyzer.py:906-911` to explicitly document `repository_alias` with the `-global` suffix requirement, contrast examples (`humanize-global` vs `humanize`), Bug #898 citation, and `*-global` wildcard / parameter-omission options. Acceptance: zero `REPO-GENERAL-024/025/026` errors on a post-fix staging delta run.
+
+### Maintenance
+
+- chore: regenerated 165 MCP tool_docs/*.md files via `tools/convert_tool_docs.py` to re-sync with `TOOL_REGISTRY` — they had drifted from the registry pre-v9.23.1 (unrelated to #898, surfaced when the verifier ran as part of the #898 fix pipeline).
+
+## v9.23.0
+
+### Features
+
+- feat(#887 Epic #886): **Depmap parser module split and anomaly channels**. `dep_map_mcp_parser.py` (1042 lines, MESSI rule 6 soft cap violation) split into four cohesive modules — `dep_map_mcp_parser.py` (orchestration + public API, ~440 lines), `dep_map_parser_tables.py` (markdown table extraction, ~354), `dep_map_parser_hygiene.py` (identifier normalization + `AnomalyEntry`/`AnomalyAggregate`/`AnomalyType` dataclasses, ~279), `dep_map_parser_graph.py` (graph edge aggregation + channel split, ~365). Dual public API surface: legacy `get_cross_domain_graph()` 2-tuple + new `get_cross_domain_graph_with_channels()` 4-tuple for callers needing `parser_anomalies`/`data_anomalies` separation. `AnomalyType` carries `channel: Literal["parser","data"]` bound attribute so routing is enum-lookup, not manual classification. Frozenset-keyed bidirectional dedup prevents ~170 anomalies from emitting for ~150 edges (pre-#887 pattern). 70 new tests across 8 ACs + 4 remediation blocker files.
+
+- feat(#888 Epic #886)!: **Depmap response contract improvements** — `resolution` field + dual-write aliases. **BREAKING** to the MCP response envelope: 5 `depmap_*` tools now return `anomalies[]` (legacy concatenation), `parser_anomalies[]`, and `data_anomalies[]` channels. Legacy `anomalies[]` is preserved for ONE release after Epic #886 completes, then dropped. Handler `_anomaly_to_dict()` helper reused at every response assembly site.
+
+- feat(#889 Epic #886): **Graph query ergonomics** — filters + `depmap_get_hub_domains` MCP tool. Graph queries now support filter parameters (min edges, domain prefix, type classification) exposed uniformly across the depmap tool family.
+
+- feat(#894): **`omni_max_repos_per_search` cap implemented**. CLAUDE.md documented this cap alongside `omni_wildcard_expansion_cap` (Bug #881) but no code ever enforced it. Literal alias lists and combined wildcards could bypass any total-fan-out ceiling. Added `MultiSearchLimitsConfig.omni_max_repos_per_search: int = 50` + `_enforce_repo_count_cap()` helper in `mcp/handlers/_utils.py` (mirrors wildcard-cap pattern), wired into `_omni_search_code` and `_omni_regex_search` AFTER wildcard expansion + literal union and BEFORE fan-out. Dual-envelope `CapBreach` response (MCP structured + REST HTTP 400) distinguished via new `error_code` field (`wildcard_cap_exceeded` vs `repo_count_cap_exceeded`). Web UI exposure. CLAUDE.md §Bug #881 section corrected to accurately describe both caps.
+
+### Bug Fixes
+
+- fix(#895): **Nested `ClaudeIntegrationConfig` fields read off top-level `ServerConfig` via `getattr` — silent fallback masked Web UI config**. Four call sites in `dependency_map_routes.py` and `mcp/handlers/repos.py` read `dependency_map_pass2_max_turns`, `cohere_api_key`, `voyageai_api_key` off `ServerConfig` directly. Because those fields live on `ServerConfig.claude_integration_config`, `getattr` silently returned each `getattr`'s default every time — operator-configured `Pass 2 Max Turns = 500` was always overridden by the hardcoded fallback `25`; Web-UI-configured Cohere/Voyage API keys never reached the subprocess env (masked in prod only because systemd `Environment=` carried the keys). Fix: all 4 sites use the existing `config_manager.get_claude_integration_config()` / `config.claude_integration_config.*` pattern; hardcoded `25` and silent `except: pass` removed; new `_resolve_provider_api_key` helper de-duplicates sites 2-4; guard test iterates `dataclasses.fields(ClaudeIntegrationConfig)` asserting `hasattr(ServerConfig(), field) is False` for each to prevent regression via name collision.
+
+- fix(#884): **Auto-updater crash loop — URL resolution ran before recovery-path retry check**. `run_once.py main()` called `_resolve_server_url()` BEFORE `_should_retry_on_startup()`. When config.json was missing/corrupt, URL resolution raised `RuntimeError`, escaped to outer `except` → `sys.exit(1)`; systemd re-triggered every 60s; the self-healing pending_restart recovery never fired. Exact incident during v9.21.1 → v9.21.2 cycle. Fix: `DeploymentExecutor` constructed without `server_url` first, then `_should_retry_on_startup()` runs BEFORE any URL resolution; retry branch wraps `_resolve_server_url()` in try/except writing `"failed"` status + `sys.exit(1)` so next invocation retries cleanly. Plus smoke-test guard in `execute()` — subprocess probe `python -c "from code_indexer.server.auto_update.run_once import main"` with 10s timeout BEFORE self-restart, aborting with `"failed"` status if the new auto-updater code won't import. `DEPLOY-GENERAL-141/142` error codes.
+
+- fix(#890): **Dependency Map dashboard reported all repos OK** — metadata filename mismatch prevented change detection. Three reader sites (`dependency_map_dashboard_service:375`, `dependency_map_service:1233` and `:1415`) read `<clone>/.code-indexer/metadata.json` but `cidx index` has written the provider-suffixed `metadata-voyage-ai.json` since the provider-aware migration. All three returned `"local"`/`"unknown"` sentinels; both sides of the status comparison read the same sentinel → `"local" == "local"` → always OK. New `metadata_reader.py` helper prefers provider-suffixed file, falls back to legacy, returns `None` (not sentinels) on missing/malformed. Dashboard `_compute_repo_statuses` adds `current_commit is not None` guard so `None == None` no longer masquerades as OK. `UnicodeDecodeError` caught for belt-and-suspenders.
+
+- fix(#891): **`search_code` failed with `AttributeError: 'dict' object has no attribute 'memory_retrieval_enabled'`**. `ServerConfig.memory_retrieval_config` sometimes arrived as a raw dict (not the `MemoryRetrievalConfig` dataclass) when runtime config was hydrated from SQLite/Postgres storage. 3 MCP tests consistently tripped on this pre-fix. Fix at the deserialization boundary: `_dict_to_server_config` in `config_manager.py` now coerces `dict → MemoryRetrievalConfig` with `__dataclass_fields__` filter for rolling-upgrade safety, mirroring the existing pattern for `claude_integration_config` and 34 other nested configs. The previously-inline `isinstance(_raw_mem, dict)` workaround at `config_service.py:586-596` became dead code and was removed (simplified to `mem_cfg = config.memory_retrieval_config or MemoryRetrievalConfig()`).
+
+- fix(#892): **`lifecycle_backfill` JobTracker registration failed — SQLite parameter 7 unsupported type**. Root cause: `progress_info` typed `Optional[str]` in backend SQL but callers could pass `Dict[str, Any]` raw. SQLite only binds `int`/`float`/`str`/`bytes`/`None`. Fix: new `_serialize_progress_info` helper in `job_tracker.py` (raises `TypeError` on unknown types, anti-fallback per Messi Rule 2) + `json.dumps(v) if isinstance(v, dict) else v` at 6 write boundaries (3 inline in `job_tracker.py` + `save_job`/`update_job` in `sqlite_backends.py` + INSERT/UPDATE in `postgres/background_jobs_backend.py`). Symmetric across both storage backends. Per CLAUDE.md §"Background Jobs (MANDATORY Checklist)", this was a direct violation of the invariant.
+
+- fix(#873): **Dashboard provider latency p95 and p99 identical due to floor-based percentile collapse at small N**. `ProviderHealthMonitor._percentile()` used floor-based nearest-rank (`int(N * pct / 100)`); for N < ~25 `floor(N*0.95) == floor(N*0.99)` → p95 and p99 resolved to the same index. Default 60-minute rolling window + typical traffic (<25 successful provider calls/hour) meant the collapse was the common case, not the edge case. Unit test `test_latency_percentiles` actively locked in the broken behavior. Fix: `float(np.percentile(sorted_values, pct))` — linear interpolation (NIST / numpy / Excel default). numpy is already a transitive dep. Regression guard `assert status.p99_latency_ms > status.p95_latency_ms` added.
+
+- fix(#896): **HNSW stale log storm — 421 identical warnings/2h in production**. `filesystem_vector_store.py:2390` emitted `logger.warning("HNSW index is stale and missing for 'voyage-code-3'. ...")` on every failed search. No repo/alias context, no dedup, no escalation. New `storage/hnsw_stale_logger.py` module with LRU-bounded per-collection-path state machine: first miss → WARNING with `alias=<>, path=<>, model=<>` context; subsequent misses within `cooldown_s=60` → DEBUG (suppressed from WARNING stream); persistent staleness past `escalate_after_s=600` with continued misses → one-shot ERROR naming `persistent_staleness_seconds`; post-escalation → DEBUG forever (no re-storm). Cache cap 1024 entries. Thread-safe via `threading.Lock`. Clock injectable for deterministic testing. Wired into stale-AND-missing branch; stale-but-present branch left alone per bug scope.
+
+- fix(#874): **Dependency Management "Recent Run Metrics" showed P1/P2 = 0.0 for every row**. Four-story Epic-scope fix:
+  - Story A: `_finalize_delta_tracking` hardcoded `0.0, 0.0` literal removed; `run_delta_analysis` wraps `detect_changes()` + `_update_affected_domains()` with `time.time()` → passes real `detect_s`/`merge_s` through to `pass1_duration_s`/`pass2_duration_s` columns. No schema change.
+  - Story B: new columns `run_type VARCHAR(16)` + `phase_timings_json TEXT/JSONB` on both SQLite + Postgres with idempotent ALTER TABLE migrations. Missing Postgres `CREATE TABLE dependency_map_run_history` fixed as sub-defect (fresh Postgres cluster deploy would have crashed on first run metrics write — latent bug) via new migration `021_dependency_map_run_history.sql`.
+  - Story C: full/delta/refinement paths now emit `run_type` + `phase_timings_json`. Refinement path records run metrics for the first time (was invisible on dashboard before). `repos_skipped` populated honestly per run type.
+  - Story D: `depmap_job_status.html` template rewritten — columns now `Timestamp | Type | Domains | Chars | Edges | Repos | Phase timings`. Type column renders badge (full/delta/refinement, em-dash for NULL). Phase timings column renders compact pill list (`synth 12.4s · per-domain 318.7s · finalize 0.2s`) parsed via `phase_timings_parsed` in `_render_complete_response` view layer (not a Jinja filter). Legacy fallback to `P1 X.Xs / P2 Y.Ys` when only pass1/pass2 populated. `or 0` coercion deleted — NULL now renders as em-dash, never `0.0`.
+
+- fix(#897 feature-flagged — measurement loop required on staging): **cidx-server RSS pinned at ~23 GB after HNSW LRU cache drain — glibc arena fragmentation**. Two opt-in mitigations behind bootstrap feature flags (both default OFF):
+  - `enable_malloc_trim: bool = False` — `glibc malloc_trim(0)` hook at end of `_cleanup_expired_entries()` in `hnsw_index_cache.py`, forcing contractible brk pages back to OS. `ctypes.CDLL("libc.so.6")` loaded lazily; silently no-ops on musl/macOS. Linux + glibc only.
+  - `enable_malloc_arena_max: bool = False` — idempotent `_ensure_malloc_arena_max()` auto-updater step (mirrors Bug #879's `_ensure_data_dir_env_var()` pattern) injects/removes `Environment=MALLOC_ARENA_MAX=2` in the cidx-server systemd unit file. Bidirectional revert: flag on → inject; flag off → remove on next auto-updater cycle. `DEPLOY-GENERAL-143` error code.
+
+  Both flags are bootstrap-only (read from `config.json` before DB is available). Production is unchanged until an operator explicitly opts in — intended to be enabled on staging first, RSS recovery measured across backfill-drain cycle, shipped only if >50% recovery per bug body mandate. Full revert leaves no dead state.
+
+- fix: **Baseline `config.codebase_dir` absolute-path resolution on `ConfigManager.load()`**. The `codebase_dir` field defaulted to `Path(".")` when absent from `config.json`; without resolution, downstream sites (`cli.py:3149` constructing `index_dir`) produced relative paths that failed Bug #642's migration-path-under-project-root assertion. Fix: `ConfigManager.load()` resolves a non-absolute `codebase_dir` against `self.config_path.parent.parent` (project root) after `Config(**data)` construction, so callers always receive an absolute path regardless of whether JSON supplied the key.
+
+### Closed with Prior-Commit Evidence
+
+10 bugs closed with backfilled evidence — their fixes landed in commits pre-dating v9.22.1: #825, #841, #871, #879, #882, #893, #842, #851, #852, #824. Evidence comments posted on each.
+
+### Tests
+
+~60 new unit + integration tests across all bug fixes, plus 70+ tests from Epic #886 Stories #887/#888/#889.
+
+### Merge
+
+Merged `feature/epic-886-depmap-tooling-hardening` (commits `bb92e24d`, `19f0441e`, `07487c1f`) into development — 37 files from 886 + 51 files from development, sole overlap `CLAUDE.md` auto-merged cleanly (different sections).
+
 ## v9.22.1
 
 ### Refactor

@@ -118,6 +118,34 @@ def _dt_to_iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat()
 
 
+def _serialize_progress_info(value: Optional[Any]) -> Optional[str]:
+    """
+    Serialize progress_info for SQLite binding.
+
+    SQLite accepts only int, float, str, bytes, and None.  When progress_info
+    is a dict (type contract violation or future API change), json.dumps it.
+    When it is already a str or None, pass through unchanged.
+
+    Raises:
+        TypeError: If the value is a dict containing non-JSON-serializable
+            objects (re-raised with a descriptive message), or if the value
+            is an unexpected type.  No silent fallback — fail fast
+            (Messi Rule #2 anti-fallback).
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value)
+        except TypeError as exc:
+            raise TypeError(
+                f"progress_info dict contains non-JSON-serializable value: {exc}"
+            ) from exc
+    raise TypeError(
+        f"progress_info must be None, str, or dict; got {type(value).__name__}"
+    )
+
+
 def _iso_to_dt(s: Optional[str]) -> Optional[datetime]:
     """Parse ISO-8601 string to aware datetime, or None."""
     if not s:
@@ -1016,7 +1044,7 @@ class JobTracker:
                     job.progress,
                     job.username,
                     job.repo_alias,
-                    job.progress_info,
+                    _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
                 ),
             )
@@ -1103,7 +1131,7 @@ class JobTracker:
                     job.progress,
                     job.username,
                     job.repo_alias,
-                    job.progress_info,
+                    _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
                 ),
             )
@@ -1145,7 +1173,7 @@ class JobTracker:
                     json.dumps(job.result) if job.result is not None else None,
                     job.error,
                     job.progress,
-                    job.progress_info,
+                    _serialize_progress_info(job.progress_info),
                     json.dumps(job.metadata) if job.metadata is not None else None,
                     job.job_id,
                 ),
