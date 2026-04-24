@@ -2,46 +2,7 @@
 name: first_time_user_guide
 category: guides
 required_permission: query_repos
-tl_dr: Get step-by-step quick start guide for new CIDX MCP server users.
-inputSchema:
-  type: object
-  properties: {}
-  required: []
-outputSchema:
-  type: object
-  properties:
-    guide:
-      type: object
-      properties:
-        steps:
-          type: array
-          items:
-            type: object
-            properties:
-              step_number:
-                type: integer
-              title:
-                type: string
-              description:
-                type: string
-              example_call:
-                type: string
-              expected_result:
-                type: string
-        quick_start_summary:
-          type: array
-          items:
-            type: string
-          description: One-line summary of each step for quick reference
-        common_errors:
-          type: array
-          items:
-            type: object
-            properties:
-              error:
-                type: string
-              solution:
-                type: string
+tl_dr: Step-by-step guide for new CIDX users.
 ---
 
 Step-by-step guide for new CIDX users. Call with no arguments to receive the full guide.

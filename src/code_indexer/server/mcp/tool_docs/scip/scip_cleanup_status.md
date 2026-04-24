@@ -3,10 +3,6 @@ name: scip_cleanup_status
 category: scip
 required_permission: manage_users
 tl_dr: Get SCIP workspace cleanup job status (admin only).
-inputSchema:
-  type: object
-  properties: {}
-  required: []
 ---
 
 Get SCIP workspace cleanup job status (admin only). Returns the current status of the SCIP workspace cleanup operation.

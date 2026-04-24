@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.1
+
+### Bug Fixes
+
+- fix(#898): **Claude CLI invoked MCP `search_code` with bare golden-repo aliases during dep-map lifecycle analysis**. Subprocess Claude CLI (dep-map Pass 2, via `LifecycleBatchRunner` / `description_refresh_scheduler`) was calling `search_code(repository_alias="humanize")` instead of `search_code(repository_alias="humanize-global")`. The server registry keys are `-global`-suffixed, so the bare form raised `FileNotFoundError: Repository not found in global repositories`, surfacing as 12× `REPO-GENERAL-024/025/026` ERRORs per delta run on staging v9.23.0 (4 per peer repo queried). Non-blocking — delta completed — but degraded investigation quality and polluted logs. Fix at the prompting layer (per bug body recommendation, rejecting the broader registry-level lenience that would have required coordinated changes across SQLite + Postgres backends + the Protocol contract): extended the "### How to Use" Claude CLI instruction block in `dependency_map_analyzer.py:906-911` to explicitly document `repository_alias` with the `-global` suffix requirement, contrast examples (`humanize-global` vs `humanize`), Bug #898 citation, and `*-global` wildcard / parameter-omission options. Acceptance: zero `REPO-GENERAL-024/025/026` errors on a post-fix staging delta run.
+
+### Maintenance
+
+- chore: regenerated 165 MCP tool_docs/*.md files via `tools/convert_tool_docs.py` to re-sync with `TOOL_REGISTRY` — they had drifted from the registry pre-v9.23.1 (unrelated to #898, surfaced when the verifier ran as part of the #898 fix pipeline).
+
 ## v9.23.0
 
 ### Features
