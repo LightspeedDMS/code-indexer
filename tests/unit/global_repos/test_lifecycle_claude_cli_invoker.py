@@ -26,11 +26,31 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Tuple
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from code_indexer.global_repos.unified_response_parser import UnifiedResult
+
+
+def _make_default_config_service_mock() -> MagicMock:
+    """Return a ConfigService mock that yields default 360/420 lifecycle timeouts.
+
+    The real ConfigService is a module-level singleton.  When other tests in
+    the full suite call update_setting() against it they mutate its in-memory
+    state, so tests that depend on the default values must use an isolated mock
+    instead of the live singleton (cf. test_lifecycle_claude_cli_invoker_config.py).
+    """
+    lifecycle_cfg = MagicMock()
+    lifecycle_cfg.shell_timeout_seconds = 360
+    lifecycle_cfg.outer_timeout_seconds = 420
+
+    server_config = MagicMock()
+    server_config.lifecycle_analysis_config = lifecycle_cfg
+
+    mock_svc = MagicMock()
+    mock_svc.get_config.return_value = server_config
+    return mock_svc
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +109,9 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
     with patch(
         "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
         side_effect=_fake_invoke,
+    ), patch(
+        "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
+        return_value=_make_default_config_service_mock(),
     ):
         result = invoker("alias-a", repo_path)
 
