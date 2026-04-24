@@ -614,6 +614,11 @@ class MultiSearchLimitsConfig:
     # Bug #881 Phase 3: cap on wildcard expansion to prevent unbounded fan-out
     # and HNSW cache memory exhaustion. Default 50; operator-tunable via Web UI.
     omni_wildcard_expansion_cap: int = 50
+    # Bug #894: cap on total repositories per omni search (after wildcard expansion
+    # + literal union). Prevents unbounded fan-out from literal alias lists or
+    # combined wildcards each under per-pattern cap. Default 50; operator-tunable
+    # via Web UI.
+    omni_max_repos_per_search: int = 50
 
 
 @dataclass
@@ -1048,6 +1053,16 @@ class ServerConfig:
     # Stays False in production. Both must be True together to enable harness.
     fault_injection_enabled: bool = False
     fault_injection_nonprod_ack: bool = False
+
+    # Bug #897 - glibc arena fragmentation mitigations (bootstrap-only, never DB).
+    # Both default False so tests and production are unchanged until operator opts in.
+    # Set in config.json; readable before the DB is available (cleanup daemon thread).
+    enable_malloc_trim: bool = (
+        False  # Mitigation 1: call malloc_trim(0) after eviction.
+    )
+    enable_malloc_arena_max: bool = (
+        False  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd.
+    )
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1612,6 +1627,21 @@ class ServerConfigManager:
             config_dict["rerank_config"], dict
         ):
             config_dict["rerank_config"] = RerankConfig(**config_dict["rerank_config"])
+
+        # Bug #891: Convert memory_retrieval_config dict to MemoryRetrievalConfig.
+        # asdict() converts the nested dataclass to a plain dict; without this block
+        # _merge_runtime_config would leave memory_retrieval_config as a dict, causing
+        # AttributeError at search.py:847 (mem_cfg.memory_retrieval_enabled).
+        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
+        # as claude_integration_config conversion above.
+        if "memory_retrieval_config" in config_dict and isinstance(
+            config_dict["memory_retrieval_config"], dict
+        ):
+            _mem_dict = config_dict["memory_retrieval_config"]
+            _mem_allowed = {f.name for f in fields(MemoryRetrievalConfig)}
+            config_dict["memory_retrieval_config"] = MemoryRetrievalConfig(
+                **{k: v for k, v in _mem_dict.items() if k in _mem_allowed}
+            )
 
         # Story #885 Phase 5b (A7d): Convert lifecycle_analysis_config dict to
         # LifecycleAnalysisConfig so that _merge_runtime_config produces proper

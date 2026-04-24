@@ -725,6 +725,15 @@ class ConfigManager:
                     data["codebase_dir"] = str(path)
 
                 self._config = Config(**data)
+
+                # Ensure codebase_dir is absolute even when absent from JSON.
+                # Config() defaults codebase_dir to Path(".") which is relative.
+                # Resolve it against the project root (parent of .code-indexer/).
+                if not self._config.codebase_dir.is_absolute():
+                    config_dir = self.config_path.parent.parent
+                    self._config.codebase_dir = (
+                        config_dir / self._config.codebase_dir
+                    ).resolve()
             except Exception as e:
                 raise ValueError(f"Failed to load config from {self.config_path}: {e}")
         else:

@@ -13,7 +13,7 @@ Uses a singleton row (id=1) pattern identical to the SQLite implementation.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -158,7 +158,12 @@ class DependencyMapTrackingPostgresBackend:
                 return True
         return False
 
-    def record_run_metrics(self, metrics: Dict[str, Any]) -> None:
+    def record_run_metrics(
+        self,
+        metrics: Dict[str, Any],
+        run_type: Optional[str] = None,
+        phase_timings_json: Optional[str] = None,
+    ) -> None:
         """
         Store run metrics to dependency_map_run_history.
 
@@ -166,13 +171,18 @@ class DependencyMapTrackingPostgresBackend:
             metrics: Dict with keys: timestamp, domain_count, total_chars, edge_count,
                      zero_char_domains, repos_analyzed, repos_skipped,
                      pass1_duration_s, pass2_duration_s
+            run_type: Optional run classification (e.g. "delta", "full").
+                      Bug #874 Story B. NULL for legacy rows.
+            phase_timings_json: Optional pre-serialized JSON string with per-phase
+                      timing breakdown. Bug #874 Story B. NULL for legacy rows.
         """
         with self._pool.connection() as conn:
             conn.execute(
                 """INSERT INTO dependency_map_run_history
                    (timestamp, domain_count, total_chars, edge_count, zero_char_domains,
-                    repos_analyzed, repos_skipped, pass1_duration_s, pass2_duration_s)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    repos_analyzed, repos_skipped, pass1_duration_s, pass2_duration_s,
+                    run_type, phase_timings_json)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     metrics.get("timestamp"),
                     metrics.get("domain_count"),
@@ -183,6 +193,8 @@ class DependencyMapTrackingPostgresBackend:
                     metrics.get("repos_skipped"),
                     metrics.get("pass1_duration_s"),
                     metrics.get("pass2_duration_s"),
+                    run_type,
+                    phase_timings_json,
                 ),
             )
         logger.debug("Recorded dependency map run metrics")
@@ -201,7 +213,8 @@ class DependencyMapTrackingPostgresBackend:
             cursor = conn.execute(
                 """SELECT run_id, timestamp, domain_count, total_chars, edge_count,
                           zero_char_domains, repos_analyzed, repos_skipped,
-                          pass1_duration_s, pass2_duration_s
+                          pass1_duration_s, pass2_duration_s,
+                          run_type, phase_timings_json
                    FROM dependency_map_run_history
                    ORDER BY run_id DESC
                    LIMIT %s""",
@@ -220,6 +233,8 @@ class DependencyMapTrackingPostgresBackend:
                 "repos_skipped": row[7],
                 "pass1_duration_s": row[8],
                 "pass2_duration_s": row[9],
+                "run_type": row[10],
+                "phase_timings_json": row[11],
             }
             for row in rows
         ]

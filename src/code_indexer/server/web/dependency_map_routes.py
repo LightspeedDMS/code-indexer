@@ -399,6 +399,35 @@ def _render_complete_response(request, session, cached_row: dict) -> HTMLRespons
                 "_render_complete_response: content health check failed: %s", exc
             )
 
+    # Story D Bug #874: pre-parse phase_timings_json str -> dict for each run row
+    # so the template iterates a real dict rather than needing a Jinja filter.
+    for row in job_status.get("run_history", []):
+        raw = row.get("phase_timings_json")
+        if raw is None:
+            # Absent value — no warning; expected for legacy or NULL rows.
+            row["phase_timings_parsed"] = None
+        else:
+            try:
+                parsed = _json.loads(raw)
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "_render_complete_response: malformed phase_timings_json %r: %s",
+                    raw,
+                    exc,
+                )
+                row["phase_timings_parsed"] = None
+            else:
+                if not isinstance(parsed, dict):
+                    logger.warning(
+                        "_render_complete_response: phase_timings_json parsed to %s "
+                        "(expected dict), ignoring: %r",
+                        type(parsed).__name__,
+                        raw,
+                    )
+                    row["phase_timings_parsed"] = None
+                else:
+                    row["phase_timings_parsed"] = parsed
+
     return templates.TemplateResponse(
         "partials/depmap_job_status.html",
         {
@@ -1086,17 +1115,17 @@ def _build_domain_analyzer(dep_map_service, output_dir: Path):
                 return False
 
             config_manager = getattr(dep_map_service, "_config_manager", None)
-            max_turns = 25
-            if config_manager:
-                try:
-                    config = (
-                        config_manager.get_config()
-                        if hasattr(config_manager, "get_config")
-                        else config_manager
-                    )
-                    max_turns = getattr(config, "dependency_map_pass2_max_turns", 25)
-                except Exception:
-                    pass
+            if config_manager is None:
+                logger.warning("Repair analyzer: no config_manager — aborting")
+                return False
+            try:
+                ci_config = config_manager.get_claude_integration_config()
+            except Exception as e:
+                logger.error(
+                    "Repair analyzer: failed to load claude_integration_config: %s", e
+                )
+                return False
+            max_turns = ci_config.dependency_map_pass2_max_turns
 
             journal = getattr(dep_map_service, "_activity_journal", None) or getattr(
                 dep_map_service, "activity_journal", None

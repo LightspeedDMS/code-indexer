@@ -278,12 +278,15 @@ class TestLifecycleConfigAutoMigration:
 
         persisted, version = _read_runtime_row(db_path)
 
-        assert version == 2, f"Version must stay 2 on second boot (no-op); got {version}"
+        assert version == 2, (
+            f"Version must stay 2 on second boot (no-op); got {version}"
+        )
         assert persisted == _MIGRATED_RUNTIME_WITH_LIFECYCLE, (
             "config_json must be identical after second boot — no silent rewrite"
         )
         spurious_logs = [
-            r for r in caplog.records
+            r
+            for r in caplog.records
             if r.levelno == logging.INFO
             and "lifecycle_analysis" in r.getMessage().lower()
         ]

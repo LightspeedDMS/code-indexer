@@ -38,6 +38,8 @@ BOOTSTRAP_KEYS = frozenset(
         "postgres_dsn",
         "ontap",
         "cluster",
+        "enable_malloc_arena_max",  # Bug #897
+        "enable_malloc_trim",  # Bug #897
         "fault_injection_enabled",  # Story #746
         "fault_injection_nonprod_ack",  # Story #746
     }
@@ -517,6 +519,8 @@ class ConfigService:
                 "omni_pattern_metacharacters": config.multi_search_limits_config.omni_pattern_metacharacters,
                 # Bug #881 Phase 3: wildcard fan-out cap
                 "omni_wildcard_expansion_cap": config.multi_search_limits_config.omni_wildcard_expansion_cap,
+                # Bug #894: total per-search fan-out cap (after expansion + literal union)
+                "omni_max_repos_per_search": config.multi_search_limits_config.omni_max_repos_per_search,
             },
             # Story #26 - Background jobs configuration, Story #27 - SubprocessExecutor max_workers
             # Note: job history retention period moved to data_retention section (Story #400 - AC5)
@@ -583,17 +587,7 @@ class ConfigService:
         # Memory retrieval settings (Story #883)
         from code_indexer.server.utils.config_manager import MemoryRetrievalConfig
 
-        _raw_mem = config.memory_retrieval_config
-        if isinstance(_raw_mem, dict):
-            mem_cfg = MemoryRetrievalConfig(
-                **{
-                    k: v
-                    for k, v in _raw_mem.items()
-                    if k in MemoryRetrievalConfig.__dataclass_fields__
-                }
-            )
-        else:
-            mem_cfg = _raw_mem or MemoryRetrievalConfig()
+        mem_cfg = config.memory_retrieval_config or MemoryRetrievalConfig()
         settings["memory_retrieval"] = {
             "memory_retrieval_enabled": mem_cfg.memory_retrieval_enabled,
             "memory_voyage_min_score": mem_cfg.memory_voyage_min_score,
@@ -1418,6 +1412,9 @@ class ConfigService:
         # Bug #881 Phase 3: wildcard fan-out cap
         elif key == "omni_wildcard_expansion_cap":
             multi_search.omni_wildcard_expansion_cap = int(value)
+        # Bug #894: total per-search fan-out cap
+        elif key == "omni_max_repos_per_search":
+            multi_search.omni_max_repos_per_search = int(value)
         else:
             raise ValueError(f"Unknown multi_search setting: {key}")
 

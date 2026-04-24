@@ -39,6 +39,7 @@ from code_indexer.global_repos.lifecycle_batch_runner import (
 from .activity_journal_service import ActivityJournalService
 from .constants import CIDX_META_REPO
 from .dep_map_health_detector import DepMapHealthDetector
+from .metadata_reader import read_current_commit
 
 logger = logging.getLogger(__name__)
 
@@ -349,7 +350,10 @@ class DependencyMapService:
             except Exception as e:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
-            # Finalize and cleanup
+            # Finalize and cleanup.
+            # Bug #874 Story C: capture start time so _finalize_analysis can compute
+            # finalize_s (includes swap + tracking + reindex) for phase_timings_json.
+            t_finalize_start = time.time()
             self._finalize_analysis(
                 config,
                 paths,
@@ -357,6 +361,8 @@ class DependencyMapService:
                 domain_list,
                 pass1_duration_s,
                 pass2_duration_s,
+                run_type="full",
+                finalize_phase_start=t_finalize_start,
             )
 
             _analysis_succeeded = True
@@ -746,6 +752,9 @@ class DependencyMapService:
         domain_list: List[Dict[str, Any]],
         pass1_duration_s: float = 0.0,
         pass2_duration_s: float = 0.0,
+        run_type: Optional[str] = None,
+        phase_timings_json: Optional[str] = None,
+        finalize_phase_start: float = 0.0,
     ) -> None:
         """
         Finalize analysis: swap, reindex, update tracking, cleanup.
@@ -757,6 +766,13 @@ class DependencyMapService:
             domain_list: List of identified domains
             pass1_duration_s: Duration of Pass 1 in seconds
             pass2_duration_s: Duration of Pass 2 in seconds
+            run_type: Run classification for metrics (e.g. "full"). Bug #874 Story C.
+            phase_timings_json: Pre-serialised JSON with per-phase timing breakdown.
+                      Bug #874 Story C. When None and run_type=="full", built here
+                      from pass1_duration_s, pass2_duration_s, and finalize_s.
+            finalize_phase_start: time.time() value recorded by the caller before
+                      calling this method. Used to compute finalize_s for full runs.
+                      Bug #874 Story C.
         """
         staging_dir = paths["staging_dir"]
         final_dir = paths["final_dir"]
@@ -790,9 +806,28 @@ class DependencyMapService:
             error_message=None,
         )
 
-        # AC9 (Story #216): Record run metrics to run_history table
+        # AC9 (Story #216): Record run metrics to run_history table.
+        # Bug #874 Story C: build phase_timings_json for full runs using the wall-clock
+        # duration of this finalize method (measured by the caller via finalize_phase_start).
+        if run_type == "full" and phase_timings_json is None:
+            finalize_s = (
+                time.time() - finalize_phase_start if finalize_phase_start else 0.0
+            )
+            phase_timings_json = json.dumps(
+                {
+                    "synth_s": pass1_duration_s,
+                    "per_domain_s": pass2_duration_s,
+                    "finalize_s": finalize_s,
+                }
+            )
         self._record_run_metrics(
-            final_dir, domain_list, repo_list, pass1_duration_s, pass2_duration_s
+            final_dir,
+            domain_list,
+            repo_list,
+            pass1_duration_s,
+            pass2_duration_s,
+            run_type=run_type,
+            phase_timings_json=phase_timings_json,
         )
 
     def _stage_then_swap(self, staging_dir: Path, final_dir: Path) -> None:
@@ -827,6 +862,9 @@ class DependencyMapService:
         repo_list: List[Dict[str, Any]],
         pass1_duration_s: float = 0.0,
         pass2_duration_s: float = 0.0,
+        run_type: Optional[str] = None,
+        phase_timings_json: Optional[str] = None,
+        repos_skipped: int = 0,
     ) -> None:
         """
         Compute and record run metrics to tracking backend (AC9, Story #216).
@@ -841,6 +879,12 @@ class DependencyMapService:
             repo_list: List of repo dicts that were analyzed
             pass1_duration_s: Duration of Pass 1 in seconds
             pass2_duration_s: Duration of Pass 2 in seconds
+            run_type: Optional run classification (e.g. "delta", "full").
+                      Bug #874 Story B. NULL for legacy rows until Story C wires it.
+            phase_timings_json: Optional pre-serialized JSON string with per-phase
+                      timing breakdown. Bug #874 Story B. NULL for legacy rows.
+            repos_skipped: Count of repos not touched by this run. Bug #874 Story C.
+                      Full runs always pass 0; delta/refinement pass honest values.
         """
         try:
             total_chars = 0
@@ -887,13 +931,17 @@ class DependencyMapService:
                 "edge_count": edge_count,
                 "zero_char_domains": zero_char_domains,
                 "repos_analyzed": len(repo_list),
-                "repos_skipped": 0,  # Full analysis always processes all repos
+                "repos_skipped": repos_skipped,  # Bug #874 Story C: caller-supplied
                 "pass1_duration_s": pass1_duration_s,
                 "pass2_duration_s": pass2_duration_s,
             }
 
             if hasattr(self._tracking_backend, "record_run_metrics"):
-                self._tracking_backend.record_run_metrics(metrics)
+                self._tracking_backend.record_run_metrics(
+                    metrics,
+                    run_type=run_type,
+                    phase_timings_json=phase_timings_json,
+                )
                 logger.info(
                     f"Recorded run metrics: {len(domain_list)} domains, "
                     f"{len(repo_list)} repos, {total_chars} chars"
@@ -1214,13 +1262,17 @@ class DependencyMapService:
 
     def _get_commit_hashes(self, repo_list: List[Dict[str, Any]]) -> Dict[str, str]:
         """
-        Read metadata.json for each repo to get current_commit.
+        Read provider-aware metadata for each repo to get current_commit (Bug #890).
+
+        Prefers metadata-voyage-ai.json, falls back to legacy metadata.json via
+        read_current_commit(). Repos with no readable metadata are omitted from
+        the result — callers must not interpret absence as a sentinel value.
 
         Args:
             repo_list: List of repo dicts with clone_path
 
         Returns:
-            Dict mapping repo alias to commit hash
+            Dict mapping repo alias to real commit SHA (only repos with valid metadata)
         """
         commit_hashes = {}
         for repo in repo_list:
@@ -1230,18 +1282,9 @@ class DependencyMapService:
             if not alias or not clone_path:
                 continue
 
-            metadata_path = Path(clone_path) / ".code-indexer" / "metadata.json"
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path) as f:
-                        metadata = json.load(f)
-                    current_commit = metadata.get("current_commit", "unknown")
-                    commit_hashes[alias] = current_commit
-                except Exception as e:
-                    logger.warning(f"Failed to read metadata for {alias}: {e}")
-                    commit_hashes[alias] = "unknown"
-            else:
-                commit_hashes[alias] = "local"
+            current_commit = read_current_commit(clone_path)
+            if current_commit is not None:
+                commit_hashes[alias] = current_commit
 
         return commit_hashes
 
@@ -1411,19 +1454,16 @@ class DependencyMapService:
             if not alias or not clone_path:
                 continue
 
-            # Read current commit hash from metadata.json
-            metadata_path = Path(clone_path) / ".code-indexer" / "metadata.json"
-            current_hash = None
+            # Read current commit hash from provider-aware metadata (Bug #890)
+            current_hash = read_current_commit(clone_path)
 
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path) as f:
-                        metadata = json.load(f)
-                    current_hash = metadata.get("current_commit")
-                except Exception as e:
-                    logger.warning(f"Failed to read metadata for {alias}: {e}")
-
-            # Compare with stored hash
+            # Bug #890 post-deploy note: on the first delta run after this fix
+            # lands, every repo will flip to CHANGED because stored_hashes may
+            # still carry "local"/"unknown" sentinels from the pre-fix period
+            # while current_hash will now hold real SHAs. This is expected and
+            # self-healing — the tracking table gets rewritten with real SHAs
+            # on that run, and normal behavior resumes thereafter. Rate-limiting
+            # in ClaudeCliManager protects against stampede.
             if alias not in stored_hashes:
                 # New repo (not in previous analysis)
                 new_repos.append(repo)
@@ -2060,6 +2100,8 @@ class DependencyMapService:
         all_repos: List[Dict[str, Any]],
         output_dir: Optional[Path] = None,
         affected_domains: Optional[Set[str]] = None,
+        detect_s: float = 0.0,
+        merge_s: float = 0.0,
     ) -> None:
         """
         Finalize delta analysis tracking updates (Story #193, AC8).
@@ -2067,11 +2109,20 @@ class DependencyMapService:
         Bug #572: Now also records run metrics so delta runs appear in the
         Recent Run Metrics dashboard table.
 
+        Bug #874 Story A: detect_s and merge_s carry real wall-clock timings from
+        run_delta_analysis so the Recent Run Metrics dashboard shows honest numbers.
+        Column mapping (no schema change — Story B adds phase_timings_json):
+          detect_s  -> pass1_duration_s  (change-detection phase)
+          merge_s   -> pass2_duration_s  (per-domain Claude-CLI merge phase)
+
         Args:
             config: Claude integration config
             all_repos: List of all current repos
             output_dir: Dependency map output directory (for metric computation)
             affected_domains: Set of domain names updated in this delta run
+            detect_s: Wall-clock seconds spent in detect_changes() (P1-equivalent)
+            merge_s: Wall-clock seconds spent in _update_affected_domains() (P2-equivalent);
+                     legitimately 0.0 on the no-affected-domains early-return branch
         """
         commit_hashes = self._get_commit_hashes(all_repos) if all_repos else {}
         next_run = (
@@ -2079,6 +2130,9 @@ class DependencyMapService:
             + timedelta(hours=config.dependency_map_interval_hours)
         ).isoformat()
 
+        # Bug #874 Story C: time the finalize phase (update_tracking + record_run_metrics)
+        # so the delta phase_timings_json includes an honest finalize_s value.
+        t_finalize_start = time.time()
         self._tracking_backend.update_tracking(
             status="completed",
             commit_hashes=json.dumps(commit_hashes) if commit_hashes else None,
@@ -2088,9 +2142,29 @@ class DependencyMapService:
 
         # Bug #572: Record run metrics for delta analysis so they appear
         # in the Recent Run Metrics dashboard table.
+        # Bug #874 Story A: pass real detect_s/merge_s instead of hardcoded 0.0/0.0.
+        # Bug #874 Story C: add run_type="delta", phase_timings_json, and repos_skipped.
         if output_dir is not None and affected_domains is not None:
+            finalize_s = time.time() - t_finalize_start
             domain_list = [{"name": d} for d in affected_domains]
-            self._record_run_metrics(output_dir, domain_list, all_repos, 0.0, 0.0)
+            # TODO #874: repos_skipped could be derived by walking the domains-to-repos
+            # mapping; deferred — 0 is a non-None, non-negative int (FR6 contract met).
+            self._record_run_metrics(
+                output_dir,
+                domain_list,
+                all_repos,
+                detect_s,
+                merge_s,
+                run_type="delta",
+                phase_timings_json=json.dumps(
+                    {
+                        "detect_s": detect_s,
+                        "merge_s": merge_s,
+                        "finalize_s": finalize_s,
+                    }
+                ),
+                repos_skipped=0,
+            )
 
     def run_delta_analysis(
         self, job_id: Optional[str] = None
@@ -2233,7 +2307,11 @@ class DependencyMapService:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
             # Detect changes (AC2: Change Detection)
+            # Bug #874 Story A: time the detect phase so the dashboard shows real numbers.
+            # detect_s maps to pass1_duration_s column (Story B will add phase_timings_json).
+            t_detect_start = time.time()
             changed_repos, new_repos, removed_repos = self.detect_changes()
+            detect_s = time.time() - t_detect_start
 
             total_changes = len(changed_repos) + len(new_repos) + len(removed_repos)
             try:
@@ -2332,7 +2410,10 @@ class DependencyMapService:
                         dependency_map_dir=dependency_map_dir,
                     )
                 all_repos = self._get_activated_repos()
-                self._finalize_delta_tracking(config, all_repos)
+                # Bug #874 Story A: pass detect_s (merge never ran on this branch).
+                self._finalize_delta_tracking(
+                    config, all_repos, detect_s=detect_s, merge_s=0.0
+                )
                 _delta_succeeded = True
                 return {
                     "status": "completed",
@@ -2422,6 +2503,9 @@ class DependencyMapService:
                 logger.debug(f"Non-fatal journal log error: {e}")
 
             # Update affected domains (AC5: In-Place Updates)
+            # Bug #874 Story A: time the merge phase so the dashboard shows real numbers.
+            # merge_s maps to pass2_duration_s column (Story B will add phase_timings_json).
+            t_merge_start = time.time()
             errors = self._update_affected_domains(
                 affected_domains,
                 dependency_map_dir,
@@ -2430,6 +2514,7 @@ class DependencyMapService:
                 removed_repos,
                 config,
             )
+            merge_s = time.time() - t_merge_start
 
             # Bug #396: Remove stale repo aliases from _domains.json
             if removed_repos:
@@ -2470,11 +2555,14 @@ class DependencyMapService:
                     f"Discovery write failed: excluding {len(new_repos)} new repo(s) "
                     "from tracking so they are re-detected on next delta run"
                 )
+            # Bug #874 Story A: pass real detect_s/merge_s timings.
             self._finalize_delta_tracking(
                 config,
                 repos_to_finalize,
                 output_dir=dependency_map_dir,
                 affected_domains=affected_domains,
+                detect_s=detect_s,
+                merge_s=merge_s,
             )
 
             logger.info(
@@ -2796,6 +2884,8 @@ class DependencyMapService:
             domains_processed = 0
             domains_changed = 0
             domains_failed = 0
+            # Bug #874 Story C: time the refinement work so phase_timings_json has honest refine_s.
+            t_refine_start = time.time()
             for domain_idx, domain_info in enumerate(batch):
                 domain_name = domain_info.get("name", "")
                 if not domain_name:
@@ -2843,6 +2933,7 @@ class DependencyMapService:
                     logger.warning(
                         "Refinement: Failed to refine domain '%s': %s", domain_name, e
                     )
+            refine_s = time.time() - t_refine_start
 
             if any_changed:
                 try:
@@ -2858,6 +2949,19 @@ class DependencyMapService:
 
             new_cursor = effective_cursor + config.refinement_domains_per_run
             self._tracking_backend.update_tracking(refinement_cursor=new_cursor)
+
+            # Bug #874 Story C FR5: first-ever _record_run_metrics call from refinement path.
+            # domain_list uses batch (what this cycle touched), not domain_list_ordered (total).
+            # repos_skipped = 0 (refinement has no per-repo skipping concept at this scope).
+            self._record_run_metrics(
+                dependency_map_dir,
+                [{"name": d["name"]} for d in batch],
+                [],
+                run_type="refinement",
+                phase_timings_json=json.dumps({"refine_s": refine_s}),
+                repos_skipped=0,
+            )
+
             try:
                 self._activity_journal.log(
                     f"Refinement cycle complete: {domains_processed} domains processed, "

@@ -2229,10 +2229,23 @@ class DependencyMapTrackingBackend:
                     repos_analyzed INTEGER,
                     repos_skipped INTEGER,
                     pass1_duration_s REAL,
-                    pass2_duration_s REAL
+                    pass2_duration_s REAL,
+                    run_type TEXT,
+                    phase_timings_json TEXT
                 )
             """
             )
+            # Bug #874 Story B: idempotent ALTER TABLE for existing installations.
+            # SQLite has no ADD COLUMN IF NOT EXISTS, so catch duplicate-column errors.
+            for col_ddl in [
+                "ALTER TABLE dependency_map_run_history ADD COLUMN run_type TEXT",
+                "ALTER TABLE dependency_map_run_history ADD COLUMN phase_timings_json TEXT",
+            ]:
+                try:
+                    conn.execute(col_ddl)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             return None
 
         self._conn_manager.execute_atomic(operation)
@@ -2259,7 +2272,12 @@ class DependencyMapTrackingBackend:
 
         self._conn_manager.execute_atomic(_do_migrate)
 
-    def record_run_metrics(self, metrics: Dict[str, Any]) -> None:
+    def record_run_metrics(
+        self,
+        metrics: Dict[str, Any],
+        run_type: Optional[str] = None,
+        phase_timings_json: Optional[str] = None,
+    ) -> None:
         """
         Store run metrics to dependency_map_run_history (AC9, Story #216).
 
@@ -2267,6 +2285,10 @@ class DependencyMapTrackingBackend:
             metrics: Dict with keys: timestamp, domain_count, total_chars, edge_count,
                      zero_char_domains, repos_analyzed, repos_skipped,
                      pass1_duration_s, pass2_duration_s
+            run_type: Optional run classification string (e.g. "delta", "full").
+                      Bug #874 Story B. NULL for legacy rows.
+            phase_timings_json: Optional pre-serialized JSON string with per-phase
+                      timing breakdown. Bug #874 Story B. NULL for legacy rows.
         """
         self._ensure_run_history_table()
 
@@ -2274,8 +2296,9 @@ class DependencyMapTrackingBackend:
             conn.execute(
                 """INSERT INTO dependency_map_run_history
                    (timestamp, domain_count, total_chars, edge_count, zero_char_domains,
-                    repos_analyzed, repos_skipped, pass1_duration_s, pass2_duration_s)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    repos_analyzed, repos_skipped, pass1_duration_s, pass2_duration_s,
+                    run_type, phase_timings_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     metrics.get("timestamp"),
                     metrics.get("domain_count"),
@@ -2286,6 +2309,8 @@ class DependencyMapTrackingBackend:
                     metrics.get("repos_skipped"),
                     metrics.get("pass1_duration_s"),
                     metrics.get("pass2_duration_s"),
+                    run_type,
+                    phase_timings_json,
                 ),
             )
             return None
@@ -2308,7 +2333,8 @@ class DependencyMapTrackingBackend:
         cursor = conn.execute(
             """SELECT run_id, timestamp, domain_count, total_chars, edge_count,
                       zero_char_domains, repos_analyzed, repos_skipped,
-                      pass1_duration_s, pass2_duration_s
+                      pass1_duration_s, pass2_duration_s,
+                      run_type, phase_timings_json
                FROM dependency_map_run_history
                ORDER BY run_id DESC
                LIMIT ?""",
@@ -2327,6 +2353,8 @@ class DependencyMapTrackingBackend:
                 "repos_skipped": row[7],
                 "pass1_duration_s": row[8],
                 "pass2_duration_s": row[9],
+                "run_type": row[10],
+                "phase_timings_json": row[11],
             }
             for row in rows
         ]
@@ -2436,7 +2464,9 @@ class BackgroundJobsSqliteBackend:
                     ),
                     current_phase,
                     phase_detail,
-                    progress_info,
+                    json.dumps(progress_info)
+                    if isinstance(progress_info, dict)
+                    else progress_info,
                     json.dumps(metadata) if metadata else None,
                     executing_node,
                     claimed_at,
@@ -2511,6 +2541,10 @@ class BackgroundJobsSqliteBackend:
             if value is None:
                 params.append(None)
             elif key in json_fields:
+                params.append(json.dumps(value))
+            elif key == "progress_info" and isinstance(value, dict):
+                # Bug #892: dict progress_info must be JSON-serialized before binding.
+                # str progress_info passes through unchanged.
                 params.append(json.dumps(value))
             elif key in bool_fields:
                 params.append(1 if value else 0)

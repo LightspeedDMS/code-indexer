@@ -323,7 +323,6 @@ class TestParserStubMethods:
             ("get_repo_domains", ("any-repo",), []),
             ("get_domain_summary", ("any-domain",), None),
             ("get_stale_domains", (0,), []),
-            ("get_cross_domain_graph", (), []),
         ],
     )
     def test_stub_returns_correct_signature(
@@ -1421,7 +1420,7 @@ class TestGetCrossDomainGraph:
     def test_get_cross_domain_graph_returns_all_edges(self, graph_root: Path) -> None:
         """Synthetic 4-domain graph yields exactly 4 edges: A→B, A→C, B→D, C→D."""
         parser = _make_parser(graph_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         assert anomalies == [], f"Expected no anomalies, got: {anomalies}"
         edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
@@ -1492,7 +1491,7 @@ class TestGetCrossDomainGraph:
         )
 
         parser = _make_parser(dep_map_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         assert anomalies == []
         assert len(edges) == 1, f"Expected exactly 1 aggregated edge, got {len(edges)}"
@@ -1566,7 +1565,7 @@ class TestGetCrossDomainGraph:
         )
 
         parser = _make_parser(dep_map_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         assert anomalies == []
         assert len(edges) == 1
@@ -1631,7 +1630,7 @@ class TestGetCrossDomainGraph:
         )
 
         parser = _make_parser(dep_map_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         assert len(anomalies) >= 1, "Expected anomaly for broken-domain"
         assert any("broken-domain" in a["file"] for a in anomalies)
@@ -1669,16 +1668,14 @@ class TestGetCrossDomainGraph:
         _write_domain_md_graph(d, "target-dom", outgoing_rows=[], incoming_rows=[])
 
         parser = _make_parser(dep_map_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
         assert ("source-dom", "target-dom") in edge_pairs, (
             "Edge must still be emitted even when incoming verification fails"
         )
         assert len(anomalies) >= 1, "Expected anomaly for bidirectional mismatch"
-        anomaly_text = " ".join(
-            a.get("error", "") + a.get("file", "") for a in anomalies
-        )
+        anomaly_text = " ".join(a["error"] + a["file"] for a in anomalies)
         assert "source-dom" in anomaly_text or "target-dom" in anomaly_text, (
             f"Anomaly must reference the mismatched domains, got: {anomalies}"
         )
@@ -1691,7 +1688,7 @@ class TestGetCrossDomainGraph:
         _write_domains_json(d, [])
 
         parser = _make_parser(dep_map_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         assert edges == []
         assert anomalies == []
@@ -1701,7 +1698,7 @@ class TestGetCrossDomainGraph:
     ) -> None:
         """Non-existent dep_map_path → ([], []) from parser; handler surfaces success=false."""
         parser = _make_parser(tmp_path / "no-such-dir")
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         assert edges == []
         assert anomalies == []
@@ -1744,7 +1741,7 @@ class TestGetCrossDomainGraph:
         _write_domain_md_graph(d, "empty-type-tgt", outgoing_rows=[], incoming_rows=[])
 
         parser = _make_parser(dep_map_root)
-        edges, anomalies = parser.get_cross_domain_graph()
+        edges, anomalies, *_ = parser.get_cross_domain_graph()
 
         edge_pairs = {(e["source_domain"], e["target_domain"]) for e in edges}
         assert ("empty-type-src", "empty-type-tgt") not in edge_pairs, (

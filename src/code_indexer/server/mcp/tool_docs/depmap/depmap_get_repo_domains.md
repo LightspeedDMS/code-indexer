@@ -29,27 +29,46 @@ extract the repo's designated role (e.g. "Core service", "Test fixture",
 
 Resilience: malformed YAML frontmatter in individual domain files is captured as
 an anomaly entry. Other domains continue to be processed and are included in the
-result. The tool always returns success=true unless the dependency-map path itself
-does not exist.
+result.
 
 Use this tool to understand how a repository fits into the broader architecture:
 which domains it belongs to, and what function it serves in each.
 
+BREAKING CHANGE (Story #888): Empty-string repo_name now returns success=false,
+resolution=invalid_input. Previous behavior was success=true with an empty domains
+list. Callers that relied on empty-success must add input validation before calling
+this tool.
+
 Response structure:
 
-  success=true:
-    domains: list of {domain_name, role} for each domain the repo belongs to
+  Every response includes both `success` and `resolution` fields.
+
+  resolution values:
+    ok               — repo found in one or more domains
+    invalid_input    — repo_name was empty (success=false)
+    repo_not_indexed — repo absent from all domains or dep_map_path missing (success=false)
+
+  success=true (resolution=ok):
+    domains: list of {domain, role} for each domain the repo belongs to
+      domain: canonical domain name
+      domain_name: DEPRECATED alias for domain — present during one-release compat window,
+                   removed in vN+1
     anomalies: list of {file, error} for any per-file parse failures
 
-  success=false (dep_map_path missing):
+  success=false (resolution=invalid_input):
     error: human-readable message
     domains: []
     anomalies: []
 
-Empty-input behavior: an empty or unknown `repo_name` returns `success: true`
-with an empty domains list. An unknown repo and a valid-but-unaffiliated
-repo produce identical responses, so callers must validate input before
-treating an empty list as "this repo is not in any domain."
+  success=false (resolution=repo_not_indexed) — two sub-cases:
+    Sub-case A: dep_map_path not found (missing-path):
+      error: human-readable message
+      domains: []
+      anomalies: []
+
+    Sub-case B: dep_map_path exists but repo absent from all scanned domains (post-scan):
+      domains: []
+      anomalies: list of {file, error} (anomalies from the scan; no error field)
 
 ### See also
 
