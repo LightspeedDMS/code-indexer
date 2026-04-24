@@ -46,8 +46,7 @@ def _assert_resolution(
         f"got: {data.get('resolution')!r}"
     )
     assert data.get("success") is expected_success, (
-        f"{prefix}Expected success={expected_success}, "
-        f"got: {data.get('success')!r}"
+        f"{prefix}Expected success={expected_success}, got: {data.get('success')!r}"
     )
 
 
@@ -60,7 +59,9 @@ class _DepMapDir:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._domains: list = []
 
-    def add_domain(self, name: str, repos: list, description: str = "d") -> "_DepMapDir":
+    def add_domain(
+        self, name: str, repos: list, description: str = "d"
+    ) -> "_DepMapDir":
         """Register a domain entry (written on flush)."""
         self._domains.append(
             {"name": name, "description": description, "participating_repos": repos}
@@ -94,7 +95,8 @@ def _write_domain_md(
         rows = "".join(f"| {r} | Python | {rl} |\n" for r, rl in roles.items())
         roles_section = (
             "## Repository Roles\n\n| Repository | Language | Role |\n|---|---|---|\n"
-            + rows + "\n"
+            + rows
+            + "\n"
         )
 
     out_rows = "".join(
@@ -134,8 +136,15 @@ def make_dep_map_with_consumer(tmp_path: Path, repo_name: str) -> Path:
     domain = "alpha-domain"
     d = _DepMapDir(tmp_path).add_domain(domain, repos=[repo_name, consumer]).flush()
     _write_domain_md(
-        d.dir, domain,
-        incoming=[{"external_repo": consumer, "depends_on": repo_name, "source_domain": domain}],
+        d.dir,
+        domain,
+        incoming=[
+            {
+                "external_repo": consumer,
+                "depends_on": repo_name,
+                "source_domain": domain,
+            }
+        ],
     )
     return d.root
 
@@ -164,11 +173,21 @@ def make_two_domain_graph(tmp_path: Path) -> Path:
         .flush()
     )
     _write_domain_md(
-        d.dir, "src-dom",
-        outgoing=[{"this_repo": "repo-s", "depends_on": "repo-t", "target_domain": "tgt-dom"}],
+        d.dir,
+        "src-dom",
+        outgoing=[
+            {"this_repo": "repo-s", "depends_on": "repo-t", "target_domain": "tgt-dom"}
+        ],
     )
     _write_domain_md(
-        d.dir, "tgt-dom",
-        incoming=[{"external_repo": "repo-s", "depends_on": "repo-t", "source_domain": "src-dom"}],
+        d.dir,
+        "tgt-dom",
+        incoming=[
+            {
+                "external_repo": "repo-s",
+                "depends_on": "repo-t",
+                "source_domain": "src-dom",
+            }
+        ],
     )
     return d.root

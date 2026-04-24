@@ -5,9 +5,53 @@ required_permission: query_repos
 tl_dr: Return all domain-to-domain edges as JSON records (source, target, dependency_count, types); no rendering — pass edges to your visualization tool of choice.
 inputSchema:
   type: object
-  properties: {}
+  properties:
+    source_domain:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+      description: >
+        Optional filter. When provided, only edges whose source_domain matches are
+        returned. A string value matches a single source domain; a list value matches
+        any domain in the list. Omit or pass null to return edges from all sources.
+    target_domain:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+      description: >
+        Optional filter. When provided, only edges whose target_domain matches are
+        returned. A string value matches a single target domain; a list value matches
+        any domain in the list. Omit or pass null to return edges to all targets.
+    min_count:
+      type: integer
+      minimum: 1
+      description: >
+        Optional filter. When provided, only edges with dependency_count >= min_count
+        are returned. Omit or pass null to return edges regardless of count.
 ---
-Retrieve the full architectural dependency graph between domains in one call.
+Retrieve the directed domain-to-domain dependency graph, optionally filtered by source, target, or minimum edge count.
+
+Filter parameters (Story #889, all optional):
+
+  source_domain (str | list[str]):
+    Restrict edges to those whose source_domain is in the given value.
+    Omit or pass null to include edges from all source domains.
+
+  target_domain (str | list[str]):
+    Restrict edges to those whose target_domain is in the given value.
+    Omit or pass null to include edges to all target domains.
+
+  min_count (int >= 1):
+    Restrict edges to those with dependency_count >= min_count.
+    Omit or pass null to include edges regardless of count.
+
+Multiple filters narrow the result conjunctively — every returned edge satisfies
+all provided filters simultaneously. Omitting all three filters returns the complete
+graph (backward-compatible with callers that pass no arguments).
 
 This tool scans every domain markdown file in the dependency-map directory and
 aggregates cross-domain dependency rows from each Outgoing Dependencies table

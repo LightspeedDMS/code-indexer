@@ -115,7 +115,9 @@ def _make_dep_map_with_consumer(tmp_path: Path, repo_name: str) -> Path:
     return tmp_path
 
 
-def _make_dep_map_with_repo_in_domain(tmp_path: Path, repo_name: str, domain_name: str) -> Path:
+def _make_dep_map_with_repo_in_domain(
+    tmp_path: Path, repo_name: str, domain_name: str
+) -> Path:
     """Create a dep-map with repo_name listed in domain_name's participating_repos.
 
     Returns tmp_path.
@@ -227,9 +229,7 @@ class TestAC3CanonicalFieldNames:
     ) -> None:
         """get_repo_domains domain entries use 'domain' key (not 'domain_name')."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "my-repo", "my-domain")
-        result = _call_get_repo_domains(
-            {"repo_name": "my-repo"}, _make_app_state(root)
-        )
+        result = _call_get_repo_domains({"repo_name": "my-repo"}, _make_app_state(root))
         data = _parse_response(result)
         assert data["success"] is True
         assert len(data["domains"]) >= 1
@@ -282,14 +282,10 @@ class TestAC3CanonicalFieldNames:
 class TestAC4InputParameterNamesUnchanged:
     """AC4: input parameters repo_name and domain_name must still work unchanged."""
 
-    def test_find_consumers_accepts_repo_name_input_param(
-        self, tmp_path: Path
-    ) -> None:
+    def test_find_consumers_accepts_repo_name_input_param(self, tmp_path: Path) -> None:
         """find_consumers still accepts 'repo_name' as input parameter (unchanged)."""
         root = _make_dep_map_with_consumer(tmp_path, "my-target")
-        result = _call_find_consumers(
-            {"repo_name": "my-target"}, _make_app_state(root)
-        )
+        result = _call_find_consumers({"repo_name": "my-target"}, _make_app_state(root))
         data = _parse_response(result)
         # Must not be invalid_input (which would indicate the param name changed)
         assert data.get("resolution") != "invalid_input", (
@@ -372,9 +368,7 @@ class TestAC5DualWriteAliases:
     ) -> None:
         """get_repo_domains domain entry has both 'domain' (canonical) and 'domain_name' (deprecated alias)."""
         root = _make_dep_map_with_repo_in_domain(tmp_path, "my-repo", "my-domain")
-        result = _call_get_repo_domains(
-            {"repo_name": "my-repo"}, _make_app_state(root)
-        )
+        result = _call_get_repo_domains({"repo_name": "my-repo"}, _make_app_state(root))
         data = _parse_response(result)
         assert data["success"] is True
         assert len(data["domains"]) >= 1
@@ -394,6 +388,7 @@ class TestAC5DualWriteAliases:
     def test_depmap_aliases_module_exists(self) -> None:
         """_depmap_aliases.py module must exist and be importable."""
         from code_indexer.server.mcp.handlers import _depmap_aliases  # noqa: F401
+
         assert _depmap_aliases is not None
 
     def test_dual_write_helper_function_is_centralized(self) -> None:
@@ -402,6 +397,7 @@ class TestAC5DualWriteAliases:
             apply_consumer_aliases,
             apply_domain_membership_aliases,
         )
+
         assert callable(apply_consumer_aliases)
         assert callable(apply_domain_membership_aliases)
 
@@ -410,9 +406,17 @@ class TestAC5DualWriteAliases:
         from code_indexer.server.mcp.handlers._depmap_aliases import (
             apply_consumer_aliases,
         )
-        entry = {"consuming_repo": "consumer-x", "domain": "d", "dependency_type": "Code-level", "evidence": "ev"}
+
+        entry = {
+            "consuming_repo": "consumer-x",
+            "domain": "d",
+            "dependency_type": "Code-level",
+            "evidence": "ev",
+        }
         result = apply_consumer_aliases(entry)
-        assert "repo" in result, f"apply_consumer_aliases must add 'repo' key; got: {list(result)}"
+        assert "repo" in result, (
+            f"apply_consumer_aliases must add 'repo' key; got: {list(result)}"
+        )
         assert "consuming_repo" in result, (
             f"apply_consumer_aliases must preserve 'consuming_repo' deprecated alias; got: {list(result)}"
         )
@@ -423,13 +427,18 @@ class TestAC5DualWriteAliases:
 
         Blocker 1: consumer entries have both canonical domain and deprecated domain_name.
         """
-        from code_indexer.server.mcp.handlers._depmap_aliases import apply_consumer_aliases
-        result = apply_consumer_aliases({
-            "repo": "repo-x",
-            "domain": "alpha-domain",
-            "evidence": "ev",
-            "dependency_type": "Code-level",
-        })
+        from code_indexer.server.mcp.handlers._depmap_aliases import (
+            apply_consumer_aliases,
+        )
+
+        result = apply_consumer_aliases(
+            {
+                "repo": "repo-x",
+                "domain": "alpha-domain",
+                "evidence": "ev",
+                "dependency_type": "Code-level",
+            }
+        )
         assert result["repo"] == "repo-x"
         assert result["consuming_repo"] == "repo-x"
         assert result["domain"] == "alpha-domain"
@@ -443,6 +452,7 @@ class TestAC5DualWriteAliases:
         from code_indexer.server.mcp.handlers._depmap_aliases import (
             apply_domain_membership_aliases,
         )
+
         entry = {"domain_name": "alpha-domain", "role": "Core service"}
         result = apply_domain_membership_aliases(entry)
         assert "domain" in result, (

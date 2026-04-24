@@ -100,4 +100,6 @@ def assert_success_resolution_consistent(success: bool, resolution: str) -> None
     if not success:
         assert resolution != "ok", "Invariant: success=False with resolution='ok'"
     else:
-        assert resolution == "ok", f"Invariant: success=True with resolution={resolution!r}"
+        assert resolution == "ok", (
+            f"Invariant: success=True with resolution={resolution!r}"
+        )

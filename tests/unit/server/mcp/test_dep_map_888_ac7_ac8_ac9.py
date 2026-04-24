@@ -49,7 +49,9 @@ class TestAC7ResolutionContractHasFiveStates:
         assert "repo_not_indexed" in states
         assert "domain_not_indexed" in states
         assert "repo_has_no_consumers" in states
-        assert len(states) == 5, f"Expected 5 resolution states, got {len(states)}: {states}"
+        assert len(states) == 5, (
+            f"Expected 5 resolution states, got {len(states)}: {states}"
+        )
 
 
 class TestAC7DomainNotIndexedGap:
@@ -80,12 +82,16 @@ class TestAC7DomainNotIndexedGap:
         or handler path that produces resolution='domain_not_indexed' from
         depmap_find_consumers_handler. The xfail documents the gap explicitly.
         """
-        from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_find_consumers_handler,
+        )
 
         # No fixture exists that can produce domain_not_indexed from find_consumers.
         # Calling with any repo returns repo_not_indexed, not domain_not_indexed.
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_find_consumers_handler, {"repo_name": "any-repo"}, root)
+        data = _call_handler(
+            depmap_find_consumers_handler, {"repo_name": "any-repo"}, root
+        )
         # This assertion will never pass — confirming domain_not_indexed is unreachable.
         assert data.get("resolution") == "domain_not_indexed", (
             f"Expected domain_not_indexed but got {data.get('resolution')!r} — "
@@ -100,35 +106,59 @@ class TestAC7DomainNotIndexedGap:
 
 class TestAC7FindConsumersInvalidInput:
     def test_empty_repo_name_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_find_consumers_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
         data = _call_handler(depmap_find_consumers_handler, {"repo_name": ""}, root)
-        _assert_resolution(data, "invalid_input", False, "find_consumers empty repo_name")
+        _assert_resolution(
+            data, "invalid_input", False, "find_consumers empty repo_name"
+        )
 
 
 class TestAC7FindConsumersRepoNotIndexed:
     def test_unknown_repo_returns_repo_not_indexed(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_find_consumers_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_find_consumers_handler, {"repo_name": "ghost"}, root)
-        _assert_resolution(data, "repo_not_indexed", False, "find_consumers unknown repo")
+        data = _call_handler(
+            depmap_find_consumers_handler, {"repo_name": "ghost"}, root
+        )
+        _assert_resolution(
+            data, "repo_not_indexed", False, "find_consumers unknown repo"
+        )
 
 
 class TestAC7FindConsumersHasNoConsumers:
     def test_indexed_isolated_repo_returns_repo_has_no_consumers(
         self, tmp_path: Path
     ) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_find_consumers_handler,
+        )
+
         root = make_dep_map_indexed_no_consumers(tmp_path, "isolated-repo")
-        data = _call_handler(depmap_find_consumers_handler, {"repo_name": "isolated-repo"}, root)
-        _assert_resolution(data, "repo_has_no_consumers", False, "find_consumers isolated")
+        data = _call_handler(
+            depmap_find_consumers_handler, {"repo_name": "isolated-repo"}, root
+        )
+        _assert_resolution(
+            data, "repo_has_no_consumers", False, "find_consumers isolated"
+        )
 
 
 class TestAC7FindConsumersOk:
     def test_repo_with_consumers_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_find_consumers_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_find_consumers_handler,
+        )
+
         root = make_dep_map_with_consumer(tmp_path, "hub-repo")
-        data = _call_handler(depmap_find_consumers_handler, {"repo_name": "hub-repo"}, root)
+        data = _call_handler(
+            depmap_find_consumers_handler, {"repo_name": "hub-repo"}, root
+        )
         _assert_resolution(data, "ok", True, "find_consumers hub")
         assert len(data["consumers"]) >= 1
 
@@ -140,21 +170,34 @@ class TestAC7FindConsumersOk:
 
 class TestAC8RepoDomains:
     def test_empty_repo_name_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_repo_domains_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_repo_domains_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
         data = _call_handler(depmap_get_repo_domains_handler, {"repo_name": ""}, root)
         _assert_resolution(data, "invalid_input", False, "repo_domains empty")
 
     def test_unknown_repo_returns_repo_not_indexed(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_repo_domains_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_repo_domains_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_get_repo_domains_handler, {"repo_name": "ghost"}, root)
+        data = _call_handler(
+            depmap_get_repo_domains_handler, {"repo_name": "ghost"}, root
+        )
         _assert_resolution(data, "repo_not_indexed", False, "repo_domains unknown")
 
     def test_known_repo_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_repo_domains_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_repo_domains_handler,
+        )
+
         root = make_dep_map_with_domain(tmp_path, "beta-domain", "known-repo")
-        data = _call_handler(depmap_get_repo_domains_handler, {"repo_name": "known-repo"}, root)
+        data = _call_handler(
+            depmap_get_repo_domains_handler, {"repo_name": "known-repo"}, root
+        )
         _assert_resolution(data, "ok", True, "repo_domains known")
 
 
@@ -165,21 +208,36 @@ class TestAC8RepoDomains:
 
 class TestAC8DomainSummary:
     def test_empty_domain_name_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_domain_summary_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_domain_summary_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_get_domain_summary_handler, {"domain_name": ""}, root)
+        data = _call_handler(
+            depmap_get_domain_summary_handler, {"domain_name": ""}, root
+        )
         _assert_resolution(data, "invalid_input", False, "domain_summary empty")
 
     def test_unknown_domain_returns_domain_not_indexed(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_domain_summary_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_domain_summary_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_get_domain_summary_handler, {"domain_name": "ghost"}, root)
+        data = _call_handler(
+            depmap_get_domain_summary_handler, {"domain_name": "ghost"}, root
+        )
         _assert_resolution(data, "domain_not_indexed", False, "domain_summary unknown")
 
     def test_known_domain_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_domain_summary_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_domain_summary_handler,
+        )
+
         root = make_dep_map_with_domain(tmp_path, "known-domain", "r")
-        data = _call_handler(depmap_get_domain_summary_handler, {"domain_name": "known-domain"}, root)
+        data = _call_handler(
+            depmap_get_domain_summary_handler, {"domain_name": "known-domain"}, root
+        )
         _assert_resolution(data, "ok", True, "domain_summary known")
 
 
@@ -190,21 +248,36 @@ class TestAC8DomainSummary:
 
 class TestAC8StaleDomains:
     def test_negative_threshold_returns_invalid_input(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_stale_domains_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_stale_domains_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_get_stale_domains_handler, {"days_threshold": -1}, root)
+        data = _call_handler(
+            depmap_get_stale_domains_handler, {"days_threshold": -1}, root
+        )
         _assert_resolution(data, "invalid_input", False, "stale_domains negative")
 
     def test_valid_threshold_returns_ok(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_stale_domains_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_stale_domains_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_get_stale_domains_handler, {"days_threshold": 30}, root)
+        data = _call_handler(
+            depmap_get_stale_domains_handler, {"days_threshold": 30}, root
+        )
         _assert_resolution(data, "ok", True, "stale_domains valid")
 
     def test_never_returns_not_indexed_states(self, tmp_path: Path) -> None:
-        from code_indexer.server.mcp.handlers.depmap import depmap_get_stale_domains_handler
+        from code_indexer.server.mcp.handlers.depmap import (
+            depmap_get_stale_domains_handler,
+        )
+
         root = make_empty_dep_map(tmp_path)
-        data = _call_handler(depmap_get_stale_domains_handler, {"days_threshold": 0}, root)
+        data = _call_handler(
+            depmap_get_stale_domains_handler, {"days_threshold": 0}, root
+        )
         assert data.get("resolution") not in {"repo_not_indexed", "domain_not_indexed"}
 
 
@@ -218,6 +291,7 @@ class TestAC9CrossDomainGraph:
         from code_indexer.server.mcp.handlers.depmap import (
             depmap_get_cross_domain_graph_handler,
         )
+
         root = make_two_domain_graph(tmp_path)
         data = _call_handler(depmap_get_cross_domain_graph_handler, {}, root)
         _assert_resolution(data, "ok", True, "graph valid")
@@ -226,6 +300,7 @@ class TestAC9CrossDomainGraph:
         from code_indexer.server.mcp.handlers.depmap import (
             depmap_get_cross_domain_graph_handler,
         )
+
         root = make_empty_dep_map(tmp_path)
         data = _call_handler(depmap_get_cross_domain_graph_handler, {}, root)
         _assert_resolution(data, "ok", True, "graph empty")
@@ -234,10 +309,13 @@ class TestAC9CrossDomainGraph:
         from code_indexer.server.mcp.handlers.depmap import (
             depmap_get_cross_domain_graph_handler,
         )
+
         root = make_empty_dep_map(tmp_path)
         data = _call_handler(depmap_get_cross_domain_graph_handler, {}, root)
         assert data.get("resolution") not in {
-            "repo_not_indexed", "domain_not_indexed", "repo_has_no_consumers"
+            "repo_not_indexed",
+            "domain_not_indexed",
+            "repo_has_no_consumers",
         }
 
     def test_missing_dep_map_path_returns_invalid_input(self, tmp_path: Path) -> None:
@@ -248,6 +326,7 @@ class TestAC9CrossDomainGraph:
         from code_indexer.server.mcp.handlers.depmap import (
             depmap_get_cross_domain_graph_handler,
         )
+
         missing_root = tmp_path / "does-not-exist"
         data = _call_handler(depmap_get_cross_domain_graph_handler, {}, missing_root)
         _assert_resolution(data, "invalid_input", False, "graph missing path")

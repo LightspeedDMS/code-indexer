@@ -175,9 +175,7 @@ class TestAC1ResolutionFieldPresent:
     def test_get_stale_domains_response_has_resolution(self, tmp_path: Path) -> None:
         """depmap_get_stale_domains response must include resolution field."""
         root = _make_valid_dep_map(tmp_path)
-        result = _call_get_stale_domains(
-            {"days_threshold": 0}, _make_app_state(root)
-        )
+        result = _call_get_stale_domains({"days_threshold": 0}, _make_app_state(root))
         data = _parse_response(result)
         assert "resolution" in data, (
             f"depmap_get_stale_domains response missing 'resolution' field; got keys: {list(data)}"
@@ -413,6 +411,7 @@ class TestAC1ResolutionLiteral:
     def test_resolution_literal_importable(self) -> None:
         """ResolutionLiteral must be importable from _depmap_aliases."""
         from code_indexer.server.mcp.handlers._depmap_aliases import ResolutionLiteral
+
         assert ResolutionLiteral is not None
 
     def test_resolution_literal_has_five_values(self) -> None:

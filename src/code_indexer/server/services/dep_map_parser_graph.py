@@ -327,6 +327,54 @@ def emit_self_loop_anomalies(
             )
 
 
+def _aggregate_graph(
+    output_dir: Path,
+) -> Tuple[Dict[Tuple[str, str], Dict[str, Any]], List[AnomalyEntry]]:
+    """Parse all domain files in output_dir and return (edge_data, raw_anomalies).
+
+    Shared helper consumed by both DepMapMCPParser.get_cross_domain_graph_with_channels
+    and depmap_get_hub_domains_handler. Single source of truth for the parsing loop
+    (AC4, Story #889).
+
+    Returns:
+        edge_data    — dict keyed by (src, tgt) tuples, values have 'count' and 'types'.
+        raw_anomalies — list of AnomalyEntry from parsing; not yet deduped or aggregated.
+
+    If output_dir does not exist or _domains.json is empty, returns ({}, []).
+    """
+    from code_indexer.server.services.dep_map_file_utils import load_domains_json
+
+    if not output_dir.exists():
+        return {}, []
+
+    domains = load_domains_json(output_dir)
+    if not domains:
+        return {}, []
+
+    base_dir = output_dir.resolve()
+    edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    incoming_claims: Set[frozenset] = set()
+    raw_anomalies: List[AnomalyEntry] = []
+
+    for domain in domains:
+        if not isinstance(domain, dict):
+            continue
+        domain_name = domain.get("name", "")
+        if not domain_name:
+            continue
+        parse_domain_file_for_graph(
+            output_dir,
+            base_dir,
+            domain_name,
+            edge_data,
+            incoming_claims,
+            raw_anomalies,
+        )
+
+    edge_data = apply_edge_hygiene(edge_data, raw_anomalies)
+    return edge_data, raw_anomalies
+
+
 def build_graph_anomalies(
     output_dir: Path,
     edge_data: Dict[Tuple[str, str], Dict[str, Any]],

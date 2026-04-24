@@ -10,12 +10,14 @@ app.state.dependency_map_service.cidx_meta_read_path — never cached.
 
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Union, cast
 
 from code_indexer.server.services.dep_map_parser_hygiene import (
     AnomalyAggregate,
     AnomalyEntry,
 )
+
+from code_indexer.server.services.dep_map_parser_graph import _aggregate_graph
 
 from . import _utils
 from ._utils import _mcp_response
@@ -163,7 +165,8 @@ def depmap_find_consumers_handler(params: Dict[str, Any], user: Any) -> Dict[str
         )
 
     resolution = (
-        "repo_has_no_consumers" if _is_repo_indexed(output_dir, repo_name)
+        "repo_has_no_consumers"
+        if _is_repo_indexed(output_dir, repo_name)
         else "repo_not_indexed"
     )
     success = False
@@ -277,7 +280,12 @@ def depmap_get_repo_domains_handler(
     assert_resolution_valid(resolution)
     assert_success_resolution_consistent(success, resolution)
     return _mcp_response(
-        {"success": success, "resolution": resolution, "domains": enriched, "anomalies": anomalies}
+        {
+            "success": success,
+            "resolution": resolution,
+            "domains": enriched,
+            "anomalies": anomalies,
+        }
     )
 
 
@@ -344,7 +352,12 @@ def depmap_get_domain_summary_handler(
     assert_resolution_valid(resolution)
     assert_success_resolution_consistent(success, resolution)
     return _mcp_response(
-        {"success": success, "resolution": resolution, "summary": summary, "anomalies": anomalies}
+        {
+            "success": success,
+            "resolution": resolution,
+            "summary": summary,
+            "anomalies": anomalies,
+        }
     )
 
 
@@ -404,6 +417,60 @@ def depmap_get_stale_domains_handler(
     )
 
 
+def _apply_graph_filters(
+    edges: List[Dict[str, Any]],
+    source_domain: Optional[Union[str, List[str]]] = None,
+    target_domain: Optional[Union[str, List[str]]] = None,
+    min_count: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Apply optional AND-composition filters to the edges list.
+
+    Filters applied only when provided (not None):
+    - source_domain (str | list[str]): edge source_domain must be in the set
+    - target_domain (str | list[str]): edge target_domain must be in the set
+    - min_count (int):                 edge dependency_count >= min_count
+
+    Returns a new list; the original edges list is not mutated.
+
+    Invariant (MESSI rule 15): every returned edge satisfies all filters.
+    Stripped under python -O.
+    """
+    # Normalise str → frozenset for O(1) membership check
+    src_set: Optional[frozenset] = None
+    if source_domain is not None:
+        src_set = (
+            frozenset([source_domain])
+            if isinstance(source_domain, str)
+            else frozenset(source_domain)
+        )
+
+    tgt_set: Optional[frozenset] = None
+    if target_domain is not None:
+        tgt_set = (
+            frozenset([target_domain])
+            if isinstance(target_domain, str)
+            else frozenset(target_domain)
+        )
+
+    result: List[Dict[str, Any]] = []
+    for edge in edges:
+        if src_set is not None and edge["source_domain"] not in src_set:
+            continue
+        if tgt_set is not None and edge["target_domain"] not in tgt_set:
+            continue
+        if min_count is not None and edge["dependency_count"] < min_count:
+            continue
+        result.append(edge)
+
+    assert all(
+        (src_set is None or e["source_domain"] in src_set)
+        and (tgt_set is None or e["target_domain"] in tgt_set)
+        and (min_count is None or e["dependency_count"] >= min_count)
+        for e in result
+    ), "Invariant: every returned edge must satisfy all provided filters"
+    return result
+
+
 def depmap_get_cross_domain_graph_handler(
     params: Dict[str, Any], user: Any
 ) -> Dict[str, Any]:
@@ -437,9 +504,84 @@ def depmap_get_cross_domain_graph_handler(
             }
         )
 
+    # AC1/AC2 (Story #889): optional filter params — all default to None (omitted = no filter)
+    raw_source = params.get("source_domain") if isinstance(params, dict) else None
+    raw_target = params.get("target_domain") if isinstance(params, dict) else None
+    raw_min_count = params.get("min_count") if isinstance(params, dict) else None
+
+    # Strict validation: domain filters accept only None, str, or list[str].
+    # Rejects dict, tuple, set, bool, int, and lists containing non-str elements.
+    def _validate_domain_filter(
+        value: Any, field: str
+    ) -> "tuple[Optional[Union[str, List[str]]], Optional[str]]":
+        if value is None:
+            return None, None
+        if isinstance(value, str):
+            return value, None
+        if isinstance(value, list) and all(isinstance(el, str) for el in value):
+            return value, None
+        return None, (
+            f"'{field}' must be a string or list of strings, "
+            f"got {type(value).__name__}"
+        )
+
+    # Strict validation: min_count accepts only None or plain int >= 1.
+    # Rejects bool (bool is int subclass), float, str, and values < 1.
+    def _validate_min_count(
+        value: Any,
+    ) -> "tuple[Optional[int], Optional[str]]":
+        if value is None:
+            return None, None
+        if type(value) is not int:
+            return None, (
+                f"'min_count' must be a positive integer, "
+                f"got {type(value).__name__}"
+            )
+        if value < 1:
+            return None, (
+                f"'min_count' must be >= 1 (schema minimum), got {value}"
+            )
+        return value, None
+
+    def _invalid_graph_response(error_msg: str) -> Dict[str, Any]:
+        _success, _resolution = False, "invalid_input"
+        assert_resolution_valid(_resolution)
+        assert_success_resolution_consistent(_success, _resolution)
+        return _mcp_response(
+            {
+                "success": _success,
+                "resolution": _resolution,
+                "error": error_msg,
+                "edges": [],
+                "anomalies": [],
+                "parser_anomalies": [],
+                "data_anomalies": [],
+            }
+        )
+
+    source_filter, src_err = _validate_domain_filter(raw_source, "source_domain")
+    if src_err is not None:
+        return _invalid_graph_response(src_err)
+
+    target_filter, tgt_err = _validate_domain_filter(raw_target, "target_domain")
+    if tgt_err is not None:
+        return _invalid_graph_response(tgt_err)
+
+    min_count_filter, mc_err = _validate_min_count(raw_min_count)
+    if mc_err is not None:
+        return _invalid_graph_response(mc_err)
+
     edges, all_anomalies, parser_anomalies, data_anomalies = (
         parser.get_cross_domain_graph_with_channels()
     )
+
+    filtered_edges = _apply_graph_filters(
+        edges,
+        source_domain=source_filter,
+        target_domain=target_filter,
+        min_count=min_count_filter,
+    )
+
     success, resolution = True, "ok"
     assert_resolution_valid(resolution)
     assert_success_resolution_consistent(success, resolution)
@@ -447,12 +589,147 @@ def depmap_get_cross_domain_graph_handler(
         {
             "success": success,
             "resolution": resolution,
-            "edges": edges,
+            "edges": filtered_edges,
             "anomalies": [_anomaly_to_dict(a) for a in all_anomalies],
             "parser_anomalies": [_anomaly_to_dict(a) for a in parser_anomalies],
             "data_anomalies": [_anomaly_to_dict(a) for a in data_anomalies],
         }
     )
+
+
+_VALID_BY_VALUES = frozenset({"out_degree", "in_degree", "total_degree"})
+
+_BY_TO_METRIC_KEY = {
+    "out_degree": "out_degree",
+    "in_degree": "in_degree",
+    "total_degree": "total",
+}
+
+
+def _compute_hub_domains(
+    output_dir: Path,
+    top_n: int = 5,
+    by: str = "total_degree",
+) -> List[Dict[str, Any]]:
+    """Compute hub domain rankings from edge_data returned by _aggregate_graph.
+
+    AC4 (Story #889): reuses _aggregate_graph — no duplicate parsing logic.
+    AC7 (Story #889): on-the-fly computation on every call — no cache.
+
+    Args:
+        output_dir: Path to the dependency-map directory.
+        top_n:      Maximum number of entries to return; must be a positive int.
+        by:         Ranking metric — must be one of _VALID_BY_VALUES.
+
+    Raises:
+        ValueError: if by is not in _VALID_BY_VALUES or top_n is invalid.
+
+    Returns:
+        List of {domain, in_degree, out_degree, total} dicts sorted descending by `by`,
+        truncated to top_n. Returns [] when output_dir is absent or graph is empty.
+    """
+    if by not in _VALID_BY_VALUES:
+        raise ValueError(f"by must be one of {sorted(_VALID_BY_VALUES)}, got {by!r}")
+    if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
+        raise ValueError(f"top_n must be a positive integer, got {top_n!r}")
+
+    edge_data, _ = _aggregate_graph(output_dir)
+    if not edge_data:
+        return []
+
+    degrees: Dict[str, Dict[str, int]] = {}
+
+    def _ensure(domain: str) -> None:
+        if domain not in degrees:
+            degrees[domain] = {"in_degree": 0, "out_degree": 0}
+
+    for src, tgt in edge_data:
+        _ensure(src)
+        _ensure(tgt)
+        degrees[src]["out_degree"] += 1
+        degrees[tgt]["in_degree"] += 1
+
+    metric_key = _BY_TO_METRIC_KEY[by]
+    hubs = [
+        {
+            "domain": domain,
+            "in_degree": v["in_degree"],
+            "out_degree": v["out_degree"],
+            "total": v["in_degree"] + v["out_degree"],
+        }
+        for domain, v in degrees.items()
+    ]
+    # cast: h[metric_key] is always int (in_degree/out_degree/total set above);
+    # mypy types h as dict[str, object] so cast is needed — runtime no-op.
+    hubs.sort(key=lambda h: int(cast(int, h[metric_key])), reverse=True)
+    return hubs[:top_n]
+
+
+DEFAULT_HUB_DOMAINS_LIMIT = 5
+
+
+def _hub_invalid_input_response(error_msg: str) -> Dict[str, Any]:
+    """Build a standard invalid_input MCP response for hub_domains validation errors."""
+    success, resolution = False, "invalid_input"
+    assert_resolution_valid(resolution)
+    assert_success_resolution_consistent(success, resolution)
+    return _mcp_response(
+        {"success": success, "resolution": resolution, "error": error_msg, "hubs": []}
+    )
+
+
+def depmap_get_hub_domains_handler(params: Dict[str, Any], user: Any) -> Dict[str, Any]:
+    """
+    MCP handler for depmap_get_hub_domains.
+
+    Returns top-N domains ranked by edge degree. Computes on every call (AC7, Story #889).
+
+    Args:
+        params: Tool arguments.
+            top_n (int, default DEFAULT_HUB_DOMAINS_LIMIT): positive int; absent uses default,
+                  present-but-invalid returns invalid_input.
+            by (str, default "total_degree"): one of _VALID_BY_VALUES.
+        user: Authenticated user (unused, kept for signature compatibility).
+
+    Returns:
+        MCP-compliant response dict.
+        resolution values (AC5):
+        - invalid_input: unknown by=, invalid/negative top_n, or dep_map_path not a valid Path
+        - ok:            hubs computed (may be empty list)
+    """
+    is_dict = isinstance(params, dict)
+    raw_by = params.get("by", "total_degree") if is_dict else "total_degree"
+
+    if not isinstance(raw_by, str) or raw_by not in _VALID_BY_VALUES:
+        return _hub_invalid_input_response(
+            f"by must be one of {sorted(_VALID_BY_VALUES)}, got {raw_by!r}"
+        )
+
+    raw_top_n = params.get("top_n") if is_dict else None
+    if raw_top_n is None:
+        top_n = DEFAULT_HUB_DOMAINS_LIMIT
+    elif not isinstance(raw_top_n, int) or isinstance(raw_top_n, bool) or raw_top_n < 1:
+        return _hub_invalid_input_response(
+            f"top_n must be a positive integer, got {raw_top_n!r}"
+        )
+    else:
+        top_n = raw_top_n
+
+    dep_map_path = (
+        _utils.app_module.app.state.dependency_map_service.cidx_meta_read_path
+    )
+    if not isinstance(dep_map_path, Path) or not dep_map_path.exists():
+        logger.warning(
+            "depmap_get_hub_domains: dep_map_path missing or invalid: %s", dep_map_path
+        )
+        return _hub_invalid_input_response("dep_map_path not found")
+
+    output_dir = dep_map_path / "dependency-map"
+    hubs = _compute_hub_domains(output_dir, top_n=top_n, by=raw_by)
+    success, resolution = True, "ok"
+    assert_resolution_valid(resolution)
+    assert_success_resolution_consistent(success, resolution)
+    return _mcp_response({"success": success, "resolution": resolution, "hubs": hubs})
 
 
 def _register(registry: Dict[str, Any]) -> None:
@@ -462,3 +739,4 @@ def _register(registry: Dict[str, Any]) -> None:
     registry["depmap_get_domain_summary"] = depmap_get_domain_summary_handler
     registry["depmap_get_stale_domains"] = depmap_get_stale_domains_handler
     registry["depmap_get_cross_domain_graph"] = depmap_get_cross_domain_graph_handler
+    registry["depmap_get_hub_domains"] = depmap_get_hub_domains_handler
