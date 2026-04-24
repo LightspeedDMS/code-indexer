@@ -2,14 +2,7 @@
 name: delete_git_credential
 category: admin
 required_permission: query_repos
-tl_dr: Delete a git forge credential.
-inputSchema:
-  type: object
-  properties:
-    credential_id:
-      type: string
-      description: The credential ID to delete (from list_git_credentials)
-  required: [credential_id]
+tl_dr: Delete a previously configured git forge credential.
 ---
 
 TL;DR: Delete a previously configured git forge credential. You can only delete your own credentials.

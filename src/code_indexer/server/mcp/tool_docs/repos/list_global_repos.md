@@ -3,54 +3,6 @@ name: list_global_repos
 category: repos
 required_permission: query_repos
 tl_dr: List all globally accessible repositories.
-inputSchema:
-  type: object
-  properties: {}
-  required: []
-outputSchema:
-  type: object
-  properties:
-    success:
-      type: boolean
-      description: Whether operation succeeded
-    repos:
-      type: array
-      description: List of global repositories (normalized schema)
-      items:
-        type: object
-        properties:
-          user_alias:
-            type: string
-            description: Global repository alias (ends with '-global')
-          golden_repo_alias:
-            type: string
-            description: Base repository name
-          is_global:
-            type: boolean
-            description: Always true for global repos
-          repo_url:
-            type:
-            - string
-            - 'null'
-            description: Repository URL
-          last_refresh:
-            type:
-            - string
-            - 'null'
-            description: ISO 8601 last refresh timestamp
-          index_path:
-            type: string
-            description: Filesystem path to index
-          created_at:
-            type:
-            - string
-            - 'null'
-            description: ISO 8601 creation timestamp
-    error:
-      type: string
-      description: Error message if failed
-  required:
-  - success
 ---
 
 List all globally accessible repositories. Returns repos registered via add_golden_repo, immediately queryable as '{name}-global' alias.

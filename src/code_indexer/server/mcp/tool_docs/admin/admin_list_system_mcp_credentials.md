@@ -2,11 +2,10 @@
 name: admin_list_system_mcp_credentials
 category: admin
 required_permission: manage_users
-tl_dr: List system-managed MCP credentials owned by the admin user (admin only).
-inputSchema:
-  type: object
-  properties: {}
-  required: []
+tl_dr: 'List MCP credentials that are owned by the built-in ''admin'' user and were
+  created
+
+  automatically by the CIDX server (e.g.'
 ---
 
 List MCP credentials that are owned by the built-in 'admin' user and were created

@@ -3,10 +3,6 @@ name: exit_maintenance_mode
 category: admin
 required_permission: manage_users
 tl_dr: Exit server maintenance mode (admin only).
-inputSchema:
-  type: object
-  properties: {}
-  required: []
 ---
 
 Exit server maintenance mode (admin only). Resumes accepting new background jobs.

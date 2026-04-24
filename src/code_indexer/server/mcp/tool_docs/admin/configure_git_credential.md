@@ -2,23 +2,7 @@
 name: configure_git_credential
 category: admin
 required_permission: query_repos
-tl_dr: Configure a git forge personal access token with identity discovery.
-inputSchema:
-  type: object
-  properties:
-    forge_type:
-      type: string
-      description: Git forge type - "github" or "gitlab"
-    forge_host:
-      type: string
-      description: Forge hostname (e.g., "github.com", "gitlab.com", "github.corp.com")
-    token:
-      type: string
-      description: Personal access token for the forge
-    name:
-      type: string
-      description: Optional human-readable label for this credential
-  required: [forge_type, forge_host, token]
+tl_dr: Configure a git forge PAT.
 ---
 
 TL;DR: Configure a git forge PAT. Validates the token against the forge API, discovers your identity (name, email, username), and stores the token encrypted.
