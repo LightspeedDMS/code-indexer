@@ -68,20 +68,25 @@ Missing directory behavior (two levels):
 
 Response structure:
 
-  success=true:
+  Every response includes both `success` and `resolution` fields.
+
+  resolution values:
+    ok            — scan completed (stale_domains may be empty if nothing exceeded threshold)
+    invalid_input — days_threshold was negative or wrong type (success=false)
+
+  Note: repo_not_indexed and domain_not_indexed are never returned by this tool.
+  This tool is scan-based with no identifier input — missing dep_map_path and
+  invalid threshold both map to invalid_input or ok as documented below.
+
+  success=true (resolution=ok):
     stale_domains: list of {domain_name, last_analyzed, days_stale} sorted
                    descending by days_stale; empty when no domain exceeds the
                    threshold or when the dependency-map directory has no domains
     anomalies: list of {file, error} for any missing or unparseable last_analyzed
                fields encountered during the scan
 
-  success=false (invalid days_threshold):
+  success=false (resolution=invalid_input, invalid days_threshold):
     error: "days_threshold must be a non-negative integer"
-    stale_domains: []
-    anomalies: []
-
-  success=false (dep_map_path missing):
-    error: human-readable message
     stale_domains: []
     anomalies: []
 

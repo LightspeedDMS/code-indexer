@@ -1,63 +1,135 @@
 """
-DepMapMCPParser — shared parser for dependency-map MCP tools (Story #855).
+DepMapMCPParser -- shared parser for dependency-map MCP tools (Story #855).
 
 Reads the dependency-map directory from cidx-meta and exposes query methods
 used by the depmap MCP handlers. No I/O at construction; all I/O deferred
 to method calls.
 
-find_consumers is fully implemented in Story #855 (S1).
-get_repo_domains and get_domain_summary are fully implemented in Story #856 (S2).
-get_stale_domains and get_cross_domain_graph remain stubs for Stories S3-S4.
+Story #887: parser hygiene and anomaly channel hardening.
+  AC1: strip backticks from all identifier fields
+  AC2-AC7: additional hygiene and channel split (see get_cross_domain_graph)
+  AC8: module split into 4 files each <=500 lines
 """
 
 import logging
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
+
+# Any is justified: domain summary dicts contain heterogeneous YAML/JSON values
+# (str, int, list, dict) with no fixed schema across all fields.
 
 from code_indexer.server.services.dep_map_file_utils import (
     get_domain_md_files,
     load_domains_json,
 )
+from code_indexer.server.services.dep_map_parser_graph import (
+    apply_edge_hygiene,
+    build_graph_anomalies,
+    finalize_graph_edges,
+    parse_domain_file_for_graph,
+)
+from code_indexer.server.services.dep_map_parser_hygiene import (
+    AnomalyAggregate,
+    AnomalyEntry,
+    strip_backticks,
+)
+from code_indexer.server.services.dep_map_parser_tables import (
+    build_cross_domain_connections,
+    build_name_description,
+    build_participating_repos,
+    parse_frontmatter_strict,
+    parse_incoming_table,
+    parse_last_analyzed,
+    parse_roles_table,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _current_utc_now() -> datetime:
-    """Return the current UTC time.
+def _parse_file_for_consumers(
+    md_file: Path,
+    repo_name: str,
+    domain_repos: Dict[str, List[str]],
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    """Parse one domain markdown file and extract consumer rows for repo_name.
 
-    Defined at module level so tests can monkeypatch it for clock-controlled
-    assertions without importing or patching datetime itself.
+    AC1: strips backticks from domain_name, depends_on, and consuming_repo fields.
+
+    Raises:
+        OSError: on file read failure.
+        ValueError: on malformed frontmatter.
     """
-    return datetime.now(timezone.utc)
+    content = md_file.read_text(encoding="utf-8")
+    fm = parse_frontmatter_strict(content)
+    domain_name = fm.get("name", md_file.stem) if fm else md_file.stem
+    domain_name = strip_backticks(domain_name)
+
+    incoming = parse_incoming_table(content)
+    rows: List[Dict[str, str]] = []
+    anomalies: List[Dict[str, str]] = []
+
+    for row in incoming:
+        depends_on = strip_backticks(row["depends_on"])
+        if depends_on != repo_name:
+            continue
+        consuming_repo = strip_backticks(row["external_repo"])
+
+        if domain_name in domain_repos:
+            json_repos = domain_repos[domain_name]
+            if repo_name not in json_repos:
+                anomalies.append(
+                    {
+                        "file": str(md_file),
+                        "error": (
+                            f"Inconsistency: markdown table references '{repo_name}' "
+                            f"as dependency in domain '{domain_name}' but "
+                            f"_domains.json does not list it in participating_repos"
+                        ),
+                    }
+                )
+
+        rows.append(
+            {
+                "domain": domain_name,
+                "consuming_repo": consuming_repo,
+                "dependency_type": row["dep_type"],
+                "evidence": row["evidence"],
+            }
+        )
+
+    return rows, anomalies
 
 
-# Column indices in the Incoming Dependencies table (0-based, after stripping outer pipes)
-_COL_EXTERNAL_REPO = 0
-_COL_DEPENDS_ON = 1
-_COL_SOURCE_DOMAIN = 2
-_COL_DEP_TYPE = 3
-_COL_WHY = 4
-_COL_EVIDENCE = 5
-_INCOMING_MIN_COLS = 6
+def _lookup_domain_entry(
+    domains: List[Dict[str, Any]], domain_name: str
+) -> Optional[Dict[str, Any]]:
+    """Return the first domain dict whose 'name' equals domain_name, or None."""
+    for d in domains:
+        if isinstance(d, dict) and d.get("name") == domain_name:
+            return d
+    return None
 
-# Column indices in the Repository Roles table (0-based)
-_COL_ROLES_REPO = 0
-_COL_ROLES_ROLE = 2
-_ROLES_MIN_COLS = 3
-_ROLES_HEADER_SENTINEL = "Repository"
 
-# Column indices in the Outgoing Dependencies table (0-based)
-_COL_OUTGOING_SOURCE_REPO = 0
-_COL_OUTGOING_TARGET_DOMAIN = 2
-_OUTGOING_MIN_COLS = 4
-_OUTGOING_HEADER_SENTINEL = "This Repo"
+def _read_domain_md_content(
+    md_file: Path,
+) -> Tuple[str, Optional[Dict[str, str]]]:
+    """Read a domain .md file. Returns (content, None) on success or ("", anomaly) on error."""
+    if not md_file.exists():
+        logger.warning("get_domain_summary: .md file not found: %s", md_file)
+        return "", {"file": str(md_file), "error": "file not found"}
+    try:
+        return md_file.read_text(encoding="utf-8"), None
+    except OSError as exc:
+        logger.warning("get_domain_summary: failed to read %s: %s", md_file, exc)
+        return "", {"file": str(md_file), "error": str(exc)}
 
-# Header sentinel to skip when parsing table rows
-_INCOMING_HEADER_SENTINEL = "External Repo"
+
+def _current_utc_now() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime."""
+    return datetime.now(tz=timezone.utc)
 
 
 class DepMapMCPParser:
@@ -67,64 +139,25 @@ class DepMapMCPParser:
     Constructor stores the root path (parent of dependency-map/).
     No I/O is performed at construction time.
 
-    All public methods return (results, anomalies) tuples:
-      - results: list of dicts or None (for get_domain_summary)
-      - anomalies: list of {"file": str, "error": str} dicts
+    Public methods return (results, anomalies) 2-tuples EXCEPT
+    get_cross_domain_graph which returns a 4-tuple
+    (edges, anomalies, parser_anomalies, data_anomalies).
     """
 
     def __init__(self, dep_map_path: Path) -> None:
-        """
-        Store dep_map_path.  No I/O performed here.
-
-        Args:
-            dep_map_path: Parent directory that contains the
-                          ``dependency-map/`` subdirectory.
-        """
         self._dep_map_path = dep_map_path
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def find_consumers(
         self, repo_name: str
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-        """
-        Return all repos that depend on repo_name, across every domain.
-
-        Dual-source: _domains.json provides domain membership; the markdown
-        Incoming Dependencies table provides dependency_type and evidence.
-        Inconsistency between the two sources emits an anomaly entry.
-
-        Resilience: every per-file parse is wrapped in try/except; failures
-        append {"file": path, "error": message} to anomalies and continue.
-
-        Empty repo_name is a valid no-op: returns ([], []) immediately.
-        Missing dependency-map directory is a valid no-op per spec AC3.
-
-        Args:
-            repo_name: Repository alias to search for (the "Depends On" column).
-
-        Returns:
-            (consumers, anomalies)
-            consumers — list of dicts with keys:
-                domain, consuming_repo, dependency_type, evidence
-            anomalies — list of dicts with keys:
-                file, error
-        """
+        """Return all repos that depend on repo_name, across every domain."""
         if not repo_name:
-            logger.debug("find_consumers called with empty repo_name — returning empty")
             return [], []
 
         output_dir = self._dep_map_path / "dependency-map"
         if not output_dir.exists():
-            logger.debug(
-                "find_consumers: dependency-map dir not found at %s — returning empty",
-                output_dir,
-            )
             return [], []
 
-        # Load _domains.json once — not inside the per-file loop
         domains = load_domains_json(output_dir)
         domain_repos: Dict[str, List[str]] = {
             d["name"]: list(d.get("participating_repos") or [])
@@ -137,12 +170,12 @@ class DepMapMCPParser:
 
         for md_file in get_domain_md_files(output_dir):
             try:
-                rows, file_anomalies = self._parse_file_for_consumers(
+                rows, file_anomalies = _parse_file_for_consumers(
                     md_file, repo_name, domain_repos
                 )
                 consumers.extend(rows)
                 anomalies.extend(file_anomalies)
-            except Exception as exc:
+            except (OSError, ValueError, yaml.YAMLError) as exc:
                 anomalies.append({"file": str(md_file), "error": str(exc)})
 
         return consumers, anomalies
@@ -150,20 +183,10 @@ class DepMapMCPParser:
     def get_repo_domains(
         self, repo_name: str
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-        """Return all domains that repo_name participates in, with its role in each.
+        """Return all domains that repo_name participates in, with its role."""
+        if not repo_name:
+            return [], []
 
-        Reads _domains.json for domain membership. For each matching domain,
-        reads the domain .md file and extracts the repo's role from the
-        Repository Roles table. Malformed .md files are captured as anomalies;
-        other domains continue to be processed.
-
-        Missing dependency-map directory returns ([], []) with no exception.
-
-        Returns:
-            (memberships, anomalies)
-            memberships — list of {domain_name, role}
-            anomalies   — list of {file, error}
-        """
         output_dir = self._dep_map_path / "dependency-map"
         if not output_dir.exists():
             return [], []
@@ -186,9 +209,9 @@ class DepMapMCPParser:
             if md_file.exists():
                 try:
                     content = md_file.read_text(encoding="utf-8")
-                    self._parse_frontmatter_strict(content)  # raises on malformed YAML
-                    role = self._parse_roles_table(content).get(repo_name, "")
-                except Exception as exc:
+                    parse_frontmatter_strict(content)
+                    role = parse_roles_table(content).get(repo_name, "")
+                except (OSError, ValueError, yaml.YAMLError) as exc:
                     logger.warning(
                         "get_repo_domains: failed to parse %s: %s", md_file, exc
                     )
@@ -205,39 +228,37 @@ class DepMapMCPParser:
     ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, str]]]:
         """Return structured summary for a named domain.
 
-        Looks up the domain in _domains.json, then reads its .md file.
-        Each parse section (frontmatter, roles table, outgoing table) is
-        independently try/except wrapped so partial failures produce anomalies
-        with the section name in the error string rather than aborting the
-        whole response.
-
-        Unknown domain returns (None, []). Missing dep-map path returns (None, []).
-
-        Returns:
-            (summary, anomalies)
-            summary — dict or None:
-                {name, description, participating_repos, cross_domain_connections}
-            anomalies — list of {file, error}
+        Includes path-traversal guard to prevent directory escape via domain_name.
+        Unknown domains return (None, []). Missing dep-map path returns (None, []).
         """
+        if not domain_name:
+            return None, []
+
         output_dir = self._dep_map_path / "dependency-map"
         if not output_dir.exists():
             return None, []
 
         domains = load_domains_json(output_dir)
-        domain_entry = self._lookup_domain_entry(domains, domain_name)
+        domain_entry = _lookup_domain_entry(domains, domain_name)
         if domain_entry is None:
             return None, []
 
-        anomalies: List[Dict[str, str]] = []
-        md_file = output_dir / f"{domain_name}.md"
+        # Path-traversal guard: mirrors get_stale_domains pattern
+        base_dir = output_dir.resolve()
+        md_file = (output_dir / f"{domain_name}.md").resolve()
+        try:
+            md_file.relative_to(base_dir)
+        except ValueError:
+            return None, [
+                {"file": str(md_file), "error": "domain_name path traversal rejected"}
+            ]
 
-        content, read_anomaly = self._read_domain_md_content(md_file)
+        anomalies: List[Dict[str, str]] = []
+        content, read_anomaly = _read_domain_md_content(md_file)
         if read_anomaly:
             anomalies.append(read_anomaly)
 
-        # Section 1: frontmatter — name and description from the .md file itself,
-        # with _domains.json values as fallbacks when the file omits those keys.
-        name, description, fm_anomaly = self._build_name_description(
+        name, description, fm_anomaly = build_name_description(
             content,
             md_file,
             fallback_name=domain_name,
@@ -246,15 +267,11 @@ class DepMapMCPParser:
         if fm_anomaly:
             anomalies.append(fm_anomaly)
 
-        # Section 2: participating_repos from Repository Roles table
-        participating_repos, pr_anomaly = self._build_participating_repos(
-            content, md_file
-        )
+        participating_repos, pr_anomaly = build_participating_repos(content, md_file)
         if pr_anomaly:
             anomalies.append(pr_anomaly)
 
-        # Section 3: cross_domain_connections from Outgoing Dependencies table
-        cross_domain_connections, cdc_anomaly = self._build_cross_domain_connections(
+        cross_domain_connections, cdc_anomaly = build_cross_domain_connections(
             content, md_file
         )
         if cdc_anomaly:
@@ -316,62 +333,55 @@ class DepMapMCPParser:
                 continue
             try:
                 content = md_file.read_text(encoding="utf-8")
-                fm = self._parse_frontmatter_strict(content) or {}
+                fm = parse_frontmatter_strict(content) or {}
                 if "last_analyzed" not in fm:
                     raise ValueError("last_analyzed field missing from frontmatter")
-                last_analyzed_dt = self._parse_last_analyzed(str(fm["last_analyzed"]))
+                last_analyzed_dt = parse_last_analyzed(str(fm["last_analyzed"]))
                 days_stale = (now_utc - last_analyzed_dt).days
                 if days_stale >= days_threshold:
                     stale_domains.append(
                         {
                             "domain_name": domain_name,
-                            # Emit the parsed UTC-aware datetime as an ISO-8601
-                            # string so the value is JSON-serializable at the
-                            # MCP layer. PyYAML parses unquoted ISO-8601 YAML
-                            # dates into native datetime objects, so we cannot
-                            # forward fm["last_analyzed"] verbatim.
                             "last_analyzed": last_analyzed_dt.isoformat(),
                             "days_stale": days_stale,
                         }
                     )
-            except Exception as exc:
+            except (OSError, ValueError, yaml.YAMLError) as exc:
                 anomalies.append({"file": str(md_file), "error": str(exc)})
 
         stale_domains.sort(key=lambda d: d["days_stale"], reverse=True)
         return stale_domains, anomalies
 
-    def get_cross_domain_graph(
+    def get_cross_domain_graph_with_channels(
         self,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-        """Return the full directed domain-to-domain edge graph.
-
-        Reads every domain markdown file and aggregates cross-domain dependency
-        rows from the Outgoing Dependencies table into edge records keyed by
-        (source_domain, target_domain). Performs a post-aggregation bidirectional
-        consistency check against the Incoming Dependencies tables in O(edges).
-
-        Per-file and per-section failures are captured as anomaly entries; healthy
-        domains continue to be processed.
+    ) -> Tuple[
+        List[Dict[str, Any]],
+        List[Union[AnomalyEntry, AnomalyAggregate]],
+        List[Union[AnomalyEntry, AnomalyAggregate]],  # parser_anomalies
+        List[Union[AnomalyEntry, AnomalyAggregate]],  # data_anomalies
+    ]:
+        """Return the full directed domain-to-domain edge graph with AC1-AC7 hygiene.
 
         Returns:
-            (edges, anomalies)
+            (edges, anomalies, parser_anomalies, data_anomalies)
             edges — sorted list of {source_domain, target_domain,
-                dependency_count, types} dicts. Edges with no derivable
-                types are omitted per AC-F6.
-            anomalies — list of {file, error} for parse or consistency issues.
+                dependency_count, types} dicts (self-loops preserved per AC4).
+            anomalies — deduplicated, aggregated union of parser + data anomalies.
+            parser_anomalies — structural/format-level anomalies (channel='parser').
+            data_anomalies — semantic/consistency anomalies (channel='data').
         """
         output_dir = self._dep_map_path / "dependency-map"
         if not output_dir.exists():
-            return [], []
+            return [], [], [], []
 
         domains = load_domains_json(output_dir)
         if not domains:
-            return [], []
+            return [], [], [], []
 
         base_dir = output_dir.resolve()
         edge_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        incoming_claims: set = set()
-        anomalies: List[Dict[str, str]] = []
+        incoming_claims: Set[frozenset] = set()
+        raw_anomalies: List[AnomalyEntry] = []
 
         for domain in domains:
             if not isinstance(domain, dict):
@@ -379,664 +389,52 @@ class DepMapMCPParser:
             domain_name = domain.get("name", "")
             if not domain_name:
                 continue
-            self._parse_domain_file_for_graph(
+            parse_domain_file_for_graph(
                 output_dir,
                 base_dir,
                 domain_name,
                 edge_data,
                 incoming_claims,
-                anomalies,
+                raw_anomalies,
             )
 
-        self._check_bidirectional_consistency(
-            output_dir, edge_data, incoming_claims, anomalies
+        edge_data = apply_edge_hygiene(edge_data, raw_anomalies)
+        # finalize_graph_edges runs BEFORE build_graph_anomalies so that any
+        # anomalies it emits (e.g. GARBAGE_DOMAIN_REJECTED for empty-types edges)
+        # are included in dedup, aggregation, and channel split (Blocker 2 fix).
+        edges = finalize_graph_edges(output_dir, edge_data, raw_anomalies)
+        all_anomalies, parser_anomalies, data_anomalies = build_graph_anomalies(
+            output_dir, edge_data, incoming_claims, raw_anomalies
         )
-        return self._finalize_graph_edges(output_dir, edge_data, anomalies), anomalies
+        return edges, all_anomalies, parser_anomalies, data_anomalies
 
-    def _parse_domain_file_for_graph(
+    def get_cross_domain_graph(
         self,
-        output_dir: Path,
-        base_dir: Path,
-        domain_name: str,
-        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
-        incoming_claims: set,
-        anomalies: List[Dict[str, str]],
-    ) -> None:
-        """Read one domain file and populate edge_data and incoming_claims.
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+        """Return (edges, anomalies) — legacy 2-tuple public API.
 
-        Performs path-traversal guard, then reads and validates frontmatter.
-        Outgoing and incoming sections are each wrapped in their own try/except
-        so that one section's failure does not abort the other.
+        Delegates to get_cross_domain_graph_with_channels() and converts each
+        anomaly to a plain {file, error} dict matching the original public
+        contract so callers that unpack exactly 2 values continue to work
+        and can directly serialize anomalies to JSON without type inspection.
+
+        AnomalyEntry  → {"file": entry.file, "error": entry.message}
+        AnomalyAggregate → {"file": "<aggregated>",
+                            "error": "<N> occurrences: <type>"}
+
+        Use get_cross_domain_graph_with_channels() when typed anomaly objects
+        and channel separation are needed.
         """
-        md_file = (output_dir / f"{domain_name}.md").resolve()
-        try:
-            md_file.relative_to(base_dir)
-        except ValueError:
-            anomalies.append(
-                {"file": str(md_file), "error": "domain_name path traversal rejected"}
-            )
-            return
-
-        try:
-            content = md_file.read_text(encoding="utf-8")
-            self._parse_frontmatter_strict(content)
-        except Exception as exc:
-            logger.warning(
-                "get_cross_domain_graph: failed to read/parse %s",
-                md_file,
-                exc_info=True,
-            )
-            anomalies.append({"file": str(md_file), "error": str(exc)})
-            return
-
-        self._collect_outgoing_edges(
-            content, domain_name, md_file, edge_data, anomalies
-        )
-        self._collect_incoming_claims(
-            content, domain_name, md_file, incoming_claims, anomalies
-        )
-
-    def _collect_outgoing_edges(
-        self,
-        content: str,
-        domain_name: str,
-        md_file: Path,
-        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
-        anomalies: List[Dict[str, str]],
-    ) -> None:
-        """Aggregate outgoing dependency rows into edge_data for domain_name."""
-        try:
-            for cells in self._iter_table_rows(
-                content,
-                "### Outgoing Dependencies",
-                _OUTGOING_MIN_COLS,
-                _OUTGOING_HEADER_SENTINEL,
-            ):
-                target_domain = cells[_COL_OUTGOING_TARGET_DOMAIN]
-                if not target_domain:
-                    continue
-                dep_type = (
-                    cells[_COL_DEP_TYPE].strip() if len(cells) > _COL_DEP_TYPE else ""
-                )
-                key = (domain_name, target_domain)
-                if key not in edge_data:
-                    edge_data[key] = {"count": 0, "types": set()}
-                edge_data[key]["count"] += 1
-                if dep_type:
-                    edge_data[key]["types"].add(dep_type)
-        except Exception as exc:
-            logger.warning(
-                "get_cross_domain_graph: failed to parse outgoing section in %s",
-                md_file,
-                exc_info=True,
-            )
-            anomalies.append(
-                {"file": str(md_file), "error": f"outgoing section: {exc}"}
-            )
-
-    def _collect_incoming_claims(
-        self,
-        content: str,
-        domain_name: str,
-        md_file: Path,
-        incoming_claims: set,
-        anomalies: List[Dict[str, str]],
-    ) -> None:
-        """Extract incoming dependency claims from domain_name's incoming table.
-
-        Each row contributes a (source_domain, domain_name) claim used by the
-        bidirectional consistency check.
-        """
-        try:
-            for cells in self._iter_table_rows(
-                content,
-                "### Incoming Dependencies",
-                _INCOMING_MIN_COLS,
-                _INCOMING_HEADER_SENTINEL,
-            ):
-                source_domain = cells[_COL_SOURCE_DOMAIN]
-                if source_domain:
-                    incoming_claims.add((source_domain, domain_name))
-        except Exception as exc:
-            logger.warning(
-                "get_cross_domain_graph: failed to parse incoming section in %s",
-                md_file,
-                exc_info=True,
-            )
-            anomalies.append(
-                {"file": str(md_file), "error": f"incoming section: {exc}"}
-            )
-
-    @staticmethod
-    def _check_bidirectional_consistency(
-        output_dir: Path,
-        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
-        incoming_claims: set,
-        anomalies: List[Dict[str, str]],
-    ) -> None:
-        """Emit anomalies for mismatched outgoing/incoming claims (both directions).
-
-        Direction 1 (O(edges)): outgoing claim A→B not confirmed by B's incoming.
-        Direction 2 (O(edges)): incoming claim A→B not confirmed by A's outgoing.
-        """
-        for src, tgt in edge_data:
-            if (src, tgt) not in incoming_claims:
-                anomalies.append(
+        edges, all_anomalies, _, _ = self.get_cross_domain_graph_with_channels()
+        dicts: List[Dict[str, str]] = []
+        for anomaly in all_anomalies:
+            if isinstance(anomaly, AnomalyAggregate):
+                dicts.append(
                     {
-                        "file": str(output_dir / f"{tgt}.md"),
-                        "error": (
-                            f"bidirectional mismatch: {src}\u2192{tgt} declared "
-                            f"outgoing by {src} but not incoming by {tgt}"
-                        ),
+                        "file": "<aggregated>",
+                        "error": f"{anomaly.count} occurrences: {anomaly.type.value}",
                     }
                 )
-        for src, tgt in incoming_claims:
-            if (src, tgt) not in edge_data:
-                anomalies.append(
-                    {
-                        "file": str(output_dir / f"{src}.md"),
-                        "error": (
-                            f"bidirectional mismatch: {src}\u2192{tgt} declared "
-                            f"incoming by {tgt} but not outgoing by {src}"
-                        ),
-                    }
-                )
-
-    @staticmethod
-    def _finalize_graph_edges(
-        output_dir: Path,
-        edge_data: Dict[Tuple[str, str], Dict[str, Any]],
-        anomalies: List[Dict[str, str]],
-    ) -> List[Dict[str, Any]]:
-        """Build the final edges list, enforcing AC-F6, sorted deterministically.
-
-        Edges with an empty types set are omitted and produce an anomaly entry.
-        Remaining edges have their types converted to a sorted list for
-        deterministic JSON output.
-        """
-        edges: List[Dict[str, Any]] = []
-        for (src, tgt), data in edge_data.items():
-            types_set = data["types"]
-            if not types_set:
-                anomalies.append(
-                    {
-                        "file": str(output_dir / f"{src}.md"),
-                        "error": f"edge {src}\u2192{tgt} has no derivable types",
-                    }
-                )
-                continue
-            edges.append(
-                {
-                    "source_domain": src,
-                    "target_domain": tgt,
-                    "dependency_count": data["count"],
-                    "types": sorted(types_set),
-                }
-            )
-        edges.sort(key=lambda e: (e["source_domain"], e["target_domain"]))
-        return edges
-
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    # ------------------------------------------------------------------
-    # Low-level table parsers (S2)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _iter_table_rows(
-        content: str,
-        section_heading: str,
-        min_cols: int,
-        header_sentinel: str,
-    ):
-        """Yield cell lists for each data row in a named markdown table section.
-
-        Activates on `section_heading`. Exits when a subsequent heading whose
-        level (number of leading `#` chars) is <= the section heading's level
-        is encountered.
-
-        Args:
-            content: Full markdown file content.
-            section_heading: Exact heading string (e.g. "## Repository Roles").
-            min_cols: Minimum number of pipe-separated cells required.
-            header_sentinel: First-cell value that identifies the header row.
-
-        Yields:
-            List[str] of stripped cell values for each qualifying data row.
-        """
-        # Compute target section level from leading '#' characters
-        section_level = len(section_heading) - len(section_heading.lstrip("#"))
-        in_section = False
-
-        for line in content.splitlines():
-            stripped = line.strip()
-
-            if stripped == section_heading:
-                in_section = True
-                continue
-
-            if in_section and stripped.startswith("#"):
-                # Compute level of the new heading inline
-                lvl = len(stripped) - len(stripped.lstrip("#"))
-                if lvl > 0 and stripped[lvl : lvl + 1] == " " and lvl <= section_level:
-                    break
-
-            if not in_section:
-                continue
-
-            if not (stripped.startswith("|") and stripped.endswith("|")):
-                continue
-
-            cells = [c.strip() for c in stripped.split("|")[1:-1]]
-            if len(cells) < min_cols:
-                continue
-            if cells[0] == header_sentinel:
-                continue
-            if set(cells[0]) <= frozenset("-"):
-                continue
-
-            yield cells
-
-    @staticmethod
-    def _parse_roles_table(content: str) -> Dict[str, str]:
-        """Extract repo→role mapping from the '## Repository Roles' table.
-
-        Expected columns (at least 3): Repository | Language | Role
-
-        Returns dict of {repo_name: role_str}.
-        """
-        result: Dict[str, str] = {}
-        for cells in DepMapMCPParser._iter_table_rows(
-            content, "## Repository Roles", _ROLES_MIN_COLS, _ROLES_HEADER_SENTINEL
-        ):
-            repo = cells[_COL_ROLES_REPO].strip("*")  # strip bold markers
-            role = cells[_COL_ROLES_ROLE]
-            if repo:
-                result[repo] = role
-        return result
-
-    @staticmethod
-    def _parse_outgoing_table(content: str) -> Dict[str, int]:
-        """Count rows per target_domain in the '### Outgoing Dependencies' table.
-
-        Expected columns (at least 4):
-          This Repo | Depends On | Target Domain | Type | ...
-
-        Returns dict of {target_domain: row_count}.
-        """
-        counts: Dict[str, int] = defaultdict(int)
-        for cells in DepMapMCPParser._iter_table_rows(
-            content,
-            "### Outgoing Dependencies",
-            _OUTGOING_MIN_COLS,
-            _OUTGOING_HEADER_SENTINEL,
-        ):
-            target = cells[_COL_OUTGOING_TARGET_DOMAIN]
-            if target:
-                counts[target] += 1
-        return dict(counts)
-
-    # ------------------------------------------------------------------
-    # Domain lookup and file I/O helpers (S2)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _lookup_domain_entry(
-        domains: List[Dict[str, Any]], domain_name: str
-    ) -> Optional[Dict[str, Any]]:
-        """Return the first domain dict whose 'name' equals domain_name, or None."""
-        for d in domains:
-            if isinstance(d, dict) and d.get("name") == domain_name:
-                return d
-        return None
-
-    @staticmethod
-    def _read_domain_md_content(
-        md_file: Path,
-    ) -> Tuple[str, Optional[Dict[str, str]]]:
-        """Read a domain .md file and return its content.
-
-        Returns:
-            (content, None) on success.
-            ("", anomaly_dict) on any failure (missing file or read error),
-            after logging a warning for every failure path.
-        """
-        if not md_file.exists():
-            logger.warning("get_domain_summary: .md file not found: %s", md_file)
-            return "", {"file": str(md_file), "error": "file not found"}
-        try:
-            return md_file.read_text(encoding="utf-8"), None
-        except Exception as exc:
-            logger.warning("get_domain_summary: failed to read %s: %s", md_file, exc)
-            return "", {"file": str(md_file), "error": str(exc)}
-
-    # ------------------------------------------------------------------
-    # Summary builder helpers (S2)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _validate_section_has_table(content: str, section_heading: str) -> None:
-        """Raise ValueError when a section heading is present but has no table rows.
-
-        A section is considered "present" when the exact heading string appears
-        in the content.  A table row is any line that starts and ends with '|'.
-        If the section is absent entirely this is a no-op (the section is
-        optional).  If it is present but contains only non-table text the
-        caller should record an anomaly — so we raise to make that explicit.
-
-        Args:
-            content: Full markdown file content.
-            section_heading: Exact heading line to search for.
-
-        Raises:
-            ValueError: section heading found but no pipe-delimited table rows
-                        follow before the next heading of the same or higher level.
-        """
-        section_level = len(section_heading) - len(section_heading.lstrip("#"))
-        in_section = False
-        found_table_row = False
-
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped == section_heading:
-                in_section = True
-                continue
-            if in_section and stripped.startswith("#"):
-                lvl = len(stripped) - len(stripped.lstrip("#"))
-                if lvl > 0 and stripped[lvl : lvl + 1] == " " and lvl <= section_level:
-                    break
-            if not in_section:
-                continue
-            if stripped.startswith("|") and stripped.endswith("|"):
-                found_table_row = True
-                break
-
-        if in_section and not found_table_row:
-            raise ValueError(
-                f"section '{section_heading}' is present but contains no table rows"
-            )
-
-    @staticmethod
-    def _build_name_description(
-        content: str,
-        md_file: Path,
-        fallback_name: str,
-        fallback_description: str = "",
-    ) -> Tuple[str, str, Optional[Dict[str, str]]]:
-        """Parse name and description from YAML frontmatter in the .md file.
-
-        A file that opens with '---' but has no closing '---' delimiter is
-        treated as corrupt frontmatter (returns anomaly), not as "no frontmatter".
-
-        When the frontmatter parses successfully but lacks a 'name' or
-        'description' key, the caller-supplied fallback values are used.  Key
-        presence (not truthiness) determines whether the file's own value is
-        used, so an explicit empty string in frontmatter is preserved.
-
-        Returns:
-            (name, description, None) on successful parse.
-            ("", "", anomaly_dict) on frontmatter parse error, after logging.
-            (fallback_name, fallback_description, None) when content has no
-            '---' opener at all.
-        """
-        if not content:
-            return fallback_name, fallback_description, None
-        if not content.startswith("---"):
-            return fallback_name, fallback_description, None
-        try:
-            parts = content.split("---", 2)
-            if len(parts) < 3:
-                raise ValueError("frontmatter block opened with '---' but never closed")
-            # yaml.safe_load: PyYAML stdlib-adjacent primitive; returns None for empty YAML, dict for mappings (verified: python-yaml.org/wiki/PyYAMLDocumentation).
-            fm = yaml.safe_load(parts[1]) or {}
-            name = fm["name"] if "name" in fm else fallback_name
-            description = (
-                fm["description"] if "description" in fm else fallback_description
-            )
-            return name, description, None
-        except Exception as exc:
-            logger.warning(
-                "get_domain_summary: failed to parse frontmatter in %s: %s",
-                md_file,
-                exc,
-            )
-            return (
-                "",
-                "",
-                {
-                    "file": str(md_file),
-                    "error": f"frontmatter: {exc}",
-                },
-            )
-
-    @staticmethod
-    def _build_participating_repos(
-        content: str,
-        md_file: Path,
-    ) -> Tuple[List[Dict[str, str]], Optional[Dict[str, str]]]:
-        """Extract participating_repos from the Repository Roles table.
-
-        Calls _validate_section_has_table first so that a present-but-empty
-        section raises ValueError and the anomaly error string carries the
-        "participating_repos:" prefix for caller identification.
-
-        Returns:
-            ([{repo, role}, ...], None) on success.
-            ([], anomaly_dict) on parse error, after logging a warning.
-            ([], None) when content is empty (file was not readable).
-        """
-        if not content:
-            return [], None
-        try:
-            DepMapMCPParser._validate_section_has_table(content, "## Repository Roles")
-            roles_map = DepMapMCPParser._parse_roles_table(content)
-            return [{"repo": r, "role": role} for r, role in roles_map.items()], None
-        except Exception as exc:
-            logger.warning(
-                "get_domain_summary: failed to parse roles table in %s: %s",
-                md_file,
-                exc,
-            )
-            return [], {
-                "file": str(md_file),
-                "error": f"participating_repos: {exc}",
-            }
-
-    @staticmethod
-    def _build_cross_domain_connections(
-        content: str,
-        md_file: Path,
-    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, str]]]:
-        """Extract cross_domain_connections from the Outgoing Dependencies table.
-
-        Calls _validate_section_has_table first so that a present-but-empty
-        section raises ValueError and the anomaly error string carries the
-        "cross_domain_connections:" prefix for caller identification.
-
-        Returns:
-            ([{target_domain, dependency_count}, ...], None) on success.
-            ([], anomaly_dict) on parse error, after logging a warning.
-            ([], None) when content is empty (file was not readable).
-        """
-        if not content:
-            return [], None
-        try:
-            DepMapMCPParser._validate_section_has_table(
-                content, "### Outgoing Dependencies"
-            )
-            counts = DepMapMCPParser._parse_outgoing_table(content)
-            return [
-                {"target_domain": t, "dependency_count": c} for t, c in counts.items()
-            ], None
-        except Exception as exc:
-            logger.warning(
-                "get_domain_summary: failed to parse outgoing table in %s: %s",
-                md_file,
-                exc,
-            )
-            return [], {
-                "file": str(md_file),
-                "error": f"cross_domain_connections: {exc}",
-            }
-
-    @staticmethod
-    def _parse_last_analyzed(raw: str) -> datetime:
-        """Parse a last_analyzed ISO-8601 string to a UTC-normalized datetime.
-
-        Accepts timezone-aware ISO-8601 strings (``2026-04-18T12:00:00+00:00``)
-        and ``Z``-suffixed forms (converted to ``+00:00`` before parsing).
-        Result is always UTC via ``astimezone(timezone.utc)``.
-
-        Raises:
-            ValueError: when ``fromisoformat`` cannot parse the string, or when
-            the parsed datetime is naive (no timezone info). Naive datetimes
-            are rejected explicitly rather than silently treated as host local
-            time, which would shift staleness by the host's UTC offset.
-        """
-        normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None or dt.utcoffset() is None:
-            raise ValueError(
-                "last_analyzed must be timezone-aware (missing Z or offset); "
-                f"got naive value {raw!r}"
-            )
-        return dt.astimezone(timezone.utc)
-
-    def _parse_file_for_consumers(
-        self,
-        md_file: Path,
-        repo_name: str,
-        domain_repos: Dict[str, List[str]],
-    ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-        """
-        Parse one domain markdown file and extract consumer rows for repo_name.
-
-        Raises yaml.YAMLError on malformed YAML frontmatter so the caller
-        can record an anomaly with the file path.
-
-        Returns:
-            (rows, anomalies) — rows are consumer dicts; anomalies contain
-            inconsistency warnings about dual-source mismatches.
-        """
-        content = md_file.read_text(encoding="utf-8")
-
-        fm = self._parse_frontmatter_strict(content)
-        domain_name = fm.get("name", md_file.stem) if fm else md_file.stem
-
-        incoming = self._parse_incoming_table(content)
-
-        rows: List[Dict[str, str]] = []
-        anomalies: List[Dict[str, str]] = []
-
-        for row in incoming:
-            if row["depends_on"] != repo_name:
-                continue
-
-            consuming_repo = row["external_repo"]
-
-            # Dual-source consistency check: _domains.json vs markdown table
-            if domain_name in domain_repos:
-                json_repos = domain_repos[domain_name]
-                if repo_name not in json_repos:
-                    anomalies.append(
-                        {
-                            "file": str(md_file),
-                            "error": (
-                                f"Inconsistency: markdown table references '{repo_name}' "
-                                f"as dependency in domain '{domain_name}' but "
-                                f"_domains.json does not list it in participating_repos"
-                            ),
-                        }
-                    )
-
-            rows.append(
-                {
-                    "domain": domain_name,
-                    "consuming_repo": consuming_repo,
-                    "dependency_type": row["dep_type"],
-                    "evidence": row["evidence"],
-                }
-            )
-
-        return rows, anomalies
-
-    def _parse_frontmatter_strict(self, content: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse YAML frontmatter, raising yaml.YAMLError on malformed YAML.
-
-        Unlike dep_map_file_utils.parse_yaml_frontmatter (which silently
-        returns None on errors), this raises so that the caller can record
-        an anomaly with the file path.
-        """
-        if not content.startswith("---"):
-            return None
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return None
-        # yaml.safe_load: PyYAML stdlib-adjacent primitive; returns None for empty YAML, dict for mappings (verified: python-yaml.org/wiki/PyYAMLDocumentation).
-        # Raises yaml.YAMLError if the frontmatter block is malformed
-        return yaml.safe_load(parts[1]) or {}
-
-    @staticmethod
-    def _parse_incoming_table(
-        content: str,
-    ) -> List[Dict[str, str]]:
-        """
-        Extract rows from the '### Incoming Dependencies' table in a domain file.
-
-        Expected columns (6):
-          External Repo | Depends On | Source Domain | Type | Why | Evidence
-
-        Cell splitting uses split("|")[1:-1] to preserve empty cells and
-        maintain correct column positions even when cells are blank.
-
-        Returns:
-            List of dicts with keys:
-            external_repo, depends_on, source_domain, dep_type, why, evidence
-        """
-        rows: List[Dict[str, str]] = []
-        in_incoming = False
-
-        for line in content.splitlines():
-            stripped = line.strip()
-
-            if stripped == "### Incoming Dependencies":
-                in_incoming = True
-                continue
-
-            if in_incoming and stripped.startswith("##"):
-                break
-
-            if not in_incoming:
-                continue
-
-            if not (stripped.startswith("|") and stripped.endswith("|")):
-                continue
-
-            # Preserve all cells including empty ones; discard outer delimiters
-            cells = [c.strip() for c in stripped.split("|")[1:-1]]
-            if len(cells) < _INCOMING_MIN_COLS:
-                continue
-
-            # Skip header row
-            if cells[_COL_EXTERNAL_REPO] == _INCOMING_HEADER_SENTINEL:
-                continue
-
-            # Skip separator row (dashes only in first cell)
-            if set(cells[_COL_EXTERNAL_REPO]) <= frozenset("-"):
-                continue
-
-            rows.append(
-                {
-                    "external_repo": cells[_COL_EXTERNAL_REPO],
-                    "depends_on": cells[_COL_DEPENDS_ON],
-                    "source_domain": cells[_COL_SOURCE_DOMAIN],
-                    "dep_type": cells[_COL_DEP_TYPE],
-                    "why": cells[_COL_WHY],
-                    "evidence": cells[_COL_EVIDENCE],
-                }
-            )
-
-        return rows
+            else:
+                dicts.append({"file": anomaly.file, "error": anomaly.message})
+        return edges, dicts

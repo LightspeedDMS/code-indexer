@@ -78,8 +78,13 @@ def test_handler_reads_path_fresh_each_call(tmp_path: Path) -> None:
     )
 
 
-def test_handler_returns_success_true_with_anomalies(tmp_path: Path) -> None:
-    """Handler returns success=true and surfaces anomalies when a domain file is malformed."""
+def test_handler_surfaces_anomalies_when_domain_file_malformed(tmp_path: Path) -> None:
+    """Handler surfaces anomalies when a domain file is malformed.
+
+    Story #888 contract: repo-b is indexed (in participating_repos) but the
+    malformed domain file produces 0 consumers + anomalies.
+    Resolution is repo_has_no_consumers (success=false) per AC7.
+    """
     dep_map_dir = tmp_path / "dependency-map"
     dep_map_dir.mkdir()
     (dep_map_dir / "_domains.json").write_text(
@@ -93,8 +98,10 @@ def test_handler_returns_success_true_with_anomalies(tmp_path: Path) -> None:
     result = _call_handler({"repo_name": "repo-b"}, _make_app_state(tmp_path))
     data = _parse_response(result)
 
-    assert data["success"] is True
-    assert isinstance(data["consumers"], list)
+    # Story #888: repo-b is indexed but no consumers found → repo_has_no_consumers
+    assert data["success"] is False
+    assert data.get("resolution") == "repo_has_no_consumers"
+    assert data["consumers"] == []
     assert isinstance(data["anomalies"], list)
     assert len(data["anomalies"]) >= 1
 
