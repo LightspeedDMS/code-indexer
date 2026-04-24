@@ -38,15 +38,25 @@ Name and description come from the domain markdown file's YAML frontmatter.
 If the frontmatter is absent or does not contain those keys, the values from
 _domains.json are used as fallbacks.
 
-An unknown domain name (not present in _domains.json) returns summary=null with
-no anomalies. A missing dependency-map directory returns success=false.
+BREAKING CHANGE (Story #888): Empty-string domain_name now returns success=false,
+resolution=invalid_input. An unknown domain name now returns success=false,
+resolution=domain_not_indexed. Previous behavior returned success=true with
+summary=null for both cases. Callers that relied on null-summary-success must
+add input validation and distinguish the two failure modes using resolution.
 
 Use this tool to understand a domain at a glance: its purpose, which repos form it,
 and which other domains it depends on.
 
 Response structure:
 
-  success=true (domain found):
+  Every response includes both `success` and `resolution` fields.
+
+  resolution values:
+    ok                 — domain found and summary returned
+    invalid_input      — domain_name was empty (success=false)
+    domain_not_indexed — domain absent from _domains.json or dep_map_path missing (success=false)
+
+  success=true (resolution=ok):
     summary:
       name: domain name string (from .md frontmatter; falls back to _domains.json)
       description: domain description (from .md frontmatter; falls back to _domains.json)
@@ -55,20 +65,26 @@ Response structure:
     anomalies: list of {file, error} for any per-section parse failures;
                error string contains the section name to identify which section failed
 
-  success=true (domain not found):
-    summary: null
-    anomalies: []
-
-  success=false (dep_map_path missing):
+  success=false (resolution=invalid_input):
     error: human-readable message
     summary: null
     anomalies: []
 
+  success=false (resolution=domain_not_indexed) — two sub-cases:
+    Sub-case A: dep_map_path not found (missing-path):
+      error: human-readable message
+      summary: null
+      anomalies: []
+
+    Sub-case B: dep_map_path exists but domain absent from _domains.json (post-scan):
+      summary: null
+      anomalies: list of {file, error} (anomalies from the scan; no error field)
+
 Field-naming note: `participating_repos[].repo` here corresponds to
-`consuming_repo` in `depmap_find_consumers` and to the `repo_name` input of
-`depmap_get_repo_domains`. Same values, different key name — clients
-chaining from `find_consumers` output into `get_domain_summary` or from
-this tool's output into `get_repo_domains` must reconcile the shape.
+`repo` (canonical) / `consuming_repo` (DEPRECATED alias) in `depmap_find_consumers`
+and to the `repo_name` input of `depmap_get_repo_domains`. Same values, different
+key name — clients chaining from `find_consumers` output into `get_domain_summary`
+or from this tool's output into `get_repo_domains` must reconcile the shape.
 
 Types-omission note: `cross_domain_connections` is a count-only projection
 and intentionally omits the `types[]` field per edge, to keep the summary

@@ -57,7 +57,16 @@ Missing directory behavior (two levels):
 
 Response structure:
 
-  success=true:
+  Every response includes both `success` and `resolution` fields.
+
+  resolution values:
+    ok            — dep_map_path exists; graph returned (may have empty edges)
+    invalid_input — dep_map_path not found; error envelope included (success=false)
+
+  Note: repo_not_indexed, domain_not_indexed, and repo_has_no_consumers are
+  never returned by this tool. This tool is scan-based with no identifier input.
+
+  success=true (resolution=ok, dep_map_path accessible):
     edges: list of edge objects sorted by (source_domain, target_domain):
       source_domain:     string — the domain declaring the outgoing dependency
       target_domain:     string — the domain being depended upon
@@ -67,7 +76,7 @@ Response structure:
     anomalies: list of {file, error} for any parse or consistency issues
                encountered during the scan; empty when all files are healthy
 
-  success=false (dep_map_path missing):
+  success=false (resolution=invalid_input, dep_map_path missing):
     error: human-readable message
     edges: []
     anomalies: []
