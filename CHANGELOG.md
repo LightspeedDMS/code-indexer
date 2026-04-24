@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.3
+
+### Changes
+
+- **Bug #897: `enable_malloc_trim` and `enable_malloc_arena_max` now default to `true`** (previously `false`). Both glibc arena-fragmentation mitigations ship enabled by default so fresh installs and existing installs that don't explicitly pin the flags automatically get the protection. Operators can still disable either by setting the flag to `false` in `~/.cidx-server/config.json` (bootstrap-only — both flags are read before the database is available).
+- **Bug #897 follow-up: `_ensure_malloc_arena_max()` config discovery under split-user auto-updater deployments** (`deployment_executor.py:1560`). The auto-updater's idempotent-apply function now passes `server_dir_path=str(_cidx_data_dir)` to `ServerConfigManager`, honoring `CIDX_DATA_DIR` (Bug #879) so the auto-updater running as root reads the same `config.json` the cidx-server process (running as e.g. code-indexer) reads. Previously the function silently no-opped under split-user deployment because `Path.home()` resolved to `/root/.cidx-server` which did not contain the server's config file. Includes new test `test_ensure_malloc_arena_max_honors_cidx_data_dir_across_users` that exercises the cross-HOME path end-to-end using the real `ServerConfigManager` and a monkeypatched `_cidx_data_dir`.
+
 ## v9.23.2
 
 ### Bug Fixes

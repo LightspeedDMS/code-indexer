@@ -648,7 +648,7 @@ class HNSWIndexCache:
 
         # Bug #897 mitigation 1: optionally trim glibc heap after eviction.
         # Feature-flagged so operators can measure RSS recovery on staging
-        # before committing. Default off; set enable_malloc_trim=true in config.json.
+        # before committing. Default ON since v9.23.3; set enable_malloc_trim=false in config.json to disable.
         if _feature_flag_enabled("enable_malloc_trim"):
             _maybe_malloc_trim()
 
