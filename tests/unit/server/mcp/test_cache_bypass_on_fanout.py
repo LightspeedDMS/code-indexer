@@ -80,22 +80,39 @@ def _fake_repo_dir_with_code_indexer():
 
 @contextlib.contextmanager
 def _shared_search_service_patches(captured: List, fake_dir: str):
-    """Patch the shared external dependencies of SemanticSearchService._perform_semantic_search."""
-    with (
-        patch(
-            "code_indexer.server.services.search_service.BackendFactory.create",
-            side_effect=_make_captured_backend_factory(captured),
-        ),
-        patch(
-            "code_indexer.server.services.search_service.ConfigManager.create_with_backtrack",
-            return_value=_make_config_manager(),
-        ),
-        patch(
-            "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
-            return_value=_make_embedding_factory(),
-        ),
-    ):
-        yield
+    """Patch the shared external dependencies of SemanticSearchService._perform_semantic_search.
+
+    Bug #899 fix: _perform_semantic_search calls _get_http_client_factory() which reads
+    app.state.http_client_factory. Set a NullFaultFactory on the real app state so the
+    call succeeds without a full server startup.
+    """
+    from code_indexer.server.fault_injection.null_factory import NullFaultFactory
+    import code_indexer.server.app as app_module
+
+    had_factory = hasattr(app_module.app.state, "http_client_factory")
+    original_factory = getattr(app_module.app.state, "http_client_factory", None)
+    app_module.app.state.http_client_factory = NullFaultFactory()
+    try:
+        with (
+            patch(
+                "code_indexer.server.services.search_service.BackendFactory.create",
+                side_effect=_make_captured_backend_factory(captured),
+            ),
+            patch(
+                "code_indexer.server.services.search_service.ConfigManager.create_with_backtrack",
+                return_value=_make_config_manager(),
+            ),
+            patch(
+                "code_indexer.server.services.search_service.EmbeddingProviderFactory.create",
+                return_value=_make_embedding_factory(),
+            ),
+        ):
+            yield
+    finally:
+        if had_factory:
+            app_module.app.state.http_client_factory = original_factory
+        elif hasattr(app_module.app.state, "http_client_factory"):
+            del app_module.app.state.http_client_factory
 
 
 # ---------------------------------------------------------------------------
