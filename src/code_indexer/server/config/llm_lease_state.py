@@ -59,20 +59,59 @@ class LlmLeaseStateManager:
     ``0o600`` permissions to prevent unauthorised reads.
     """
 
-    def __init__(self, server_dir_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        server_dir_path: Optional[str] = None,
+        state_filename: str = _STATE_FILENAME,
+    ) -> None:
         """
         Initialise the manager.
 
         Args:
             server_dir_path: Directory where the state file is stored.
                              Defaults to ``~/.cidx-server``.
+            state_filename: Name of the state file within server_dir_path.
+                            Must be a plain filename — non-empty, not ``"."``
+                            or ``".."``, no path separators, and
+                            ``Path(state_filename).parts`` must have exactly
+                            one element.  Defaults to
+                            ``llm_lease_state.json``.  Callers that need
+                            vendor-scoped isolation (e.g. Codex) pass a
+                            distinct filename here instead of mutating
+                            ``_state_file`` after construction.
+
+        Raises:
+            ValueError: If ``state_filename`` fails any of the plain-filename
+                        safety checks.
         """
+        import os as _os
+
+        if not state_filename:
+            raise ValueError("state_filename must be a non-empty string")
+        if state_filename in (".", ".."):
+            raise ValueError(
+                f"state_filename must not be a directory-traversal token; "
+                f"got: {state_filename!r}"
+            )
+        _parts = Path(state_filename).parts
+        if len(_parts) != 1:
+            raise ValueError(
+                f"state_filename must be a single-component filename "
+                f"(Path.parts must have exactly one element); "
+                f"got: {state_filename!r} with parts {_parts}"
+            )
+        if _os.path.basename(state_filename) != state_filename:
+            raise ValueError(
+                f"state_filename must be a plain filename with no path "
+                f"separators; got: {state_filename!r}"
+            )
+
         if server_dir_path:
             self._server_dir = Path(server_dir_path)
         else:
             self._server_dir = Path.home() / ".cidx-server"
 
-        self._state_file = self._server_dir / _STATE_FILENAME
+        self._state_file = self._server_dir / state_filename
         self._encryption_key = self._derive_encryption_key()
 
     # ------------------------------------------------------------------
