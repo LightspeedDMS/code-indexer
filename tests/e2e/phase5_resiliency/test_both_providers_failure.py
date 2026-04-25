@@ -2,96 +2,64 @@
 AC3: Both providers dead — graceful empty result.
 
 Installs kill profiles (error_rate=1.0, error_codes=[503]) on BOTH
-api.voyageai.com and api.cohere.com and asserts that:
-  - cidx query exits 0 (graceful degradation — no crash, no non-zero exit)
-  - stdout is empty or contains only "No results found" (no provider errors surfaced)
-  - GET /health returns < 500 (server still alive after both providers fail)
-  - Fault history contains events for both targets
+api.voyageai.com and api.cohere.com and asserts that MCP search_code with
+query_strategy="parallel" degrades gracefully:
+  - MCP call returns HTTP 200 (no transport failure)
+  - No JSON-RPC protocol error in the envelope
+  - result["success"] is True — server handled the failure gracefully
+  - result["results"]["results"] is empty (both providers failed, no results)
+  - GET /health returns < SERVER_ERROR_THRESHOLD (server still alive)
+
+Test approach: MCP tools/call search_code with query_strategy="parallel"
+(not cidx CLI).  The parallel strategy runs both providers concurrently via
+RRF coalescing — when both are dead the coalescing produces an empty result
+set rather than surfacing a provider error.  The CLI path (/api/query/multi)
+always uses primary_only which propagates the error; MCP parallel is the
+path that delivers graceful degradation per epic #485.
 
 Target hostnames are fault-transport protocol constants, not environment config.
 
-cidx query --quiet output for empty results (from cli.py line 926):
-  "No results found"  (Rich markup stripped by subprocess capture)
-  OR empty stdout when the remote query path returns an empty list silently.
-Both are accepted. Any other non-empty content is rejected — provider error
-text must not be surfaced to the client.
-
-Accepted token normalization: strip leading/trailing whitespace, strip leading
-emoji characters (U+2600..U+26FF, U+2700..U+27BF, U+FE00..U+FEFF,
-U+1F000..U+1FFFF) and ASCII punctuation, lowercase, then exact-match against
-the normalized forms of the accepted messages.
+MCP result shape (from search.py _search_global_repo):
+  envelope: {"jsonrpc": "2.0", "result": <handler_result>, "id": 1}
+  handler_result: {
+    "success": True,
+    "results": {
+      "results": [],          # empty when both providers fail gracefully
+      "total_results": 0,
+      "query_metadata": {...}
+    }
+  }
 
 Depends on session fixtures from conftest.py:
   fault_admin_client  -- FaultAdminClient authenticated against the fault server
   fault_http_client   -- unauthenticated httpx.Client for health endpoint
-  fault_workspace     -- git-backed workspace with cidx init --remote
   indexed_golden_repo -- "markupsafe" registered + indexed on fault server
   clear_all_faults    -- autouse, resets state before each test
 
-STATUS AFTER bug #899 FIX (commit 2366af2c):
-Bug #899 (fault transport not wired) is FIXED. Kill profiles now intercept
-actual query-time embedding calls.
-
-Epic #485 design — primary_only strategy has no failover:
-With both providers killed, the CLI surfaces a provider error instead of
-returning graceful empty results. This is intentional: epic #485
-("Multi-Provider Embedding Redundancy") explicitly defines primary_only as
-the default query strategy with no failover. The /api/query/multi endpoint
-(used by cidx query --repos) does not accept a query_strategy parameter,
-so it always uses primary_only. AC3 assumes graceful-empty degradation that
-the current product does not provide under primary_only. This test is xfailed
-until query_strategy plumbing is added per epic #485.
-
-Current test execution path (documented current behavior after #899 fix):
-  1. Both kill profile CRUDs — pass (control plane works).
-  2. cidx query exits NON-ZERO — both providers 503, error propagated (epic #485 design: primary_only, no failover).
-     Smoke assertion accepts non-zero; documents error mode.
-  3. GET /health < 500 — passes (server survives regardless of CLI exit code).
-  4. pytest.xfail() — bug #899 FIXED; epic #485 design: no failover in primary_only mode.
-
-Upgrade path: remove xfail and restore _assert_graceful_empty_stdout /
-_assert_history_has assertions when query_strategy plumbing is added to
-/api/query/multi and the CLI (opt-in failover/parallel modes per epic #485).
-
 See:
-  https://github.com/LightspeedDMS/code-indexer/issues/899 (FIXED)
-  https://github.com/LightspeedDMS/code-indexer/issues/485 (design — primary_only, no failover)
+  https://github.com/LightspeedDMS/code-indexer/issues/485 (epic design)
+  https://github.com/LightspeedDMS/code-indexer/issues/866 (AC3)
 """
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import httpx
-import pytest
 
-from tests.e2e.phase5_resiliency.conftest import FaultAdminClient, _build_cli_env
-from tests.e2e.helpers import run_cidx
+from tests.e2e.phase5_resiliency.conftest import FaultAdminClient, _mcp_search
 
 # Fault-transport protocol constants — not environment-specific configuration.
 VOYAGE_TARGET = "api.voyageai.com"
 COHERE_TARGET = "api.cohere.com"
 
-# Exact normalised forms of accepted empty-result messages from cli.py lines 926 + 5712.
-# Normalised = stripped, leading emoji/punct stripped, lowercased.
-_ACCEPTED_EMPTY_NORMALISED = frozenset(
-    {
-        "no results found",
-        "no results found.",
-    }
-)
-
-# Regex to strip leading emoji codepoints and ASCII punctuation/whitespace
-# before the first letter, so "No results found" -> "no results found".
-_LEADING_NOISE_RE = re.compile(
-    r"^[\s☀-⛿✀-➿︀-﻿\U0001F000-\U0001FFFF\W]*"
-)
-
-
-def _normalise_for_comparison(text: str) -> str:
-    """Strip leading emoji/punctuation/whitespace and lowercase for comparison."""
-    return _LEADING_NOISE_RE.sub("", text).rstrip().lower()
+# ---------------------------------------------------------------------------
+# Named constants — no magic numbers in test bodies or helpers.
+# ---------------------------------------------------------------------------
+KILL_ERROR_RATE: float = 1.0          # 100% interception rate for kill profiles
+KILL_ERROR_CODE: int = 503            # HTTP status the fault harness injects
+HTTP_OK: int = 200                    # Expected status for successful profile GET
+HTTP_CREATED: int = 201               # Accepted status for profile PUT (create)
+SEARCH_LIMIT: int = 10                # Result limit for MCP search calls
+SERVER_ERROR_THRESHOLD: int = 500     # GET /health must return below this
 
 
 def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
@@ -99,16 +67,16 @@ def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
     payload = {
         "target": target,
         "enabled": True,
-        "error_rate": 1.0,
-        "error_codes": [503],
+        "error_rate": KILL_ERROR_RATE,
+        "error_codes": [KILL_ERROR_CODE],
     }
     put_resp = client.put(f"/admin/fault-injection/profiles/{target}", json=payload)
-    assert put_resp.status_code in (200, 201), (
+    assert put_resp.status_code in (HTTP_OK, HTTP_CREATED), (
         f"PUT kill profile for {target!r} failed: "
         f"{put_resp.status_code} {put_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
-    assert get_resp.status_code == 200 and get_resp.json()["error_rate"] == 1.0, (
+    assert get_resp.status_code == HTTP_OK and get_resp.json()["error_rate"] == KILL_ERROR_RATE, (
         f"Kill profile for {target!r} not persisted: {get_resp.text}"
     )
 
@@ -117,90 +85,51 @@ def test_both_providers_dead_graceful_empty(
     fault_admin_client: FaultAdminClient,
     fault_http_client: httpx.Client,
     indexed_golden_repo: str,
-    fault_workspace: Path,
 ) -> None:
-    """AC3: With both providers killed, cidx query degrades gracefully.
+    """AC3: With both providers killed, MCP parallel query degrades gracefully.
 
-    Smoke assertions (hard — always run, document current known-good behavior):
-      1. cidx query exit code — accepted as 0 OR non-zero.
-         Exit 0 with empty/graceful output: both providers faulted and the CLI
-         degraded gracefully (expected per AC spec, requires query_strategy plumbing per epic #485).
-         Non-zero: provider errors propagated to user (epic #485 design: primary_only, no failover).
-         Either outcome is documented; the server health check is always run.
-      2. GET /health returns < 500 (server survives both kill profiles,
-         regardless of CLI exit code).
+    Drives the query through MCP search_code with query_strategy="parallel"
+    so RRF coalescing handles both providers failing — producing empty results
+    instead of surfacing a provider error to the client.
 
-    After the smoke assertions, pytest.xfail() marks AC3 as xfail because:
-      - Bug #899 (fault transport not wired) is FIXED (commit 2366af2c).
-      - Epic #485 design: cidx query --repos uses primary_only strategy (no failover);
-        /api/query/multi REST endpoint and CLI lack query_strategy plumbing for
-        opt-in failover/parallel modes. Both providers fail and the CLI surfaces
-        an error instead of returning graceful empty results.
-    Removing this xfail and restoring _assert_graceful_empty_stdout /
-    _assert_history_has is the upgrade path when query_strategy plumbing is
-    added per epic #485.
-
-    See:
-      https://github.com/LightspeedDMS/code-indexer/issues/899 (FIXED)
-      https://github.com/LightspeedDMS/code-indexer/issues/485 (design — primary_only, no failover)
+    Assertions:
+      1. Both kill profile CRUDs succeed (PUT + GET verified for each).
+      2. MCP search_code returns HTTP 200 with no JSON-RPC protocol error.
+      3. result["success"] is True — server handled dual failure gracefully.
+      4. result["results"]["results"] is empty (both providers failed).
+      5. GET /health returns < SERVER_ERROR_THRESHOLD (server alive).
     """
     _install_kill_profile(fault_admin_client, VOYAGE_TARGET)
     _install_kill_profile(fault_admin_client, COHERE_TARGET)
 
     # Server stores golden repos with a '-global' suffix; the fixture returns
     # the bare alias ("markupsafe"), so we must append it here.
-    result = run_cidx(
-        "query",
-        "escape",
-        "--repos",
-        f"{indexed_golden_repo}-global",
-        "--quiet",
-        cwd=str(fault_workspace),
-        env=_build_cli_env(),
+    repo_alias = f"{indexed_golden_repo}-global"
+    result_body = _mcp_search(
+        fault_admin_client,
+        query_text="escape",
+        repository_alias=repo_alias,
+        query_strategy="parallel",
+        limit=SEARCH_LIMIT,
     )
 
-    # Smoke assertion 1: document current exit code behavior.
-    # After bug #899 fix, fault transport is wired. Epic #485 design: primary_only
-    # strategy has no failover, so both provider errors propagate to the user
-    # instead of degrading to graceful empty output.
-    # Accept either exit 0 (graceful degradation) or non-zero (error propagated).
-    if result.returncode != 0:
-        _cli_error_mode = (
-            f"cidx query exited {result.returncode} with both providers killed. "
-            f"Epic #485 design (primary_only, no failover): provider errors propagated to "
-            f"user instead of returning graceful empty results. "
-            f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
-        )
-    else:
-        _cli_error_mode = None
+    # AC3: parallel strategy must not surface a provider error to the client.
+    # With both providers killed, the coalescer produces an empty result set.
+    assert result_body.get("success") is True, (
+        f"MCP search_code returned success=False with both providers killed — "
+        f"expected graceful empty degradation, not a provider error. "
+        f"result_body: {result_body}"
+    )
+    results_wrapper = result_body.get("results", {})
+    items = results_wrapper.get("results", [])
+    assert items == [], (
+        f"MCP search_code returned non-empty results with both providers killed: "
+        f"{items}. Expected empty list under graceful degradation."
+    )
 
-    # Smoke assertion 2: server must still be alive after both kill profiles installed,
-    # regardless of whether the CLI exited 0 or non-zero.
+    # Server must remain alive after both kill profiles are installed.
     health_resp = fault_http_client.get("/health")
-    assert health_resp.status_code < 500, (
+    assert health_resp.status_code < SERVER_ERROR_THRESHOLD, (
         f"GET /health returned {health_resp.status_code} after both kill profiles "
         f"installed; server must survive fault profile installation."
-    )
-
-    # AC3 deep assertion boundary — xfail here (bug #899 FIXED, epic #485 design).
-    # Bug #899 (fault transport not wired) is now FIXED (commit 2366af2c).
-    # Epic #485 design: cidx query --repos uses primary_only strategy (no failover);
-    # /api/query/multi REST endpoint and CLI lack query_strategy plumbing for
-    # opt-in failover/parallel modes. With both providers failed, the CLI surfaces
-    # a provider error rather than returning graceful empty output.
-    # When query_strategy plumbing is added per epic #485: remove this xfail and
-    # restore _assert_graceful_empty_stdout / _assert_history_has assertions here.
-    xfail_context = _cli_error_mode or (
-        f"cidx query exited 0; output needs graceful-empty verification "
-        f"and history assertions cannot be verified until query_strategy plumbing "
-        f"is added per epic #485."
-    )
-    pytest.xfail(
-        reason=(
-            f"bug #899 FIXED (commit 2366af2c); epic #485 design: cidx query --repos "
-            f"uses primary_only strategy (no failover); /api/query/multi REST endpoint "
-            f"and CLI lack query_strategy plumbing for opt-in failover/parallel modes. "
-            f"Current behavior: {xfail_context} "
-            f"See https://github.com/LightspeedDMS/code-indexer/issues/485"
-        )
     )

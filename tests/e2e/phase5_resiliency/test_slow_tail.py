@@ -1,48 +1,57 @@
 """
-AC3: Slow-tail Bernoulli distribution at E2E scale.
+AC3 (#867): Slow-tail Bernoulli distribution at E2E scale.
 
-Scenario: slow_tail_rate=0.5 on VoyageAI; 20 queries run; approximately 50% of
-intercepted events are slow_tail outcomes (tolerance band: 3 <= count <= 17).
+Scenario: slow_tail_rate=0.5 on VoyageAI; QUERY_COUNT MCP parallel queries
+run; approximately 50% of intercepted events are slow_tail outcomes
+(tolerance band: SLOW_TAIL_MIN_EVENTS <= count <= SLOW_TAIL_MAX_EVENTS).
 
-Target hostnames (VOYAGE_TARGET) are fault-transport protocol constants — they
-match the httpx transport-layer interception targets and are not
-environment-specific configuration values.
+Test approach: MCP tools/call search_code with query_strategy="parallel"
+(not cidx CLI).  The parallel strategy routes both providers through the
+wired http_client_factory, which intercepts the slow_tail profile.  Driving
+through MCP (rather than the CLI subprocess) ensures the fault transport is
+actually exercised on the query-time embedding calls.
 
-Current state (bug #899 — fault transport not wired into query-time embedding clients):
-EmbeddingProviderFactory.create() constructs VoyageAIClient and
-CohereEmbeddingProvider without passing http_client_factory.  Slow-tail profiles
-are accepted by the control plane (CRUD works) but never intercept actual
-query-time embedding calls — fault history stays empty after queries.
+Target hostname (VOYAGE_TARGET) is a fault-transport protocol constant —
+it matches the httpx transport-layer interception target and is not an
+environment-specific configuration value.
 
-Smoke assertions (always hard):
-  - Profile CRUD round-trip (PUT + GET).
-  - All QUERY_COUNT cidx queries exit 0.
-  - GET /health < 500.
-  - GET /admin/fault-injection/history returns 200 (endpoint reachable — a
-    non-200 is a real regression, not a known bug #899 condition).
+Assertions (all hard — no xfail):
+  - Profile CRUD round-trip (PUT + GET verified).
+  - All QUERY_COUNT MCP parallel queries return success=True.
+  - GET /health < SERVER_ERROR_THRESHOLD.
+  - GET /admin/fault-injection/history returns 200.
+  - slow_tail event count for VOYAGE_TARGET falls within
+    [SLOW_TAIL_MIN_EVENTS, SLOW_TAIL_MAX_EVENTS] over QUERY_COUNT queries.
 
-xfail boundary (bug #899): triggered only when event_count == 0 (i.e. history
-empty after queries). When bug #899 is fixed and events appear, the distribution
-band assertion runs as live code. This means the test self-upgrades without code
-change when the transport wiring is corrected.
+Depends on session fixtures from conftest.py:
+  fault_admin_client  -- FaultAdminClient authenticated against the fault server
+  fault_http_client   -- unauthenticated httpx.Client for health endpoint
+  indexed_golden_repo -- "markupsafe" registered + indexed on fault server
+  clear_all_faults    -- autouse, resets state before each test
 
-See: https://github.com/LightspeedDMS/code-indexer/issues/899
+See:
+  https://github.com/LightspeedDMS/code-indexer/issues/485 (epic design)
+  https://github.com/LightspeedDMS/code-indexer/issues/867 (AC3)
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import List, cast
 
 import httpx
-import pytest
 
-from tests.e2e.phase5_resiliency.conftest import FaultAdminClient, _build_cli_env
-from tests.e2e.helpers import run_cidx
+from tests.e2e.phase5_resiliency.conftest import FaultAdminClient, _mcp_search
 
-# Fault-transport protocol constants — these match the httpx transport-layer
-# interception targets and are not environment-specific configuration values.
+# Fault-transport protocol constant — not environment-specific configuration.
 VOYAGE_TARGET = "api.voyageai.com"
+
+# ---------------------------------------------------------------------------
+# Named constants — no magic numbers in test bodies or helpers.
+# ---------------------------------------------------------------------------
+HTTP_OK: int = 200                          # Expected status for REST calls
+HTTP_CREATED: int = 201                     # Accepted status for profile PUT (create)
+SERVER_ERROR_THRESHOLD: int = 500           # GET /health must return below this
+SEARCH_LIMIT: int = 10                      # Result limit for MCP search calls
 
 # AC3 specification values.
 SLOW_TAIL_RATE: float = 0.5
@@ -58,12 +67,12 @@ def _install_slow_tail_profile(client: FaultAdminClient, target: str) -> None:
     """PUT slow-tail profile on *target* and verify round-trip via GET."""
     payload = {"target": target, "enabled": True, "slow_tail_rate": SLOW_TAIL_RATE}
     put_resp = client.put(f"/admin/fault-injection/profiles/{target}", json=payload)
-    assert put_resp.status_code in (200, 201), (
+    assert put_resp.status_code in (HTTP_OK, HTTP_CREATED), (
         f"PUT slow-tail profile for {target!r} failed: "
         f"{put_resp.status_code} {put_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
-    assert get_resp.status_code == 200, (
+    assert get_resp.status_code == HTTP_OK, (
         f"GET profile for {target!r} after PUT failed: {get_resp.status_code}"
     )
     stored_rate = get_resp.json().get("slow_tail_rate")
@@ -74,42 +83,29 @@ def _install_slow_tail_profile(client: FaultAdminClient, target: str) -> None:
 
 
 def _run_queries_and_assert_success(
-    count: int, repo_alias_arg: str, workspace: Path
+    count: int, repo_alias: str, client: FaultAdminClient
 ) -> None:
-    """Run *count* cidx queries and assert each exits 0."""
-    env = _build_cli_env()
+    """Run *count* MCP parallel queries and assert each returns success=True."""
     for i in range(count):
-        result = run_cidx(
-            "query", "escape",
-            "--repos", repo_alias_arg,
-            "--quiet",
-            cwd=str(workspace),
-            env=env,
+        result_body = _mcp_search(
+            client,
+            query_text="escape",
+            repository_alias=repo_alias,
+            query_strategy="parallel",
+            limit=SEARCH_LIMIT,
         )
-        assert result.returncode == 0, (
-            f"cidx query #{i + 1}/{count} must exit 0 under slow-tail profile "
-            f"on {VOYAGE_TARGET!r}. Got exit {result.returncode}. "
-            f"stderr:\n{result.stderr}"
+        assert result_body.get("success") is True, (
+            f"MCP query #{i + 1}/{count} must return success=True under slow-tail "
+            f"profile on {VOYAGE_TARGET!r}. result_body: {result_body}"
         )
-
-
-def _assert_server_healthy(client: httpx.Client, context: str) -> None:
-    """Assert GET /health returns < 500."""
-    health_resp = client.get("/health")
-    assert health_resp.status_code < 500, (
-        f"GET /health returned {health_resp.status_code} {context}; "
-        f"server must remain alive."
-    )
 
 
 def _fetch_history(client: FaultAdminClient) -> List[dict]:
-    """Fetch /admin/fault-injection/history; assert 200 (hard — not an xfail condition)."""
+    """Fetch /admin/fault-injection/history; assert 200 (hard)."""
     resp = client.get("/admin/fault-injection/history")
-    assert resp.status_code == 200, (
+    assert resp.status_code == HTTP_OK, (
         f"GET /admin/fault-injection/history returned {resp.status_code}; "
-        f"the history endpoint must be reachable. "
-        f"This is a real regression, not a known bug #899 condition. "
-        f"Response: {resp.text}"
+        f"the history endpoint must be reachable. Response: {resp.text}"
     )
     return cast(List[dict], resp.json()["history"])
 
@@ -120,6 +116,10 @@ def _assert_slow_tail_distribution(events: List[dict], target: str) -> None:
         e for e in events
         if e.get("target") == target and "slow_tail" in e.get("fault_type", "")
     ]
+    assert slow_tail_events, (
+        f"Expected at least one slow_tail history event for {target!r}; got 0. "
+        f"The fault transport must be wired for slow_tail interception."
+    )
     assert SLOW_TAIL_MIN_EVENTS <= len(slow_tail_events) <= SLOW_TAIL_MAX_EVENTS, (
         f"slow_tail event count {len(slow_tail_events)} for {target!r} outside "
         f"expected band [{SLOW_TAIL_MIN_EVENTS}, {SLOW_TAIL_MAX_EVENTS}] over "
@@ -128,40 +128,31 @@ def _assert_slow_tail_distribution(events: List[dict], target: str) -> None:
     )
 
 
+def _assert_server_healthy(client: httpx.Client, context: str) -> None:
+    """Assert GET /health returns below SERVER_ERROR_THRESHOLD."""
+    health_resp = client.get("/health")
+    assert health_resp.status_code < SERVER_ERROR_THRESHOLD, (
+        f"GET /health returned {health_resp.status_code} {context}; "
+        f"server must remain alive."
+    )
+
+
 def test_slow_tail_bernoulli_distribution(
     fault_admin_client: FaultAdminClient,
     fault_http_client: httpx.Client,
     indexed_golden_repo: str,
-    fault_workspace: Path,
 ) -> None:
     """AC3: slow_tail_rate=0.5 must produce a non-degenerate distribution over 20 queries.
 
-    xfail triggered only when history is empty (bug #899 condition). When the
-    transport is wired and events appear, the distribution band assertion runs.
-
-    See: https://github.com/LightspeedDMS/code-indexer/issues/899
+    All assertions are hard — no xfail guards. The fault transport must be
+    wired for slow_tail interception; if history is empty the test fails.
     """
     _install_slow_tail_profile(fault_admin_client, VOYAGE_TARGET)
-    repo_alias_arg = f"{indexed_golden_repo}-global"
-    _run_queries_and_assert_success(QUERY_COUNT, repo_alias_arg, fault_workspace)
+    repo_alias = f"{indexed_golden_repo}-global"
+    _run_queries_and_assert_success(QUERY_COUNT, repo_alias, fault_admin_client)
     _assert_server_healthy(
         fault_http_client,
         f"after {QUERY_COUNT} queries under slow-tail profile on {VOYAGE_TARGET!r}",
     )
-
     events = _fetch_history(fault_admin_client)
-    if not events:
-        # xfail only for the known bug #899 condition: history empty after queries.
-        # When bug #899 is fixed and events appear, execution continues past this
-        # branch and the distribution assertion below runs automatically.
-        pytest.xfail(
-            reason=(
-                f"bug #899: fault transport not wired — slow_tail profile "
-                f"(rate={SLOW_TAIL_RATE}) on {VOYAGE_TARGET!r} produced 0 history "
-                f"events after {QUERY_COUNT} queries. "
-                f"See https://github.com/LightspeedDMS/code-indexer/issues/899"
-            )
-        )
-
-    # Reached only when bug #899 is fixed and the transport is wired.
     _assert_slow_tail_distribution(events, VOYAGE_TARGET)

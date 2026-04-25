@@ -48,6 +48,12 @@ DEFAULT_GOLDEN_REPO_TIMEOUT_SECONDS: float = 900.0
 # Poll interval when waiting for background indexing jobs
 JOB_POLL_INTERVAL_SECONDS: float = 2.0
 
+# HTTP client timeout for test requests.  Fault-injected parallel-strategy queries
+# must wait for one provider to fail before fusion completes; 60 s gives ample
+# headroom (actual latency: 200-400 ms × intercepted calls + RRF coalescing +
+# retries) while still surfacing a genuinely hung server.
+PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS: float = 60.0
+
 # Expected HTTP status code for a successful fault reset
 FAULT_RESET_OK: int = 200
 
@@ -124,7 +130,7 @@ class FaultAdminClient:
         # _auth_headers() in helpers.py owns all Bearer assembly — we store result verbatim
         self._headers: dict[str, str] = _auth_headers(token)
         self._token = token
-        self._client = httpx.Client(base_url=base_url)
+        self._client = httpx.Client(base_url=base_url, timeout=PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS)
 
     @property
     def token(self) -> str:
@@ -171,7 +177,7 @@ def fault_http_client() -> Generator[httpx.Client, None, None]:
     host = _require_env("E2E_FAULT_SERVER_HOST")
     port = _require_env("E2E_FAULT_SERVER_PORT")
     base_url = f"http://{host}:{port}"
-    with httpx.Client(base_url=base_url) as client:
+    with httpx.Client(base_url=base_url, timeout=PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS) as client:
         yield client
 
 
@@ -426,3 +432,76 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
     # record success=True for all providers, clearing any residual sinbin state
     # automatically.  Explicit sinbin clearing is not possible without a REST
     # endpoint — the self-healing mechanism is sufficient for test isolation.
+
+
+# ---------------------------------------------------------------------------
+# _mcp_search — shared MCP search_code helper for Phase 5 resiliency tests
+# ---------------------------------------------------------------------------
+
+
+def _mcp_search(
+    fault_admin_client: "FaultAdminClient",
+    query_text: str,
+    repository_alias: str,
+    query_strategy: str = "parallel",
+    limit: int = 10,
+    **extra_args: object,
+) -> dict:
+    """POST MCP tools/call search_code and return the unwrapped result body.
+
+    Sends a JSON-RPC 2.0 request to /mcp with the given arguments and
+    query_strategy (default "parallel" — exercises RRF coalescing across
+    all configured providers so one dead provider still returns surviving
+    results).
+
+    Uses fault_admin_client.post() which carries pre-built Authorization
+    headers — no manual Bearer assembly here.
+
+    Returns the handler result dict (i.e. envelope["result"] from the
+    JSON-RPC response, which is {"success": True/False, "results": {...}}).
+
+    Raises:
+        ValueError: On invalid arguments (non-str inputs, empty strings,
+                    non-int or non-positive limit).
+        httpx.HTTPStatusError: If the HTTP transport returns a non-2xx status.
+        AssertionError: If the JSON-RPC envelope contains a protocol-level error.
+
+    Does NOT raise if result["success"] is False — callers inspect the body to
+    assert per-AC behavior (e.g. empty results on full failure for AC3).
+    """
+    if not isinstance(query_text, str) or not query_text:
+        raise ValueError(f"query_text must be a non-empty str, got {query_text!r}")
+    if not isinstance(repository_alias, str) or not repository_alias:
+        raise ValueError(
+            f"repository_alias must be a non-empty str, got {repository_alias!r}"
+        )
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError(f"limit must be a positive int, got {limit!r}")
+
+    arguments: dict = {
+        "query_text": query_text,
+        "repository_alias": repository_alias,
+        "query_strategy": query_strategy,
+        "limit": limit,
+        **extra_args,
+    }
+    response = fault_admin_client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "search_code",
+                "arguments": arguments,
+            },
+        },
+    )
+    response.raise_for_status()
+    envelope = response.json()
+    assert "error" not in envelope, (
+        f"_mcp_search: JSON-RPC protocol error for "
+        f"query_text={query_text!r}, repository_alias={repository_alias!r}: "
+        f"{envelope['error']}"
+    )
+    return envelope["result"]

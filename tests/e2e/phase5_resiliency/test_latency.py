@@ -1,60 +1,54 @@
 """
-AC2: Latency injection completes within budget.
+AC2 (#867): Latency injection completes within budget.
 
-Scenario: A latency profile is installed (latency_rate=1.0, latency_ms_range=[200,400]);
-the CLI exits 0 within a 10-second budget; history shows at least one latency event.
+Scenario: A latency profile is installed (latency_rate=1.0,
+latency_ms_range=[200,400]); MCP search_code with query_strategy="parallel"
+exits within LATENCY_QUERY_BUDGET_SECONDS; history shows at least one latency
+event for the target.
 
-Target hostnames (VOYAGE_TARGET) are fault-transport protocol constants — they
-match the httpx transport-layer interception targets and are not
-environment-specific configuration values.
+Test approach: MCP tools/call search_code with query_strategy="parallel"
+(not cidx CLI).  The parallel strategy routes both providers through the
+wired http_client_factory, which intercepts the latency profile.  Driving
+through MCP (rather than the CLI subprocess) ensures the latency transport is
+actually exercised on the query-time embedding calls.
 
-Current state (bug #899 — fault transport not wired into query-time embedding clients):
-EmbeddingProviderFactory.create() constructs VoyageAIClient and
-CohereEmbeddingProvider without passing http_client_factory.  Latency profiles
-are accepted by the control plane (CRUD works) but never intercept actual
-query-time embedding calls — no latency is injected and fault history stays empty.
+Target hostname (VOYAGE_TARGET) is a fault-transport protocol constant —
+it matches the httpx transport-layer interception target and is not an
+environment-specific configuration value.
 
-Smoke assertions (always hard):
-  - Latency profile CRUD round-trip (PUT + GET).
-  - cidx query exits 0 within LATENCY_QUERY_BUDGET_SECONDS (no hang).
-  - GET /health < 500.
-  - GET /admin/fault-injection/history returns 200 (endpoint reachable — a
-    non-200 is a real regression, not a known bug #899 condition).
+Depends on session fixtures from conftest.py:
+  fault_admin_client  -- FaultAdminClient authenticated against the fault server
+  fault_http_client   -- unauthenticated httpx.Client for health endpoint
+  indexed_golden_repo -- "markupsafe" registered + indexed on fault server
+  clear_all_faults    -- autouse, resets state before each test
 
-xfail boundary (bug #899): triggered only when no history events exist for the
-target (i.e. latency transport not intercepting calls). When bug #899 is fixed
-and events appear, the fault_type assertion runs as live code — the test
-self-upgrades without a code change.
-
-The budget check (smoke assertion 2) is retained as a meaningful guard:
-once the transport IS wired, a hang rather than a bounded delay will fail
-loudly here rather than at a vague test-runner timeout.
-
-See: https://github.com/LightspeedDMS/code-indexer/issues/899
+See:
+  https://github.com/LightspeedDMS/code-indexer/issues/485 (epic design)
+  https://github.com/LightspeedDMS/code-indexer/issues/867 (AC2)
 """
 
 from __future__ import annotations
 
-import subprocess
 import time
-from pathlib import Path
 from typing import List, cast
 
 import httpx
-import pytest
 
-from tests.e2e.phase5_resiliency.conftest import FaultAdminClient, _build_cli_env
+from tests.e2e.phase5_resiliency.conftest import FaultAdminClient, _mcp_search
 
-# Fault-transport protocol constants — these match the httpx transport-layer
-# interception targets and are not environment-specific configuration values.
+# Fault-transport protocol constant — not environment-specific configuration.
 VOYAGE_TARGET = "api.voyageai.com"
+
+# ---------------------------------------------------------------------------
+# Named constants — no magic numbers in test bodies or helpers.
+# ---------------------------------------------------------------------------
+HTTP_OK: int = 200                          # Expected status for REST calls
+HTTP_CREATED: int = 201                     # Accepted status for profile PUT (create)
+SERVER_ERROR_THRESHOLD: int = 500           # GET /health must return below this
+SEARCH_LIMIT: int = 10                      # Result limit for MCP search calls
 
 # AC2 hard budget: query with latency injection must return within this many seconds.
 LATENCY_QUERY_BUDGET_SECONDS: float = 10.0
-
-# Subprocess hard cap: slightly above the budget so TimeoutExpired fires before
-# the test runner's own timeout, giving a clear failure message.
-LATENCY_SUBPROCESS_CAP_SECONDS: float = LATENCY_QUERY_BUDGET_SECONDS + 5.0
 
 # Latency profile values matching the AC2 specification.
 LATENCY_RATE: float = 1.0
@@ -71,12 +65,12 @@ def _install_latency_profile(client: FaultAdminClient, target: str) -> None:
         "latency_ms_range": [LATENCY_MS_MIN, LATENCY_MS_MAX],
     }
     put_resp = client.put(f"/admin/fault-injection/profiles/{target}", json=payload)
-    assert put_resp.status_code in (200, 201), (
+    assert put_resp.status_code in (HTTP_OK, HTTP_CREATED), (
         f"PUT latency profile for {target!r} failed: "
         f"{put_resp.status_code} {put_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
-    assert get_resp.status_code == 200, (
+    assert get_resp.status_code == HTTP_OK, (
         f"GET profile for {target!r} after PUT failed: {get_resp.status_code}"
     )
     stored_rate = get_resp.json().get("latency_rate")
@@ -86,81 +80,28 @@ def _install_latency_profile(client: FaultAdminClient, target: str) -> None:
     )
 
 
-def _run_query_within_budget(
-    repo_alias_arg: str, workspace: Path
-) -> "subprocess.CompletedProcess[str]":
-    """Run cidx query and assert it completes within LATENCY_QUERY_BUDGET_SECONDS."""
-    env = _build_cli_env()
-    cmd = [
-        "python3", "-m", "code_indexer.cli",
-        "query", "escape",
-        "--repos", repo_alias_arg,
-        "--quiet",
-    ]
-    start = time.monotonic()
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=str(workspace),
-            env=env,
-            timeout=LATENCY_SUBPROCESS_CAP_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        elapsed = time.monotonic() - start
-        raise AssertionError(
-            f"cidx query with latency profile on {VOYAGE_TARGET!r} did not terminate "
-            f"within {LATENCY_SUBPROCESS_CAP_SECONDS:.0f}s (elapsed: {elapsed:.1f}s). "
-            f"Latency transport must not hang the client; "
-            f"configured range [{LATENCY_MS_MIN}, {LATENCY_MS_MAX}] ms."
-        )
-    elapsed = time.monotonic() - start
-    assert proc.returncode == 0, (
-        f"cidx query must exit 0 under latency profile on {VOYAGE_TARGET!r}. "
-        f"Got exit {proc.returncode}. stderr:\n{proc.stderr}"
-    )
-    assert elapsed < LATENCY_QUERY_BUDGET_SECONDS, (
-        f"cidx query with latency profile on {VOYAGE_TARGET!r} took {elapsed:.1f}s "
-        f"(AC2 budget: {LATENCY_QUERY_BUDGET_SECONDS}s). "
-        f"Configured latency range [{LATENCY_MS_MIN}, {LATENCY_MS_MAX}] ms must not "
-        f"block the client beyond the budget."
-    )
-    return proc
-
-
-def _assert_server_healthy(client: httpx.Client, context: str) -> None:
-    """Assert GET /health returns < 500."""
-    health_resp = client.get("/health")
-    assert health_resp.status_code < 500, (
-        f"GET /health returned {health_resp.status_code} {context}; "
-        f"server must remain alive."
-    )
-
-
 def _fetch_history_for_target(
     client: FaultAdminClient, target: str
 ) -> List[dict]:
     """Fetch history and return events matching *target*.
 
-    Hard-asserts history endpoint returns 200 — a non-200 is a real regression,
-    not a known bug #899 condition, and must not be masked by the xfail path.
+    Hard-asserts history endpoint returns 200 — a non-200 is a real regression
+    and must not be masked.
     """
     resp = client.get("/admin/fault-injection/history")
-    assert resp.status_code == 200, (
+    assert resp.status_code == HTTP_OK, (
         f"GET /admin/fault-injection/history returned {resp.status_code}; "
-        f"the history endpoint must be reachable. "
-        f"This is a real regression, not a known bug #899 condition. "
-        f"Response: {resp.text}"
+        f"the history endpoint must be reachable. Response: {resp.text}"
     )
     all_events = cast(List[dict], resp.json()["history"])
     return [e for e in all_events if e.get("target") == target]
 
 
 def _assert_latency_events(target_events: List[dict], target: str) -> None:
-    """Assert *target_events* contains at least one latency event with correct fault_type."""
+    """Assert *target_events* contains at least one latency event."""
     assert target_events, (
-        f"Expected at least one history event for {target!r}; got 0."
+        f"Expected at least one history event for {target!r}; got 0. "
+        f"The fault transport must be wired for latency interception."
     )
     assert all("latency" in e.get("fault_type", "") for e in target_events), (
         f"Not all events for {target!r} have fault_type indicating latency: "
@@ -168,40 +109,57 @@ def _assert_latency_events(target_events: List[dict], target: str) -> None:
     )
 
 
+def _assert_server_healthy(client: httpx.Client, context: str) -> None:
+    """Assert GET /health returns below SERVER_ERROR_THRESHOLD."""
+    health_resp = client.get("/health")
+    assert health_resp.status_code < SERVER_ERROR_THRESHOLD, (
+        f"GET /health returned {health_resp.status_code} {context}; "
+        f"server must remain alive."
+    )
+
+
 def test_latency_injection_completes_within_budget(
     fault_admin_client: FaultAdminClient,
     fault_http_client: httpx.Client,
     indexed_golden_repo: str,
-    fault_workspace: Path,
 ) -> None:
-    """AC2: Latency profile on VoyageAI must not prevent query from completing.
+    """AC2: Latency profile on VoyageAI must not prevent MCP query from completing.
 
-    xfail triggered only when no history events exist for the target (bug #899).
-    When the transport is wired and events appear, the fault_type assertion runs.
-
-    See: https://github.com/LightspeedDMS/code-indexer/issues/899
+    Asserts:
+      1. Latency profile CRUD round-trip (PUT + GET verified).
+      2. MCP parallel query completes within LATENCY_QUERY_BUDGET_SECONDS.
+      3. result["success"] is True.
+      4. GET /health returns < SERVER_ERROR_THRESHOLD.
+      5. Fault history contains at least one latency event for VOYAGE_TARGET.
     """
     _install_latency_profile(fault_admin_client, VOYAGE_TARGET)
-    repo_alias_arg = f"{indexed_golden_repo}-global"
-    _run_query_within_budget(repo_alias_arg, fault_workspace)
+
+    repo_alias = f"{indexed_golden_repo}-global"
+    start = time.monotonic()
+    result_body = _mcp_search(
+        fault_admin_client,
+        query_text="escape",
+        repository_alias=repo_alias,
+        query_strategy="parallel",
+        limit=SEARCH_LIMIT,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result_body.get("success") is True, (
+        f"MCP search_code must return success=True under latency profile on "
+        f"{VOYAGE_TARGET!r}. result_body: {result_body}"
+    )
+    assert elapsed < LATENCY_QUERY_BUDGET_SECONDS, (
+        f"MCP parallel query with latency profile on {VOYAGE_TARGET!r} took "
+        f"{elapsed:.2f}s (budget: {LATENCY_QUERY_BUDGET_SECONDS}s). "
+        f"Configured latency range [{LATENCY_MS_MIN}, {LATENCY_MS_MAX}] ms "
+        f"must not block the client beyond the budget."
+    )
+
     _assert_server_healthy(
         fault_http_client,
         f"after latency profile on {VOYAGE_TARGET!r}",
     )
 
     target_events = _fetch_history_for_target(fault_admin_client, VOYAGE_TARGET)
-    if not target_events:
-        # xfail only for the known bug #899 condition: no events for this target.
-        # When bug #899 is fixed and events appear, execution continues past this
-        # branch and the latency assertion below runs automatically.
-        pytest.xfail(
-            reason=(
-                f"bug #899: fault transport not wired — latency profile "
-                f"(rate={LATENCY_RATE}) on {VOYAGE_TARGET!r} produced 0 history "
-                f"events after query. "
-                f"See https://github.com/LightspeedDMS/code-indexer/issues/899"
-            )
-        )
-
-    # Reached only when bug #899 is fixed and the transport is wired.
     _assert_latency_events(target_events, VOYAGE_TARGET)
