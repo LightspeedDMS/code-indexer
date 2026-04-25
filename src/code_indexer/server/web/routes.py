@@ -179,6 +179,8 @@ _VALID_CONFIG_SECTIONS = (
     "rerank",
     # Story #885 - Lifecycle analysis timeouts
     "lifecycle_analysis",
+    # Story #844 - Codex CLI integration configuration
+    "codex_integration",
 )
 
 
@@ -5354,6 +5356,8 @@ def _get_current_config() -> dict:
         RerankConfig,
         # Story #885 - Lifecycle analysis configuration
         LifecycleAnalysisConfig,
+        # Story #844 - Codex CLI integration configuration
+        CodexIntegrationConfig,
     )
     from dataclasses import asdict
 
@@ -5561,6 +5565,10 @@ def _get_current_config() -> dict:
         # Story #885: Lifecycle analysis configuration
         "lifecycle_analysis": settings.get(
             "lifecycle_analysis", asdict(LifecycleAnalysisConfig())
+        ),
+        # Story #844: Codex CLI integration configuration
+        "codex_integration": settings.get(
+            "codex_integration", asdict(CodexIntegrationConfig())
         ),
     }
 

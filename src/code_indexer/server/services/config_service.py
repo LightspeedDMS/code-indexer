@@ -603,6 +603,19 @@ class ConfigService:
             "outer_timeout_seconds": config.lifecycle_analysis_config.outer_timeout_seconds,  # type: ignore[union-attr]
         }
 
+        # Story #844: Codex CLI integration configuration
+        # codex_integration_config is guaranteed non-None by ServerConfig.__post_init__
+        assert config.codex_integration_config is not None
+        cx_cfg = config.codex_integration_config
+        settings["codex_integration"] = {
+            "enabled": cx_cfg.enabled,
+            "credential_mode": cx_cfg.credential_mode,
+            "api_key": (cx_cfg.api_key[:6] + "***" if cx_cfg.api_key else None),
+            "lcp_url": cx_cfg.lcp_url,
+            "lcp_vendor": cx_cfg.lcp_vendor,
+            "codex_weight": cx_cfg.codex_weight,
+        }
+
         return settings
 
     def _get_delegation_settings(self) -> Dict[str, Any]:
@@ -710,6 +723,9 @@ class ConfigService:
         # Story #885 - Lifecycle analysis timeouts
         elif category == "lifecycle_analysis":
             self._update_lifecycle_analysis_setting(config, key, value)
+        # Story #844 - Codex CLI integration
+        elif category == "codex_integration":
+            self._update_codex_integration_setting(config, key, value)
         else:
             raise ValueError(f"Unknown category: {category}")
 
@@ -1199,6 +1215,51 @@ class ConfigService:
             lifecycle.outer_timeout_seconds = int(value)
         else:
             raise ValueError(f"Unknown lifecycle_analysis setting: {key}")
+
+    def _update_codex_integration_setting(
+        self, config: ServerConfig, key: str, value: Any
+    ) -> None:
+        """Update a Codex CLI integration setting (Story #844).
+
+        Mirrors _update_claude_cli_setting but scoped to CodexIntegrationConfig.
+        api_key is preserved when the submitted value is a masked placeholder
+        (contains '***') to prevent UI re-saves from wiping the stored key.
+        """
+        from code_indexer.server.utils.config_manager import CodexIntegrationConfig
+
+        if config.codex_integration_config is None:
+            config.codex_integration_config = CodexIntegrationConfig()
+        cx = config.codex_integration_config
+
+        if key == "enabled":
+            cx.enabled = _parse_bool(value)
+        elif key == "credential_mode":
+            allowed = {"none", "api_key", "subscription"}
+            str_val = str(value)
+            if str_val not in allowed:
+                raise ValueError(
+                    f"Invalid credential_mode '{value}': must be one of {sorted(allowed)}"
+                )
+            cx.credential_mode = str_val
+        elif key == "api_key":
+            # Preserve existing key when the submitted value is a masked placeholder
+            str_val = str(value) if value else ""
+            if "***" not in str_val:
+                cx.api_key = str_val if str_val else None
+            # else: placeholder submitted — do not overwrite the stored key
+        elif key == "lcp_url":
+            cx.lcp_url = str(value) if value else None
+        elif key == "lcp_vendor":
+            cx.lcp_vendor = str(value)
+        elif key == "codex_weight":
+            weight = float(value)
+            if not (0.0 <= weight <= 1.0):
+                raise ValueError(
+                    f"Invalid codex_weight {weight}: must be in [0.0, 1.0]"
+                )
+            cx.codex_weight = weight
+        else:
+            raise ValueError(f"Unknown codex_integration setting: {key}")
 
     def _update_search_limits_setting(
         self, config: ServerConfig, key: str, value: Any

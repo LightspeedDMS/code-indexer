@@ -31,6 +31,22 @@ from typing import Any, Dict, List, Optional, cast
 
 from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
 
+# Story #848: lazy server imports for Pass 2 CliDispatcher wiring.
+# These are None in pure CLI contexts (no server package) and populated when
+# the server package is available.  Importing at module level (not inside the
+# method) makes them patchable by unit tests via
+#   patch("code_indexer.global_repos.dependency_map_analyzer.get_config_service")
+try:
+    from code_indexer.server.services.config_service import get_config_service
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
+    from code_indexer.server.services.claude_invoker import ClaudeInvoker
+    from code_indexer.server.services.codex_invoker import CodexInvoker
+except ImportError:  # pragma: no cover — server package absent in pure CLI context
+    get_config_service = None  # type: ignore[assignment]
+    CliDispatcher = None  # type: ignore[assignment]
+    ClaudeInvoker = None  # type: ignore[assignment]
+    CodexInvoker = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # Bug #838: journal hook constants.
@@ -215,6 +231,7 @@ class DependencyMapAnalyzer:
         pass_timeout: int,
         mcp_registration_service=None,
         analysis_model: str = "opus",
+        cli_dispatcher=None,
     ):
         """
         Initialize dependency map analyzer.
@@ -225,12 +242,21 @@ class DependencyMapAnalyzer:
             pass_timeout: Timeout in seconds for each pass (Pass 2 uses full, others use half)
             mcp_registration_service: MCPSelfRegistrationService for auto-registering CIDX as MCP server
             analysis_model: Claude model to use ("opus" or "sonnet", default: "opus")
+            cli_dispatcher: Optional CliDispatcher instance (Story #848).
+                When provided, Pass 2 routes through this dispatcher instead of
+                building one from config. Primarily used to inject a mock dispatcher
+                for deterministic behaviour in tests.
         """
         self.golden_repos_root = Path(golden_repos_root)
         self.cidx_meta_path = Path(cidx_meta_path)
         self.pass_timeout = pass_timeout
         self._mcp_registration_service = mcp_registration_service
         self.analysis_model = analysis_model
+        self._cli_dispatcher = cli_dispatcher
+        # HIGH #3 (Story #848): lazy cache for the built dispatcher so
+        # _invoke_pass2_dispatcher constructs CliDispatcher only once per
+        # analyzer instance lifetime instead of on every Pass 2 call.
+        self._cached_pass2_dispatcher = None
 
     def generate_claude_md(self, repo_list: List[Dict[str, Any]]) -> None:
         """
@@ -1123,6 +1149,89 @@ Rules:
 
         return prompt
 
+    # ========================================================================
+    # Story #848: CliDispatcher wiring for Pass 2 (Domain Refinement)
+    # ========================================================================
+
+    def _build_pass2_dispatcher(self):
+        """
+        Build a CliDispatcher for Pass 2 from the current ServerConfig (Story #848).
+
+        Constructs a ClaudeInvoker unconditionally.  When
+        config.codex_integration_config.enabled is True and CODEX_HOME is set
+        in os.environ, also constructs a CodexInvoker and wires it in with the
+        weight from config.  Otherwise codex=None and the effective weight
+        collapses to 0.0 inside CliDispatcher.
+
+        Returns:
+            A fully initialised CliDispatcher.
+        """
+        config = get_config_service().get_config()
+        claude_invoker = ClaudeInvoker(analysis_model=self.analysis_model)
+        codex_invoker = None
+        codex_weight = 0.0
+        codex_cfg = config.codex_integration_config if config else None
+        if codex_cfg and codex_cfg.enabled:
+            codex_home = os.environ.get("CODEX_HOME", "")
+            if codex_home:
+                codex_invoker = CodexInvoker(codex_home=codex_home)
+                codex_weight = codex_cfg.codex_weight
+        return CliDispatcher(
+            claude=claude_invoker,
+            codex=codex_invoker,
+            codex_weight=codex_weight,
+        )
+
+    def _invoke_pass2_dispatcher(self, prompt: str, timeout: int) -> str:
+        """
+        Invoke the CliDispatcher for Pass 2 domain refinement (Story #848).
+
+        Uses the injected CliDispatcher when available; otherwise builds one
+        from the current ServerConfig on each call.  Logs an INFO record when
+        failover fired so operators can see which CLI handled the job.
+
+        # PostToolUse hooks fire only for the Bash tool in Codex, not for MCP tools.
+        # The turn-count escalation logic (--settings PostToolUse JSON) is therefore
+        # not supported on the Codex path. This is a known degradation accepted by
+        # the user. See: https://github.com/openai/codex/issues/16732
+
+        Args:
+            prompt: Full prompt text for Pass 2 domain analysis.
+            timeout: Hard timeout seconds for the subprocess. Must be > 0.
+
+        Returns:
+            Output string from the CLI (result.output; empty string when dispatch fails).
+
+        Raises:
+            ValueError: If timeout is not a positive integer.
+        """
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise ValueError(
+                f"_invoke_pass2_dispatcher: timeout must be a positive int, got {timeout!r}"
+            )
+
+        if self._cli_dispatcher is not None:
+            dispatcher = self._cli_dispatcher
+        else:
+            if self._cached_pass2_dispatcher is None:
+                self._cached_pass2_dispatcher = self._build_pass2_dispatcher()
+            dispatcher = self._cached_pass2_dispatcher
+
+        result = dispatcher.dispatch(
+            flow="dependency_map_pass_2",
+            cwd=str(self.golden_repos_root),
+            prompt=prompt,
+            timeout=timeout,
+        )
+
+        if result.was_failover:
+            logger.info(
+                "Pass 2 CLI failover fired: cli_used=%s was_failover=True",
+                result.cli_used,
+            )
+
+        return result.output
+
     def run_pass_2_per_domain(
         self,
         staging_dir: Path,
@@ -1212,17 +1321,19 @@ Rules:
 
         prompt = prompt + file_write_instructions
 
-        # Invoke Claude CLI (Pass 2 needs MCP search_code tool for source code analysis)
-        # Story #715: dangerously_skip_permissions enables Write tool for file output
-        result = self._invoke_claude_cli(
-            prompt,
-            self.pass_timeout,
-            max_turns,
-            allowed_tools="mcp__cidx-local__search_code",
-            post_tool_hook=hook_reminder,
-            hook_thresholds=hook_thresh,
-            dangerously_skip_permissions=True,
-        )
+        # Story #848: Route Pass 2 primary invocation through CliDispatcher so
+        # Codex CLI can participate in domain refinement alongside Claude.
+        # The dispatcher selects Claude or Codex based on codex_weight and
+        # handles failover automatically.  Retry paths below remain Claude-only
+        # because they use --settings PostToolUse hooks not supported by Codex.
+        #
+        # IMPORTANT: ALL retries (whether triggered by max-turn errors OR
+        # insufficient output below _MIN_PASS2_OUTPUT_CHARS) execute on the
+        # Claude path with full --settings PostToolUse hook support. This is
+        # broader than AC5 of Story #848 (which only specifies Claude failover
+        # on non-retryable errors). The Codex primary attempt is one-shot; if
+        # it produces a short result, we retry on Claude.
+        result = self._invoke_pass2_dispatcher(prompt, self.pass_timeout)
 
         # Story #715: Read from file if Claude wrote it, else fall back to stdout
         result = self._read_pass2_file_or_strip(body_file, result)

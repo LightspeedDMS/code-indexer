@@ -2302,6 +2302,160 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<!-- Story #844: Codex CLI Integration -->
+<details class="config-section" id="section-codex-integration">
+    <summary>
+        <h2>Codex CLI Integration</h2>
+    </summary>
+    <p class="section-description">
+        Configures Codex CLI integration for AI-assisted repository analysis. Enable Codex and select a credential mode to activate. The weight controls how much Codex results influence hybrid search scoring.
+    </p>
+    <article>
+        <!-- Display Mode -->
+        <div id="display-codex-integration">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.codex_integration.enabled else 'No' }}</td>
+                        <td class="config-note"><small>Whether Codex CLI integration is active (default: No)</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Credential Mode</td>
+                        <td class="config-value">{{ config.codex_integration.credential_mode }}</td>
+                        <td class="config-note"><small>How credentials are supplied: none, api_key, or subscription</small></td>
+                    </tr>
+                    {% if config.codex_integration.credential_mode == 'api_key' %}
+                    <tr>
+                        <td class="config-label">API Key</td>
+                        <td class="config-value">{% if config.codex_integration.api_key %}***{% else %}(not set){% endif %}</td>
+                        <td class="config-note"><small>API key for direct OpenAI/Codex access</small></td>
+                    </tr>
+                    {% endif %}
+                    {% if config.codex_integration.credential_mode == 'subscription' %}
+                    <tr>
+                        <td class="config-label">LCP URL</td>
+                        <td class="config-value">{{ config.codex_integration.lcp_url or '(not set)' }}</td>
+                        <td class="config-note"><small>URL of the LCP credential provider</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">LCP Vendor</td>
+                        <td class="config-value">{{ config.codex_integration.lcp_vendor }}</td>
+                        <td class="config-note"><small>Vendor identifier sent to the LCP provider (default: openai)</small></td>
+                    </tr>
+                    {% endif %}
+                    <tr>
+                        <td class="config-label">Codex Weight</td>
+                        <td class="config-value">{{ config.codex_integration.codex_weight }}</td>
+                        <td class="config-note"><small>Influence of Codex results in hybrid scoring (0.0 - 1.0, default: 0.5)</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('codex-integration')">Edit</button>
+            </div>
+        </div>
+        <!-- Edit Mode -->
+        <form id="edit-form-codex-integration" method="post" action="/admin/config/codex_integration" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.codex_integration %}
+            <div class="validation-error">{{ validation_errors.codex_integration }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="codex-enabled">
+                    Enabled
+                    <select id="codex-enabled" name="enabled" onchange="toggleCodexIntegration()">
+                        <option value="true" {% if config.codex_integration.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.codex_integration.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Enable Codex CLI integration</small>
+                </label>
+                <label for="codex-credential-mode">
+                    Credential Mode
+                    <select id="codex-credential-mode" name="credential_mode"
+                            onchange="toggleCodexCredentialFields()">
+                        <option value="none" {% if config.codex_integration.credential_mode == 'none' %}selected{% endif %}>None</option>
+                        <option value="api_key" {% if config.codex_integration.credential_mode == 'api_key' %}selected{% endif %}>API Key</option>
+                        <option value="subscription" {% if config.codex_integration.credential_mode == 'subscription' %}selected{% endif %}>Subscription</option>
+                    </select>
+                    <small>How credentials are supplied to Codex</small>
+                </label>
+                <div id="codex-api-key-wrap">
+                <label for="codex-api-key">
+                    API Key
+                    <input type="password" id="codex-api-key" name="api_key"
+                           value=""
+                           placeholder="Enter Codex/OpenAI API key"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>API key for Codex (used when credential_mode is api_key)</small>
+                </label>
+                </div>
+                <div id="codex-lcp-wrap">
+                <label for="codex-lcp-url">
+                    LCP URL
+                    <input type="url" id="codex-lcp-url" name="lcp_url"
+                           value="{{ config.codex_integration.lcp_url or '' }}"
+                           placeholder="https://lcp-provider/api"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>LCP credential provider URL (used when credential_mode is subscription)</small>
+                </label>
+                <label for="codex-lcp-vendor">
+                    LCP Vendor
+                    <input type="text" id="codex-lcp-vendor" name="lcp_vendor"
+                           value="{{ config.codex_integration.lcp_vendor }}"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>Vendor identifier sent to the LCP provider (default: openai)</small>
+                </label>
+                </div>
+                <label for="codex-weight">
+                    Codex Weight
+                    <input type="number" id="codex-weight" name="codex_weight"
+                           value="{{ config.codex_integration.codex_weight }}"
+                           min="0" max="1" step="0.01"
+                           {% if not config.codex_integration.enabled %}disabled{% endif %}>
+                    <small>Influence of Codex results in hybrid scoring (0.0 - 1.0)</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('codex-integration')">Cancel</button>
+            </div>
+        </form>
+    </article>
+    <script>
+    function toggleCodexIntegration() {
+        var enabled = document.getElementById('codex-enabled').value === 'true';
+        var fields = [
+            document.getElementById('codex-api-key'),
+            document.getElementById('codex-lcp-url'),
+            document.getElementById('codex-lcp-vendor'),
+            document.getElementById('codex-weight'),
+        ];
+        for (var i = 0; i < fields.length; i++) {
+            if (fields[i]) {
+                fields[i].disabled = !enabled;
+            }
+        }
+    }
+
+    function toggleCodexCredentialFields() {
+        var mode = document.getElementById('codex-credential-mode').value;
+        var apiKeyWrap = document.getElementById('codex-api-key-wrap');
+        var lcpWrap = document.getElementById('codex-lcp-wrap');
+        if (apiKeyWrap) {
+            apiKeyWrap.style.display = (mode === 'api_key') ? '' : 'none';
+        }
+        if (lcpWrap) {
+            lcpWrap.style.display = (mode === 'subscription') ? '' : 'none';
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        toggleCodexCredentialFields();
+    });
+    </script>
+</details>
+
 <!-- Multi-Search Settings Section (Story #25, Story #29 - Consolidated) -->
 
 <details class="config-section" id="section-claude_delegation">
@@ -3170,6 +3324,7 @@ function saveLlmCredsConfig() {
         </form>
     </article>
 </details>
+
 
 </div>
 
