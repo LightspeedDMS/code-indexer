@@ -45,6 +45,23 @@ def _build_test_cli_env() -> dict[str, str]:
     return env
 
 
+def _assert_stdout_has_py_result(stdout: str, repo_alias: str) -> None:
+    """Assert stdout has at least one result line containing a .py file path.
+
+    cidx query --quiet emits lines like "1. 0.750 src/markupsafe/file.py:1-40".
+    The markupsafe golden repo contains only Python files, so a valid result
+    must have at least one line with ".py" — a structural check that rules out
+    blank output or non-result noise (such as an error envelope).
+    """
+    lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+    assert lines, f"cidx query returned empty stdout for repo '{repo_alias}'"
+    has_py_result = any(".py" in ln for ln in lines)
+    assert has_py_result, (
+        f"cidx query stdout for '{repo_alias}' has no line with a .py file path.\n"
+        f"First 10 lines: {lines[:10]}"
+    )
+
+
 def test_query_returns_results_when_no_faults_installed(
     indexed_golden_repo: str,
     fault_workspace: Path,
@@ -57,12 +74,15 @@ def test_query_returns_results_when_no_faults_installed(
     fault_workspace is the Path to the temp workspace initialised with cidx init --remote.
     The clear_all_faults autouse fixture (session-scope) guarantees a clean
     fault baseline before this test body executes.
+
+    The server stores golden repos with a '-global' suffix; the fixture returns
+    the bare alias ("markupsafe"), so we must append it here.
     """
     result = run_cidx(
         "query",
         "escape",
         "--repos",
-        indexed_golden_repo,
+        f"{indexed_golden_repo}-global",
         "--quiet",
         cwd=str(fault_workspace),
         env=_build_test_cli_env(),
@@ -71,7 +91,4 @@ def test_query_returns_results_when_no_faults_installed(
     assert result.returncode == 0, (
         f"cidx query exit {result.returncode}; stderr:\n{result.stderr}"
     )
-    assert result.stdout.strip(), (
-        f"cidx query returned empty stdout for repo '{indexed_golden_repo}'; "
-        f"stderr:\n{result.stderr}"
-    )
+    _assert_stdout_has_py_result(result.stdout, indexed_golden_repo)
