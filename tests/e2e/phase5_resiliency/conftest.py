@@ -69,7 +69,11 @@ def _optional_env(name: str, default: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# CLI environment builder — single source of truth for subprocess env setup
+# CLI environment builder — intended single source of truth for subprocess env.
+#
+# New Phase 5 test files import _build_cli_env from this module (MESSI rule 4:
+# anti-duplication).  One legacy local copy (_build_test_cli_env) remains in
+# test_positive_control.py and is pending cleanup in a follow-up.
 # ---------------------------------------------------------------------------
 
 
@@ -393,6 +397,17 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
 
     Phase 5 must run single-worker (no pytest-xdist) because POST /reset
     is global: parallel workers would interfere with each other via this fixture.
+
+    Sinbin recovery invariant (AC5):
+    POST /admin/fault-injection/reset clears fault profiles and history but
+    does NOT directly clear ProviderHealthMonitor sinbin state — no REST
+    endpoint exists for forced sinbin clearing (ProviderHealthMonitor.clear_sinbin()
+    is not exposed via REST).  Sinbin self-clears on the first successful query
+    after profiles are removed: ProviderHealthMonitor.record_call(success=True)
+    resets sinbin_rounds and clears sinbin_until (provider_health_monitor.py:231-234).
+    Tests that need to verify or wait for sinbin recovery must poll
+    GET /admin/provider-health in a bounded retry loop after their kill-profile
+    sequence — see test_health_isolation.py for the reference implementation.
     """
     fault_admin_client.re_login()
     reset_resp = fault_admin_client.post("/admin/fault-injection/reset")
@@ -402,3 +417,8 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
             f"(status={reset_resp.status_code}): {reset_resp.text}"
         )
     yield
+    # No teardown action for sinbin: kill profiles are already cleared by the
+    # pre-test reset above, so the first query after this fixture yields will
+    # record success=True for all providers, clearing any residual sinbin state
+    # automatically.  Explicit sinbin clearing is not possible without a REST
+    # endpoint — the self-healing mechanism is sufficient for test isolation.
