@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.4
+
+### Features
+
+- **Story #868**: **Remove Repo from Auto-Discovery Pending List**. Operators can now refine selection inside the auto-discovery batch-create modal without cancelling and restarting. Per-row `<button type="button" class="remove-repo-btn" aria-label="Remove {repo}">` injected by `showCreateDialog`, with `removeRepo()` JS handler that drops the row from DOM, removes the entry from `selectedRepos`, calls `updateSelectionUI()` to keep the discovery-page checkboxes/count consistent, and shows a "No repositories selected." empty state with a disabled `#execute-batch-btn` when the list goes empty. CSS mirrors the existing `.close-btn` pattern; no confirmation dialog. XSS-safe: `aria-label` interpolation via `escHtml`, DOM selectors via `CSS.escape`. Async safety preserved via the existing `if (!item) return` guard in `updateRepoBranchDropdown`. Pure template change at `src/code_indexer/server/web/templates/auto_discovery.html`. 19 new template-render unit tests.
+
+- **Story #872**: **Research Agent SQLite/PostgreSQL Database Access via Authorized Script**. New `scripts/cidx-db-query.sh` allow-listed for the Claude CLI subprocess invoked by `ResearchAssistantService`, so the Research Assistant can query/modify the CIDX server's databases during investigations without operator shell access. Algorithm: read `${CIDX_SERVER_DATA_DIR:-~/.cidx-server}/config.json`, dispatch to `sqlite3 -header -column` (standalone) or `psql -c` (cluster) based on `storage_mode` + `postgres_dsn`. Scope-enforced: `readlink -f` canonicalizes both the target DB path and the data dir, prefix-collision-safe (`/foo/cidx-server-evil/` rejected when data dir is `/foo/cidx-server`). `--db <path>` and `--pg <dsn>` flags override auto-detect; `--db` outside the data dir exits 1 with `target database is outside CIDX data directory`. `_allow_rules()` extended with optional `db_query_script_rule` parameter producing the `Bash({absolute_path} *)` pattern that mirrors `cidx-meta-cleanup.sh`. `_run_claude_background()` injects `CIDX_SERVER_DATA_DIR` (sourced from `self.db_path`) and `CIDX_REPO_ROOT` into the subprocess env so the script's auto-detection works regardless of the agent's invocation context. `_bash_deny_rules()` unchanged — `python3` remains denied at the agent prompt level; the script's internal `python3 -c` for JSON parsing runs inside the allow-listed subprocess and never traverses Claude's tool gate. New section in `research_assistant_prompt.md` documents invocation syntax + scope restriction (no example queries, per spec). 6 shell-script tests + 2 service-layer tests.
+
 ## v9.23.3
 
 ### Changes
