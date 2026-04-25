@@ -1557,7 +1557,9 @@ class DeploymentExecutor:
         try:
             from code_indexer.server.utils.config_manager import ServerConfigManager
 
-            config = ServerConfigManager(server_dir_path=str(_cidx_data_dir)).load_config()
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
             flag_enabled = bool(
                 config and getattr(config, "enable_malloc_arena_max", False)
             )
