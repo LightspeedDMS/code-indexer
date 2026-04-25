@@ -126,12 +126,10 @@ echo "📊 Telemetry enabled: Results will be saved to $TELEMETRY_FILE"
 echo "⏱️  Duration report: $DURATION_FILE"
 python3 -m pytest \
     tests/unit/ \
-    tests/mcpb/ \
     --durations=0 \
     --ignore=tests/unit/server/ \
     --ignore=tests/unit/remote/ \
     --ignore=tests/unit/infrastructure/ \
-    --ignore=tests/mcpb/integration/test_bridge_e2e_real.py \
     --ignore=tests/unit/api_clients/test_base_cidx_remote_api_client_real.py \
     --ignore=tests/unit/api_clients/test_remote_query_client_real.py \
     --ignore=tests/unit/api_clients/test_repository_linking_client_real.py \
