@@ -32,23 +32,30 @@ STATUS AFTER bug #899 FIX (commit 2366af2c):
 Bug #899 (fault transport not wired) is FIXED. Kill profiles now intercept
 actual query-time embedding calls.
 
-New revealed gap — bug #901 (no CLI provider-level failover):
-With both providers killed, the CLI now surfaces a provider error instead of
-returning graceful empty results. Bug #901 is BLOCKING AC3.
+Epic #485 design — primary_only strategy has no failover:
+With both providers killed, the CLI surfaces a provider error instead of
+returning graceful empty results. This is intentional: epic #485
+("Multi-Provider Embedding Redundancy") explicitly defines primary_only as
+the default query strategy with no failover. The /api/query/multi endpoint
+(used by cidx query --repos) does not accept a query_strategy parameter,
+so it always uses primary_only. AC3 assumes graceful-empty degradation that
+the current product does not provide under primary_only. This test is xfailed
+until query_strategy plumbing is added per epic #485.
 
 Current test execution path (documented current behavior after #899 fix):
   1. Both kill profile CRUDs — pass (control plane works).
-  2. cidx query exits NON-ZERO — both providers 503, error propagated (bug #901).
+  2. cidx query exits NON-ZERO — both providers 503, error propagated (epic #485 design: primary_only, no failover).
      Smoke assertion accepts non-zero; documents error mode.
   3. GET /health < 500 — passes (server survives regardless of CLI exit code).
-  4. pytest.xfail() — bug #899 FIXED; bug #901 BLOCKING.
+  4. pytest.xfail() — bug #899 FIXED; epic #485 design: no failover in primary_only mode.
 
 Upgrade path: remove xfail and restore _assert_graceful_empty_stdout /
-_assert_history_has assertions when bug #901 is resolved.
+_assert_history_has assertions when query_strategy plumbing is added to
+/api/query/multi and the CLI (opt-in failover/parallel modes per epic #485).
 
 See:
   https://github.com/LightspeedDMS/code-indexer/issues/899 (FIXED)
-  https://github.com/LightspeedDMS/code-indexer/issues/901 (BLOCKING)
+  https://github.com/LightspeedDMS/code-indexer/issues/485 (design — primary_only, no failover)
 """
 
 from __future__ import annotations
@@ -117,23 +124,25 @@ def test_both_providers_dead_graceful_empty(
     Smoke assertions (hard — always run, document current known-good behavior):
       1. cidx query exit code — accepted as 0 OR non-zero.
          Exit 0 with empty/graceful output: both providers faulted and the CLI
-         degraded gracefully (expected per AC spec, requires bug #901 fix).
-         Non-zero: provider errors propagated to user (bug #901 behavior).
+         degraded gracefully (expected per AC spec, requires query_strategy plumbing per epic #485).
+         Non-zero: provider errors propagated to user (epic #485 design: primary_only, no failover).
          Either outcome is documented; the server health check is always run.
       2. GET /health returns < 500 (server survives both kill profiles,
          regardless of CLI exit code).
 
     After the smoke assertions, pytest.xfail() marks AC3 as xfail because:
       - Bug #899 (fault transport not wired) is FIXED (commit 2366af2c).
-      - Bug #901 (no CLI provider-level failover) is BLOCKING:
-        both providers fail but the CLI surfaces an error instead of
-        returning graceful empty results.
+      - Epic #485 design: cidx query --repos uses primary_only strategy (no failover);
+        /api/query/multi REST endpoint and CLI lack query_strategy plumbing for
+        opt-in failover/parallel modes. Both providers fail and the CLI surfaces
+        an error instead of returning graceful empty results.
     Removing this xfail and restoring _assert_graceful_empty_stdout /
-    _assert_history_has is the upgrade path when bug #901 is resolved.
+    _assert_history_has is the upgrade path when query_strategy plumbing is
+    added per epic #485.
 
     See:
       https://github.com/LightspeedDMS/code-indexer/issues/899 (FIXED)
-      https://github.com/LightspeedDMS/code-indexer/issues/901 (BLOCKING)
+      https://github.com/LightspeedDMS/code-indexer/issues/485 (design — primary_only, no failover)
     """
     _install_kill_profile(fault_admin_client, VOYAGE_TARGET)
     _install_kill_profile(fault_admin_client, COHERE_TARGET)
@@ -151,13 +160,14 @@ def test_both_providers_dead_graceful_empty(
     )
 
     # Smoke assertion 1: document current exit code behavior.
-    # After bug #899 fix, fault transport is wired. Bug #901 means both provider
-    # errors propagate to the user instead of degrading to graceful empty output.
+    # After bug #899 fix, fault transport is wired. Epic #485 design: primary_only
+    # strategy has no failover, so both provider errors propagate to the user
+    # instead of degrading to graceful empty output.
     # Accept either exit 0 (graceful degradation) or non-zero (error propagated).
     if result.returncode != 0:
         _cli_error_mode = (
             f"cidx query exited {result.returncode} with both providers killed. "
-            f"Bug #901 (no CLI provider failover): provider errors propagated to "
+            f"Epic #485 design (primary_only, no failover): provider errors propagated to "
             f"user instead of returning graceful empty results. "
             f"stderr:\n{result.stderr}\nstdout:\n{result.stdout}"
         )
@@ -172,22 +182,25 @@ def test_both_providers_dead_graceful_empty(
         f"installed; server must survive fault profile installation."
     )
 
-    # AC3 deep assertion boundary — xfail here (bug #899 FIXED, bug #901 BLOCKING).
+    # AC3 deep assertion boundary — xfail here (bug #899 FIXED, epic #485 design).
     # Bug #899 (fault transport not wired) is now FIXED (commit 2366af2c).
-    # Bug #901 (no CLI provider-level failover) is now BLOCKING this AC:
-    # with both providers failed, the CLI must return graceful empty output,
-    # not surface a provider error.
-    # When bug #901 is resolved: remove this xfail and restore
-    # _assert_graceful_empty_stdout / _assert_history_has assertions here.
+    # Epic #485 design: cidx query --repos uses primary_only strategy (no failover);
+    # /api/query/multi REST endpoint and CLI lack query_strategy plumbing for
+    # opt-in failover/parallel modes. With both providers failed, the CLI surfaces
+    # a provider error rather than returning graceful empty output.
+    # When query_strategy plumbing is added per epic #485: remove this xfail and
+    # restore _assert_graceful_empty_stdout / _assert_history_has assertions here.
     xfail_context = _cli_error_mode or (
         f"cidx query exited 0; output needs graceful-empty verification "
-        f"and history assertions cannot be verified until bug #901 is resolved."
+        f"and history assertions cannot be verified until query_strategy plumbing "
+        f"is added per epic #485."
     )
     pytest.xfail(
         reason=(
-            f"bug #899 FIXED (commit 2366af2c); bug #901 BLOCKING "
-            f"(no CLI provider-level failover when both embedding providers fail). "
+            f"bug #899 FIXED (commit 2366af2c); epic #485 design: cidx query --repos "
+            f"uses primary_only strategy (no failover); /api/query/multi REST endpoint "
+            f"and CLI lack query_strategy plumbing for opt-in failover/parallel modes. "
             f"Current behavior: {xfail_context} "
-            f"See https://github.com/LightspeedDMS/code-indexer/issues/901"
+            f"See https://github.com/LightspeedDMS/code-indexer/issues/485"
         )
     )
