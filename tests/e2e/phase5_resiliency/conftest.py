@@ -15,6 +15,7 @@ All configuration is read from environment variables set by e2e-automation.sh --
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -520,4 +521,37 @@ def _mcp_search(
         f"query_text={query_text!r}, repository_alias={repository_alias!r}: "
         f"{envelope['error']}"
     )
-    return envelope["result"]
+    result = envelope["result"]
+    # search_code returns a content-wrapped MCP response:
+    # {"content": [{"type": "text", "text": "<json string>"}]}
+    # Unwrap to the actual handler result dict.
+    if not isinstance(result, dict) or "content" not in result:
+        raise ValueError(
+            f"_mcp_search: unexpected result shape (no 'content' key): {result!r}"
+        )
+    content = result["content"]
+    if not isinstance(content, list) or len(content) == 0:
+        raise ValueError(
+            f"_mcp_search: 'content' is not a non-empty list: {content!r}"
+        )
+    text_block = content[0]
+    if not isinstance(text_block, dict) or text_block.get("type") != "text":
+        raise ValueError(
+            f"_mcp_search: first content block is not a text-type dict: {text_block!r}"
+        )
+    text = text_block.get("text")
+    if not isinstance(text, str) or not text:
+        raise ValueError(
+            f"_mcp_search: text block 'text' field is not a non-empty str: {text_block!r}"
+        )
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"_mcp_search: failed to JSON-decode MCP text payload: {exc!r}; text={text!r}"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise ValueError(
+            f"_mcp_search: decoded MCP payload is not a dict: {type(decoded).__name__!r}, value={decoded!r}"
+        )
+    return decoded
