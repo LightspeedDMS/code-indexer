@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.7
+
+### Bug fixes
+
+- **Codex api_key-mode auth schema mismatch (epic #843 follow-up)**: Story #846's `CodexCredentialsFileManager.write_credentials` writes the OAuth/subscription schema (`auth_mode: "chatgpt"` + `tokens.{access_token, account_id, id_token, refresh_token}` + `last_refresh`) regardless of credential mode. For api_key mode, codex-cli expects a minimal schema `{"auth_mode": "apikey", "OPENAI_API_KEY": "..."}`. When api_key mode hit the OAuth-style auth.json, codex tried to use it as OAuth and the WebSocket failed with HTTP 401 (verified via earlier manual E2E). Fix: `codex_cli_startup.py:initialize_codex_manager_on_startup` now delegates api_key-mode auth to `codex login --with-api-key` via subprocess (key piped through stdin, never on the command line) — codex itself owns the schema, so we don't have to track it. Mirrors the Claude precedent (`claude_cli_manager._ensure_api_key_synced` uses `~/.claude.json` writer + env var sync). Subscription mode unchanged (still uses `CodexCredentialsFileManager` + lease loop). 7 new unit tests in `test_codex_login_with_api_key.py` covering: correct argv, key-via-stdin (not argv), success/nonzero/timeout/missing-binary/empty-key paths. Existing #846 startup tests updated to reflect the new branch.
+
 ## v9.23.6
 
 ### Operator helpers
