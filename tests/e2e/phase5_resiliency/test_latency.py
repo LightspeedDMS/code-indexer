@@ -153,7 +153,7 @@ def _fetch_history_for_target(
         f"This is a real regression, not a known bug #899 condition. "
         f"Response: {resp.text}"
     )
-    all_events = cast(List[dict], resp.json())
+    all_events = cast(List[dict], resp.json()["history"])
     return [e for e in all_events if e.get("target") == target]
 
 

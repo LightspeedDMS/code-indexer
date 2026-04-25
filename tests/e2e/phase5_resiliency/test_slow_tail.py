@@ -111,7 +111,7 @@ def _fetch_history(client: FaultAdminClient) -> List[dict]:
         f"This is a real regression, not a known bug #899 condition. "
         f"Response: {resp.text}"
     )
-    return resp.json()  # type: ignore[no-any-return]
+    return cast(List[dict], resp.json()["history"])
 
 
 def _assert_slow_tail_distribution(events: List[dict], target: str) -> None:
