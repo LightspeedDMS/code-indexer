@@ -382,9 +382,9 @@ Runtime loader with caching: `tool_doc_loader.py`. Tests: `tests/unit/tools/test
 
 ## Version Bump
 
-Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/mcpb/setup.md` and `docs/server-deployment.md`.
+Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/server-deployment.md`.
 
-DO NOT bump on CIDX version change: `mcpb/__init__.py` (separate version 1.0.0), `server/app.py` OpenAPI spec, `test-fixtures/` test data.
+DO NOT bump on CIDX version change: `server/app.py` OpenAPI spec, `test-fixtures/` test data.
 
 Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
 
