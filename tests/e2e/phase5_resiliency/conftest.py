@@ -39,8 +39,11 @@ logger = logging.getLogger(__name__)
 # Module-level constants (no magic numbers in fixture bodies)
 # ---------------------------------------------------------------------------
 
-# Default timeout for dual-provider golden repo indexing (longer than single-provider)
-DEFAULT_GOLDEN_REPO_TIMEOUT_SECONDS: float = 300.0
+# Default timeout for dual-provider golden repo indexing.  900 s gives coarse
+# headroom for: dual-provider indexing (Voyage + Cohere) + Claude-CLI
+# meta-description hook (variable-latency, 30-90 s on top of indexing).
+# This is fixture setup, not a test target — bias toward not flaking.
+DEFAULT_GOLDEN_REPO_TIMEOUT_SECONDS: float = 900.0
 
 # Poll interval when waiting for background indexing jobs
 JOB_POLL_INTERVAL_SECONDS: float = 2.0
@@ -334,8 +337,9 @@ def indexed_golden_repo(
 
     Returns the alias string ("markupsafe").
 
-    Timeout respects E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT (default 300 s) because
-    dual-provider indexing (VoyageAI + Cohere) takes longer than single-provider.
+    Timeout respects E2E_FAULT_GOLDEN_REPO_JOB_TIMEOUT (default 900 s) because
+    dual-provider indexing (VoyageAI + Cohere) plus the Claude-CLI meta-description
+    hook (variable-latency) push total job time well past the single-provider baseline.
     """
     seed_cache_dir = Path(_require_env("E2E_SEED_CACHE_DIR"))
     repo_path = str(seed_cache_dir / "markupsafe")
