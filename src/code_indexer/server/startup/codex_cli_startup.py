@@ -93,9 +93,69 @@ def _ensure_codex_home(base_dir: Path) -> Path:
     return codex_home
 
 
+def _login_codex_with_api_key(
+    codex_home: Path,
+    api_key: str,
+    timeout_seconds: int = 30,
+) -> bool:
+    """Run `codex login --with-api-key` to populate auth.json non-interactively.
+
+    Codex owns the auth.json schema for api_key mode. Reading it via stdin
+    avoids leaking the key on the process command line. Returns True on
+    successful login, False on any failure (logged at WARNING).
+
+    Args:
+        codex_home: Path to the CODEX_HOME directory.
+        api_key: OpenAI API key to pass via stdin.
+        timeout_seconds: Subprocess timeout. Defaults to 30.
+
+    Returns:
+        True on success (exit code 0), False on any failure.
+    """
+    if not api_key or not api_key.strip():
+        logger.warning("Cannot login Codex with empty api_key")
+        return False
+    api_key = api_key.strip()
+    cmd = ["codex", "login", "--with-api-key"]
+    env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    try:
+        result = subprocess.run(
+            cmd,
+            input=api_key.encode("utf-8"),
+            env=env,
+            capture_output=True,
+            timeout=timeout_seconds,
+        )
+        if result.returncode != 0:
+            stderr_text = result.stderr.decode("utf-8", errors="replace")[:_MAX_STDERR_LOG_CHARS]
+            logger.warning(
+                "`codex login --with-api-key` failed (exit %d): %s",
+                result.returncode,
+                stderr_text,
+            )
+            return False
+        logger.info("Codex login (api_key mode) completed successfully")
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "`codex login --with-api-key` timed out — auth.json may not be populated"
+        )
+        return False
+    except FileNotFoundError:
+        logger.warning("codex binary not found on PATH — Codex feature effectively disabled")
+        return False
+    except Exception as exc:
+        logger.warning("Unexpected error running `codex login --with-api-key`: %s", exc)
+        return False
+
+
 def _handle_api_key_mode(api_key: str, base_dir: Path) -> None:
     """
-    Set OPENAI_API_KEY and CODEX_HOME; do NOT write auth.json.
+    Set OPENAI_API_KEY and CODEX_HOME; delegate auth.json to codex login.
+
+    Calls `codex login --with-api-key` (stdin) so codex owns the auth.json
+    schema for api_key mode. Also sets OPENAI_API_KEY as belt-and-suspenders
+    fallback for codex code paths that read the env var directly.
 
     Args:
         api_key: Non-empty, non-whitespace OpenAI API key from config.
@@ -106,8 +166,13 @@ def _handle_api_key_mode(api_key: str, base_dir: Path) -> None:
     """
     if not api_key or not api_key.strip():
         raise ValueError("api_key must not be empty in api_key credential_mode")
-    _ensure_codex_home(base_dir)
+    codex_home = _ensure_codex_home(base_dir)
     os.environ["OPENAI_API_KEY"] = api_key.strip()
+    login_succeeded = _login_codex_with_api_key(codex_home=codex_home, api_key=api_key.strip())
+    if not login_succeeded:
+        logger.warning(
+            "Codex login via api_key mode failed; continuing with OPENAI_API_KEY env var fallback"
+        )
     logger.info("Codex api_key mode: OPENAI_API_KEY configured, CODEX_HOME set")
 
 

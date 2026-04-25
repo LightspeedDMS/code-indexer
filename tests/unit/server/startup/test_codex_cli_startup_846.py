@@ -10,9 +10,7 @@ No live network calls — HTTP mocked via httpx.MockTransport.
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from typing import List, Tuple
 from unittest.mock import MagicMock, patch
 
@@ -163,14 +161,23 @@ class TestApiKeyMode:
         )
         assert os.environ.get("OPENAI_API_KEY") == TEST_API_KEY
 
-    def test_does_not_write_auth_json(self, tmp_path):
-        """Per AC1: api_key mode must NOT write auth.json."""
-        server_config = _make_server_config(_api_key_config())
-        initialize_codex_manager_on_startup(
-            server_config=server_config,
-            server_data_dir=str(tmp_path),
-        )
-        assert not (tmp_path / "codex-home" / "auth.json").exists()
+    def test_delegates_auth_json_to_codex_login(self, tmp_path):
+        """Per fix: api_key mode must delegate auth.json to `codex login --with-api-key`
+        rather than writing the OAuth-style schema directly via CodexCredentialsFileManager."""
+        from unittest.mock import patch as _patch
+
+        with _patch(
+            "code_indexer.server.startup.codex_cli_startup._login_codex_with_api_key",
+            return_value=True,
+        ) as mock_login:
+            server_config = _make_server_config(_api_key_config())
+            initialize_codex_manager_on_startup(
+                server_config=server_config,
+                server_data_dir=str(tmp_path),
+            )
+        mock_login.assert_called_once()
+        call_kwargs = mock_login.call_args[1]
+        assert call_kwargs["api_key"] == TEST_API_KEY
 
     def test_sets_codex_home_to_exact_expected_path(self, tmp_path):
         """CODEX_HOME must be exactly <server_data_dir>/codex-home."""
