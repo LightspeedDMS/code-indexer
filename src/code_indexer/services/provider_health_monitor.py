@@ -2,13 +2,22 @@
 
 Tracks per-provider embedding API metrics in a rolling window.
 Thread-safe singleton for use across query and indexing operations.
+
+Story #691: Optional persistence_path parameter for file-backed state across
+CLI invocations. When persistence_path is None (server default), behavior is
+identical to the original in-memory implementation.
 """
 
+import fcntl
+import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
@@ -72,6 +81,7 @@ class ProviderHealthMonitor:
         error_rate_threshold: float = DEFAULT_ERROR_RATE_THRESHOLD,
         latency_p95_threshold_ms: float = DEFAULT_LATENCY_P95_THRESHOLD_MS,
         availability_threshold: float = DEFAULT_AVAILABILITY_THRESHOLD,
+        persistence_path: Optional[Path] = None,
     ):
         self._metrics: Dict[str, deque] = {}  # provider -> deque of HealthMetric
         self._consecutive_failures: Dict[str, int] = {}
@@ -95,6 +105,151 @@ class ProviderHealthMonitor:
         self._sinbin_failure_deque: Dict[
             str, deque
         ] = {}  # provider -> recent failure timestamps
+        # Story #691: optional file-backed persistence of sin-bin state
+        self._persistence_path: Optional[Path] = persistence_path
+        if persistence_path is not None:
+            self._load_from_file()
+
+    # ------------------------------------------------------------------
+    # Story #691: File-backed persistence helpers
+    # ------------------------------------------------------------------
+
+    def _load_from_file(self) -> None:
+        """Load sin-bin state from persistence file (Story #691).
+
+        No-op if the file does not exist. Expired entries are silently dropped.
+        JSONDecodeError and OSError are logged as WARNING and treated as empty state.
+        Uses LOCK_SH so multiple readers can coexist.
+        All writes to shared _sinbin_until happen under _data_lock.
+        """
+        path = self._persistence_path
+        assert path is not None  # guarded by caller
+        if not path.exists():
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                fcntl.flock(fh, fcntl.LOCK_SH)
+                try:
+                    raw = fh.read()
+                finally:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+            state: object = json.loads(raw)
+            if not isinstance(state, dict):
+                logger.warning(
+                    "Persistence file %s: top-level value is not a dict — ignoring",
+                    path,
+                )
+                return
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            with self._data_lock:
+                for provider, entry in state.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    expiry_wall = entry.get("sinbin_until_wall_seconds")
+                    if not isinstance(expiry_wall, (int, float)):
+                        continue
+                    remaining = float(expiry_wall) - now_wall
+                    if remaining > 0:
+                        self._sinbin_until[provider] = now_mono + remaining
+        except json.JSONDecodeError as exc:
+            logger.warning("Persistence file %s: JSON decode error — %s", path, exc)
+        except OSError as exc:
+            logger.warning("Persistence file %s: read error — %s", path, exc)
+
+    def _read_persisted_state(self, path: Path) -> Dict[str, object]:
+        """Read and parse the persisted sin-bin state file (Story #691).
+
+        Returns empty dict on missing file, read error, or JSON decode error.
+        All errors are logged at WARNING level for observability.
+        Caller must hold the sidecar lock before calling this.
+        """
+        if not path.exists():
+            return {}
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "Persistence file %s: read error during merge — %s", path, exc
+            )
+            return {}
+        try:
+            parsed: object = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Persistence file %s: JSON decode error during merge — %s", path, exc
+            )
+            return {}
+        if not isinstance(parsed, dict):
+            logger.warning(
+                "Persistence file %s: top-level value is not a dict during merge", path
+            )
+            return {}
+        return {str(k): v for k, v in parsed.items()}
+
+    def _build_merged_state(self, existing: Dict[str, object]) -> Dict[str, object]:
+        """Merge current in-memory sin-bin state into existing persisted state (Story #691).
+
+        Converts monotonic expiry timestamps to wall-clock timestamps.
+        Entries with non-positive remaining time are not written.
+        Reads self._sinbin_until under self._data_lock.
+        """
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        merged: Dict[str, object] = {}
+        with self._data_lock:
+            current_sinbin = dict(self._sinbin_until)
+        for provider, mono_expiry in current_sinbin.items():
+            remaining = mono_expiry - now_mono
+            if remaining > 0:
+                merged[provider] = {
+                    "sinbin_until_wall_seconds": now_wall + remaining,
+                    "last_failure_kind": "sinbin",
+                }
+        return merged
+
+    def _persist_to_file(self) -> None:
+        """Write current sin-bin state to the persistence file (Story #691).
+
+        Uses a stable sidecar `.lock` file for LOCK_EX so the lock inode is
+        never swapped out by os.replace(). The data file is replaced atomically
+        using a unique tmp file from tempfile.mkstemp(). The mkstemp fd is
+        wrapped in os.fdopen() so Python's buffered write guarantees completeness.
+        OSError is logged at WARNING; the caller operation is never interrupted.
+        """
+        path = self._persistence_path
+        assert path is not None  # guarded by caller
+        lock_path = path.parent / (path.name + ".lock")
+        tmp_name: Optional[str] = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "a", encoding="utf-8") as lock_fh:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX)
+                try:
+                    existing = self._read_persisted_state(path)
+                    merged = self._build_merged_state(existing)
+                    tmp_fd, tmp_name = tempfile.mkstemp(
+                        dir=str(path.parent),
+                        prefix=path.name + ".",
+                        suffix=".tmp",
+                    )
+                    with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_fh:
+                        tmp_fh.write(json.dumps(merged))
+                    # tmp_fd closed by os.fdopen context manager
+                    os.replace(tmp_name, str(path))
+                    tmp_name = None
+                finally:
+                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        except OSError as exc:
+            logger.warning("Persistence file %s: write error — %s", path, exc)
+        finally:
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError as exc:
+                    logger.warning(
+                        "Persistence tmp file cleanup failed (%s): %s", tmp_name, exc
+                    )
 
     @classmethod
     def get_instance(cls, **kwargs: object) -> "ProviderHealthMonitor":
@@ -152,12 +307,16 @@ class ProviderHealthMonitor:
             cooldown,
             rounds + 1,
         )
+        if self._persistence_path is not None:
+            self._persist_to_file()
 
     def clear_sinbin(self, provider: str) -> None:
         """Remove provider from sin-bin immediately and reset backoff rounds."""
         with self._data_lock:
             self._sinbin_until.pop(provider, None)
             self._sinbin_rounds[provider] = 0
+        if self._persistence_path is not None:
+            self._persist_to_file()
 
     def get_sinbin_ttl_seconds(self, provider: str) -> Optional[float]:
         """Return remaining sin-bin cooldown in seconds, or None if not sinbinned."""
@@ -181,9 +340,9 @@ class ProviderHealthMonitor:
             from code_indexer.server.services.config_service import get_config_service
 
             server_cfg = get_config_service().get_config()
-            if provider in ("voyage-ai", "voyage-reranker"):
+            if provider in ("voyage-ai", "voyage-reranker", "voyage-embedder"):
                 cfg = getattr(server_cfg, "voyage_ai_sinbin", None)
-            elif provider in ("cohere", "cohere-reranker"):
+            elif provider in ("cohere", "cohere-reranker", "cohere-embedder"):
                 cfg = getattr(server_cfg, "cohere_sinbin", None)
             else:
                 cfg = None
