@@ -159,6 +159,18 @@ class ProviderHealthMonitor:
             self._sinbin_until.pop(provider, None)
             self._sinbin_rounds[provider] = 0
 
+    def clear_sinbin_all(self) -> None:
+        """Remove ALL providers from sin-bin and reset all backoff rounds to zero.
+
+        Used by the REST clear-sinbin endpoint (Bug #902) to ensure test isolation:
+        when both providers are sinbinned from a prior test, dispatch pre-skips them
+        and self-healing via record_call(success=True) is impossible (chicken-and-egg).
+        """
+        with self._data_lock:
+            self._sinbin_until.clear()
+            for provider in list(self._sinbin_rounds.keys()):
+                self._sinbin_rounds[provider] = 0
+
     def get_sinbin_ttl_seconds(self, provider: str) -> Optional[float]:
         """Return remaining sin-bin cooldown in seconds, or None if not sinbinned."""
         with self._data_lock:

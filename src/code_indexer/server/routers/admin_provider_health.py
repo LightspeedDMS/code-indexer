@@ -31,6 +31,36 @@ class ProviderHealthResponse(BaseModel):
     providers: List[ProviderHealthEntry]
 
 
+class ClearSinbinRequest(BaseModel):
+    """Optional body for POST /admin/provider-health/clear-sinbin (Bug #902).
+
+    target: provider name to clear (e.g. 'voyage-ai', 'cohere').
+            Omit or pass null to clear ALL providers at once.
+    """
+
+    target: Optional[str] = None
+
+
+@router.post("/clear-sinbin")
+def clear_sinbin(
+    body: ClearSinbinRequest,
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
+    """Force-clear ProviderHealthMonitor sinbin state (Bug #902).
+
+    Clears the named provider when 'target' is supplied, otherwise clears ALL
+    providers.  Designed for use by the Phase 5 E2E test fixture clear_all_faults
+    to break the chicken-and-egg where sinbinned providers are skipped by dispatch
+    so they can never self-heal via record_call(success=True).
+    """
+    monitor = ProviderHealthMonitor.get_instance()
+    if body.target is not None:
+        monitor.clear_sinbin(body.target)
+        return {"cleared": body.target}
+    monitor.clear_sinbin_all()
+    return {"cleared": "all"}
+
+
 @router.get("", response_model=ProviderHealthResponse)
 def get_provider_health(
     current_user: User = Depends(get_current_admin_user_hybrid),

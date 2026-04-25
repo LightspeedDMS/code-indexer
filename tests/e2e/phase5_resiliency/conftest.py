@@ -400,7 +400,7 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
     """Re-login and reset all fault injection state before each test.
 
     Called BEFORE the test body runs (setup phase of the fixture) so that
-    every test observes a clean baseline with no profiles or history.
+    every test observes a clean baseline with no profiles, history, or sinbin state.
 
     Re-login defeats the 10-minute JWT TTL documented in CLAUDE.md.
     On reset failure the error surfaces immediately — no masking.
@@ -408,16 +408,12 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
     Phase 5 must run single-worker (no pytest-xdist) because POST /reset
     is global: parallel workers would interfere with each other via this fixture.
 
-    Sinbin recovery invariant (AC5):
-    POST /admin/fault-injection/reset clears fault profiles and history but
-    does NOT directly clear ProviderHealthMonitor sinbin state — no REST
-    endpoint exists for forced sinbin clearing (ProviderHealthMonitor.clear_sinbin()
-    is not exposed via REST).  Sinbin self-clears on the first successful query
-    after profiles are removed: ProviderHealthMonitor.record_call(success=True)
-    resets sinbin_rounds and clears sinbin_until (provider_health_monitor.py:231-234).
-    Tests that need to verify or wait for sinbin recovery must poll
-    GET /admin/provider-health in a bounded retry loop after their kill-profile
-    sequence — see test_health_isolation.py for the reference implementation.
+    Sinbin recovery (AC5, Bug #902):
+    POST /admin/fault-injection/reset clears fault profiles and history.
+    POST /admin/provider-health/clear-sinbin then explicitly clears all
+    ProviderHealthMonitor sinbin state before each test.  This breaks the
+    chicken-and-egg where sinbinned providers are pre-skipped by dispatch so
+    record_call(success=True) can never fire to self-heal them.
     """
     fault_admin_client.re_login()
     reset_resp = fault_admin_client.post("/admin/fault-injection/reset")
@@ -426,12 +422,15 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
             f"clear_all_faults: POST /admin/fault-injection/reset failed "
             f"(status={reset_resp.status_code}): {reset_resp.text}"
         )
+    sinbin_resp = fault_admin_client.post(
+        "/admin/provider-health/clear-sinbin", json={}
+    )
+    if sinbin_resp.status_code != FAULT_RESET_OK:
+        raise RuntimeError(
+            f"clear_all_faults: POST /admin/provider-health/clear-sinbin failed "
+            f"(status={sinbin_resp.status_code}): {sinbin_resp.text}"
+        )
     yield
-    # No teardown action for sinbin: kill profiles are already cleared by the
-    # pre-test reset above, so the first query after this fixture yields will
-    # record success=True for all providers, clearing any residual sinbin state
-    # automatically.  Explicit sinbin clearing is not possible without a REST
-    # endpoint — the self-healing mechanism is sufficient for test isolation.
 
 
 # ---------------------------------------------------------------------------
