@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.6
+
+### Operator helpers
+
+- **NEW `scripts/setup-codex-npm-prefix.sh`**: idempotent operator helper that resolves the EACCES failure observed on hosts where the system npm prefix (`/usr/local/lib/node_modules`) is not writable by the auto-updater's effective user. Detects current npm prefix; if it's a system path (`/usr`, `/usr/local`, `/opt`), switches to a user-writable `~/.npm-global` prefix via `npm config set prefix`; ensures `~/.bashrc` exports the new bin dir on PATH; runs `npm install -g @openai/codex`; verifies via `codex --version`. Prints a final summary block with the exact `Environment="PATH=..."` line operators need to add to the cidx-server systemd unit so the server process can find the binary. Once the systemd PATH is updated and cidx-server restarted, the auto-updater's Story #845 step 6.7 will find npm + the user-writable prefix on subsequent runs and `_ensure_codex_cli_installed` succeeds without WARNING. 5 unit tests (`tests/unit/scripts/test_setup_codex_npm_prefix.py`) using PATH-shimmed npm/codex binaries to avoid real network/host pollution. Manual E2E confirmed: ran on staging where v9.23.5 step 6.7 had failed `[DEPLOY-GENERAL-144] EACCES`; script installed Codex 0.125.0 to `/home/jsbattig/.npm-global/bin/codex` cleanly.
+
+### Follow-up still required
+- Operator must update the cidx-server systemd unit `Environment="PATH=..."` line to prepend `${HOME}/.npm-global/bin` (or the chosen prefix's `/bin`), then `systemctl daemon-reload + systemctl restart cidx-server`. The script's summary block prints the exact line to use. A future version may extend the script with a `--update-cidx-server-systemd` flag to automate this step.
+- Codex CLI authentication still requires `codex login` (ChatGPT OAuth session) populated under `CODEX_HOME` before Codex can actually execute jobs. See v9.23.5 epic #843 known-limitations.
+
 ## v9.23.5
 
 ### Features — Epic #843: Codex CLI Integration for Background Intelligence
