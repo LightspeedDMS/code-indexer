@@ -171,6 +171,41 @@ class ProviderHealthMonitor:
             for provider in list(self._sinbin_rounds.keys()):
                 self._sinbin_rounds[provider] = 0
 
+    def clear_health_state_all(self) -> None:
+        """Wipe ALL rolling health state for all providers (test-only isolation).
+
+        Distinct from clear_sinbin_all() which only clears cooldown timers.
+        This wipes metrics, consecutive-failure counters, windowed failure deques,
+        last-known status, AND stops any active recovery probes before clearing.
+
+        The pre-skip gate in semantic_query_manager checks BOTH is_sinbinned() AND
+        _compute_status().status == "down". clear_sinbin_all() alone is insufficient
+        because _metrics with error_rate=1.0 causes _compute_status() to keep returning
+        "down" even after sinbin timers are cleared (Bug #902 root cause).
+
+        Test isolation only -- calling this at runtime would obliterate the
+        rolling-window observability contract used by health-gated dispatch.
+
+        Does NOT clear _probe_functions -- those are registered by provider constructors
+        and will not be re-registered after clearing.
+        """
+        # Stop all active recovery probes first (must happen before state wipe
+        # so probe threads do not race against the clear under _data_lock)
+        with self._probe_lock:
+            provider_names = list(self._probe_threads.keys())
+        for provider_name in provider_names:
+            self._stop_recovery_probe(provider_name)
+
+        # Wipe all rolling health state under the data lock
+        with self._data_lock:
+            self._metrics.clear()
+            self._consecutive_failures.clear()
+            self._sinbin_failure_deque.clear()
+            self._last_known_status.clear()
+            self._sinbin_until.clear()
+            self._sinbin_rounds.clear()
+        logger.debug("clear_health_state_all: all provider health state wiped")
+
     def get_sinbin_ttl_seconds(self, provider: str) -> Optional[float]:
         """Return remaining sin-bin cooldown in seconds, or None if not sinbinned."""
         with self._data_lock:

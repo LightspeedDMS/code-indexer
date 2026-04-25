@@ -61,6 +61,30 @@ def clear_sinbin(
     return {"cleared": "all"}
 
 
+@router.post("/reset-state")
+def reset_health_state(
+    current_user: User = Depends(get_current_admin_user_hybrid),
+) -> Dict[str, Any]:
+    """Wipe ALL rolling health state for all providers (Bug #902, test isolation).
+
+    Distinct from /clear-sinbin which only clears sinbin cooldown timers.
+    This endpoint clears metrics, consecutive-failure counters, windowed failure
+    deques, last-known status, sinbin timers, sinbin rounds, and stops any active
+    recovery probe threads.
+
+    Required for Phase 5 E2E test isolation: the pre-skip gate in
+    semantic_query_manager checks BOTH is_sinbinned() AND _compute_status().status.
+    clear-sinbin alone is insufficient because _metrics with error_rate=1.0 keeps
+    _compute_status() returning 'down' even after sinbin timers are cleared.
+
+    DO NOT call this from operational/runtime code. It obliterates the rolling-window
+    observability contract used by health-gated dispatch.
+    """
+    monitor = ProviderHealthMonitor.get_instance()
+    monitor.clear_health_state_all()
+    return {"reset": "all"}
+
+
 @router.get("", response_model=ProviderHealthResponse)
 def get_provider_health(
     current_user: User = Depends(get_current_admin_user_hybrid),

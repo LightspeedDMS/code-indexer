@@ -408,12 +408,23 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
     Phase 5 must run single-worker (no pytest-xdist) because POST /reset
     is global: parallel workers would interfere with each other via this fixture.
 
-    Sinbin recovery (AC5, Bug #902):
-    POST /admin/fault-injection/reset clears fault profiles and history.
-    POST /admin/provider-health/clear-sinbin then explicitly clears all
-    ProviderHealthMonitor sinbin state before each test.  This breaks the
-    chicken-and-egg where sinbinned providers are pre-skipped by dispatch so
-    record_call(success=True) can never fire to self-heal them.
+    Full health state isolation (Bug #902 root-cause fix):
+    Three resets are required in sequence:
+
+    1. POST /admin/fault-injection/reset — clears fault profiles and history.
+
+    2. POST /admin/provider-health/clear-sinbin — clears sinbin cooldown timers so
+       is_sinbinned() returns False.  This was the original (incomplete) fix.
+
+    3. POST /admin/provider-health/reset-state — wipes ALL rolling health state:
+       _metrics (error_rate=1.0), _consecutive_failures, _sinbin_failure_deque,
+       _last_known_status, and stops active recovery probes.
+
+       This is the Bug #902 root-cause fix.  The pre-skip gate in
+       semantic_query_manager checks BOTH is_sinbinned() AND
+       _compute_status().status == "down".  After sinbin-only clear, _metrics
+       retained error_rate=1.0 causing _compute_status() to still return "down",
+       so providers were pre-skipped even though sinbin timers were gone.
     """
     fault_admin_client.re_login()
     reset_resp = fault_admin_client.post("/admin/fault-injection/reset")
@@ -429,6 +440,12 @@ def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, No
         raise RuntimeError(
             f"clear_all_faults: POST /admin/provider-health/clear-sinbin failed "
             f"(status={sinbin_resp.status_code}): {sinbin_resp.text}"
+        )
+    state_resp = fault_admin_client.post("/admin/provider-health/reset-state")
+    if state_resp.status_code != FAULT_RESET_OK:
+        raise RuntimeError(
+            f"clear_all_faults: POST /admin/provider-health/reset-state failed "
+            f"(status={state_resp.status_code}): {state_resp.text}"
         )
     yield
 
