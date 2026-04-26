@@ -2686,9 +2686,12 @@ ERROR_REGISTRY: Dict[str, ErrorDefinition] = {
     ),
     "APP-GENERAL-050": ErrorDefinition(
         code="APP-GENERAL-050",
-        description="TODO",
+        description="Codex CLI credential management initialization failure",
         severity=Severity.WARNING,
-        action="TODO",
+        action=(
+            "Verify Codex configuration in Web UI and check llm-creds-provider "
+            "connectivity. Codex is optional; CIDX continues without it."
+        ),
     ),
     "APP-GENERAL-051": ErrorDefinition(
         code="APP-GENERAL-051",

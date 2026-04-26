@@ -690,6 +690,29 @@ def make_lifespan(
                 )
             )
 
+        # Startup: Initialize Codex CLI credential management (Story #846)
+        _codex_shutdown_hook = None
+        try:
+            from code_indexer.server.startup.codex_cli_startup import (
+                initialize_codex_manager_on_startup,
+            )
+
+            _codex_shutdown_hook = initialize_codex_manager_on_startup(
+                server_config=config_service.get_config(),
+                server_data_dir=server_data_dir,
+                return_shutdown_hook=True,
+            )
+            # Hoist to app.state so the shutdown block can reach it (Story #846 CRIT-1).
+            app.state.codex_shutdown_hook = _codex_shutdown_hook
+        except Exception as e:
+            logger.warning(
+                format_error_log(
+                    "APP-GENERAL-050",
+                    f"Failed to initialize Codex CLI credential management on startup: {e}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Startup: Initialize Scheduled Catch-Up Service (Story #23, AC6)
         scheduled_catchup_service = None
         logger.info(
@@ -2255,6 +2278,15 @@ def make_lifespan(
                 logger.info("LLM lease lifecycle stopped")
             except Exception as e:
                 logger.error("Error stopping LLM lease lifecycle: %s", e)
+
+        # Codex lease lifecycle shutdown (Story #846 CRIT-1)
+        _codex_hook = getattr(app.state, "codex_shutdown_hook", None)
+        if _codex_hook is not None:
+            try:
+                _codex_hook()
+                logger.info("Codex lease lifecycle stopped")
+            except Exception as exc:
+                logger.error("Error stopping Codex lease lifecycle: %s", exc)
 
         # Shutdown: Stop cidx-meta refresh debouncer (Story #345)
         cidx_meta_debouncer_state = getattr(app.state, "cidx_meta_debouncer", None)

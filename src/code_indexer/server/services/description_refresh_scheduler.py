@@ -14,13 +14,19 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.server.services.codex_mcp_auth_header_provider import (
+    build_codex_mcp_auth_header_provider,
+)
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +218,7 @@ class DescriptionRefreshScheduler:
         golden_repos_dir: Optional[Path] = None,
         lifecycle_debouncer=None,
         refresh_scheduler=None,
+        cli_dispatcher=None,
     ) -> None:
         """
         Initialize the scheduler.
@@ -243,6 +250,10 @@ class DescriptionRefreshScheduler:
             refresh_scheduler: Optional global RefreshScheduler instance (Story #876 D3).
                 Provides the write-lock acquire/release interface the batch runner
                 uses to serialise cidx-meta updates across the fleet.
+            cli_dispatcher: Optional CliDispatcher instance (Story #847).
+                When provided, _invoke_claude_cli routes through this dispatcher
+                instead of building one from config on each call.  Used by tests
+                to inject a mock dispatcher for deterministic behaviour.
         """
         if db_path is None and (tracking_backend is None or golden_backend is None):
             raise ValueError(
@@ -262,6 +273,8 @@ class DescriptionRefreshScheduler:
         self._golden_repos_dir = golden_repos_dir
         self._lifecycle_debouncer = lifecycle_debouncer
         self._refresh_scheduler = refresh_scheduler
+        # Story #847: injectable CliDispatcher for testing; None means build from config.
+        self._cli_dispatcher = cli_dispatcher
         if tracking_backend is not None:
             self._tracking_backend = tracking_backend
         else:
@@ -1094,40 +1107,105 @@ class DescriptionRefreshScheduler:
             repo_path_obj,
         )
 
-    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
+    def _build_cli_dispatcher(self, config) -> "CliDispatcher":
         """
-        Invoke Claude CLI with the given prompt.
+        Build a CliDispatcher from *config* (Story #847).
 
-        Delegates to the module-level :func:`invoke_claude_cli` helper for the
-        subprocess mechanics, then validates the returned output via
-        :meth:`_validate_cli_output`.
+        Constructs a ClaudeInvoker unconditionally.  When
+        config.codex_integration_config.enabled is True and CODEX_HOME is set
+        in os.environ, also constructs a CodexInvoker and wires it in with the
+        weight from config.  Otherwise codex=None and the effective weight
+        collapses to 0.0 inside CliDispatcher.
+
+        Wires auth_header_provider for cidx-local MCP authentication via
+        persistent Basic auth header from MCPCredentialManager (no expiration;
+        same credentials Claude uses — no JWT TTL issue).
 
         Args:
-            repo_path: Path to repository
-            prompt: Prompt to send to Claude
+            config: ServerConfig returned by config_manager.load_config().
 
         Returns:
-            Tuple of (success: bool, result: str) where result is the output or error message
+            A fully initialised CliDispatcher.
         """
-        success, output = invoke_claude_cli(
-            repo_path=repo_path,
-            prompt=prompt,
-            cli_manager=self._claude_cli_manager,
+        import os
+
+        from code_indexer.server.services.cli_dispatcher import CliDispatcher
+        from code_indexer.server.services.claude_invoker import ClaudeInvoker
+        from code_indexer.server.services.codex_invoker import CodexInvoker
+
+        claude_invoker = ClaudeInvoker(
             analysis_model=self._analysis_model,
+            soft_timeout_seconds=_CLAUDE_CLI_SOFT_TIMEOUT_SECONDS,
         )
-        if not success:
-            return False, output
+
+        codex_invoker = None
+        codex_weight = 0.0
+        codex_cfg = config.codex_integration_config if config else None
+        if codex_cfg and codex_cfg.enabled:
+            codex_home = os.environ.get("CODEX_HOME", "")
+            if codex_home:
+                codex_invoker = CodexInvoker(
+                    codex_home=codex_home,
+                    auth_header_provider=build_codex_mcp_auth_header_provider(),
+                )
+                codex_weight = codex_cfg.codex_weight
+
+        return CliDispatcher(
+            claude=claude_invoker,
+            codex=codex_invoker,
+            codex_weight=codex_weight,
+        )
+
+    def _invoke_claude_cli(self, repo_path: str, prompt: str) -> tuple[bool, str]:
+        """
+        Invoke the CLI dispatcher with the given prompt (Story #847).
+
+        Uses the injected CliDispatcher when available; otherwise builds one
+        from the current ServerConfig on each call.  Logs an INFO record when
+        failover fired so operators can see which CLI handled the job.
+
+        Args:
+            repo_path: Path to repository (used as subprocess cwd).
+            prompt: Prompt to send to the CLI.
+
+        Returns:
+            Tuple of (success: bool, result: str) where result is the output
+            or error message — identical shape to the pre-wiring behaviour.
+        """
+        if self._cli_dispatcher is not None:
+            dispatcher = self._cli_dispatcher
+        else:
+            config = (
+                self._config_manager.load_config() if self._config_manager else None
+            )
+            dispatcher = self._build_cli_dispatcher(config)
+
+        result = dispatcher.dispatch(
+            flow="description_refresh",
+            cwd=repo_path,
+            prompt=prompt,
+            timeout=_CLAUDE_CLI_HARD_TIMEOUT_SECONDS,
+        )
+
+        if result.was_failover:
+            logger.info(
+                "CLI failover fired: cli_used=%s was_failover=True",
+                result.cli_used,
+            )
+
+        if not result.success:
+            return False, result.error
 
         # Validate output quality (detect error messages masquerading as content)
-        if not self._validate_cli_output(output):
+        if not self._validate_cli_output(result.output):
             error_msg = (
-                f"Claude CLI output appears to be an error message"
-                f" (length={len(output)}): {output[:200]}"
+                f"CLI output appears to be an error message"
+                f" (length={len(result.output)}): {result.output[:200]}"
             )
             logger.warning(error_msg)
             return False, error_msg
 
-        return True, output
+        return True, result.output
 
     def _validate_cli_output(self, output: str) -> bool:
         """
