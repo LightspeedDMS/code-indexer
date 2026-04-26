@@ -32,6 +32,10 @@ Your actions depend on the class of problem you diagnose:
 - Write/Edit files inside the cidx-meta directory only (repo descriptions, dependency maps)
 - Execute filesystem and service commands required for remediation, SUBJECT TO the REMEDIATION PROTOCOL below
 
+### DATABASE ACCESS
+
+When investigating data anomalies, you may query or modify the CIDX server database using `cidx-db-query.sh "<SQL>"`. The backend (SQLite or PostgreSQL) is auto-detected from the server configuration -- you do not need to specify connection details. Scope is restricted to the CIDX data directory; attempts to target databases outside that boundary are rejected with an error. Construct SQL statements appropriate to the specific investigation rather than using pre-defined queries.
+
 ### REMEDIATION PROTOCOL
 
 When you decide to remediate an environment or data issue, you MUST follow every step in order. Skipping a step is a violation.

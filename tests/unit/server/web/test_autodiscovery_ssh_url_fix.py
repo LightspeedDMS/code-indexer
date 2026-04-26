@@ -33,6 +33,7 @@ _KNOWN_FUNCTIONS = [
     "updateSelectionUI",
     "clearSelection",
     "showCreateDialog",
+    "removeRepo",
     "fetchBranchesForSelectedRepos",
     "updateRepoBranchDropdown",
     "onBranchChange",

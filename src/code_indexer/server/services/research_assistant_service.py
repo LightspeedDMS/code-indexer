@@ -1266,13 +1266,17 @@ class ResearchAssistantService:
         ]
 
     def _allow_rules(
-        self, cidx_meta_path: str, cleanup_script_rule: Optional[str]
+        self,
+        cidx_meta_path: str,
+        cleanup_script_rule: Optional[str],
+        db_query_script_rule: Optional[str] = None,
     ) -> List[str]:
         """
         Return allow rules for Claude CLI permission enforcement.
 
         Story #554: scoped Write/Edit for cidx-meta.
         Story #738: adds specific allow for self-restart of cidx-server.
+        Story #872: adds cidx-db-query.sh for SQLite/PostgreSQL access.
         """
         rules: List[str] = [
             "Read",
@@ -1286,12 +1290,16 @@ class ResearchAssistantService:
         ]
         if cleanup_script_rule is not None:
             rules.append(cleanup_script_rule)
+        # Story #872: allow the db-query wrapper so the research agent can run SQL.
+        if db_query_script_rule is not None:
+            rules.append(db_query_script_rule)
         return rules
 
     def _build_permission_settings(
         self,
         cidx_meta_path: str,
         cleanup_script_rule: Optional[str],
+        db_query_script_rule: Optional[str] = None,
     ) -> PermissionSettings:
         """
         Build the Claude CLI permission settings dict (Story #554 + Story #738).
@@ -1302,7 +1310,9 @@ class ResearchAssistantService:
         tool_level_deny: List[str] = ["Write", "Edit", "WebFetch", "WebSearch"]
         return {
             "permissions": {
-                "allow": self._allow_rules(cidx_meta_path, cleanup_script_rule),
+                "allow": self._allow_rules(
+                    cidx_meta_path, cleanup_script_rule, db_query_script_rule
+                ),
                 "deny": tool_level_deny + self._bash_deny_rules(),
             }
         }
@@ -1394,12 +1404,29 @@ class ResearchAssistantService:
                 )
                 cleanup_script_rule = None
 
+            # Story #872: Inject CIDX_SERVER_DATA_DIR so cidx-db-query.sh can locate
+            # config.json and the SQLite database via auto-detection.
+            env["CIDX_SERVER_DATA_DIR"] = server_data_dir_for_perms
+
+            # Story #872: Inject CIDX_REPO_ROOT so the script absolute path is locatable.
+            if cidx_repo_root_for_perms:
+                env["CIDX_REPO_ROOT"] = cidx_repo_root_for_perms
+
+            # Story #872: Build allow rule for cidx-db-query.sh (mirrors cleanup pattern).
+            if cidx_repo_root_for_perms:
+                db_query_script_path = str(
+                    Path(cidx_repo_root_for_perms) / "scripts" / "cidx-db-query.sh"
+                )
+                db_query_script_rule: Optional[str] = f"Bash({db_query_script_path} *)"
+            else:
+                db_query_script_rule = None
+
             # Story #554 + Story #738: Build permission settings via helper.
             # Story #554: scoped Write/Edit cidx-meta; Story #738: remediation authority.
             import json as _json
 
             permission_settings = self._build_permission_settings(
-                cidx_meta_path, cleanup_script_rule
+                cidx_meta_path, cleanup_script_rule, db_query_script_rule
             )
 
             # Build base command

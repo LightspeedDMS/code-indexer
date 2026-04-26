@@ -527,6 +527,9 @@ def initialize_services() -> Dict[str, Any]:
         config_manager=config_service,
         mcp_credential_manager=mcp_credential_manager,
     )
+    MCPSelfRegistrationService.set_instance(
+        mcp_registration_service
+    )  # v9.23.10 — codex auth-header provider singleton lookup
 
     golden_repo_manager.set_mcp_registration_service(mcp_registration_service)
 
