@@ -303,7 +303,9 @@ class TestLeaseAcquisitionFailure:
         loop, _ = failing_loop
         with caplog.at_level(logging.WARNING):
             loop.start(consumer_id="test-consumer")
-        warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        warning_msgs = [
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        ]
         assert any(
             "codex" in m.lower() or "lease" in m.lower() or "credential" in m.lower()
             for m in warning_msgs

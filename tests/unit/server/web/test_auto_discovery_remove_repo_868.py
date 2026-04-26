@@ -301,9 +301,7 @@ class TestAC4RemoveButtonKeyboardAccessible:
         """Remove button onclick must call removeRepo() handler."""
         body = _function_slice(_read_template(), "showCreateDialog")
         assert body, "showCreateDialog function must exist"
-        assert "removeRepo(" in body, (
-            "Remove button must call removeRepo() on click"
-        )
+        assert "removeRepo(" in body, "Remove button must call removeRepo() on click"
 
 
 class TestAC5RemoveButtonCSS:

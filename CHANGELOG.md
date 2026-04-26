@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.9 — 2026-04-25
+
+### Codex MCP integration
+
+- **Codex MCP launcher gap closed**: Codex now registers `cidx-local` MCP via HTTP transport at server startup (`codex mcp add cidx-local --url http://localhost:{port}/mcp --bearer-token-env-var CIDX_MCP_BEARER_TOKEN`). `CodexInvoker` injects a fresh admin-scope JWT into each subprocess invocation via `CIDX_MCP_BEARER_TOKEN`. Replaces the empty `_DEFAULT_CIDX_MCP_COMMAND = ""` placeholder from Story #848. Pre-check via `codex mcp get cidx-local` ensures idempotent registration. Closes parity gap with Claude (`MCPSelfRegistrationService` HTTP+Basic-auth path).
+
+- **Hook gap accepted as permanent degradation**: codex 0.125 has no equivalent of Claude's `PostToolUse` hooks. Verified via `codex --help` and `codex exec --help`; only `--dangerously-bypass-approvals-and-sandbox` and `--sandbox` flags exist (reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. Documented in `CLAUDE.md` "Codex CLI Integration" subsection.
+
+### Known limitations
+
+- **JWT TTL vs. long-running Pass 2**: `CIDX_MCP_BEARER_TOKEN` is generated once per `CodexInvoker.invoke()` call with TTL = `jwt_expiration_minutes` (runtime config, default 10 min). Codex reads the env var ONCE at subprocess startup and does not refresh. Pass 2 runs that exceed the JWT TTL will see HTTP 401 on subsequent `cidx-local` MCP calls mid-flow. Mitigation: configure `jwt_expiration_minutes` ≥ longest expected pass timeout, OR accept that mid-flow auth failures trigger codex retry/abort with dispatcher failover to Claude. Long-term fix would require either (a) a dedicated long-lived MCP service credential (instead of short-lived JWT) or (b) an env-var rotation sidecar — both deferred.
+
 ## v9.23.8
 
 ### Operator helpers

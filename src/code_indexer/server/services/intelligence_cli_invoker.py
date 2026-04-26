@@ -9,7 +9,7 @@ and CliDispatcher so they can be composed without coupling to concrete types.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Protocol, runtime_checkable
 
@@ -58,7 +58,9 @@ class IntelligenceCliInvoker(Protocol):
     work for duck-type compliance verification.
     """
 
-    def invoke(self, flow: str, cwd: str, prompt: str, timeout: int) -> InvocationResult:
+    def invoke(
+        self, flow: str, cwd: str, prompt: str, timeout: int
+    ) -> InvocationResult:
         """
         Invoke the CLI with the given prompt.
 

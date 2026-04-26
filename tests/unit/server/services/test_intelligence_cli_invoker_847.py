@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import dataclasses
 
-import pytest
-
 from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
     InvocationResult,

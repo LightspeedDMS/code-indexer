@@ -353,6 +353,11 @@ Rationale: batch processing needs rate limiting for API cost; interactive UX exp
 
 No fallbacks — research and propose solutions. JSON errors: use `_validate_and_debug_prompt()`, check non-ASCII characters, long lines, quotes.
 
+**Codex/Claude divergence (v9.23.9)**:
+
+- `cidx-local` MCP is registered automatically at server startup for BOTH CLI paths: Claude via `MCPSelfRegistrationService` (HTTP + Basic auth, `client_id:client_secret` encoded as Base64), and Codex via `_ensure_codex_mcp_http_registered` in `codex_cli_startup.py` (HTTP + Bearer JWT, admin-scope token injected as `CIDX_MCP_BEARER_TOKEN` env var). See `src/code_indexer/server/startup/codex_cli_startup.py`.
+- Hook parity is NOT achieved — codex 0.125 has no `PostToolUse` hook equivalent (verified via `codex --help` and `codex exec --help`; reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. This is accepted as permanent degradation. See CHANGELOG v9.23.9.
+
 ---
 
 ## Background Jobs (MANDATORY Checklist)

@@ -335,12 +335,17 @@ def test_form_field_names_match_handler_keys():
     codex_api_key) which the handler rejects with ValueError. This test catches that.
     """
     codex_html = _read_codex_section()
-    accepted_keys = {"enabled", "credential_mode", "api_key", "lcp_url", "lcp_vendor", "codex_weight"}
+    accepted_keys = {
+        "enabled",
+        "credential_mode",
+        "api_key",
+        "lcp_url",
+        "lcp_vendor",
+        "codex_weight",
+    }
     fields = _extract_edit_form_inputs(codex_html)
     assert fields, "No form fields found in codex edit form"
-    bad_names = [
-        (elem, name) for elem, name in fields if name not in accepted_keys
-    ]
+    bad_names = [(elem, name) for elem, name in fields if name not in accepted_keys]
     assert not bad_names, (
         f"Form fields with names NOT accepted by handler: {bad_names}. "
         f"Accepted keys: {sorted(accepted_keys)}"
@@ -400,8 +405,12 @@ def test_toggle_credential_fields_is_implemented():
     assert script_end != -1, "Unclosed <script in codex section"
     script_block = codex_html[script_start : script_end + len("</script>")]
 
-    func_body = _extract_named_function_body(script_block, "toggleCodexCredentialFields")
-    assert func_body, "toggleCodexCredentialFields function not found in codex section script"
+    func_body = _extract_named_function_body(
+        script_block, "toggleCodexCredentialFields"
+    )
+    assert func_body, (
+        "toggleCodexCredentialFields function not found in codex section script"
+    )
 
     # Must check for api_key mode
     assert "api_key" in func_body, (
@@ -420,6 +429,7 @@ def test_toggle_credential_fields_is_implemented():
 
     # 3. The wrapper element IDs referenced in the JS body must exist in the HTML
     import re
+
     ids_in_func = re.findall(r"""getElementById\(['"]([^'"]+)['"]\)""", func_body)
     assert ids_in_func, (
         f"toggleCodexCredentialFields does not call getElementById. Body: {func_body!r}"
@@ -474,12 +484,16 @@ def test_codex_section_appears_immediately_after_claude_section():
     # <details> tag except whitespace and the Story #844 comment marker.
     # Note: codex_idx points to the id= attribute (mid-tag), so we anchor on the
     # codex <details> opening tag start (the actual element boundary).
-    claude_end = text.find('</details>', claude_idx)
-    codex_open = text.rfind('<details', 0, codex_idx)
-    between = text[claude_end + len('</details>'):codex_open]
+    claude_end = text.find("</details>", claude_idx)
+    codex_open = text.rfind("<details", 0, codex_idx)
+    between = text[claude_end + len("</details>") : codex_open]
     # Allow whitespace and the Story #844 comment, nothing else
-    cleaned = between.strip().replace('<!-- Story #844: Codex CLI Integration -->', '').strip()
-    assert cleaned == '', (
+    cleaned = (
+        between.strip()
+        .replace("<!-- Story #844: Codex CLI Integration -->", "")
+        .strip()
+    )
+    assert cleaned == "", (
         f"Unexpected content between Claude </details> and Codex <details>: {cleaned!r}"
     )
 
@@ -496,9 +510,11 @@ def test_codex_weight_input_is_type_number_not_range():
     codex_html = _read_codex_section()
     name_idx = codex_html.find('name="codex_weight"')
     assert name_idx != -1, "codex_weight input not found in Codex section"
-    open_idx = codex_html.rfind('<input', 0, name_idx)
-    close_idx = codex_html.find('>', name_idx)
-    assert open_idx != -1 and close_idx != -1, "Could not locate codex_weight <input> element bounds"
+    open_idx = codex_html.rfind("<input", 0, name_idx)
+    close_idx = codex_html.find(">", name_idx)
+    assert open_idx != -1 and close_idx != -1, (
+        "Could not locate codex_weight <input> element bounds"
+    )
     weight_element = codex_html[open_idx : close_idx + 1]
     assert 'type="number"' in weight_element, (
         f"Codex Weight must be type='number' (numeric box), not type='range' (slider). "
@@ -528,26 +544,26 @@ def _is_row_inside_jinja_guard(html: str, opener: str, row_marker: str) -> bool:
         depth = 1
         scan = opener_idx + len(opener)
         while depth > 0 and scan < len(html):
-            next_if = html.find('{% if ', scan)
-            next_endif = html.find('{% endif %}', scan)
+            next_if = html.find("{% if ", scan)
+            next_endif = html.find("{% endif %}", scan)
             if next_endif == -1:
                 return False  # malformed template
             if next_if != -1 and next_if < next_endif:
                 depth += 1
-                scan = next_if + len('{% if ')
+                scan = next_if + len("{% if ")
             else:
                 depth -= 1
                 if depth == 0:
                     endif_idx = next_endif
                     break
-                scan = next_endif + len('{% endif %}')
+                scan = next_endif + len("{% endif %}")
         else:
             return False
         # The row is contained if it falls between the opener's end and the matching endif
         block = html[opener_idx + len(opener) : endif_idx]
         if row_marker in block:
             return True
-        pos = endif_idx + len('{% endif %}')
+        pos = endif_idx + len("{% endif %}")
 
 
 # Display mode parity: rows specific to a credential mode appear ONLY when that

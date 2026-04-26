@@ -20,7 +20,7 @@ import logging
 import os
 import signal
 import subprocess
-from typing import List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 from code_indexer.server.services.intelligence_cli_invoker import (
     FailureClass,
@@ -30,8 +30,9 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 logger = logging.getLogger(__name__)
 
 _CLI_USED = "codex"
-_STDERR_SNIPPET_LEN = 200     # max chars of stderr included in error messages
-_JSONL_LOG_SNIPPET_LEN = 80   # max chars of a malformed JSONL line in caller logs
+_STDERR_SNIPPET_LEN = 200  # max chars of stderr included in error messages
+_JSONL_LOG_SNIPPET_LEN = 80  # max chars of a malformed JSONL line in caller logs
+_MCP_BEARER_ENV_VAR = "CIDX_MCP_BEARER_TOKEN"
 
 # Stderr substrings that indicate permanent credential/config problems.
 # All are mapped to RETRYABLE_ON_OTHER (failover to alternate CLI).
@@ -44,7 +45,9 @@ _PERMANENT_FAILURE_STDERR_PATTERNS = (
 )
 
 
-def _make_failure_result(error_msg: str, failure_class: FailureClass) -> InvocationResult:
+def _make_failure_result(
+    error_msg: str, failure_class: FailureClass
+) -> InvocationResult:
     """Construct a failed InvocationResult with was_failover=False."""
     return InvocationResult(
         success=False,
@@ -70,12 +73,26 @@ class CodexInvoker:
     Resource cleanup: proc.communicate(timeout=...) is used on both the normal
     and timeout paths to drain stdout/stderr pipes and reap the subprocess,
     preventing zombie processes and leaked file descriptors.
+
+    bearer_token_provider: Optional callable that returns a fresh JWT string
+    before each subprocess invocation. When provided, the token is injected as
+    CIDX_MCP_BEARER_TOKEN so codex can authenticate against the cidx-local MCP
+    server registered via HTTP transport. When None, no token is injected
+    (backward-compatible default). When the provider raises, a WARNING is logged
+    and the subprocess spawns without the token (codex MCP calls will fail over
+    to the dispatcher, but the invocation itself is not blocked).
     """
 
-    def __init__(self, codex_home: str) -> None:
+    def __init__(
+        self,
+        codex_home: str,
+        bearer_token_provider: Optional[Callable[[], str]] = None,
+    ) -> None:
         """
         Args:
             codex_home: Value to inject as CODEX_HOME. Must be non-empty string.
+            bearer_token_provider: Optional callable returning a fresh JWT token
+                string. Called once per invoke() to inject CIDX_MCP_BEARER_TOKEN.
 
         Raises:
             ValueError: if codex_home is empty or not a string.
@@ -85,8 +102,11 @@ class CodexInvoker:
                 f"CodexInvoker: codex_home must be a non-empty string, got {codex_home!r}"
             )
         self._codex_home = codex_home
+        self._bearer_token_provider = bearer_token_provider
 
-    def invoke(self, flow: str, cwd: str, prompt: str, timeout: int) -> InvocationResult:
+    def invoke(
+        self, flow: str, cwd: str, prompt: str, timeout: int
+    ) -> InvocationResult:
         """
         Invoke Codex CLI and return the parsed result.
 
@@ -124,9 +144,18 @@ class CodexInvoker:
         """Validate all invoke() parameters. Returns a failure result on error, else None."""
         checks = [
             (timeout <= 0, f"timeout {timeout!r}: must be > 0"),
-            (not isinstance(flow, str) or not flow, f"flow must be non-empty string, got {flow!r}"),
-            (not isinstance(cwd, str) or not cwd, f"cwd must be non-empty string, got {cwd!r}"),
-            (not isinstance(prompt, str) or not prompt, f"prompt must be non-empty string, got {prompt!r}"),
+            (
+                not isinstance(flow, str) or not flow,
+                f"flow must be non-empty string, got {flow!r}",
+            ),
+            (
+                not isinstance(cwd, str) or not cwd,
+                f"cwd must be non-empty string, got {cwd!r}",
+            ),
+            (
+                not isinstance(prompt, str) or not prompt,
+                f"prompt must be non-empty string, got {prompt!r}",
+            ),
         ]
         for is_invalid, detail in checks:
             if is_invalid:
@@ -138,15 +167,32 @@ class CodexInvoker:
     def _start_process(
         self, prompt: str, cwd: str
     ) -> "Union[subprocess.Popen[str], InvocationResult]":
-        """Start the Codex subprocess. Returns Popen on success, InvocationResult on error."""
+        """Start the Codex subprocess. Returns Popen on success, InvocationResult on error.
+
+        When bearer_token_provider is set, calls it once to obtain a fresh JWT and
+        injects it as CIDX_MCP_BEARER_TOKEN so the codex process can authenticate
+        against the cidx-local MCP HTTP endpoint. If the provider raises, a WARNING
+        is logged and the subprocess is still spawned without the token.
+        """
         cmd = [
-            "codex", "exec",
+            "codex",
+            "exec",
             "--json",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
             prompt,
         ]
         env = {**os.environ, "CODEX_HOME": self._codex_home}
+        if self._bearer_token_provider is not None:
+            try:
+                token = self._bearer_token_provider()
+                env[_MCP_BEARER_ENV_VAR] = token
+            except Exception as exc:
+                logger.warning(
+                    "CodexInvoker: bearer_token_provider raised — spawning without %s: %s",
+                    _MCP_BEARER_ENV_VAR,
+                    exc,
+                )
         try:
             return subprocess.Popen(
                 cmd,
@@ -176,7 +222,9 @@ class CodexInvoker:
         try:
             return proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            error_msg = f"CodexInvoker: timed out after {timeout}s — killing process group"
+            error_msg = (
+                f"CodexInvoker: timed out after {timeout}s — killing process group"
+            )
             logger.warning(error_msg)
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -185,10 +233,14 @@ class CodexInvoker:
             try:
                 proc.communicate()
             except Exception as drain_exc:
-                logger.debug("CodexInvoker: post-kill drain failed (benign): %s", drain_exc)
+                logger.debug(
+                    "CodexInvoker: post-kill drain failed (benign): %s", drain_exc
+                )
             return _make_failure_result(error_msg, FailureClass.RETRYABLE_ON_SAME)
 
-    def _handle_nonzero_exit(self, returncode: int, stderr_text: str) -> InvocationResult:
+    def _handle_nonzero_exit(
+        self, returncode: int, stderr_text: str
+    ) -> InvocationResult:
         """Classify and return a failure result for a non-zero process exit."""
         failure_class = _classify_stderr_failure(stderr_text)
         error_msg = (

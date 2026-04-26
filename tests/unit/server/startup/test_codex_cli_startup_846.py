@@ -321,7 +321,9 @@ class TestShutdownHook:
         if callable(shutdown_fn):
             shutdown_fn()
         checkin_reqs = [r for r in captured if "/checkin" in str(r.url)]
-        assert len(checkin_reqs) >= 1, "Expected at least one checkin request from shutdown"
+        assert len(checkin_reqs) >= 1, (
+            "Expected at least one checkin request from shutdown"
+        )
 
     def test_shutdown_hook_removes_auth_json(self, tmp_path):
         """Shutdown hook must delete auth.json after returning the lease."""

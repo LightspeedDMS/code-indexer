@@ -132,7 +132,7 @@ def _normalize_claude_output(raw: str) -> str:
     # Strip chain-of-thought text before YAML frontmatter
     frontmatter_match = re.search(r"^---\s*$", output, re.MULTILINE)
     if frontmatter_match and frontmatter_match.start() > 0:
-        output = output[frontmatter_match.start():]
+        output = output[frontmatter_match.start() :]
     return output
 
 
@@ -194,7 +194,9 @@ class ClaudeInvoker:
         self._analysis_model = analysis_model
         self._soft_timeout_seconds = soft_timeout_seconds
 
-    def invoke(self, flow: str, cwd: str, prompt: str, timeout: int) -> InvocationResult:
+    def invoke(
+        self, flow: str, cwd: str, prompt: str, timeout: int
+    ) -> InvocationResult:
         """
         Invoke the Claude CLI and return a normalised result.
 
@@ -216,7 +218,9 @@ class ClaudeInvoker:
         if validation_error is not None:
             return validation_error
 
-        cmd = _build_claude_command(prompt, self._analysis_model, self._soft_timeout_seconds)
+        cmd = _build_claude_command(
+            prompt, self._analysis_model, self._soft_timeout_seconds
+        )
         env = _build_claude_env(os.environ)
 
         try:
