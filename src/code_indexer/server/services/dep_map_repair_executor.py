@@ -40,6 +40,7 @@ from code_indexer.server.services.dep_map_repair_phase37 import (
     Action,  # noqa: F401 — re-exported for test backward compat
     JournalEntry,  # noqa: F401 — re-exported for test backward compat
     RepairJournal,  # noqa: F401 — re-exported for test backward compat
+    acquire_domain_lock,
     atomic_write_text,
     body_byte_offset,
     build_and_append_journal_entry,
@@ -568,7 +569,7 @@ class DepMapRepairExecutor:
         fixed: List[str],
         errors: List[str],
     ) -> None:
-        """Phase 3.7 shim: check enable flag then delegate to phase37 and malformed_yaml modules.
+        """Phase 3.7 shim: check enable flag then delegate to phase37, malformed_yaml, and garbage_domain modules.
 
         No-op when enable_graph_channel_repair is False (AC2).
         """
@@ -585,6 +586,15 @@ class DepMapRepairExecutor:
             locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
             is_safe_domain_name_fn=self._is_safe_domain_name,
         )
+        # GARBAGE_DOMAIN_REJECTED pass — Story #911
+        from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyType
+
+        parser = DepMapMCPParser(dep_map_path=output_dir.parent)
+        _, all_anomalies, _p, _d = parser.get_cross_domain_graph_with_channels()
+        for _a in all_anomalies:
+            if _a.type == AnomalyType.GARBAGE_DOMAIN_REJECTED:
+                self._repair_garbage_domain_rejected(output_dir, _a, fixed, errors)
 
     def _repair_self_loop(
         self,
@@ -629,13 +639,16 @@ class DepMapRepairExecutor:
         if new_lines == original_lines:
             return  # idempotent — no self-loop row present
 
-        if not atomic_write_text(md_path, "".join(new_lines), errors):
-            return
-
-        fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
-        build_and_append_journal_entry(
-            md_path, domain_name, journal_path, journal, errors
-        )
+        try:
+            with acquire_domain_lock(domain_name):
+                if not atomic_write_text(md_path, "".join(new_lines), errors):
+                    return
+                fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
+                build_and_append_journal_entry(
+                    md_path, domain_name, journal_path, journal, errors
+                )
+        except TimeoutError as exc:
+            errors.append(f"Phase 3.7: {exc}")
 
     def _repair_malformed_yaml(
         self,
@@ -647,6 +660,7 @@ class DepMapRepairExecutor:
         """Thin shim kept for test backward compat; delegates to module-level helper.
 
         All logic lives in dep_map_repair_malformed_yaml.repair_single_malformed_yaml_anomaly.
+        Domain lock is acquired inside rewrite_malformed_yaml_file (Story #917).
         """
         from code_indexer.server.services.dep_map_repair_malformed_yaml import (
             repair_single_malformed_yaml_anomaly,
@@ -663,6 +677,140 @@ class DepMapRepairExecutor:
             locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
             is_safe_domain_name_fn=self._is_safe_domain_name,
         )
+
+    @staticmethod
+    def _extract_prose_fragment(message: str) -> str:
+        """Extract the prose fragment string from a GARBAGE_DOMAIN_REJECTED message.
+
+        Message format: "prose-fragment target domain rejected: '<fragment>'"
+        Falls back to stripping outer quotes if ast.literal_eval fails.
+        Raises TypeError when message is None.
+        """
+        import ast
+
+        if message is None:
+            raise TypeError("message must not be None")
+        prefix = "prose-fragment target domain rejected: "
+        if message.startswith(prefix):
+            raw = message[len(prefix) :].strip()
+            try:
+                return ast.literal_eval(raw)
+            except (ValueError, SyntaxError):
+                return raw.strip("'\"")
+        return message
+
+    def _append_garbage_journal(
+        self,
+        journal: Any,
+        source_domain: str,
+        target_domain: str,
+        action: Any,
+        citations: List[str],
+        file_writes: Optional[List[Dict[str, str]]] = None,
+        errors: Optional[List[str]] = None,
+    ) -> None:
+        """Centralized GARBAGE_DOMAIN_REJECTED journal entry creation and append.
+
+        Validates journal has append() and action has .value before creating entry.
+        On failure, appends to errors when provided; otherwise logs a warning.
+        """
+        if journal is None or not hasattr(journal, "append"):
+            raise TypeError("journal must have an append() method")
+        if action is None or not hasattr(action, "value"):
+            raise TypeError("action must be an Action enum member with .value")
+        try:
+            entry = JournalEntry(
+                anomaly_type="GARBAGE_DOMAIN_REJECTED",
+                source_domain=source_domain,
+                target_domain=target_domain,
+                source_repos=[],
+                target_repos=[],
+                verdict="N_A",
+                action=action.value,
+                citations=citations,
+                file_writes=file_writes or [],
+                claude_response_raw="",
+                effective_mode="deterministic",
+            )
+            journal.append(entry)
+        except (ValueError, TypeError, RuntimeError, OSError) as exc:
+            msg = f"Phase 3.7: garbage-domain journal write failed: {exc}"
+            if errors is not None:
+                errors.append(msg)
+            else:
+                logger.warning(msg)
+
+    def _journal_and_backfill_garbage(
+        self,
+        journal: Any,
+        stem: str,
+        target_domain: str,
+        source_path: Path,
+        target_path: Path,
+        outgoing_cells: List[str],
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """Thin shim delegating to journal_and_backfill_garbage_domain.
+
+        Domain locks are acquired inside _execute_unique_rewrite (source) and
+        _write_target_backfill (target) within the production helpers (Story #917).
+        """
+        from code_indexer.server.services.dep_map_repair_garbage_domain import (
+            journal_and_backfill_garbage_domain,
+        )
+
+        journal_and_backfill_garbage_domain(
+            journal,
+            stem,
+            target_domain,
+            source_path,
+            target_path,
+            outgoing_cells,
+            fixed,
+            errors,
+            append_journal_fn=self._append_garbage_journal,
+        )
+
+    def _repair_garbage_domain_rejected(
+        self,
+        output_dir: Path,
+        anomaly: Any,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """Repair GARBAGE_DOMAIN_REJECTED anomalies via _domains.json inverted-index lookup.
+
+        Unique mapping -> source outgoing cell rewrite + mirror incoming backfill.
+        Ambiguous or no match -> journal for manual operator review.
+        Handles both AnomalyEntry and AnomalyAggregate (Story #911 AC6).
+        """
+        from code_indexer.server.services.dep_map_parser_hygiene import AnomalyAggregate
+        from code_indexer.server.services.dep_map_repair_garbage_domain import (
+            build_inverted_repo_index,
+            repair_one_garbage_domain_anomaly,
+        )
+
+        examples = (
+            [anomaly] if not isinstance(anomaly, AnomalyAggregate) else anomaly.examples
+        )
+        domain_list = self._load_domains_json(output_dir)
+        repo_to_domains = build_inverted_repo_index(domain_list)
+        journal = RepairJournal()
+        for example in examples:
+            repair_one_garbage_domain_anomaly(
+                output_dir,
+                example,
+                repo_to_domains,
+                journal,
+                fixed,
+                errors,
+                is_safe_domain_name_fn=self._is_safe_domain_name,
+                append_journal_fn=self._append_garbage_journal,
+                journal_and_backfill_fn=self._journal_and_backfill_garbage,
+                extract_prose_fn=self._extract_prose_fragment,
+                log_fn=self._log,
+            )
 
     @staticmethod
     def _body_byte_offset(raw_bytes: bytes, close_idx: int) -> int:
@@ -822,7 +970,11 @@ class DepMapRepairExecutor:
         if new_content == content:
             return False
 
-        md_file.write_text(new_content, encoding="utf-8")
+        try:
+            with acquire_domain_lock(md_file.stem):
+                md_file.write_text(new_content, encoding="utf-8")
+        except TimeoutError as exc:
+            raise OSError(str(exc)) from exc
         return True
 
     @staticmethod
@@ -995,9 +1147,10 @@ class DepMapRepairExecutor:
         new_content = "\n".join(result_lines)
         if new_content != content:
             try:
-                domain_file.write_text(new_content)
+                with acquire_domain_lock(domain_file.stem):
+                    domain_file.write_text(new_content)
                 self._log(f"  Cleaned stale repo sections from {domain_file.name}")
-            except OSError as e:
+            except (OSError, TimeoutError) as e:
                 self._log(f"  Warning: Could not write {domain_file.name}: {e}")
 
     @staticmethod

@@ -17,11 +17,12 @@ import json
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional
 
 if TYPE_CHECKING:
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
@@ -34,10 +35,14 @@ class Action(str, Enum):
 
     Story #908: self_loop_deleted.
     Story #910: malformed_yaml_reemitted.
+    Story #911: garbage_domain_remapped, garbage_domain_ambiguous_review.
     """
 
     self_loop_deleted = "self_loop_deleted"
     malformed_yaml_reemitted = "malformed_yaml_reemitted"
+    garbage_domain_remapped = "garbage_domain_remapped"
+    garbage_domain_ambiguous_review = "garbage_domain_ambiguous_review"
+    domain_lock_timeout = "domain_lock_timeout"
 
 
 _VALID_VERDICTS: frozenset = frozenset({"CONFIRMED", "REFUTED", "INCONCLUSIVE", "N_A"})
@@ -107,6 +112,64 @@ _JOURNAL_LOCK_TIMEOUT_S: int = 5
 _DEFAULT_CIDX_DATA_DIR: Path = Path.home() / ".cidx-server"
 _JOURNAL_FILENAME: str = "dep_map_repair_journal.jsonl"
 _write_lock: threading.Lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Per-domain-file advisory lock infrastructure (Story #917)
+#
+# Prevents concurrent Branch A (Phase 3.7 repairs) and Branch B (lifecycle
+# writes) from racing on the same domain markdown file.
+#
+# Lock map is keyed on domain_name (str). Different domains get different locks
+# so parallel work on distinct files proceeds without contention.  The same
+# domain always returns the identical Lock instance (singleton per domain).
+#
+# _LOCKS_GUARD serialises map mutations only; it is never held during file I/O.
+# ---------------------------------------------------------------------------
+_DOMAIN_LOCK_DEFAULT_TIMEOUT_S: float = 30.0
+_DOMAIN_FILE_LOCKS: Dict[str, threading.Lock] = {}
+_LOCKS_GUARD: threading.Lock = threading.Lock()
+
+
+def get_domain_file_lock(domain: str) -> threading.Lock:
+    """Return the process-wide Lock for *domain*, creating it on first call."""
+    with _LOCKS_GUARD:
+        if domain not in _DOMAIN_FILE_LOCKS:
+            _DOMAIN_FILE_LOCKS[domain] = threading.Lock()
+        return _DOMAIN_FILE_LOCKS[domain]
+
+
+@contextmanager
+def acquire_domain_lock(
+    domain_name: str,
+    timeout_seconds: float = _DOMAIN_LOCK_DEFAULT_TIMEOUT_S,
+) -> Iterator[None]:
+    """Context manager that acquires the per-domain advisory lock.
+
+    Preconditions (MESSI Rule 15 — asserted, stripped under python -O):
+      domain_name must be non-empty.
+
+    Raises ValueError for non-positive or non-finite timeout_seconds.
+    Raises TimeoutError when the lock cannot be acquired within timeout_seconds.
+    Always releases the lock on exit, even when the body raises.
+    """
+    import math
+
+    if not domain_name:
+        raise ValueError("domain_name must be non-empty")
+    if not (math.isfinite(timeout_seconds) and timeout_seconds > 0):
+        raise ValueError(
+            f"timeout_seconds must be a finite positive number, got {timeout_seconds!r}"
+        )
+    lock = get_domain_file_lock(domain_name)
+    acquired = lock.acquire(timeout=timeout_seconds)
+    if not acquired:
+        raise TimeoutError(
+            f"domain lock acquisition timed out: {domain_name} after {timeout_seconds}s"
+        )
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _resolve_journal_data_dir() -> Path:
@@ -437,10 +500,15 @@ def _repair_one_self_loop(
     new_lines = remove_self_loop_rows(domain_name, original_lines)
     if new_lines == original_lines:
         return
-    if not atomic_write_text(md_path, "".join(new_lines), errors):
+    try:
+        with acquire_domain_lock(domain_name):
+            if not atomic_write_text(md_path, "".join(new_lines), errors):
+                return
+            fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
+            build_and_append_journal_entry(md_path, domain_name, None, journal, errors)
+    except TimeoutError as exc:
+        errors.append(f"Phase 3.7: {exc}")
         return
-    fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
-    build_and_append_journal_entry(md_path, domain_name, None, journal, errors)
 
 
 def run_phase37(

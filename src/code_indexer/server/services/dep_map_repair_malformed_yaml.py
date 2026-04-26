@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 from code_indexer.server.services.dep_map_repair_phase37 import (
+    acquire_domain_lock,
     body_byte_offset,
     build_and_append_malformed_yaml_journal_entry,
     reemit_frontmatter_from_domain_info,
@@ -205,10 +206,15 @@ def rewrite_malformed_yaml_file(
         log_fn(f"Phase 3.7: malformed-yaml repair no-op for {raw_file}")
         return True
     try:
-        file_path.write_bytes(new_bytes)
-        fixed.append(f"Phase 3.7: re-emitted frontmatter for {stem}")
-        log_fn(f"Phase 3.7 frontmatter re-emitted: {raw_file}")
-        build_and_append_malformed_yaml_journal_entry(file_path, stem, errors)
+        with acquire_domain_lock(file_path.stem):
+            file_path.write_bytes(new_bytes)
+            fixed.append(f"Phase 3.7: re-emitted frontmatter for {stem}")
+            log_fn(f"Phase 3.7 frontmatter re-emitted: {raw_file}")
+            build_and_append_malformed_yaml_journal_entry(file_path, stem, errors)
+    except TimeoutError as exc:
+        errors.append(
+            f"Phase 3.7 MALFORMED_YAML: domain lock timeout for {file_path.stem}: {exc}"
+        )
     except OSError as e:
         errors.append(f"Phase 3.7: cannot write {raw_file}: {e}")
     return True
