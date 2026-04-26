@@ -41,7 +41,7 @@ try:
     from code_indexer.server.services.cli_dispatcher import CliDispatcher
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
     from code_indexer.server.services.codex_invoker import CodexInvoker
-    from code_indexer.server.services.codex_bearer_provider import build_codex_bearer_provider
+    from code_indexer.server.services.codex_mcp_auth_header_provider import build_codex_mcp_auth_header_provider
 except ImportError:  # pragma: no cover — server package absent in pure CLI context
     # Caller guards against None before any of these are used; CLI paths never reach
     # the Codex/server integration code below.
@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover — server package absent in pure CLI co
     CliDispatcher = None  # type: ignore[assignment]
     ClaudeInvoker = None  # type: ignore[assignment]
     CodexInvoker = None  # type: ignore[assignment]
-    build_codex_bearer_provider = None  # type: ignore[assignment]
+    build_codex_mcp_auth_header_provider = None  # type: ignore[assignment]  # Callable[[], str] | None; CLI paths never call this
 
 logger = logging.getLogger(__name__)
 
@@ -1168,8 +1168,9 @@ Rules:
         weight from config.  Otherwise codex=None and the effective weight
         collapses to 0.0 inside CliDispatcher.
 
-        Wires bearer_token_provider for cidx-local MCP authentication via fresh
-        admin-scope JWT (TTL = jwt_expiration_minutes from runtime config).
+        Wires auth_header_provider for cidx-local MCP authentication via
+        persistent Basic auth header from MCPCredentialManager (no expiration;
+        same credentials Claude uses — no JWT TTL issue).
 
         Returns:
             A fully initialised CliDispatcher.
@@ -1184,7 +1185,7 @@ Rules:
             if codex_home:
                 codex_invoker = CodexInvoker(
                     codex_home=codex_home,
-                    bearer_token_provider=build_codex_bearer_provider(),
+                    auth_header_provider=build_codex_mcp_auth_header_provider(),
                 )
                 codex_weight = codex_cfg.codex_weight
         return CliDispatcher(

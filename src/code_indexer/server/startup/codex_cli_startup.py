@@ -39,12 +39,16 @@ from code_indexer.server.services.codex_lease_loop import (
 )
 from code_indexer.server.services.llm_creds_client import LlmCredsClient
 from code_indexer.server.startup.codex_mcp_registration import (
-    _DEFAULT_CIDX_SERVER_PORT,
-    _MAX_STDERR_LOG_CHARS,
     _ensure_codex_mcp_http_registered,
 )
 
 logger = logging.getLogger(__name__)
+
+# Default CIDX server port used as fallback when server_config does not expose port.
+_DEFAULT_CIDX_SERVER_PORT = 8000
+
+# Maximum number of characters from subprocess stderr included in WARNING logs.
+_MAX_STDERR_LOG_CHARS = 500
 
 
 # ---------------------------------------------------------------------------

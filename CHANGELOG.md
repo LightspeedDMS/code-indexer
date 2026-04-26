@@ -5,17 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.10 — 2026-04-25
+
+### Codex MCP auth — persistent Basic credentials replace short-lived JWT
+
+- **Root cause fixed**: v9.23.9 injected a short-lived admin JWT (`CIDX_MCP_BEARER_TOKEN`, default TTL 10 min) into each `CodexInvoker` subprocess. Pass 2 dependency analysis runs lasting 30+ minutes expired mid-flow, causing silent HTTP 401 failover to Claude. Fix: Codex now uses the same persistent `client_id:client_secret` pair issued by `MCPCredentialManager` that Claude uses, encoded as `Basic <base64>` and injected as `CIDX_MCP_AUTH_HEADER`. No JWT, no TTL, no mid-flow expiry.
+
+- **TOML-based MCP registration**: Codex 0.125 `codex mcp add` has no `--http-headers` / `--env-http-headers` flags (only `--bearer-token-env-var`). Registration now writes `$CODEX_HOME/config.toml` directly with `env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }`. The idempotency check reads the TOML back and skips the write when the section already matches. Atomic write via `.tmp` + `Path.replace()` with parent-dir creation and mode 0o600 preservation. Reference: https://developers.openai.com/codex/mcp.
+
+- **Stale v9.23.9 config migration**: When `config.toml` contains a `[mcp_servers.cidx-local]` section with `bearer_token_env_var` (old schema), it is silently replaced with the new `env_http_headers` section on the next server startup.
+
+- **New module `codex_mcp_auth_header_provider.py`**: `build_codex_mcp_auth_header_provider()` returns a closure that retrieves the cached `Authorization` header value from `MCPSelfRegistrationService` — fast path via `get_cached_auth_header_value()`, cache-miss path via `build_auth_header_from_creds()`. No credential assembly in the provider; the value is sliced from the already-assembled header string in `MCPSelfRegistrationService.register_in_claude_code()`.
+
+- **`CodexInvoker` rename**: `bearer_token_provider` / `_bearer_token_provider` / `CIDX_MCP_BEARER_TOKEN` renamed to `auth_header_provider` / `_auth_header_provider` / `CIDX_MCP_AUTH_HEADER`. Both production wiring sites updated: `DependencyMapAnalyzer._build_pass2_dispatcher()` and `DescriptionRefreshScheduler._build_cli_dispatcher()`.
+
+- **Deleted**: `codex_bearer_provider.py`, `test_codex_invoker_bearer_injection.py`, `test_codex_invoker_jwt_wiring.py`.
+
 ## v9.23.9 — 2026-04-25
 
 ### Codex MCP integration
 
-- **Codex MCP launcher gap closed**: Codex now registers `cidx-local` MCP via HTTP transport at server startup (`codex mcp add cidx-local --url http://localhost:{port}/mcp --bearer-token-env-var CIDX_MCP_BEARER_TOKEN`). `CodexInvoker` injects a fresh admin-scope JWT into each subprocess invocation via `CIDX_MCP_BEARER_TOKEN`. Replaces the empty `_DEFAULT_CIDX_MCP_COMMAND = ""` placeholder from Story #848. Pre-check via `codex mcp get cidx-local` ensures idempotent registration. Closes parity gap with Claude (`MCPSelfRegistrationService` HTTP+Basic-auth path).
+- **Codex MCP launcher gap closed**: Codex now registers `cidx-local` MCP via HTTP transport at server startup. Replaces the empty `_DEFAULT_CIDX_MCP_COMMAND = ""` placeholder from Story #848. Closes parity gap with Claude (`MCPSelfRegistrationService` HTTP+Basic-auth path). Note: superseded by v9.23.10 which replaces the JWT credential with persistent Basic auth.
 
 - **Hook gap accepted as permanent degradation**: codex 0.125 has no equivalent of Claude's `PostToolUse` hooks. Verified via `codex --help` and `codex exec --help`; only `--dangerously-bypass-approvals-and-sandbox` and `--sandbox` flags exist (reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. Documented in `CLAUDE.md` "Codex CLI Integration" subsection.
-
-### Known limitations
-
-- **JWT TTL vs. long-running Pass 2**: `CIDX_MCP_BEARER_TOKEN` is generated once per `CodexInvoker.invoke()` call with TTL = `jwt_expiration_minutes` (runtime config, default 10 min). Codex reads the env var ONCE at subprocess startup and does not refresh. Pass 2 runs that exceed the JWT TTL will see HTTP 401 on subsequent `cidx-local` MCP calls mid-flow. Mitigation: configure `jwt_expiration_minutes` ≥ longest expected pass timeout, OR accept that mid-flow auth failures trigger codex retry/abort with dispatcher failover to Claude. Long-term fix would require either (a) a dedicated long-lived MCP service credential (instead of short-lived JWT) or (b) an env-var rotation sidecar — both deferred.
 
 ## v9.23.8
 

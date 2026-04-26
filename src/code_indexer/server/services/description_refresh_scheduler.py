@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
-from code_indexer.server.services.codex_bearer_provider import (
-    build_codex_bearer_provider,
+from code_indexer.server.services.codex_mcp_auth_header_provider import (
+    build_codex_mcp_auth_header_provider,
 )
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
@@ -1117,8 +1117,9 @@ class DescriptionRefreshScheduler:
         weight from config.  Otherwise codex=None and the effective weight
         collapses to 0.0 inside CliDispatcher.
 
-        Wires bearer_token_provider for cidx-local MCP authentication via fresh
-        admin-scope JWT (TTL = jwt_expiration_minutes from runtime config).
+        Wires auth_header_provider for cidx-local MCP authentication via
+        persistent Basic auth header from MCPCredentialManager (no expiration;
+        same credentials Claude uses — no JWT TTL issue).
 
         Args:
             config: ServerConfig returned by config_manager.load_config().
@@ -1145,7 +1146,7 @@ class DescriptionRefreshScheduler:
             if codex_home:
                 codex_invoker = CodexInvoker(
                     codex_home=codex_home,
-                    bearer_token_provider=build_codex_bearer_provider(),
+                    auth_header_provider=build_codex_mcp_auth_header_provider(),
                 )
                 codex_weight = codex_cfg.codex_weight
 
