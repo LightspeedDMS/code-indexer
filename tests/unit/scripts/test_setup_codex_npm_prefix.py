@@ -279,3 +279,207 @@ def test_codex_install_invoked(system_prefix_env, home_dir):
     assert "@openai/codex" in npm_calls_log.read_text(), (
         "Expected '@openai/codex' in npm calls log"
     )
+
+
+# ---------------------------------------------------------------------------
+# Helpers and fixtures for --update-cidx-server-systemd tests
+# ---------------------------------------------------------------------------
+
+
+def _make_sudo_shim(shim_dir: Path) -> None:
+    """
+    Fake `sudo` that logs every invocation to shim_dir/sudo_calls.log.
+    `sudo tee <file>` reads stdin and writes it to <file>.
+    `sudo systemctl ...` only logs.
+    """
+    sudo_shim = shim_dir / "sudo"
+    sudo_shim.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            SHIM_DIR="{shim_dir}"
+            echo "SUDO_CALLED: $@" >> "$SHIM_DIR/sudo_calls.log"
+            case "$1" in
+              tee)
+                cat > "$2"
+                ;;
+            esac
+            exit 0
+            """
+        )
+    )
+    sudo_shim.chmod(sudo_shim.stat().st_mode | stat.S_IEXEC)
+
+
+def _make_fake_unit_file(unit_path: Path, npm_bin: str, already_in_path: bool) -> None:
+    """Write a minimal cidx-server.service unit file for testing."""
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    path_value = (
+        f"{npm_bin}:/usr/local/bin:/usr/bin:/bin"
+        if already_in_path
+        else "/usr/local/bin:/usr/bin:/bin"
+    )
+    unit_path.write_text(
+        textwrap.dedent(
+            f"""\
+            [Unit]
+            Description=cidx-server
+
+            [Service]
+            Environment="PATH={path_value}"
+            ExecStart=/usr/bin/python3 -m code_indexer.server
+
+            [Install]
+            WantedBy=multi-user.target
+            """
+        )
+    )
+
+
+@pytest.fixture()
+def systemd_env(tmp_path, system_prefix_env, home_dir):
+    """
+    Consolidated fixture for --update-cidx-server-systemd tests.
+
+    Returns a dict with:
+      shim_dir  — Path to the shims directory (npm + sudo shims present)
+      home_dir  — isolated HOME
+      npm_bin   — resolved ~/.npm-global/bin path string
+      unit_file — Path where the fake unit file should be written
+      run       — callable(already_in_path, extra_args=[]) -> CompletedProcess
+                  Creates the unit file (or skips if already_in_path is None),
+                  runs the script with CIDX_SYSTEMD_UNIT_PATH set, and returns
+                  the CompletedProcess.
+    """
+    shim_dir, _ = system_prefix_env
+    _make_sudo_shim(shim_dir)
+    npm_bin = str(home_dir / ".npm-global" / "bin")
+    unit_file = tmp_path / "cidx-server.service"
+
+    def run(already_in_path, include_flag=True):
+        if already_in_path is not None:
+            _make_fake_unit_file(unit_file, npm_bin, already_in_path)
+        flag_args = ["--update-cidx-server-systemd"] if include_flag else []
+        return _run_script(
+            flag_args,
+            home_dir,
+            shim_dir,
+            extra_env={"CIDX_SYSTEMD_UNIT_PATH": str(unit_file)},
+        )
+
+    return {
+        "shim_dir": shim_dir,
+        "home_dir": home_dir,
+        "npm_bin": npm_bin,
+        "unit_file": unit_file,
+        "run": run,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tests 6-8: noop, prepend, daemon-reload
+# ---------------------------------------------------------------------------
+
+
+def test_systemd_path_already_present_noop(systemd_env):
+    """
+    When npm bin dir is already in the unit PATH, script prints 'already'
+    and does NOT rewrite the file (idempotent — content and mtime unchanged).
+    """
+    unit_file = systemd_env["unit_file"]
+    npm_bin = systemd_env["npm_bin"]
+    _make_fake_unit_file(unit_file, npm_bin, already_in_path=True)
+    original_content = unit_file.read_text()
+    original_mtime = unit_file.stat().st_mtime
+
+    result = systemd_env["run"](already_in_path=None)  # file pre-created above
+
+    assert result.returncode == 0, f"Expected exit 0. stderr: {result.stderr!r}"
+    assert "already" in (result.stdout + result.stderr).lower(), (
+        f"Expected 'already' in output. Got: {result.stdout + result.stderr!r}"
+    )
+    assert unit_file.read_text() == original_content, "Unit file was rewritten unexpectedly"
+    assert unit_file.stat().st_mtime == original_mtime, "Unit file mtime changed unexpectedly"
+
+
+def test_systemd_path_prepended_when_missing(systemd_env):
+    """
+    When npm bin dir is NOT in the unit PATH, the script prepends it so
+    the resulting PATH line starts with the npm bin dir.
+    """
+    npm_bin = systemd_env["npm_bin"]
+    unit_file = systemd_env["unit_file"]
+
+    result = systemd_env["run"](already_in_path=False)
+
+    assert result.returncode == 0, f"Expected exit 0. stderr: {result.stderr!r}"
+    updated = unit_file.read_text()
+    assert npm_bin in updated, f"Expected '{npm_bin}' in updated unit. Got:\n{updated}"
+    for line in updated.splitlines():
+        if "Environment=" in line and "PATH=" in line:
+            path_val = line.split("PATH=", 1)[1].rstrip('"')
+            assert path_val.startswith(npm_bin), (
+                f"Expected PATH to start with '{npm_bin}'. Got: {path_val!r}"
+            )
+            break
+    else:
+        pytest.fail(f"No Environment=PATH line found in updated unit:\n{updated}")
+
+
+def test_systemd_daemon_reload_invoked_after_write(systemd_env):
+    """
+    After writing the updated unit file, script calls `sudo systemctl daemon-reload`.
+    """
+    result = systemd_env["run"](already_in_path=False)
+
+    assert result.returncode == 0, f"Expected exit 0. stderr: {result.stderr!r}"
+    sudo_log = systemd_env["shim_dir"] / "sudo_calls.log"
+    assert sudo_log.exists(), "Expected sudo_calls.log — sudo was never called"
+    assert "daemon-reload" in sudo_log.read_text(), (
+        f"Expected 'daemon-reload' in sudo calls. Got:\n{sudo_log.read_text()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests 9-10: missing unit warning; no changes without flag
+# ---------------------------------------------------------------------------
+
+
+def test_systemd_unit_missing_warning_no_crash(systemd_env):
+    """
+    When the unit file does not exist, script prints WARNING and exits 0
+    (npm install portion continues — unit patching is non-fatal).
+    """
+    # already_in_path=None and unit_file never pre-created => points at nonexistent path
+    result = systemd_env["run"](already_in_path=None)
+
+    assert result.returncode == 0, (
+        f"Expected exit 0 with missing unit. stderr: {result.stderr!r}"
+    )
+    combined = result.stdout + result.stderr
+    assert "warning" in combined.lower(), (
+        f"Expected WARNING in output when unit is missing. Got: {combined!r}"
+    )
+
+
+def test_flag_not_passed_no_systemd_changes(systemd_env):
+    """
+    Without --update-cidx-server-systemd, the unit file is NEVER read or written
+    and sudo daemon-reload is never called.
+    """
+    unit_file = systemd_env["unit_file"]
+    npm_bin = systemd_env["npm_bin"]
+    _make_fake_unit_file(unit_file, npm_bin, already_in_path=False)
+    original_content = unit_file.read_text()
+
+    result = systemd_env["run"](already_in_path=None, include_flag=False)
+
+    assert result.returncode == 0, f"Expected exit 0. stderr: {result.stderr!r}"
+    assert unit_file.read_text() == original_content, (
+        "Unit file was modified without --update-cidx-server-systemd flag"
+    )
+    sudo_log = systemd_env["shim_dir"] / "sudo_calls.log"
+    if sudo_log.exists():
+        assert "daemon-reload" not in sudo_log.read_text(), (
+            "daemon-reload was called without the flag"
+        )
