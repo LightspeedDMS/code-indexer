@@ -370,3 +370,88 @@ class TestServiceInitSingletonWiring:
             "build_codex_mcp_auth_header_provider() raises RuntimeError on first "
             "invocation in production, causing silent fallback to Claude."
         )
+
+
+class TestRegressionV9_23_11NoTomliDependency:
+    """v9.23.11 regression: production code must not depend on tomli/tomllib.
+
+    v9.23.10 used `import tomli` for TOML idempotency parsing. Dev machines
+    had `tomli` from a transitive dep so unit tests passed; staging Python 3.9
+    had neither `tomllib` nor `tomli`, so registration silently failed
+    (ModuleNotFoundError caught and logged WARNING). The stale v9.23.9
+    `bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"` entry then persisted
+    in config.toml, defeating the entire fix end-to-end.
+
+    These tests use plain text matching (no parser) so they fail on the
+    same Python that production runs.
+    """
+
+    def test_production_module_imports_without_tomli(self):
+        """Production source MUST NOT contain ANY `tomli` or `tomllib` references.
+
+        v9.23.11: TOML parsing was replaced with regex/substring text checks
+        (_extract_cidx_local_block, _is_already_registered_text). Reintroducing
+        ANY reference to either parser (import, attribute access, type hint,
+        comment-survived doc) would risk breaking staging.
+        """
+        import inspect
+
+        from code_indexer.server.startup import codex_mcp_registration
+
+        src = inspect.getsource(codex_mcp_registration)
+        assert "tomli" not in src, (
+            "v9.23.11 invariant violated: codex_mcp_registration.py must not "
+            "reference `tomli` anywhere (Python 3.9 staging deploys do not have "
+            "it). Use _is_already_registered_text() and regex section "
+            "replacement instead."
+        )
+        assert "tomllib" not in src, (
+            "v9.23.11 invariant violated: codex_mcp_registration.py must not "
+            "reference `tomllib` anywhere (Python 3.9 staging deploys do not "
+            "have it). Use _is_already_registered_text() and regex section "
+            "replacement instead."
+        )
+
+    def test_staging_v9_23_9_stale_bearer_token_env_var_triggers_rewrite(
+        self, tmp_path
+    ):
+        """Exact staging reproduction: existing v9.23.9 schema must be replaced.
+
+        Reproduces the staging E2E bug observed at 12:29 on 2026-04-26: a config.toml
+        carried forward from v9.23.9 contained:
+
+            [mcp_servers.cidx-local]
+            url = "http://127.0.0.1:8000/mcp"
+            bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"
+
+        v9.23.10 silently failed to rewrite this on Python 3.9 (no tomli).
+        v9.23.11 must replace it with env_http_headers schema. Assertions use
+        plain text matching so they fail on the exact Python staging runs.
+        """
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        config_toml = codex_home / "config.toml"
+        config_toml.write_text(
+            "[mcp_servers.cidx-local]\n"
+            'url = "http://127.0.0.1:8000/mcp"\n'
+            'bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"\n',
+            encoding="utf-8",
+        )
+
+        _ensure_codex_mcp_http_registered(
+            codex_home=codex_home, port=8000, host="127.0.0.1"
+        )
+
+        result = config_toml.read_text(encoding="utf-8")
+        assert "bearer_token_env_var" not in result, (
+            "v9.23.9 stale `bearer_token_env_var` line must be removed; "
+            f"got file content:\n{result}"
+        )
+        assert 'Authorization = "CIDX_MCP_AUTH_HEADER"' in result, (
+            "v9.23.10/v9.23.11 schema must inject the env_http_headers Authorization line; "
+            f"got file content:\n{result}"
+        )
+        assert "[mcp_servers.cidx-local.env_http_headers]" in result, (
+            "env_http_headers sub-table must be present after rewrite; "
+            f"got file content:\n{result}"
+        )

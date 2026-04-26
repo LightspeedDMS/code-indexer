@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -39,59 +38,50 @@ _PORT_MAX = 65535
 
 
 # ---------------------------------------------------------------------------
-# TOML read helper
+# Text-based idempotency check (no external TOML parser dependency)
 # ---------------------------------------------------------------------------
+#
+# Production deploys ship Python 3.9 without an external TOML parser
+# installed. Idempotency uses regex/substring checks against the raw file
+# text. Section replacement was already regex-based, so read and write paths
+# stay consistent. See CHANGELOG v9.23.11 for the staging incident that drove
+# the parser removal.
 
 
-def _read_toml(config_toml: Path) -> Tuple[Optional[Dict], Optional[str]]:
-    """Read and parse config_toml. Returns (data_dict, None) on success.
+def _extract_cidx_local_block(text: str) -> str:
+    """Return concatenated text of every [mcp_servers.cidx-local*] section.
 
-    When config_toml does not exist, returns ({}, None) so the caller can
-    proceed to create the file.
-
-    When the file exists but contains invalid TOML, returns (None, error_str)
-    so the caller can log and skip the write (preserving the broken file for
-    operator inspection).
-
-    IOErrors from an existing file propagate to the caller unchanged.
+    Matches the parent table and any sub-tables (e.g. .env_http_headers).
+    Returns an empty string when no cidx-local section is present.
     """
-    if not config_toml.exists():
-        return {}, None
-    try:
-        import tomli
-
-        with open(config_toml, "rb") as fh:
-            return tomli.load(fh), None
-    except Exception as exc:
-        import tomli
-
-        if isinstance(exc, tomli.TOMLDecodeError):
-            return None, f"TOML parse error in {config_toml}: {exc}"
-        raise
+    pattern = re.compile(
+        r"^\[mcp_servers\." + re.escape(_CIDX_MCP_NAME) + r"(?:\.[^\]]+)?\]"
+        r".*?"
+        r"(?=^\[(?!mcp_servers\." + re.escape(_CIDX_MCP_NAME) + r")|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    return "\n".join(pattern.findall(text))
 
 
-# ---------------------------------------------------------------------------
-# Idempotency check
-# ---------------------------------------------------------------------------
+def _is_already_registered_text(text: str, url: str) -> bool:
+    """Return True when the raw config.toml text already has a current cidx-local section.
 
+    Current means all three:
+      - The URL line matches `url = "<expected>"` exactly.
+      - `Authorization = "CIDX_MCP_AUTH_HEADER"` is present (env_http_headers schema).
+      - `bearer_token_env_var` is absent (would indicate stale v9.23.9 schema).
 
-def _is_already_registered(data: Dict, url: str) -> bool:
-    """Return True when config.toml already has a current cidx-local section.
-
-    A registration is current when:
-      - data["mcp_servers"]["cidx-local"]["url"] == url
-      - data["mcp_servers"]["cidx-local"]["env_http_headers"]["Authorization"]
-            == _MCP_AUTH_HEADER_ENV_VAR
-
-    Any missing key or value mismatch returns False (stale or absent).
+    Any mismatch returns False so the caller proceeds to rewrite the section.
     """
-    section = data.get("mcp_servers", {}).get(_CIDX_MCP_NAME, {})
-    if not section:
+    block = _extract_cidx_local_block(text)
+    if not block:
         return False
-    if section.get("url") != url:
+    if "bearer_token_env_var" in block:
         return False
-    env_headers = section.get("env_http_headers", {})
-    return env_headers.get("Authorization") == _MCP_AUTH_HEADER_ENV_VAR
+    if f'url = "{url}"' not in block:
+        return False
+    expected_auth_line = f'Authorization = "{_MCP_AUTH_HEADER_ENV_VAR}"'
+    return expected_auth_line in block
 
 
 # ---------------------------------------------------------------------------
@@ -206,20 +196,16 @@ def _ensure_codex_mcp_http_registered(
     url = f"http://{host}:{port}{_MCP_PATH}"
 
     try:
-        data, parse_error = _read_toml(config_toml)
-        if parse_error is not None:
-            logger.warning("cidx-local MCP registration skipped — %s", parse_error)
-            return
+        existing_text = (
+            config_toml.read_text(encoding="utf-8") if config_toml.exists() else ""
+        )
 
-        if _is_already_registered(data, url):
+        if _is_already_registered_text(existing_text, url):
             logger.info(
                 "cidx-local MCP already registered in %s — skipping write", config_toml
             )
             return
 
-        existing_text = (
-            config_toml.read_text(encoding="utf-8") if config_toml.exists() else ""
-        )
         _write_toml_atomic(config_toml, url, existing_text)
         logger.info("cidx-local MCP registered in %s at %s", config_toml, url)
 
