@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.11 — 2026-04-26
+
+### Fixed: v9.23.10 silent registration failure on staging (Python 3.9 / no `tomli`)
+
+- **Symptom**: After v9.23.10 deploy, staging's `codex mcp get cidx-local` still returned the v9.23.9 schema with `bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"`. End-to-end Codex Pass 2 still failed: stale env-var name, no `env_http_headers` block, codex sent the wrong header on every MCP call.
+
+- **Root cause**: v9.23.10's `_read_toml` did `import tomli`. Production deploys ship Python 3.9 (no `tomllib` builtin) and do not have `tomli` installed. The import raised `ModuleNotFoundError`, the entry point's broad `except Exception` caught it and logged a single WARNING (`cidx-local MCP registration failed — ModuleNotFoundError: No module named 'tomli'`), and the registration was silently skipped. Unit tests in dev passed because `tomli` was already installed on dev machines via a transitive dep — codex review's independent verification ran on the same dev box, masking the bug.
+
+- **Fix**: Dropped the parser dependency entirely from production code. `_read_toml` removed; `_is_already_registered(data, url)` replaced with `_is_already_registered_text(text, url)` using regex/substring checks against the raw config.toml file content. The section-replacement path was already regex-based, so read and write paths are now consistent.
+
+- **Regression tests**:
+  - `test_production_module_imports_without_tomli` — asserts `codex_mcp_registration.py` source contains zero `tomli` or `tomllib` references; locks in the no-parser invariant.
+  - `test_staging_v9_23_9_stale_bearer_token_env_var_triggers_rewrite` — pre-populates config.toml with the v9.23.9 schema and asserts (via plain text matching, no parser) that the entry point rewrites to env_http_headers, removes the stale `bearer_token_env_var` line, and adds the `[mcp_servers.cidx-local.env_http_headers]` sub-table.
+
+- **Lesson**: unit tests passing in dev does not mean production works. The codex E2E auth flow had to actually run on Python 3.9 staging to expose the dependency mismatch. v9.23.10 codex review approved the architecture but couldn't catch the runtime import gap because the review ran in dev too.
+
 ## v9.23.10 — 2026-04-25
 
 ### Codex MCP auth — persistent Basic credentials replace short-lived JWT
