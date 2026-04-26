@@ -65,6 +65,9 @@ HNSWLIB_REPO_URL = "https://github.com/LightspeedDMS/hnswlib.git"
 # Bug #839: Claude CLI auto-update timeout constants
 NPM_VERSION_TIMEOUT_SECONDS = 5  # How long to wait for `npm --version` probe
 CLAUDE_CLI_UPDATE_TIMEOUT_SECONDS = 180  # How long to wait for npm global install
+# Story #845: Codex CLI install timeout constants
+CODEX_CLI_INSTALL_TIMEOUT_SECONDS = 300  # npm install can be slow; generous budget
+CODEX_VERSION_PROBE_TIMEOUT_SECONDS = 10  # Quick binary probe after install
 
 
 class DeploymentExecutor:
@@ -1557,7 +1560,9 @@ class DeploymentExecutor:
         try:
             from code_indexer.server.utils.config_manager import ServerConfigManager
 
-            config = ServerConfigManager(server_dir_path=str(_cidx_data_dir)).load_config()
+            config = ServerConfigManager(
+                server_dir_path=str(_cidx_data_dir)
+            ).load_config()
             flag_enabled = bool(
                 config and getattr(config, "enable_malloc_arena_max", False)
             )
@@ -2823,6 +2828,16 @@ class DeploymentExecutor:
                 extra={"correlation_id": get_correlation_id()},
             )
 
+        # Step 6.7: Story #845 - Idempotently install/update Codex CLI (optional feature)
+        if not self._ensure_codex_cli_installed():
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-144",
+                    "Codex CLI could not be verified/installed — feature effectively disabled",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+
         # Step 7: Ensure ripgrep is installed (Bug #157: log result)
         ripgrep_result = self.ensure_ripgrep()
         if ripgrep_result:
@@ -2970,3 +2985,120 @@ class DeploymentExecutor:
                 )
             )
             return False
+
+    def _run_codex_npm_install(self) -> bool:
+        """Run `npm install -g @openai/codex` and return True on success.
+
+        Handles nonzero returncode, TimeoutExpired, and OSError as
+        WARNING + return False. Never raises.
+        """
+        try:
+            result = subprocess.run(
+                ["npm", "install", "-g", "@openai/codex"],
+                capture_output=True,
+                text=True,
+                timeout=CODEX_CLI_INSTALL_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            logger.debug(
+                "npm install @openai/codex stdout: %s",
+                result.stdout,
+                extra={"correlation_id": get_correlation_id()},
+            )
+            if result.returncode != 0:
+                logger.warning(
+                    format_error_log(
+                        "DEPLOY-GENERAL-144",
+                        f"npm install @openai/codex failed (exit {result.returncode}): "
+                        f"{result.stderr}",
+                        extra={"correlation_id": get_correlation_id()},
+                    )
+                )
+                return False
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-144",
+                    f"npm install @openai/codex timed out after {CODEX_CLI_INSTALL_TIMEOUT_SECONDS}s",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+        except OSError as exc:
+            logger.warning(
+                format_error_log(
+                    "DEPLOY-GENERAL-144",
+                    f"npm install @openai/codex could not be spawned: {exc}",
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            )
+            return False
+
+    def _probe_codex_version(self) -> None:
+        """Run `codex --version` and log the result. Never raises.
+
+        Logs INFO on clean exit, WARNING on nonzero returncode,
+        FileNotFoundError, or TimeoutExpired. All outcomes are non-fatal.
+        """
+        try:
+            probe = subprocess.run(
+                ["codex", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=CODEX_VERSION_PROBE_TIMEOUT_SECONDS,
+                shell=False,
+            )
+            if probe.returncode == 0:
+                logger.info(
+                    "Codex CLI installed: %s",
+                    probe.stdout.strip(),
+                    extra={"correlation_id": get_correlation_id()},
+                )
+            else:
+                logger.warning(
+                    "Codex CLI installed but 'codex --version' returned exit %d — "
+                    "binary may need PATH refresh",
+                    probe.returncode,
+                    extra={"correlation_id": get_correlation_id()},
+                )
+        except FileNotFoundError:
+            logger.warning(
+                "Codex CLI installed successfully but 'codex' binary not found "
+                "on PATH immediately after install — PATH may need refresh",
+                extra={"correlation_id": get_correlation_id()},
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Codex CLI version probe timed out after %ds — "
+                "install may have succeeded; binary availability unconfirmed",
+                CODEX_VERSION_PROBE_TIMEOUT_SECONDS,
+                extra={"correlation_id": get_correlation_id()},
+            )
+
+    def _ensure_codex_cli_installed(self) -> bool:
+        """Story #845: idempotently install/update @openai/codex via npm.
+
+        - If npm is not on PATH, logs WARNING and returns True (optional-feature
+          semantics — CIDX must not fail when npm is absent).
+        - Otherwise runs `npm install -g @openai/codex` via _run_codex_npm_install().
+        - On install success, probes `codex --version` via _probe_codex_version()
+          and logs result at INFO. Probe failures are non-fatal.
+        - Never raises. Returns False only when install itself fails or times out.
+
+        Returns:
+            True if npm was absent (optional skip) or install succeeded.
+            False if npm install returned nonzero, timed out, or failed to spawn
+            (DEPLOY-GENERAL-144 logged by _run_codex_npm_install).
+        """
+        if shutil.which("npm") is None:
+            logger.warning(
+                "npm not available on PATH; skipping Codex CLI install — "
+                "feature effectively disabled",
+                extra={"correlation_id": get_correlation_id()},
+            )
+            return True
+        if not self._run_codex_npm_install():
+            return False
+        self._probe_codex_version()
+        return True

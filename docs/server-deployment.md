@@ -597,5 +597,4 @@ both with and without verification to confirm the corrections justify the cost.
 ## Additional Resources
 
 - [Main README](../README.md) - Project overview and features
-- [MCP Bridge Documentation](mcpb/) - Claude Desktop integration
 - [GitHub Repository](https://github.com/LightspeedDMS/code-indexer) - Source code and issues

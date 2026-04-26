@@ -428,8 +428,9 @@ pipx upgrade code-indexer
    ```
 
 2. **Authentication valid**:
-   - Check ~/.mcpb/config.json contains tokens
-   - Re-run setup script if tokens expired
+   - Verify your JWT bearer token via `POST /auth/login` (`{"username": "...", "password": "..."}`) returns `200 OK` with `access_token`
+   - Confirm your MCP client points at the server's `/mcp` endpoint (authenticated, send the token in `Authorization: Bearer ...`) or `/mcp-public` (unauthenticated)
+   - Re-issue a fresh token if the existing one expired (default lifetime: 10 minutes)
 
 3. **Network connectivity**:
    ```bash
@@ -482,4 +483,3 @@ nano CLAUDE.md
 - **Configuration**: [Configuration Guide](configuration.md)
 
 ---
-

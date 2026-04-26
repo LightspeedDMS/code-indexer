@@ -5,6 +5,116 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Breaking Changes
+
+- **MCPB Removed (epic #756)**. The MCP Bridge subsystem has been removed in a single hard-removal pass with no deprecation window. Removed in this release: the `cidx-bridge` and `cidx-token-refresh` console-script entry points; the entire `src/code_indexer/mcpb/` Python module (12 files, ~2,053 LOC); the `tests/mcpb/` and `tests/installer/` test trees; the `install-mcpb.sh`, `scripts/setup-mcpb.sh`, `scripts/installer/mcpb-installer.nsi`, and `scripts/installer/README.md` installer scripts; the `scripts/build_binary.py` MCPB-bundle build script and its companion test; the `.github/workflows/release-mcpb.yml` CI workflow (688 lines); the entire `docs/mcpb/` documentation tree (6 files, ~5,862 lines). Migration: any MCP-aware client should connect directly to the CIDX server's native MCP endpoints — `/mcp` (JWT-Bearer-authenticated via `POST /auth/login`) or `/mcp-public` (unauthenticated). The `cidx-bridge` stdio-to-HTTP shim is no longer needed because every modern MCP client supports streaming HTTP/SSE transports natively. **Impact**: any installation that depended on `cidx-bridge` or `cidx-token-refresh` binaries will see `command not found` after upgrade. Past GitHub Release artifacts that bundle `install-mcpb.sh` remain downloadable per the repository's tag-immutability policy, but no new MCPB installer will be built going forward. See `RELEASE_NOTES.md` for the user-facing migration note.
+
+## v9.23.11 — 2026-04-26
+
+### Fixed: v9.23.10 silent registration failure on staging (Python 3.9 / no `tomli`)
+
+- **Symptom**: After v9.23.10 deploy, staging's `codex mcp get cidx-local` still returned the v9.23.9 schema with `bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"`. End-to-end Codex Pass 2 still failed: stale env-var name, no `env_http_headers` block, codex sent the wrong header on every MCP call.
+
+- **Root cause**: v9.23.10's `_read_toml` did `import tomli`. Production deploys ship Python 3.9 (no `tomllib` builtin) and do not have `tomli` installed. The import raised `ModuleNotFoundError`, the entry point's broad `except Exception` caught it and logged a single WARNING (`cidx-local MCP registration failed — ModuleNotFoundError: No module named 'tomli'`), and the registration was silently skipped. Unit tests in dev passed because `tomli` was already installed on dev machines via a transitive dep — codex review's independent verification ran on the same dev box, masking the bug.
+
+- **Fix**: Dropped the parser dependency entirely from production code. `_read_toml` removed; `_is_already_registered(data, url)` replaced with `_is_already_registered_text(text, url)` using regex/substring checks against the raw config.toml file content. The section-replacement path was already regex-based, so read and write paths are now consistent.
+
+- **Regression tests**:
+  - `test_production_module_imports_without_tomli` — asserts `codex_mcp_registration.py` source contains zero `tomli` or `tomllib` references; locks in the no-parser invariant.
+  - `test_staging_v9_23_9_stale_bearer_token_env_var_triggers_rewrite` — pre-populates config.toml with the v9.23.9 schema and asserts (via plain text matching, no parser) that the entry point rewrites to env_http_headers, removes the stale `bearer_token_env_var` line, and adds the `[mcp_servers.cidx-local.env_http_headers]` sub-table.
+
+- **Lesson**: unit tests passing in dev does not mean production works. The codex E2E auth flow had to actually run on Python 3.9 staging to expose the dependency mismatch. v9.23.10 codex review approved the architecture but couldn't catch the runtime import gap because the review ran in dev too.
+
+## v9.23.10 — 2026-04-25
+
+### Codex MCP auth — persistent Basic credentials replace short-lived JWT
+
+- **Root cause fixed**: v9.23.9 injected a short-lived admin JWT (`CIDX_MCP_BEARER_TOKEN`, default TTL 10 min) into each `CodexInvoker` subprocess. Pass 2 dependency analysis runs lasting 30+ minutes expired mid-flow, causing silent HTTP 401 failover to Claude. Fix: Codex now uses the same persistent `client_id:client_secret` pair issued by `MCPCredentialManager` that Claude uses, encoded as `Basic <base64>` and injected as `CIDX_MCP_AUTH_HEADER`. No JWT, no TTL, no mid-flow expiry.
+
+- **TOML-based MCP registration**: Codex 0.125 `codex mcp add` has no `--http-headers` / `--env-http-headers` flags (only `--bearer-token-env-var`). Registration now writes `$CODEX_HOME/config.toml` directly with `env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }`. The idempotency check reads the TOML back and skips the write when the section already matches. Atomic write via `.tmp` + `Path.replace()` with parent-dir creation and mode 0o600 preservation. Reference: https://developers.openai.com/codex/mcp.
+
+- **Stale v9.23.9 config migration**: When `config.toml` contains a `[mcp_servers.cidx-local]` section with `bearer_token_env_var` (old schema), it is silently replaced with the new `env_http_headers` section on the next server startup.
+
+- **New module `codex_mcp_auth_header_provider.py`**: `build_codex_mcp_auth_header_provider()` returns a closure that retrieves the cached `Authorization` header value from `MCPSelfRegistrationService` — fast path via `get_cached_auth_header_value()`, cache-miss path via `build_auth_header_from_creds()`. No credential assembly in the provider; the value is sliced from the already-assembled header string in `MCPSelfRegistrationService.register_in_claude_code()`.
+
+- **`CodexInvoker` rename**: `bearer_token_provider` / `_bearer_token_provider` / `CIDX_MCP_BEARER_TOKEN` renamed to `auth_header_provider` / `_auth_header_provider` / `CIDX_MCP_AUTH_HEADER`. Both production wiring sites updated: `DependencyMapAnalyzer._build_pass2_dispatcher()` and `DescriptionRefreshScheduler._build_cli_dispatcher()`.
+
+- **Deleted**: `codex_bearer_provider.py`, `test_codex_invoker_bearer_injection.py`, `test_codex_invoker_jwt_wiring.py`.
+
+## v9.23.9 — 2026-04-25
+
+### Codex MCP integration
+
+- **Codex MCP launcher gap closed**: Codex now registers `cidx-local` MCP via HTTP transport at server startup. Replaces the empty `_DEFAULT_CIDX_MCP_COMMAND = ""` placeholder from Story #848. Closes parity gap with Claude (`MCPSelfRegistrationService` HTTP+Basic-auth path). Note: superseded by v9.23.10 which replaces the JWT credential with persistent Basic auth.
+
+- **Hook gap accepted as permanent degradation**: codex 0.125 has no equivalent of Claude's `PostToolUse` hooks. Verified via `codex --help` and `codex exec --help`; only `--dangerously-bypass-approvals-and-sandbox` and `--sandbox` flags exist (reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. Documented in `CLAUDE.md` "Codex CLI Integration" subsection.
+
+## v9.23.8
+
+### Operator helpers
+
+- **`scripts/setup-codex-npm-prefix.sh --update-cidx-server-systemd` flag**: extends the v9.23.6 helper to optionally patch the cidx-server systemd unit's `Environment="PATH=..."` line, prepending the npm bin dir (defaults to `~/.npm-global/bin`) so the cidx-server process can find `codex` after the install. Closes the operationalization loop: with this flag, the only manual steps an operator needs are (1) running the script (security: chooses where global npm packages land), (2) entering OPENAI_API_KEY in the Web UI Config Screen (security: secret entry). Everything else (npm install, PATH setup, systemd unit patch + daemon-reload, codex login on next server restart, auth.json schema, dispatcher invocation) is now automatic. Idempotent: when the bin dir is already in PATH, no-op + skip rewrite. Honors `CIDX_SYSTEMD_UNIT_PATH` env override for testing. 5 new unit tests (10 total in the script suite). Manual E2E confirmed on staging: when `~/.npm-global/bin` was already added to the systemd PATH (via earlier manual edit), running with the flag emits "PATH already configured" and exits clean.
+
+### Recommended operator runbook (single command + 1 UI entry)
+
+```bash
+# 1. One-time host setup (operator-driven, security-sensitive):
+sudo -u <cidx-server-user> bash scripts/setup-codex-npm-prefix.sh --update-cidx-server-systemd
+sudo systemctl restart cidx-server
+
+# 2. Set OPENAI_API_KEY in Web UI:
+#    Browser → /admin/config → Codex CLI Integration → Enabled: Yes,
+#    Credential Mode: api_key, OPENAI_API_KEY: <sk-proj-...>, Save.
+#    On next cidx-server restart (or save-triggered reload), codex_cli_startup
+#    runs `codex login --with-api-key` (v9.23.7), writes the correct minimal
+#    apikey-mode auth.json, and CodexInvoker authenticates successfully without
+#    any further operator intervention.
+```
+
+## v9.23.7
+
+### Bug fixes
+
+- **Codex api_key-mode auth schema mismatch (epic #843 follow-up)**: Story #846's `CodexCredentialsFileManager.write_credentials` writes the OAuth/subscription schema (`auth_mode: "chatgpt"` + `tokens.{access_token, account_id, id_token, refresh_token}` + `last_refresh`) regardless of credential mode. For api_key mode, codex-cli expects a minimal schema `{"auth_mode": "apikey", "OPENAI_API_KEY": "..."}`. When api_key mode hit the OAuth-style auth.json, codex tried to use it as OAuth and the WebSocket failed with HTTP 401 (verified via earlier manual E2E). Fix: `codex_cli_startup.py:initialize_codex_manager_on_startup` now delegates api_key-mode auth to `codex login --with-api-key` via subprocess (key piped through stdin, never on the command line) — codex itself owns the schema, so we don't have to track it. Mirrors the Claude precedent (`claude_cli_manager._ensure_api_key_synced` uses `~/.claude.json` writer + env var sync). Subscription mode unchanged (still uses `CodexCredentialsFileManager` + lease loop). 7 new unit tests in `test_codex_login_with_api_key.py` covering: correct argv, key-via-stdin (not argv), success/nonzero/timeout/missing-binary/empty-key paths. Existing #846 startup tests updated to reflect the new branch.
+
+## v9.23.6
+
+### Operator helpers
+
+- **NEW `scripts/setup-codex-npm-prefix.sh`**: idempotent operator helper that resolves the EACCES failure observed on hosts where the system npm prefix (`/usr/local/lib/node_modules`) is not writable by the auto-updater's effective user. Detects current npm prefix; if it's a system path (`/usr`, `/usr/local`, `/opt`), switches to a user-writable `~/.npm-global` prefix via `npm config set prefix`; ensures `~/.bashrc` exports the new bin dir on PATH; runs `npm install -g @openai/codex`; verifies via `codex --version`. Prints a final summary block with the exact `Environment="PATH=..."` line operators need to add to the cidx-server systemd unit so the server process can find the binary. Once the systemd PATH is updated and cidx-server restarted, the auto-updater's Story #845 step 6.7 will find npm + the user-writable prefix on subsequent runs and `_ensure_codex_cli_installed` succeeds without WARNING. 5 unit tests (`tests/unit/scripts/test_setup_codex_npm_prefix.py`) using PATH-shimmed npm/codex binaries to avoid real network/host pollution. Manual E2E confirmed: ran on staging where v9.23.5 step 6.7 had failed `[DEPLOY-GENERAL-144] EACCES`; script installed Codex 0.125.0 to `/home/jsbattig/.npm-global/bin/codex` cleanly.
+
+### Follow-up still required
+- Operator must update the cidx-server systemd unit `Environment="PATH=..."` line to prepend `${HOME}/.npm-global/bin` (or the chosen prefix's `/bin`), then `systemctl daemon-reload + systemctl restart cidx-server`. The script's summary block prints the exact line to use. A future version may extend the script with a `--update-cidx-server-systemd` flag to automate this step.
+- Codex CLI authentication still requires `codex login` (ChatGPT OAuth session) populated under `CODEX_HOME` before Codex can actually execute jobs. See v9.23.5 epic #843 known-limitations.
+
+## v9.23.5
+
+### Features — Epic #843: Codex CLI Integration for Background Intelligence
+
+- **Story #844 — Codex CLI Configuration via Web UI**: New `CodexIntegrationConfig` dataclass with fields `enabled`, `credential_mode` (none/api_key/subscription), `api_key`, `lcp_url`, `lcp_vendor`, `codex_weight` (0.0–1.0). Web UI Config Screen surface: Yes/No `<select>` for `enabled` (matches OIDC/Langfuse/Claude precedent), `<select>` for credential mode, `type="password"` masked api_key input, numeric input for weight, and Jinja `{% if credential_mode == ... %}` guards in BOTH display and edit modes so only the relevant credential fields show per active mode. XSS-safe (`escHtml` on `aria-label`/dynamic attributes), masked-placeholder API-key preserve on save. Section sits immediately after Claude CLI Integration (its conceptual sibling). 49 tests including 4 regression tests preventing reintroduction of: form-name/handler-key mismatch, unmasked read-only display, no-op JS toggle stub, range slider, checkbox-vs-select inconsistency.
+
+- **Story #845 — Auto-Updater Installs/Updates Codex CLI**: New idempotent step 6.7 in `DeploymentExecutor.execute()` (`_ensure_codex_cli_installed`) running `npm install -g @openai/codex` followed by `codex --version` verification at INFO level. Optional-feature semantics: when `npm` is absent on PATH, function logs WARNING and returns True (CIDX must not fail). Subprocess timeout protection via `subprocess.TimeoutExpired` catch. Non-blocking in `execute()` — a Codex install failure does not bail out the auto-updater. Error code `DEPLOY-GENERAL-144`. 8 unit tests + 212 broader auto_update regression all green.
+
+- **Story #846 — Codex Session Vending via llm-creds-provider**: Three-mode credential lifecycle (`none`/`api_key`/`subscription`) mirroring Claude. New `CodexCredentialsFileManager` (atomic `auth.json` write to `{CODEX_HOME}/auth.json` with 0o600 perms; `chatgpt` auth_mode + tokens dict + OPENAI_API_KEY + last_refresh; idempotent delete; corruption-safe read). New `CodexLeaseLoop` parallel to Claude lease loop with vendor-scoped state file (`codex_lease_state.json`) preventing collision with Claude's `llm_lease_state.json`. New `initialize_codex_manager_on_startup` lifecycle entry point invoked from FastAPI lifespan; CODEX_HOME at `{CIDX_DATA_DIR}/codex-home/` honoring Bug #879 split-user pattern. Shutdown hook hoisted onto `app.state.codex_shutdown_hook` and invoked in lifespan teardown — leases returned, auth.json cleaned up. **SPIKE outcome**: llm-creds-provider OpenAI vendor checkout returns `{lease_id, credential_id, access_token, refresh_token, custom_fields:{}}` but Codex auth.json expects `tokens.account_id` and `tokens.id_token`. Workaround in `_provider_response_to_auth_json`: pull from `custom_fields` if vendor surfaces them, fall back to empty strings otherwise (documented inline; vendor-side enhancement is the long-term fix). New error code `APP-GENERAL-050` for Codex init failure (resolved collision with `api_key_management`'s `APP-GENERAL-046`). `LlmLeaseStateManager.__init__` extended with `state_filename` parameter (4-layer path validation: non-empty, no `.`/`..`, `Path.parts` length 1, basename equality). 85 tests covering all credential modes + state-file isolation + lifespan wiring.
+
+- **Story #847 — CLI Dispatcher (Selection + Failover) for Description Gen + Refinement**: New `IntelligenceCliInvoker` Protocol + `InvocationResult` dataclass + `FailureClass` enum (`RETRYABLE_ON_SAME` / `RETRYABLE_ON_OTHER`). `ClaudeInvoker` extracts the existing PTY-via-`script` invocation pattern from `description_refresh_scheduler.py:544-621` preserving exact behavior. `CodexInvoker` builds `codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox <prompt>` (codex-cli 0.125.0 compatible — original spec assumed older `codex --json -q` syntax which 0.125 rejects), with `subprocess.Popen(start_new_session=True)` + `os.killpg(os.getpgid(proc.pid), signal.SIGKILL)` on timeout (kills full process group preventing orphaned Node + Rust subprocesses). JSONL parsing filters `event.type == "item.completed"` AND `item.type == "agent_message"`, returns `item.text` of the LAST matching event (no markdown scraping). `CliDispatcher` performs weighted random primary selection (`random() < codex_weight`), single retry on RETRYABLE_ON_SAME, failover to alternate on RETRYABLE_ON_OTHER (or after retry exhaustion). Wired into `description_refresh_scheduler.py` and `claude_cli_manager.py`. When Codex disabled (`codex=None`/`codex_weight=0.0`), behavior is bit-identical to legacy direct-Claude path. 90 tests covering selection distribution, retry, failover, JSONL parsing, process-group kill, and wiring.
+
+- **Story #848 — Codex CLI for Dependency Map Pass 2 (Domain Refinement)**: Pass 2 entry point in `dependency_map_analyzer.py` wired to `CliDispatcher` (cached on instance attribute, built once per analyzer run). `flow="dependency_map_pass_2"` distinct from description flows. PostToolUse `--settings` JSON for turn-count escalation routes to `ClaudeInvoker` only (Codex MCP-tool calls don't fire PostToolUse hooks per [openai/codex#16732](https://github.com/openai/codex/issues/16732) — accepted degradation, documented in source comment block). All retries (max-turn errors AND insufficient-output retries) execute on Claude path with full hook support. New `_ensure_codex_mcp_registered` helper runs `codex mcp add cidx-local -- <command>` at startup with CODEX_HOME env scope, idempotent, `subprocess.TimeoutExpired` caught. **Known limitation (FIXME, follow-up issue needed)**: cidx-local stdio launcher command is empty placeholder. cidx exposes its MCP via HTTP transport (per existing `MCPSelfRegistrationService` for Claude); codex-cli's `mcp add ... -- <stdio cmd>` requires a real stdio launcher OR HTTP transport with custom auth headers. Two follow-up paths: (a) implement `cidx mcp serve` as a stdio launcher in `cli.py`, (b) verify codex-cli MCP HTTP transport support and use the existing HTTP+Basic-auth pattern. Until follow-up lands: registration is skipped (empty command → INFO log + early return), CIDX startup unaffected, dispatcher fails over Codex Pass 2 → Claude per AC5. 17 tests including failover end-to-end + GitHub issue #16732 source comment guard.
+
+### Architecture Notes
+
+- IntelligenceCliInvoker Protocol provides a structural duck-type contract for `ClaudeInvoker` and `CodexInvoker` (both implement `invoke(flow, cwd, prompt, timeout) -> InvocationResult`); `@runtime_checkable` for isinstance verification.
+- `random.random() < codex_weight` selection: weight=0.0 is always-Claude (since `random()` returns [0.0, 1.0)), weight=1.0 is always-Codex.
+- Codex JSONL output contract: structured events, no markdown scraping. `item.completed` + `item.type == "agent_message"` is the only path to extract the agent's final response text.
+- Process-group kill (`start_new_session=True` + `os.killpg(os.getpgid(pid), SIGKILL)`) is the only way to clean up Codex's Node wrapper + Rust subprocess on timeout. `proc.kill()` alone leaks them.
+
+### Known limitations & follow-ups
+
+- **Codex CLI auth**: codex-cli uses ChatGPT OAuth session (via `codex login`), NOT `OPENAI_API_KEY`. For api_key mode to drive Codex end-to-end, either (a) operator runs `codex login` to populate CODEX_HOME with OAuth tokens before CIDX starts, OR (b) subscription mode via Story #846 lease loop populates auth.json with valid session tokens (open SPIKE: vendor-side `account_id` / `id_token` enhancement).
+- **cidx-local MCP launcher**: see Story #848 known-limitation note. Without it, Codex Pass 2 cannot reach CIDX MCP tools end-to-end. Dispatcher failover to Claude works correctly; full Codex MCP path requires the launcher follow-up.
+
 ## v9.23.4
 
 ### Features

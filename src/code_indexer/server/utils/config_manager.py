@@ -556,6 +556,42 @@ class ClaudeIntegrationConfig:
 
 
 @dataclass
+class CodexIntegrationConfig:
+    """
+    Codex CLI integration configuration (Story #844).
+
+    Controls whether and how Codex participates in background intelligence jobs.
+    Mirrors ClaudeIntegrationConfig but is scoped exclusively to Codex CLI.
+    """
+
+    # Master enable/disable for Codex CLI participation
+    enabled: bool = False
+    # Credential acquisition mode: "none" | "api_key" | "subscription"
+    credential_mode: str = "none"
+    # OPENAI_API_KEY used when credential_mode == "api_key"
+    api_key: Optional[str] = None
+    # llm-creds-provider base URL used when credential_mode == "subscription"
+    lcp_url: Optional[str] = None
+    # Vendor name sent to LCP (future-proof for multi-vendor support)
+    lcp_vendor: str = "openai"
+    # Distribution weight: 0.0 = always Claude, 1.0 = always Codex, 0.5 = 50/50
+    codex_weight: float = 0.5
+
+    def __post_init__(self) -> None:
+        """Validate field values on construction."""
+        _valid_modes = {"none", "api_key", "subscription"}
+        if self.credential_mode not in _valid_modes:
+            raise ValueError(
+                f"Invalid credential_mode '{self.credential_mode}': "
+                f"must be one of {sorted(_valid_modes)}"
+            )
+        if not (0.0 <= self.codex_weight <= 1.0):
+            raise ValueError(
+                f"Invalid codex_weight {self.codex_weight}: must be in [0.0, 1.0]"
+            )
+
+
+@dataclass
 class RepositoryConfig:
     """
     Repository configuration (Story #15 - AC4).
@@ -1034,6 +1070,9 @@ class ServerConfig:
     # Story #885 - Lifecycle analysis subprocess timeout configuration
     lifecycle_analysis_config: Optional[LifecycleAnalysisConfig] = None
 
+    # Story #844 - Codex CLI integration configuration (runtime, not bootstrap)
+    codex_integration_config: Optional[CodexIntegrationConfig] = None
+
     # Bug #678 - Sin-bin configs per provider (server runtime only, not seeded to CLI)
     voyage_ai_sinbin: Optional[ProviderSinBinConfig] = None
     cohere_sinbin: Optional[ProviderSinBinConfig] = None
@@ -1058,12 +1097,8 @@ class ServerConfig:
     # Both default True since v9.23.3 so fresh installs automatically inherit the
     # protections. Operators can disable either by setting the flag to false in
     # ~/.cidx-server/config.json; readable before the DB is available (cleanup daemon thread).
-    enable_malloc_trim: bool = (
-        True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
-    )
-    enable_malloc_arena_max: bool = (
-        True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
-    )
+    enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
+    enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
 
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
@@ -1149,6 +1184,9 @@ class ServerConfig:
         # Story #885 - Initialize lifecycle analysis config
         if self.lifecycle_analysis_config is None:
             self.lifecycle_analysis_config = LifecycleAnalysisConfig()
+        # Story #844 - Initialize Codex integration config
+        if self.codex_integration_config is None:
+            self.codex_integration_config = CodexIntegrationConfig()
 
 
 class ServerConfigManager:
@@ -1652,6 +1690,18 @@ class ServerConfigManager:
         ):
             config_dict["lifecycle_analysis_config"] = LifecycleAnalysisConfig(
                 **config_dict["lifecycle_analysis_config"]
+            )
+
+        # Story #844: Convert codex_integration_config dict to CodexIntegrationConfig.
+        # Unknown keys are filtered for rolling-upgrade safety — same fields() pattern
+        # as claude_integration_config conversion above.
+        if "codex_integration_config" in config_dict and isinstance(
+            config_dict["codex_integration_config"], dict
+        ):
+            _cx_dict = config_dict["codex_integration_config"]
+            _cx_allowed = {f.name for f in fields(CodexIntegrationConfig)}
+            config_dict["codex_integration_config"] = CodexIntegrationConfig(
+                **{k: v for k, v in _cx_dict.items() if k in _cx_allowed}
             )
 
         # Bug #678: Convert sinbin dicts to ProviderSinBinConfig

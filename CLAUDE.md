@@ -72,7 +72,7 @@ NEVER push to `master` without explicit user authorization in the **current conv
 |-------|-------|---------------|------|
 | `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~6-7 min |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
-| `e2e-automation.sh` | 4-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote | Final regression gate — ALL completed work | ~30-60 min |
+| `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate — ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests — it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
 
@@ -96,11 +96,12 @@ NEVER push to `master` without explicit user authorization in the **current conv
 ### e2e-automation.sh Usage
 
 ```bash
-./e2e-automation.sh              # All 4 phases
+./e2e-automation.sh              # All 5 phases
 ./e2e-automation.sh --phase 1    # CLI standalone
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
+./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server, dual provider)
 ```
 
 Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing. Outcomes: SUCCESS = done; failures attributable to your change = root-cause → fix → re-run; new skips = treat as failure.
@@ -196,6 +197,10 @@ NEVER: re-introduce the piggyback cleanup trigger in `get_connection()` (lost ra
 
 - `enable_malloc_trim: bool = True` -- calls `glibc malloc_trim(0)` at the end of each `_cleanup_expired_entries()` cycle (implemented in `_maybe_malloc_trim()` in `hnsw_index_cache.py`). Linux + glibc only; silently no-ops on musl/macOS. Default ON since v9.23.3.
 - `enable_malloc_arena_max: bool = True` -- idempotently injects `Environment=MALLOC_ARENA_MAX=2` into the cidx-server systemd unit file on each auto-updater run (`_ensure_malloc_arena_max()` in `deployment_executor.py`, step 6.6, error code `DEPLOY-GENERAL-143`). Reverting the flag removes the line on the next auto-updater cycle. Default ON since v9.23.3.
+
+**Codex CLI auto-install (Story #845)**: `_ensure_codex_cli_installed()` in `deployment_executor.py`, step 6.7, error code `DEPLOY-GENERAL-144`. Runs `npm install -g @openai/codex` on every auto-updater cycle (idempotent — both first install and updates). If npm is not on PATH, logs WARNING and returns True (optional-feature semantics — CIDX starts fine without Codex). After install, probes `codex --version` and logs result at INFO. Non-fatal: a failed install logs WARNING and returns False but does not abort the auto-updater. Tests: `tests/unit/server/auto_update/test_ensure_codex_cli_installed_845.py`.
+
+**Codex auth modes (Story #846)**: Two distinct paths in `src/code_indexer/server/startup/codex_cli_startup.py`. `api_key` mode: delegates auth.json population to `codex login --with-api-key` (key read from stdin) via `_login_codex_with_api_key()` — codex owns the auth.json schema for this mode, preventing the OAuth-schema mismatch that caused WebSocket 401s. Also sets `OPENAI_API_KEY` env var as belt-and-suspenders fallback. `subscription` mode: uses the OAuth lease-loop path via `CodexCredentialsFileManager` + `CodexLeaseLoop` (unchanged). `none` mode: no-op. Tests: `tests/unit/server/startup/test_codex_cli_startup_846.py`, `tests/unit/server/startup/test_codex_login_with_api_key.py`.
 
 Both flags are bootstrap-only (read from `config.json` before DB is available) and default True since v9.23.3 so fresh installs and existing installs that don't pin the flags automatically get the protection. Tests: `tests/unit/server/cache/test_malloc_trim_flag_bug_897.py`, `tests/unit/server/auto_update/test_malloc_arena_max_bug_897.py`.
 
@@ -349,6 +354,11 @@ Rationale: batch processing needs rate limiting for API cost; interactive UX exp
 
 No fallbacks — research and propose solutions. JSON errors: use `_validate_and_debug_prompt()`, check non-ASCII characters, long lines, quotes.
 
+**Codex/Claude divergence (v9.23.10)**:
+
+- `cidx-local` MCP is registered automatically at server startup for BOTH CLI paths using the SAME persistent `client_id:client_secret` credentials issued by `MCPCredentialManager`: Claude via `MCPSelfRegistrationService` (HTTP + Basic auth header passed directly), and Codex via `_ensure_codex_mcp_http_registered` in `codex_cli_startup.py` (TOML config — `env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }` — codex reads `CIDX_MCP_AUTH_HEADER` env var and injects it verbatim as the Authorization header). `CodexInvoker` retrieves the header value via `build_codex_mcp_auth_header_provider()` closure. No JWT, no TTL. See `src/code_indexer/server/startup/codex_mcp_registration.py` and `src/code_indexer/server/services/codex_mcp_auth_header_provider.py`.
+- Hook parity is NOT achieved — codex 0.125 has no `PostToolUse` hook equivalent (verified via `codex --help` and `codex exec --help`; reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. This is accepted as permanent degradation. See CHANGELOG v9.23.9.
+
 ---
 
 ## Background Jobs (MANDATORY Checklist)
@@ -382,9 +392,9 @@ Runtime loader with caching: `tool_doc_loader.py`. Tests: `tests/unit/tools/test
 
 ## Version Bump
 
-Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/mcpb/setup.md` and `docs/server-deployment.md`.
+Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/server-deployment.md`.
 
-DO NOT bump on CIDX version change: `mcpb/__init__.py` (separate version 1.0.0), `server/app.py` OpenAPI spec, `test-fixtures/` test data.
+DO NOT bump on CIDX version change: `server/app.py` OpenAPI spec, `test-fixtures/` test data.
 
 Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
 
