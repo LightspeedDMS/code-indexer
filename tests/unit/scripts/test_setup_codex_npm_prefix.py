@@ -237,9 +237,7 @@ def test_path_export_added_to_bashrc(system_prefix_env, home_dir):
 
     # First run
     result1 = _run_script([], home_dir, shim_dir)
-    assert result1.returncode == 0, (
-        f"First run failed. stderr: {result1.stderr!r}"
-    )
+    assert result1.returncode == 0, f"First run failed. stderr: {result1.stderr!r}"
     bashrc = home_dir / ".bashrc"
     content_after_first = bashrc.read_text()
     assert ".npm-global" in content_after_first, (
@@ -251,9 +249,7 @@ def test_path_export_added_to_bashrc(system_prefix_env, home_dir):
 
     # Second run
     result2 = _run_script([], home_dir, shim_dir)
-    assert result2.returncode == 0, (
-        f"Second run failed. stderr: {result2.stderr!r}"
-    )
+    assert result2.returncode == 0, f"Second run failed. stderr: {result2.stderr!r}"
     content_after_second = bashrc.read_text()
     npm_export_count = content_after_second.count(".npm-global/bin")
     assert npm_export_count == 1, (
@@ -398,8 +394,12 @@ def test_systemd_path_already_present_noop(systemd_env):
     assert "already" in (result.stdout + result.stderr).lower(), (
         f"Expected 'already' in output. Got: {result.stdout + result.stderr!r}"
     )
-    assert unit_file.read_text() == original_content, "Unit file was rewritten unexpectedly"
-    assert unit_file.stat().st_mtime == original_mtime, "Unit file mtime changed unexpectedly"
+    assert unit_file.read_text() == original_content, (
+        "Unit file was rewritten unexpectedly"
+    )
+    assert unit_file.stat().st_mtime == original_mtime, (
+        "Unit file mtime changed unexpectedly"
+    )
 
 
 def test_systemd_path_prepended_when_missing(systemd_env):

@@ -340,7 +340,7 @@ def _extract_query_metadata(result: dict) -> dict:
     content = result.get("content", [])
     assert content, "Expected non-empty MCP response content"
     payload = json.loads(content[0]["text"])
-    return payload.get("results", {}).get("query_metadata", {})
+    return dict(payload.get("results", {}).get("query_metadata", {}))
 
 
 def _invoke_search_code_with_mocks(
@@ -387,13 +387,15 @@ def _invoke_search_code_with_mocks(
 
         from code_indexer.server.mcp.handlers import search_code
 
-        return search_code(
-            {
-                "query_text": _EXPECTED_QUERY,
-                "search_mode": search_mode,
-                "limit": _EXPECTED_LIMIT,
-            },
-            mock_user,
+        return dict(
+            search_code(
+                {
+                    "query_text": _EXPECTED_QUERY,
+                    "search_mode": search_mode,
+                    "limit": _EXPECTED_LIMIT,
+                },
+                mock_user,
+            )
         )
 
 

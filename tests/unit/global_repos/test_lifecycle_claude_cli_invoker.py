@@ -106,12 +106,15 @@ def test_invoker_returns_unified_result_on_success(tmp_path: Path) -> None:
 
     invoker = LifecycleClaudeCliInvoker()
 
-    with patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
-        side_effect=_fake_invoke,
-    ), patch(
-        "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
-        return_value=_make_default_config_service_mock(),
+    with (
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.invoke_claude_cli",
+            side_effect=_fake_invoke,
+        ),
+        patch(
+            "code_indexer.global_repos.lifecycle_claude_cli_invoker.get_config_service",
+            return_value=_make_default_config_service_mock(),
+        ),
     ):
         result = invoker("alias-a", repo_path)
 
@@ -183,7 +186,9 @@ def test_prompt_contains_always_emit_v3_guidance() -> None:
     assert "NEVER omit a section" in prompt
 
     # Old OPTIONAL language must be gone
-    assert "OMIT the section entirely (do not emit a section full of nulls)" not in prompt
+    assert (
+        "OMIT the section entirely (do not emit a section full of nulls)" not in prompt
+    )
 
 
 # ---------------------------------------------------------------------------

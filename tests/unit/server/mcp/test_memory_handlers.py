@@ -6,6 +6,7 @@ translators — the service has its own 174 unit tests.
 """
 
 import json
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.services.memory_store_service import (
@@ -35,9 +36,10 @@ def make_context(service_mock: MagicMock):
     )
 
 
-def _parse_response(response: dict) -> dict:
+def _parse_response(response: dict) -> dict[Any, Any]:
     """Parse the MCP content envelope and return the inner data dict."""
-    return json.loads(response["content"][0]["text"])
+    # cast needed: json.loads() returns Any; MCP handlers always return dict envelope
+    return cast(dict[Any, Any], json.loads(response["content"][0]["text"]))
 
 
 # ---------------------------------------------------------------------------

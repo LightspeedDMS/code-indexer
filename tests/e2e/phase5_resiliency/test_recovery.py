@@ -58,13 +58,13 @@ VOYAGE_TARGET = "api.voyageai.com"
 # ---------------------------------------------------------------------------
 # Named constants — no magic numbers in test bodies or helpers.
 # ---------------------------------------------------------------------------
-KILL_ERROR_RATE: float = 1.0          # 100% interception rate for kill profiles
-KILL_ERROR_CODE: int = 503            # HTTP status the fault harness injects
-HTTP_OK: int = 200                    # Expected status for successful GET/DELETE
-HTTP_CREATED: int = 201               # Accepted status for profile PUT (create)
-HTTP_NOT_FOUND: int = 404             # Expected status for profile GET after DELETE
-SEARCH_LIMIT: int = 50                # Result limit — large enough that dual-provider RRF can widen past single-provider cap
-SERVER_ERROR_THRESHOLD: int = 500     # GET /health must return below this
+KILL_ERROR_RATE: float = 1.0  # 100% interception rate for kill profiles
+KILL_ERROR_CODE: int = 503  # HTTP status the fault harness injects
+HTTP_OK: int = 200  # Expected status for successful GET/DELETE
+HTTP_CREATED: int = 201  # Accepted status for profile PUT (create)
+HTTP_NOT_FOUND: int = 404  # Expected status for profile GET after DELETE
+SEARCH_LIMIT: int = 50  # Result limit — large enough that dual-provider RRF can widen past single-provider cap
+SERVER_ERROR_THRESHOLD: int = 500  # GET /health must return below this
 
 
 def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
@@ -81,17 +81,17 @@ def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
         f"{put_resp.status_code} {put_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
-    assert get_resp.status_code == HTTP_OK and get_resp.json()["error_rate"] == KILL_ERROR_RATE, (
-        f"Kill profile for {target!r} not persisted correctly: {get_resp.text}"
-    )
+    assert (
+        get_resp.status_code == HTTP_OK
+        and get_resp.json()["error_rate"] == KILL_ERROR_RATE
+    ), f"Kill profile for {target!r} not persisted correctly: {get_resp.text}"
 
 
 def _delete_profile(client: FaultAdminClient, target: str) -> None:
     """DELETE the fault profile for *target* and verify it returns 404 after."""
     del_resp = client.delete(f"/admin/fault-injection/profiles/{target}")
     assert del_resp.status_code == HTTP_OK, (
-        f"DELETE profile for {target!r} failed: "
-        f"{del_resp.status_code} {del_resp.text}"
+        f"DELETE profile for {target!r} failed: {del_resp.status_code} {del_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
     assert get_resp.status_code == HTTP_NOT_FOUND, (
@@ -108,7 +108,7 @@ def _get_results(result_body: dict) -> list:
     """
     if not result_body.get("success"):
         return []
-    return result_body.get("results", {}).get("results", [])
+    return list(result_body.get("results", {}).get("results", []))
 
 
 def _providers_in_results(items: list) -> set:
@@ -131,7 +131,9 @@ def _providers_in_results(items: list) -> set:
 
 VOYAGE_PROVIDER = "voyage-ai"
 RESULT_PREVIEW_COUNT: int = 3  # items shown in assertion messages
-HEALTH_RESET_OK: int = 200     # expected status for POST /admin/provider-health/reset-state
+HEALTH_RESET_OK: int = (
+    200  # expected status for POST /admin/provider-health/reset-state
+)
 
 
 def _reset_provider_health(client: FaultAdminClient) -> None:

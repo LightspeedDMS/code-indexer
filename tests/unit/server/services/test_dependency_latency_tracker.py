@@ -125,9 +125,11 @@ def _wait_for_rows(backend, timeout_s: float = WRITER_FLUSH_TIMEOUT_S) -> List:
             WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
         )
         if rows:
-            return rows
-    return backend.select_samples_for_window(
-        WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
+            return list(rows)
+    return list(
+        backend.select_samples_for_window(
+            WINDOW_START_TS, time.time() + WINDOW_END_OFFSET_S
+        )
     )
 
 

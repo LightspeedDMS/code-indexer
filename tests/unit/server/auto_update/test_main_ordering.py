@@ -12,6 +12,7 @@ Validates that:
 import json
 import sys
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -62,9 +63,12 @@ class TestMainRetryPathSurvivesUrlFailure:
         url_resolve_called = []
 
         fake_executor = MagicMock()
-        fake_executor._should_retry_on_startup.side_effect = lambda: (
-            retry_check_called.append(True) or True
-        )
+
+        def _check_retry() -> bool:
+            retry_check_called.append(True)
+            return True
+
+        fake_executor._should_retry_on_startup.side_effect = _check_retry
         fake_executor._write_status_file.side_effect = (
             lambda s, d="": write_status_calls.append(s)
         )
@@ -170,7 +174,11 @@ class TestMainHealthyPathPreservesBehavior:
 
     def test_url_resolved_once_on_normal_path(self, normal_executor, _patch_infra):
         """_resolve_server_url must be called exactly once on the normal poll path."""
-        url_calls = []
+        url_calls: list[int] = []
+
+        def _record_url_call() -> str:
+            url_calls.append(1)
+            return "http://localhost:8000"
 
         with (
             patch(
@@ -179,7 +187,7 @@ class TestMainHealthyPathPreservesBehavior:
             ),
             patch(
                 "code_indexer.server.auto_update.run_once._resolve_server_url",
-                side_effect=lambda: url_calls.append(1) or "http://localhost:8000",
+                side_effect=_record_url_call,
             ),
         ):
             with pytest.raises(SystemExit):
@@ -252,7 +260,9 @@ class TestSmokeTestGuard:
             return {}
         raw = status_file.read_text()
         try:
-            return json.loads(raw)
+            return cast(
+                dict, json.loads(raw)
+            )  # json.loads returns Any; status files are always objects
         except json.JSONDecodeError as exc:
             pytest.fail(f"status file contained invalid JSON: {exc}\nRaw: {raw!r}")
 

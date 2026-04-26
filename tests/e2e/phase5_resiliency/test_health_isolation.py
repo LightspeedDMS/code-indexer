@@ -67,13 +67,13 @@ COHERE_PROVIDER_NAME = "cohere"
 # ---------------------------------------------------------------------------
 # Named constants — no magic numbers in test bodies or helpers.
 # ---------------------------------------------------------------------------
-KILL_ERROR_RATE: float = 1.0          # 100% interception rate for kill profiles
-KILL_ERROR_CODE: int = 503            # HTTP status the fault harness injects
-HTTP_OK: int = 200                    # Expected status for REST calls
-HTTP_CREATED: int = 201               # Accepted status for profile PUT (create)
-SEARCH_LIMIT: int = 10                # Result limit for MCP search calls
-SERVER_ERROR_THRESHOLD: int = 500     # GET /health must return below this
-RESULT_PREVIEW_COUNT: int = 5         # Number of items to include in diagnostics
+KILL_ERROR_RATE: float = 1.0  # 100% interception rate for kill profiles
+KILL_ERROR_CODE: int = 503  # HTTP status the fault harness injects
+HTTP_OK: int = 200  # Expected status for REST calls
+HTTP_CREATED: int = 201  # Accepted status for profile PUT (create)
+SEARCH_LIMIT: int = 10  # Result limit for MCP search calls
+SERVER_ERROR_THRESHOLD: int = 500  # GET /health must return below this
+RESULT_PREVIEW_COUNT: int = 5  # Number of items to include in diagnostics
 
 # Number of queries needed to exceed the default sinbin failure_threshold=5.
 QUERIES_TO_TRIGGER_SINBIN: int = 6
@@ -83,7 +83,7 @@ SINBIN_RECOVERY_WAIT_SECONDS: float = 60.0
 SINBIN_POLL_INTERVAL_SECONDS: float = 2.0
 SINBIN_MAX_POLLS: int = int(SINBIN_RECOVERY_WAIT_SECONDS / SINBIN_POLL_INTERVAL_SECONDS)
 
-FAULT_RESET_OK: int = 200             # Expected status for /admin/fault-injection/reset
+FAULT_RESET_OK: int = 200  # Expected status for /admin/fault-injection/reset
 
 
 def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
@@ -103,9 +103,10 @@ def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
         f"PUT kill profile for {target!r} failed: {put_resp.status_code} {put_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
-    assert get_resp.status_code == HTTP_OK and get_resp.json()["error_rate"] == KILL_ERROR_RATE, (
-        f"Kill profile for {target!r} not persisted: {get_resp.text}"
-    )
+    assert (
+        get_resp.status_code == HTTP_OK
+        and get_resp.json()["error_rate"] == KILL_ERROR_RATE
+    ), f"Kill profile for {target!r} not persisted: {get_resp.text}"
 
 
 def _get_provider_health(client: FaultAdminClient) -> Dict[str, dict]:
@@ -114,10 +115,7 @@ def _get_provider_health(client: FaultAdminClient) -> Dict[str, dict]:
     assert resp.status_code == HTTP_OK, (
         f"GET /admin/provider-health failed: {resp.status_code} {resp.text}"
     )
-    return {
-        entry["provider"]: entry
-        for entry in resp.json().get("providers", [])
-    }
+    return {entry["provider"]: entry for entry in resp.json().get("providers", [])}
 
 
 def _is_provider_degraded(entry: dict) -> bool:
@@ -202,9 +200,8 @@ def _reset_and_wait_recovery(
         health_map = _get_provider_health(fault_admin_client)
         voyage_entry = health_map.get(VOYAGE_PROVIDER_NAME, {})
         cohere_entry = health_map.get(COHERE_PROVIDER_NAME, {})
-        if (
-            not _is_provider_degraded(voyage_entry)
-            and not _is_provider_degraded(cohere_entry)
+        if not _is_provider_degraded(voyage_entry) and not _is_provider_degraded(
+            cohere_entry
         ):
             recovered = True
             break

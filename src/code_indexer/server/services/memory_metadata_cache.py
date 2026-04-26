@@ -163,7 +163,8 @@ class MemoryMetadataCache:
         path = self._memories_dir / f"{memory_id}.md"
         try:
             fm, _body, _hash = read_memory_file(path)
-            return fm
+            result: Dict[str, Any] = fm
+            return result
         except MemoryFileNotFoundError:
             logger.debug(
                 "MemoryMetadataCache: memory file not found for %r — excluding",

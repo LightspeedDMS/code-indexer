@@ -45,6 +45,7 @@ from __future__ import annotations
 import json as _json
 import secrets
 import string
+from typing import cast
 
 from fastapi.testclient import TestClient
 
@@ -147,8 +148,10 @@ def _mcp_result(resp) -> dict:
         if isinstance(content, list) and content:
             first = content[0]
             if isinstance(first, dict) and "text" in first:
-                return _json.loads(first["text"])
-    return result
+                return cast(
+                    dict, _json.loads(first["text"])
+                )  # json.loads returns Any; payload is always a dict
+    return cast(dict, result)  # resp.json() returns Any; result is always a dict
 
 
 def _sweep_by_description(

@@ -233,7 +233,7 @@ ADMIN_TOOLS: list[tuple[str, str, JsonArgs]] = [
 @pytest.mark.parametrize(
     PARAMETRIZE_FIELDS,
     ADMIN_TOOLS,
-    ids=[t[TOOL_LABEL_INDEX] for t in ADMIN_TOOLS],
+    ids=[str(t[TOOL_LABEL_INDEX]) for t in ADMIN_TOOLS],
 )
 def test_mcp_admin_tool(
     label: str,

@@ -194,7 +194,7 @@ class TestAuthHeaderProviderFreshPerInvocation:
             nonlocal call_count
             header = headers[call_count % len(headers)]
             call_count += 1
-            return header
+            return str(header)
 
         invoker = CodexInvoker(
             codex_home=_FAKE_CODEX_HOME,

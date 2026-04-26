@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Generator, List, Tuple
 from unittest.mock import patch
 
@@ -87,7 +88,9 @@ def written_manager(manager):
 @pytest.fixture()
 def replace_tracker(
     manager,
-) -> Generator[Tuple[CodexCredentialsFileManager, list], None, None]:
+) -> Generator[
+    Tuple[CodexCredentialsFileManager, Path, List[Tuple[str, str]]], None, None
+]:
     """
     Fixture that wraps os.replace with a call-tracker for atomic-write tests.
 
@@ -100,7 +103,7 @@ def replace_tracker(
 
     def tracking_replace(src: str, dst: str) -> None:
         replace_calls.append((src, dst))
-        return real_replace(src, dst)
+        real_replace(src, dst)
 
     with patch("os.replace", side_effect=tracking_replace):
         yield mgr, auth_path, replace_calls

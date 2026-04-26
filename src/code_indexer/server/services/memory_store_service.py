@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Optional, Protocol, TypeVar, runtime_checkable
 
 from code_indexer.server.services.job_tracker import DuplicateJobError
 from code_indexer.server.services.memory_file_lock_manager import (
@@ -42,6 +42,8 @@ from code_indexer.server.services.memory_schema import (
     validate_create_payload,
     validate_edit_payload,
 )
+
+_T = TypeVar("_T")
 
 logger = logging.getLogger(__name__)
 
@@ -297,8 +299,8 @@ class MemoryStoreService:
             raise NotFoundError(f"Memory {memory_id!r} does not exist")
 
     def _run_with_per_memory_lock(
-        self, memory_id: str, owner: str, operation: Callable[[], Any]
-    ) -> Any:
+        self, memory_id: str, owner: str, operation: Callable[[], _T]
+    ) -> _T:
         """Non-blocking acquire of per-memory lock; release guaranteed in finally.
 
         Raises ConflictError immediately if lock is not available.

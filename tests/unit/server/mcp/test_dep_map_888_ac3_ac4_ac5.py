@@ -14,7 +14,7 @@ AC5: handler-layer dual-write helper writes both canonical AND deprecated-alias 
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -39,7 +39,8 @@ def _make_app_state(read_path: Path) -> MagicMock:
 
 
 def _parse_response(result: Any) -> Dict[str, Any]:
-    return json.loads(result["content"][0]["text"])
+    # cast needed: json.loads() returns Any; MCP handlers always return dict envelope
+    return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))
 
 
 def _call_find_consumers(params: dict, app_state: MagicMock) -> Any:

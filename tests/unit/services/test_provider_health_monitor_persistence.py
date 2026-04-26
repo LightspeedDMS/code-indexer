@@ -16,9 +16,11 @@ import fcntl
 import json
 import logging
 import multiprocessing
+import multiprocessing.synchronize
 import threading
 import time
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -35,8 +37,9 @@ def _fresh_monitor(path: Path) -> ProviderHealthMonitor:
     return ProviderHealthMonitor(persistence_path=path)
 
 
-def _read_state_file(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _read_state_file(path: Path) -> dict[Any, Any]:
+    # cast needed: json.loads() returns Any; structure is dynamic JSON state dict
+    return cast(dict[Any, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +49,8 @@ def _read_state_file(path: Path) -> dict:
 
 def _lock_holder(
     path_str: str,
-    ready_event: multiprocessing.Event,  # type: ignore[type-arg]  # multiprocessing.Event is generic only in 3.9+
-    release_event: multiprocessing.Event,  # type: ignore[type-arg]
+    ready_event: multiprocessing.synchronize.Event,
+    release_event: multiprocessing.synchronize.Event,
 ) -> None:
     """Child process: acquire LOCK_EX on path, signal ready, wait for release."""
     path = Path(path_str)

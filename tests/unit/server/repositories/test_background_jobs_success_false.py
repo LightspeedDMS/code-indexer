@@ -246,11 +246,11 @@ class TestFailedJobMemoryCleanup:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if job_id not in self.manager.jobs:
-                return job_id
+                return str(job_id)
             time.sleep(self._POLL_INTERVAL_SECONDS)
         # Timeout expired — return job_id so the caller can assert and produce
         # a meaningful failure message.
-        return job_id
+        return str(job_id)
 
     def test_failed_job_removed_from_memory_when_sqlite_backend_active(self):
         """Memory-leak fix: FAILED job must be evicted from self.jobs when SQLite active.

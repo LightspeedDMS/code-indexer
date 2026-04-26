@@ -93,7 +93,7 @@ def test_auto_detect_postgres(tmp_path):
     shim_dir = tmp_path / "shims"
     shim_dir.mkdir()
     psql_shim = shim_dir / "psql"
-    psql_shim.write_text("#!/bin/sh\necho \"SHIM_CALLED: $@\"\n")
+    psql_shim.write_text('#!/bin/sh\necho "SHIM_CALLED: $@"\n')
     psql_shim.chmod(psql_shim.stat().st_mode | stat.S_IEXEC)
 
     config = {"storage_mode": "postgres", "postgres_dsn": _TEST_PG_DSN}
@@ -186,6 +186,4 @@ def test_error_propagation_invalid_sql(sqlite_data_dir):
     assert any(
         indicator in result.stderr.lower()
         for indicator in ["syntax error", "near", "error"]
-    ), (
-        f"Expected sqlite3 error indicator in stderr. Got: {result.stderr!r}"
-    )
+    ), f"Expected sqlite3 error indicator in stderr. Got: {result.stderr!r}"

@@ -21,7 +21,7 @@ def _poll_until(
         if condition_fn():
             return True
         time.sleep(interval_secs)
-    return condition_fn()  # One final check
+    return bool(condition_fn())  # One final check
 
 
 @pytest.fixture
@@ -248,7 +248,7 @@ class TestFourGranularityTiersWrittenTogether:
                     "WHERE username=? AND metric_type=?",
                     ("_anonymous", "semantic"),
                 ).fetchone()
-            return row[0] > 0
+            return bool(row[0] > 0)
 
         assert _poll_until(_anonymous_row_present), (
             "A row with username='_anonymous' must be written when no username is given"

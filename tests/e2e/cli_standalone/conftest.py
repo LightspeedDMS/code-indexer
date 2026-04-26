@@ -47,4 +47,4 @@ def indexed_markupsafe(
         f"stderr: {index_result.stderr}"
     )
 
-    return path
+    return Path(path)

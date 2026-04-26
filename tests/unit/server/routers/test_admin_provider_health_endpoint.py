@@ -12,6 +12,7 @@ Bug #679 Part 2.
 """
 
 import time
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,9 +53,9 @@ def _make_mock_health_status(
 
 
 def _make_mock_monitor(
-    providers: dict = None,
-    sinbin_until: dict = None,
-    sinbin_rounds: dict = None,
+    providers: Optional[dict] = None,
+    sinbin_until: Optional[dict] = None,
+    sinbin_rounds: Optional[dict] = None,
 ):
     """Build a mock ProviderHealthMonitor with controllable state."""
     monitor = MagicMock()

@@ -16,7 +16,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +212,8 @@ class CodexCredentialsFileManager:
 
         try:
             with open(self.auth_json_path, "r") as fh:
-                return json.load(fh)
+                loaded: Dict[Any, Any] = json.load(fh)
+                return loaded
         except FileNotFoundError:
             # Race: file removed between exists() and open()
             logger.debug(

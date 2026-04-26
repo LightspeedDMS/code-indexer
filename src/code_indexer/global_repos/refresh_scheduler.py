@@ -1163,7 +1163,9 @@ class RefreshScheduler:
                         # NOT in global_repos.  repo_info comes from global_repos which
                         # has no default_branch column, so .get() always returned "main".
                         # Read the real value from GoldenRepoMetadataSqliteBackend.
-                        default_branch = repo_info.get("default_branch")  # None if absent; later layers fill in
+                        default_branch = repo_info.get(
+                            "default_branch"
+                        )  # None if absent; later layers fill in
                         try:
                             db_path = str(
                                 self.golden_repos_dir.parent / "cidx_server.db"
@@ -1205,7 +1207,7 @@ class RefreshScheduler:
                                 if symref_result.returncode == 0:
                                     ref = symref_result.stdout.strip()
                                     if ref.startswith("origin/"):
-                                        default_branch = ref[len("origin/"):]
+                                        default_branch = ref[len("origin/") :]
                             except Exception as e:
                                 logger.debug(
                                     "git symbolic-ref fallback failed for %s: %s",
@@ -1213,7 +1215,11 @@ class RefreshScheduler:
                                     e,
                                 )
 
-                        if default_branch and current_branch and current_branch != default_branch:
+                        if (
+                            default_branch
+                            and current_branch
+                            and current_branch != default_branch
+                        ):
                             logger.warning(
                                 f"Base clone for {alias_name} on '{current_branch}' instead of "
                                 f"'{default_branch}', resetting to default branch"

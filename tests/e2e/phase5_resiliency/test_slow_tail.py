@@ -48,10 +48,10 @@ VOYAGE_TARGET = "api.voyageai.com"
 # ---------------------------------------------------------------------------
 # Named constants — no magic numbers in test bodies or helpers.
 # ---------------------------------------------------------------------------
-HTTP_OK: int = 200                          # Expected status for REST calls
-HTTP_CREATED: int = 201                     # Accepted status for profile PUT (create)
-SERVER_ERROR_THRESHOLD: int = 500           # GET /health must return below this
-SEARCH_LIMIT: int = 10                      # Result limit for MCP search calls
+HTTP_OK: int = 200  # Expected status for REST calls
+HTTP_CREATED: int = 201  # Accepted status for profile PUT (create)
+SERVER_ERROR_THRESHOLD: int = 500  # GET /health must return below this
+SEARCH_LIMIT: int = 10  # Result limit for MCP search calls
 
 # AC3 specification values.
 SLOW_TAIL_RATE: float = 0.5
@@ -113,7 +113,8 @@ def _fetch_history(client: FaultAdminClient) -> List[dict]:
 def _assert_slow_tail_distribution(events: List[dict], target: str) -> None:
     """Assert slow_tail events for *target* fall within the expected Bernoulli band."""
     slow_tail_events = [
-        e for e in events
+        e
+        for e in events
         if e.get("target") == target and "slow_tail" in e.get("fault_type", "")
     ]
     assert slow_tail_events, (

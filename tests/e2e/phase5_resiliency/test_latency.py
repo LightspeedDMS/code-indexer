@@ -42,10 +42,10 @@ VOYAGE_TARGET = "api.voyageai.com"
 # ---------------------------------------------------------------------------
 # Named constants — no magic numbers in test bodies or helpers.
 # ---------------------------------------------------------------------------
-HTTP_OK: int = 200                          # Expected status for REST calls
-HTTP_CREATED: int = 201                     # Accepted status for profile PUT (create)
-SERVER_ERROR_THRESHOLD: int = 500           # GET /health must return below this
-SEARCH_LIMIT: int = 10                      # Result limit for MCP search calls
+HTTP_OK: int = 200  # Expected status for REST calls
+HTTP_CREATED: int = 201  # Accepted status for profile PUT (create)
+SERVER_ERROR_THRESHOLD: int = 500  # GET /health must return below this
+SEARCH_LIMIT: int = 10  # Result limit for MCP search calls
 
 # AC2 hard budget: query with latency injection must return within this many seconds.
 LATENCY_QUERY_BUDGET_SECONDS: float = 10.0
@@ -80,9 +80,7 @@ def _install_latency_profile(client: FaultAdminClient, target: str) -> None:
     )
 
 
-def _fetch_history_for_target(
-    client: FaultAdminClient, target: str
-) -> List[dict]:
+def _fetch_history_for_target(client: FaultAdminClient, target: str) -> List[dict]:
     """Fetch history and return events matching *target*.
 
     Hard-asserts history endpoint returns 200 — a non-200 is a real regression

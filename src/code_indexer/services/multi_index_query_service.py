@@ -55,8 +55,9 @@ class MultiIndexQueryService:
         self.project_root = project_root
         self.vector_store = vector_store
         self.embedding_provider = embedding_provider
-        # Lazy-initialized multimodal embedding provider
-        self._multimodal_provider = None
+        # Lazy-initialized multimodal embedding provider (VoyageMultimodalClient or
+        # CohereMultimodalClient — no common base class, so typed as Optional[Any])
+        self._multimodal_provider: Optional[Any] = None
 
     def _get_multimodal_provider(self):
         """Get or create the multimodal embedding provider (lazy initialization).
@@ -76,7 +77,7 @@ class MultiIndexQueryService:
             from .cohere_multimodal import CohereMultimodalClient
 
             cohere_config = CohereConfig(model="embed-v4.0")
-            self._multimodal_provider = CohereMultimodalClient(cohere_config)  # type: ignore[assignment]
+            self._multimodal_provider = CohereMultimodalClient(cohere_config)
             logger.debug(
                 "Initialized Cohere multimodal embedding provider: %s",
                 COHERE_MULTIMODAL_MODEL,
@@ -87,7 +88,7 @@ class MultiIndexQueryService:
         from .voyage_multimodal import VoyageMultimodalClient
 
         multimodal_config = VoyageAIConfig(model=VOYAGE_MULTIMODAL_MODEL)
-        self._multimodal_provider = VoyageMultimodalClient(multimodal_config)  # type: ignore[assignment]
+        self._multimodal_provider = VoyageMultimodalClient(multimodal_config)
         logger.debug(
             "Initialized VoyageAI multimodal embedding provider: %s",
             VOYAGE_MULTIMODAL_MODEL,

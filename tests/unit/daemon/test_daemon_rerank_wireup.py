@@ -23,10 +23,28 @@ Anti-mock strategy (MESSI Rule 1):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _make_log_and_return(
+    log: list[Dict[str, Any]], limit: Optional[int] = None
+) -> Callable[..., list[Dict[str, Any]]]:
+    """Return a side-effect that appends call kwargs to *log* then returns results.
+
+    Replaces ``lambda **kw: log.append(kw) or kw["results"]`` which triggers
+    mypy's func-returns-value error (list.append returns None, not a value).
+    When *limit* is given, the slice ``results[:limit]`` is returned instead.
+    """
+
+    def _side_effect(**kw: Any) -> list[Dict[str, Any]]:
+        log.append(kw)
+        results: list[Dict[str, Any]] = kw["results"]
+        return results if limit is None else results[:limit]
+
+    return _side_effect
 
 
 # ---------------------------------------------------------------------------
@@ -272,12 +290,12 @@ class TestDaemonRerankShortCircuit:
         self, daemon_service, tmp_path
     ):
         results = _semantic_results(5)
-        call_log: list = []
+        call_log: list[Dict[str, Any]] = []
         ps = _sem_patches(results)
         with ps[0], ps[1], ps[2], ps[3]:
             with patch(
                 "code_indexer.daemon.service._apply_cli_rerank_and_filter",
-                side_effect=lambda **kw: call_log.append(kw) or kw["results"],
+                side_effect=_make_log_and_return(call_log),
             ):
                 response = daemon_service.exposed_query(
                     str(tmp_path),
@@ -292,12 +310,12 @@ class TestDaemonRerankShortCircuit:
         self, daemon_service, tmp_path
     ):
         results = _semantic_results(5)
-        call_log: list = []
+        call_log: list[Dict[str, Any]] = []
         ps = _sem_patches(results)
         with ps[0], ps[1], ps[2], ps[3]:
             with patch(
                 "code_indexer.daemon.service._apply_cli_rerank_and_filter",
-                side_effect=lambda **kw: call_log.append(kw) or kw["results"],
+                side_effect=_make_log_and_return(call_log),
             ):
                 response = daemon_service.exposed_query(
                     str(tmp_path),
@@ -321,12 +339,12 @@ class TestDaemonRerankFunnelInvocation:
         self, daemon_service, tmp_path
     ):
         results = _semantic_results(5)
-        call_log: list = []
+        call_log: list[Dict[str, Any]] = []
         ps = _sem_patches(results)
         with ps[0], ps[1], ps[2], ps[3]:
             with patch(
                 "code_indexer.daemon.service._apply_cli_rerank_and_filter",
-                side_effect=lambda **kw: call_log.append(kw) or kw["results"][:2],
+                side_effect=_make_log_and_return(call_log, limit=2),
             ):
                 response = daemon_service.exposed_query(
                     str(tmp_path),
@@ -347,13 +365,13 @@ class TestDaemonRerankFunnelInvocation:
         self, daemon_service, tmp_path
     ):
         results = _fts_results(4)
-        call_log: list = []
+        call_log: list[Dict[str, Any]] = []
         _make_fts_dir(tmp_path)
         ps = _fts_patches(results)
         with ps[0]:
             with patch(
                 "code_indexer.daemon.service._apply_cli_rerank_and_filter",
-                side_effect=lambda **kw: call_log.append(kw) or kw["results"][:1],
+                side_effect=_make_log_and_return(call_log, limit=1),
             ):
                 result = daemon_service.exposed_query_fts(
                     str(tmp_path),
@@ -374,7 +392,7 @@ class TestDaemonRerankFunnelInvocation:
         """Hybrid mode calls funnel once for semantic and once for FTS, both with correct kwargs."""
         sem = _semantic_results(4)
         fts = _fts_results(4)
-        call_log: list = []
+        call_log: list[Dict[str, Any]] = []
         _make_fts_dir(tmp_path)
         sp = _sem_patches(sem)
         fp = _fts_patches(fts)
@@ -382,7 +400,7 @@ class TestDaemonRerankFunnelInvocation:
             with fp[0]:
                 with patch(
                     "code_indexer.daemon.service._apply_cli_rerank_and_filter",
-                    side_effect=lambda **kw: call_log.append(kw) or kw["results"][:2],
+                    side_effect=_make_log_and_return(call_log, limit=2),
                 ):
                     result = daemon_service.exposed_query_hybrid(
                         str(tmp_path),

@@ -21,7 +21,7 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import httpx
 
@@ -166,7 +166,9 @@ def login(base_url: str, username: str, password: str) -> str:
     )
     response.raise_for_status()
     token = response.json()["access_token"]
-    assert isinstance(token, str), f"access_token must be str, got {type(token).__name__}"
+    assert isinstance(token, str), (
+        f"access_token must be str, got {type(token).__name__}"
+    )
     return token
 
 

@@ -354,4 +354,4 @@ def _tagged_content_extractor(item: dict) -> str:
         if not title and not summary:
             return ""
         return f"{title}: {summary}" if title and summary else (title or summary)
-    return item.get("content", "") or item.get("code_snippet", "")
+    return str(item.get("content", "") or item.get("code_snippet", ""))

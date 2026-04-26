@@ -101,9 +101,11 @@ def test_ensure_registered_cached_across_many_invocations(tmp_path):
     def _fake_run(cmd, *args, **kwargs):
         result = MagicMock()
         result.returncode = 0
-        result.stdout = _VALID_CLI_OUTPUT if (
-            isinstance(cmd, list) and cmd and cmd[0] == "script"
-        ) else ""
+        result.stdout = (
+            _VALID_CLI_OUTPUT
+            if (isinstance(cmd, list) and cmd and cmd[0] == "script")
+            else ""
+        )
         result.stderr = ""
         return result
 

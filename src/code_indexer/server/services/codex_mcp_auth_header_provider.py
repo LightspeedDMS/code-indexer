@@ -66,13 +66,13 @@ def build_codex_mcp_auth_header_provider() -> Callable[[], str]:
         # Fast path: use cached header from Claude registration (already done).
         header = service.get_cached_auth_header_value()
         if header is not None:
-            return header
+            return str(header)
 
         # Cache miss: trigger ensure_registered() which runs register_in_claude_code()
         # and populates the cache, then return the freshly cached value.
         header = service.build_auth_header_from_creds()
         if header is not None:
-            return header
+            return str(header)
 
         # Both paths exhausted — credential state is broken, fail fast.
         raise RuntimeError(

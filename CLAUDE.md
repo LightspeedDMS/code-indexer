@@ -133,6 +133,8 @@ ruff check --fix src/ tests/
 
 Zero tolerance — never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
 
+**Bug #900 prevention** (2026-04-26): 251 mypy errors had accumulated across 79 files on `development` because story DoDs were being interpreted as "no NEW lint errors introduced by this changeset" rather than "`lint.sh` exits 0". Partial cleanups don't compound — they hide. Going forward, every story DoD must require `./lint.sh` to exit 0 BEFORE merging the story branch back to `development`. If a story can't reach a clean lint, it must either fix the upstream debt or be blocked. CI gate must be `./lint.sh` (full ruff check + ruff format check + mypy across `src/` and `tests/`), not just `mypy src/`.
+
 ---
 
 ## Critical Architecture Invariants

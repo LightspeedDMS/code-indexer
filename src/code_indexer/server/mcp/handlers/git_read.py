@@ -38,12 +38,14 @@ from code_indexer.global_repos.git_operations import GitOperationsService
 from code_indexer.server.mcp import reranking as _mcp_reranking
 
 from ._utils import (
+    CapBreach,
     _coerce_int,
     _expand_wildcard_patterns,
     _format_omni_response,
     _get_access_filtering_service,
     _mcp_response,
     _parse_json_string_array,
+    cap_breach_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -187,6 +189,8 @@ def _omni_git_log(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handle omni-git-log across multiple repositories."""
     repo_aliases = args.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
+    if isinstance(repo_aliases, CapBreach):
+        return cap_breach_response(repo_aliases)
     limit = _coerce_int(args.get("limit"), 20)
 
     if not repo_aliases:
@@ -769,6 +773,8 @@ def _omni_git_search_commits(args: Dict[str, Any], user: User) -> Dict[str, Any]
     """Handle omni-git-search across multiple repositories."""
     repo_aliases = args.get("repository_alias", [])
     repo_aliases = _expand_wildcard_patterns(repo_aliases, user)
+    if isinstance(repo_aliases, CapBreach):
+        return cap_breach_response(repo_aliases)
     query = args.get("query", "")
     is_regex = args.get("is_regex", False)
 

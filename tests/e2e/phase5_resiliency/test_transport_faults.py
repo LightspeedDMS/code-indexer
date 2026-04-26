@@ -62,9 +62,13 @@ def _cidx_query_cmd(indexed_golden_repo: str, env: dict) -> list:
     returned by the fixture ("markupsafe") must have it appended here.
     """
     return [
-        "python3", "-m", "code_indexer.cli",
-        "query", "escape",
-        "--repos", f"{indexed_golden_repo}-global",
+        "python3",
+        "-m",
+        "code_indexer.cli",
+        "query",
+        "escape",
+        "--repos",
+        f"{indexed_golden_repo}-global",
         "--quiet",
     ]
 

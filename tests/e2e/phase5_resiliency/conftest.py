@@ -21,7 +21,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Generator
+from typing import Any, Generator
 
 import httpx
 import pytest
@@ -100,7 +100,9 @@ def _build_cli_env() -> dict[str, str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = pythonpath
 
-    voyage_api_key = _optional_env("E2E_VOYAGE_API_KEY") or _optional_env("VOYAGE_API_KEY")
+    voyage_api_key = _optional_env("E2E_VOYAGE_API_KEY") or _optional_env(
+        "VOYAGE_API_KEY"
+    )
     if voyage_api_key:
         env["VOYAGE_API_KEY"] = voyage_api_key
 
@@ -131,7 +133,9 @@ class FaultAdminClient:
         # _auth_headers() in helpers.py owns all Bearer assembly — we store result verbatim
         self._headers: dict[str, str] = _auth_headers(token)
         self._token = token
-        self._client = httpx.Client(base_url=base_url, timeout=PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS)
+        self._client = httpx.Client(
+            base_url=base_url, timeout=PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS
+        )
 
     @property
     def token(self) -> str:
@@ -144,19 +148,19 @@ class FaultAdminClient:
         # helpers._auth_headers owns Bearer assembly; conftest stores result verbatim
         self._headers = _auth_headers(self._token)
 
-    def get(self, path: str, **kwargs: object) -> httpx.Response:
+    def get(self, path: str, **kwargs: Any) -> httpx.Response:
         return self._client.get(path, headers=self._headers, **kwargs)
 
-    def put(self, path: str, **kwargs: object) -> httpx.Response:
+    def put(self, path: str, **kwargs: Any) -> httpx.Response:
         return self._client.put(path, headers=self._headers, **kwargs)
 
-    def patch(self, path: str, **kwargs: object) -> httpx.Response:
+    def patch(self, path: str, **kwargs: Any) -> httpx.Response:
         return self._client.patch(path, headers=self._headers, **kwargs)
 
-    def delete(self, path: str, **kwargs: object) -> httpx.Response:
+    def delete(self, path: str, **kwargs: Any) -> httpx.Response:
         return self._client.delete(path, headers=self._headers, **kwargs)
 
-    def post(self, path: str, **kwargs: object) -> httpx.Response:
+    def post(self, path: str, **kwargs: Any) -> httpx.Response:
         return self._client.post(path, headers=self._headers, **kwargs)
 
     def close(self) -> None:
@@ -178,7 +182,9 @@ def fault_http_client() -> Generator[httpx.Client, None, None]:
     host = _require_env("E2E_FAULT_SERVER_HOST")
     port = _require_env("E2E_FAULT_SERVER_PORT")
     base_url = f"http://{host}:{port}"
-    with httpx.Client(base_url=base_url, timeout=PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS) as client:
+    with httpx.Client(
+        base_url=base_url, timeout=PHASE5_HTTP_CLIENT_TIMEOUT_SECONDS
+    ) as client:
         yield client
 
 
@@ -239,7 +245,12 @@ def _init_git_workspace(workspace: Path, seed_path: Path) -> None:
     )
     if not branch_check.stdout.strip():
         remote_refs = subprocess.run(
-            ["git", "for-each-ref", "--format=%(refname:short)", "refs/remotes/origin/"],
+            [
+                "git",
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/remotes/origin/",
+            ],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -397,7 +408,9 @@ def indexed_golden_repo(
 
 
 @pytest.fixture(autouse=True)
-def clear_all_faults(fault_admin_client: FaultAdminClient) -> Generator[None, None, None]:
+def clear_all_faults(
+    fault_admin_client: FaultAdminClient,
+) -> Generator[None, None, None]:
     """Re-login and reset all fault injection state before each test.
 
     Called BEFORE the test body runs (setup phase of the fixture) so that
@@ -531,9 +544,7 @@ def _mcp_search(
         )
     content = result["content"]
     if not isinstance(content, list) or len(content) == 0:
-        raise ValueError(
-            f"_mcp_search: 'content' is not a non-empty list: {content!r}"
-        )
+        raise ValueError(f"_mcp_search: 'content' is not a non-empty list: {content!r}")
     text_block = content[0]
     if not isinstance(text_block, dict) or text_block.get("type") != "text":
         raise ValueError(

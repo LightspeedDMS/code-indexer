@@ -54,12 +54,12 @@ COHERE_TARGET = "api.cohere.com"
 # ---------------------------------------------------------------------------
 # Named constants — no magic numbers in test bodies or helpers.
 # ---------------------------------------------------------------------------
-KILL_ERROR_RATE: float = 1.0          # 100% interception rate for kill profiles
-KILL_ERROR_CODE: int = 503            # HTTP status the fault harness injects
-HTTP_OK: int = 200                    # Expected status for successful profile GET
-HTTP_CREATED: int = 201               # Accepted status for profile PUT (create)
-SEARCH_LIMIT: int = 10                # Result limit for MCP search calls
-SERVER_ERROR_THRESHOLD: int = 500     # GET /health must return below this
+KILL_ERROR_RATE: float = 1.0  # 100% interception rate for kill profiles
+KILL_ERROR_CODE: int = 503  # HTTP status the fault harness injects
+HTTP_OK: int = 200  # Expected status for successful profile GET
+HTTP_CREATED: int = 201  # Accepted status for profile PUT (create)
+SEARCH_LIMIT: int = 10  # Result limit for MCP search calls
+SERVER_ERROR_THRESHOLD: int = 500  # GET /health must return below this
 
 
 def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
@@ -76,9 +76,10 @@ def _install_kill_profile(client: FaultAdminClient, target: str) -> None:
         f"{put_resp.status_code} {put_resp.text}"
     )
     get_resp = client.get(f"/admin/fault-injection/profiles/{target}")
-    assert get_resp.status_code == HTTP_OK and get_resp.json()["error_rate"] == KILL_ERROR_RATE, (
-        f"Kill profile for {target!r} not persisted: {get_resp.text}"
-    )
+    assert (
+        get_resp.status_code == HTTP_OK
+        and get_resp.json()["error_rate"] == KILL_ERROR_RATE
+    ), f"Kill profile for {target!r} not persisted: {get_resp.text}"
 
 
 def test_both_providers_dead_graceful_empty(

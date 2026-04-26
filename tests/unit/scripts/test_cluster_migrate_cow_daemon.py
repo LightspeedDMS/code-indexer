@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -248,7 +249,9 @@ class TestConfigGenerationLogic:
             json.dump(config, f, indent=2)
 
         with open(str(config_file)) as f:
-            return json.load(f)
+            return cast(
+                dict, json.load(f)
+            )  # json.load returns Any; config files are always objects
 
     def _make_config_file(self, tmp_path: Path) -> Path:
         config = {"server_dir": str(tmp_path), "host": "127.0.0.1", "port": 8000}

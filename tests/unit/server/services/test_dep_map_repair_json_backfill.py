@@ -143,7 +143,7 @@ def _make_domains_json(
 
 
 def _load_domains_json(output_dir: Path) -> List[Dict[str, Any]]:
-    return json.loads((output_dir / "_domains.json").read_text())
+    return list(json.loads((output_dir / "_domains.json").read_text()))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

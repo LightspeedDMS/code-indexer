@@ -636,7 +636,7 @@ class TestClearSinBinAll:
         """clear_sinbin_all() resets backoff rounds to zero for every provider."""
         monitor.sinbin("voyage-ai")
         monitor.sinbin("voyage-ai")  # round 2
-        monitor.sinbin("cohere")    # round 1
+        monitor.sinbin("cohere")  # round 1
         monitor.clear_sinbin_all()
         assert monitor.get_sinbin_rounds("voyage-ai") == 0
         assert monitor.get_sinbin_rounds("cohere") == 0

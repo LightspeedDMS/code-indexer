@@ -6,6 +6,7 @@ provider config onto CLI subprocess config.json before each cidx index launch.
 
 import json
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -172,7 +173,7 @@ class TestDotPathHelpers:
     def test_resolve_dot_path_missing_key_returns_none(self):
         from code_indexer.server.services.config_seeding import _resolve_dot_path
 
-        data = {"a": {}}
+        data: dict[str, object] = {"a": {}}
         assert _resolve_dot_path(data, "a.b") is None
 
     def test_resolve_dot_path_top_level(self):
@@ -211,6 +212,8 @@ class TestDotPathHelpers:
     def test_set_dot_path_replaces_non_dict_intermediate(self):
         from code_indexer.server.services.config_seeding import _set_dot_path
 
-        data = {"a": "scalar"}
+        data: dict[str, object] = {"a": "scalar"}
         _set_dot_path(data, "a.b", 1)
-        assert data["a"]["b"] == 1
+        # _set_dot_path replaces the "a" entry from str to dict at runtime;
+        # cast tells mypy the entry is now a dict so ["b"] is valid.
+        assert cast(dict[str, object], data["a"])["b"] == 1

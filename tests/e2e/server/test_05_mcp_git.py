@@ -239,7 +239,7 @@ GIT_TOOLS: list[tuple[str, str, JsonArgs]] = [
 @pytest.mark.parametrize(
     PARAMETRIZE_FIELDS,
     GIT_TOOLS,
-    ids=[t[TOOL_LABEL_INDEX] for t in GIT_TOOLS],
+    ids=[str(t[TOOL_LABEL_INDEX]) for t in GIT_TOOLS],
 )
 def test_mcp_git_tool(
     label: str,
