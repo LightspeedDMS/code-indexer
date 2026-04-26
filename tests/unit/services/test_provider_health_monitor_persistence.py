@@ -420,3 +420,120 @@ class TestClearSinbinPersistence:
             "Cleared provider must be absent from file"
         )
         assert "cohere-reranker" in state, "Non-cleared provider must remain in file"
+
+
+# ---------------------------------------------------------------------------
+# BLOCKER 1: get_instance() with persistence_path installs file-backed singleton
+# ---------------------------------------------------------------------------
+
+
+class TestGetInstanceWithPersistencePath:
+    """get_instance(persistence_path=...) must create a file-backed singleton.
+
+    Regression tests for BLOCKER 1: cli.py previously called the constructor
+    directly (ProviderHealthMonitor(persistence_path=...)) which created an
+    ORPHAN instance, not the class singleton. Reranker clients calling
+    get_instance() subsequently got a DIFFERENT, in-memory-only singleton.
+    Fix: get_instance() now accepts persistence_path and installs it as the
+    singleton when the singleton has not yet been created.
+    """
+
+    @pytest.fixture(autouse=True)
+    def reset_singleton(self):
+        ProviderHealthMonitor.reset_instance()
+        yield
+        ProviderHealthMonitor.reset_instance()
+
+    def test_get_instance_with_path_creates_file_backed_singleton(
+        self, tmp_path: Path
+    ) -> None:
+        """First get_instance(persistence_path=path) call installs persistent singleton.
+
+        Writes a sinbinned state file, calls get_instance with that path,
+        then calls get_instance() again with no args (as reranker clients do).
+        Both calls must return the SAME object and the second call must see
+        the persisted sinbin state.
+        """
+        sinbin_path = tmp_path / "state.json"
+        sinbin_path.write_text(
+            json.dumps(
+                {
+                    "voyage-reranker": {
+                        "sinbin_until_wall_seconds": time.time() + 3600,
+                        "last_failure_kind": "sinbin",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # CLI-style call: first caller installs singleton with persistence
+        instance_a = ProviderHealthMonitor.get_instance(persistence_path=sinbin_path)
+
+        # Reranker-client-style call: no args, must return the same singleton
+        instance_b = ProviderHealthMonitor.get_instance()
+
+        assert instance_a is instance_b, (
+            "get_instance() with no args must return the same singleton "
+            "installed by get_instance(persistence_path=...)"
+        )
+        assert instance_b.is_sinbinned("voyage-reranker"), (
+            "Singleton returned by get_instance() must have loaded the "
+            "persisted sinbin state — voyage-reranker should be sinbinned"
+        )
+
+    def test_get_instance_different_path_logs_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """get_instance(persistence_path=other_path) logs WARNING when singleton exists with a different path."""
+        path_a = tmp_path / "state_a.json"
+        path_b = tmp_path / "state_b.json"
+
+        # Create singleton with path_a
+        ProviderHealthMonitor.get_instance(persistence_path=path_a)
+
+        # Second call with different path must log WARNING and return existing singleton
+        with caplog.at_level(
+            logging.WARNING,
+            logger="code_indexer.services.provider_health_monitor",
+        ):
+            instance = ProviderHealthMonitor.get_instance(persistence_path=path_b)
+
+        assert instance._persistence_path == path_a, (
+            "Existing singleton must be returned unchanged when path differs"
+        )
+        warning_msgs = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any("persistence_path" in m for m in warning_msgs), (
+            f"Expected WARNING about persistence_path mismatch, got: {warning_msgs}"
+        )
+
+    def test_get_instance_returns_same_singleton_on_second_call_no_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Second no-arg get_instance() call returns existing singleton silently.
+
+        After cli.py installs the file-backed singleton via
+        get_instance(persistence_path=...), reranker clients call get_instance()
+        with no arguments. This must return the same object without logging any
+        warnings, preserving the persistence configuration silently.
+        """
+        path = tmp_path / "state.json"
+
+        # First call installs the persistent singleton (cli.py pattern)
+        instance_a = ProviderHealthMonitor.get_instance(persistence_path=path)
+
+        # Second call with no args (reranker client pattern)
+        with caplog.at_level(logging.WARNING):
+            instance_b = ProviderHealthMonitor.get_instance()
+
+        assert instance_a is instance_b, (
+            "No-arg get_instance() must return the same singleton"
+        )
+        warning_msgs = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert not warning_msgs, (
+            f"No-arg get_instance() after path-based install must not warn, got: {warning_msgs}"
+        )

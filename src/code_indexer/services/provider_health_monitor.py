@@ -252,12 +252,48 @@ class ProviderHealthMonitor:
                     )
 
     @classmethod
-    def get_instance(cls, **kwargs: object) -> "ProviderHealthMonitor":
-        """Get or create singleton instance."""
+    def get_instance(
+        cls, persistence_path: Optional[Path] = None, **kwargs: object
+    ) -> "ProviderHealthMonitor":
+        """Get or create singleton instance.
+
+        Args:
+            persistence_path: Optional path for file-backed sin-bin persistence
+                (Story #691 / BLOCKER 1 fix). Extracted explicitly so it can be
+                used in the mismatch check without appearing in **kwargs.
+                If the singleton has not yet been created, it is instantiated
+                with this path. If the singleton already exists with a DIFFERENT
+                path, a WARNING is logged and the existing singleton is returned
+                unchanged. If same path or no path, returns silently.
+            **kwargs: Additional constructor parameters (e.g. rolling_window_minutes)
+                forwarded to __init__ on first creation only.
+
+        Note on type: ignore below: **kwargs: object cannot statically express
+        the constructor's typed keyword parameters without duplicating the full
+        signature here. The constructor itself validates all keys at runtime.
+        """
+        mismatch_warning: Optional[str] = None
         with cls._lock:
             if cls._instance is None:
-                cls._instance = cls(**kwargs)  # type: ignore[arg-type]
-            return cls._instance
+                # **kwargs typed as `object` cannot match __init__'s typed params statically;
+                # all keys are validated by the constructor at runtime.
+                cls._instance = cls(persistence_path=persistence_path, **kwargs)  # type: ignore[arg-type]
+                return cls._instance
+            # Singleton already exists — check for persistence_path mismatch.
+            if persistence_path is not None:
+                existing_path = cls._instance._persistence_path
+                if existing_path != persistence_path:
+                    # Collect message inside lock; emit outside so logging I/O
+                    # does not extend lock hold time and pytest caplog captures it.
+                    mismatch_warning = (
+                        "ProviderHealthMonitor.get_instance(): persistence_path mismatch — "
+                        f"singleton already exists with path={existing_path}, "
+                        f"ignoring requested path={persistence_path}"
+                    )
+            instance = cls._instance
+        if mismatch_warning is not None:
+            logger.warning(mismatch_warning)
+        return instance
 
     @classmethod
     def reset_instance(cls) -> None:

@@ -105,7 +105,7 @@ def test_voyage_primary_success(voyage_provider, cohere_provider, health_monitor
         ) as mock_voyage,
         patch.object(cohere_provider, "_make_sync_request") as mock_cohere,
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,
@@ -139,7 +139,7 @@ def test_voyage_failure_cohere_fallback_success(
             return_value=_make_embedding_response("cohere", dim=COHERE_EXPECTED_DIM),
         ),
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,
@@ -169,7 +169,7 @@ def test_both_providers_fail(voyage_provider, cohere_provider, health_monitor):
             side_effect=TimeoutError("Cohere timeout"),
         ),
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,
@@ -217,7 +217,7 @@ def test_voyage_sinbinned_cohere_primary(
             return_value=_make_embedding_response("cohere", dim=COHERE_EXPECTED_DIM),
         ),
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,
@@ -273,7 +273,7 @@ def test_voyage_health_down_cohere_primary(
                 ),
             ),
         ):
-            vector, name, reason, elapsed_ms = _run_embedder_chain(
+            vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
                 text="foo",
                 embedding_purpose="query",
                 primary_provider=voyage_provider,
@@ -301,7 +301,7 @@ def test_both_providers_sinbinned(voyage_provider, cohere_provider, health_monit
         patch.object(voyage_provider, "_make_sync_request") as mock_voyage,
         patch.object(cohere_provider, "_make_sync_request") as mock_cohere,
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,
@@ -331,7 +331,7 @@ def test_only_voyage_configured(voyage_provider, health_monitor):
         "_make_sync_request",
         return_value=_make_embedding_response("voyage"),
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,
@@ -353,7 +353,7 @@ def test_only_cohere_configured(cohere_provider, health_monitor):
         "_make_sync_request",
         return_value=_make_embedding_response("cohere", dim=COHERE_EXPECTED_DIM),
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=None,
@@ -370,7 +370,7 @@ def test_no_providers_configured(health_monitor):
     """primary=None and secondary=None: chain returns 'no-providers-configured' without raising."""
     from code_indexer.services.embedder_chain import _run_embedder_chain
 
-    vector, name, reason, elapsed_ms = _run_embedder_chain(
+    vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
         text="foo",
         embedding_purpose="query",
         primary_provider=None,
@@ -427,7 +427,7 @@ def test_elapsed_ms_always_returned_even_on_total_failure(health_monitor):
     from code_indexer.services.embedder_chain import _run_embedder_chain
 
     t_before = time.monotonic()
-    _, _, _, elapsed_ms = _run_embedder_chain(
+    _, _, _, elapsed_ms, _outcomes = _run_embedder_chain(
         text="foo",
         embedding_purpose="query",
         primary_provider=None,
@@ -439,6 +439,122 @@ def test_elapsed_ms_always_returned_even_on_total_failure(health_monitor):
     assert isinstance(elapsed_ms, int)
     assert elapsed_ms >= 0
     assert elapsed_ms <= int((t_after - t_before) * 1000) + ELAPSED_MS_TOLERANCE
+
+
+def test_providers_attempted_carries_per_provider_reasons(
+    voyage_provider, cohere_provider, health_monitor
+):
+    """EmbedderUnavailableError.providers_attempted carries distinct per-provider reasons (BLOCKER 2).
+
+    When voyage-embedder is sin-binned and cohere fails, the chain exposes a 5th
+    return element `providers_outcomes: List[Tuple[str, str]]` so callers can
+    populate EmbedderUnavailableError.providers_attempted with accurate per-provider
+    information rather than the same aggregate reason for both providers.
+
+    This test drives the full contract: chain returns distinct per-provider reasons,
+    which the caller uses to construct EmbedderUnavailableError, and the error's
+    providers_attempted field reflects those distinct reasons.
+    """
+    from code_indexer.services.embedder_chain import (
+        EMBEDDER_HEALTH_KEYS,
+        EmbedderUnavailableError,
+        _run_embedder_chain,
+    )
+
+    health_monitor.sinbin(EMBEDDER_HEALTH_KEYS["voyage"])
+
+    with patch.object(
+        cohere_provider,
+        "_make_sync_request",
+        side_effect=ConnectionError("Cohere also down"),
+    ):
+        vector, name, reason, elapsed_ms, providers_outcomes = _run_embedder_chain(
+            text="foo",
+            embedding_purpose="query",
+            primary_provider=voyage_provider,
+            secondary_provider=cohere_provider,
+            health_monitor=health_monitor,
+        )
+
+    assert vector is None
+    assert name is None
+
+    # providers_outcomes is a list of (provider_name, per_provider_reason) tuples
+    assert isinstance(providers_outcomes, list), (
+        f"providers_outcomes must be a list, got {type(providers_outcomes)}"
+    )
+    outcome_map = dict(providers_outcomes)
+
+    # Voyage was sinbinned — its reason must indicate that, not "failed"
+    assert outcome_map.get("voyage") == "sinbinned", (
+        f"Expected 'sinbinned' for voyage, got {outcome_map.get('voyage')!r}"
+    )
+    # Cohere actually attempted and raised — its reason must be "failed"
+    assert outcome_map.get("cohere") == "failed", (
+        f"Expected 'failed' for cohere, got {outcome_map.get('cohere')!r}"
+    )
+
+    # Build the error from providers_outcomes (as cli.py will do after the fix)
+    exc = EmbedderUnavailableError(
+        f"Both embedding providers unavailable: {reason}",
+        providers_attempted=providers_outcomes,
+    )
+    attempted_map = dict(exc.providers_attempted)
+    assert attempted_map.get("voyage") == "sinbinned", (
+        f"EmbedderUnavailableError.providers_attempted must have 'sinbinned' for voyage, "
+        f"got {attempted_map.get('voyage')!r}"
+    )
+    assert attempted_map.get("cohere") == "failed", (
+        f"EmbedderUnavailableError.providers_attempted must have 'failed' for cohere, "
+        f"got {attempted_map.get('cohere')!r}"
+    )
+
+
+def test_failover_emits_info_log_when_secondary_succeeds(
+    voyage_provider, cohere_provider, health_monitor, caplog
+):
+    """Exactly one INFO log containing 'Embedder failover' is emitted when
+    Voyage fails and Cohere succeeds (SHOULD-FIX 4 / Story #904 AC requirement).
+    """
+    import logging
+
+    from code_indexer.services.embedder_chain import _run_embedder_chain
+
+    with (
+        patch.object(
+            voyage_provider,
+            "_make_sync_request",
+            side_effect=ConnectionError("Voyage unreachable"),
+        ),
+        patch.object(
+            cohere_provider,
+            "_make_sync_request",
+            return_value=_make_embedding_response("cohere", dim=COHERE_EXPECTED_DIM),
+        ),
+        caplog.at_level(logging.INFO, logger="code_indexer.services.embedder_chain"),
+    ):
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
+            text="foo",
+            embedding_purpose="query",
+            primary_provider=voyage_provider,
+            secondary_provider=cohere_provider,
+            health_monitor=health_monitor,
+        )
+
+    assert vector is not None
+    assert name == "cohere"
+
+    failover_logs = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "Embedder failover" in r.getMessage()
+    ]
+    assert len(failover_logs) == 1, (
+        f"Expected exactly one INFO 'Embedder failover' log, got: {[r.getMessage() for r in caplog.records]}"
+    )
+    msg = failover_logs[0].getMessage()
+    assert "voyage" in msg.lower(), f"Failover log must mention 'voyage': {msg}"
+    assert "cohere" in msg.lower(), f"Failover log must mention 'cohere': {msg}"
 
 
 def test_voyage_returns_wrong_dimension_embedding(
@@ -469,7 +585,7 @@ def test_voyage_returns_wrong_dimension_embedding(
             return_value=_make_embedding_response("cohere", dim=COHERE_EXPECTED_DIM),
         ),
     ):
-        vector, name, reason, elapsed_ms = _run_embedder_chain(
+        vector, name, reason, elapsed_ms, _outcomes = _run_embedder_chain(
             text="foo",
             embedding_purpose="query",
             primary_provider=voyage_provider,

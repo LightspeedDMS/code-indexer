@@ -175,6 +175,11 @@ logger = logging.getLogger(__name__)
 # Indexing safety buffer: time (seconds) reserved before token/rate-limit cutoff.
 _INDEX_SAFETY_BUFFER_SECONDS = 60
 
+# Multiplier applied to the user-requested limit when over-fetching candidates for
+# a rerank stage.  Gives the reranker enough documents to meaningfully re-order before
+# we truncate back to the original limit.
+_RERANK_OVERFETCH_MULTIPLIER = 4
+
 
 def _log_skipped_provider_warning(provider_name: str) -> None:
     """Log a warning that a provider was skipped due to missing API key."""
@@ -4787,6 +4792,30 @@ def display_temporal_results(results, temporal_service):
     help="Query multiple repositories (comma-separated aliases, e.g., 'repo1,repo2,repo3'). Remote mode only. Mutually exclusive with --repo.",
 )
 # --show-unchanged removed: Story 2 - all temporal results are changes now
+@click.option(
+    "--rerank-query",
+    "rerank_query",
+    default=None,
+    type=str,
+    help=(
+        "Apply reranker stage after retrieval using this query text. "
+        "If omitted and auto_populate_rerank_query is true in global config, "
+        "the search query is used automatically. "
+        "Pass an empty string ('') to explicitly disable reranking. "
+        "Requires VOYAGE_API_KEY or COHERE_API_KEY."
+    ),
+)
+@click.option(
+    "--rerank-instruction",
+    "rerank_instruction",
+    default=None,
+    type=str,
+    help=(
+        "Optional instruction prepended to the reranker query to guide ranking. "
+        "Passed to the reranker vendor as-is. "
+        "Only meaningful when --rerank-query is also provided."
+    ),
+)
 @click.pass_context
 @require_mode("local", "remote", "proxy")
 def query(
@@ -4815,6 +4844,8 @@ def query(
     chunk_type: Optional[str],
     repo: Optional[str],
     repos: Optional[str],
+    rerank_query: Optional[str],
+    rerank_instruction: Optional[str],
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -5384,6 +5415,49 @@ def query(
     else:
         search_mode = "semantic"  # Default behavior
 
+    # Bundle 4 (Stories #694 + #904): hoisted init for rerank + embedder chain.
+    # Defined BEFORE search_mode dispatch so all sub-paths (FTS, hybrid, regex,
+    # semantic, temporal) reference the same global_config / cli_rerank_config /
+    # health_monitor / effective_rerank_query / primary_embedder / secondary_embedder.
+    from code_indexer.config_global import load_global_config
+    from code_indexer.services.cli_rerank_config_shim import CliRerankConfigService
+    from code_indexer.services.embedder_chain import (
+        EmbedderUnavailableError,
+        _run_embedder_chain,
+    )
+    from code_indexer.services.embedder_provider_resolver import (
+        _resolve_embedder_providers,
+    )
+    from code_indexer.services.provider_health_monitor import ProviderHealthMonitor
+
+    global_config = load_global_config()
+
+    # Persistence path for sin-bin state: XDG-compliant, CLI-specific location.
+    _xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    _cli_config_base = (
+        Path(_xdg_config_home) if _xdg_config_home else Path.home() / ".config"
+    )
+    _sinbin_persistence_path = _cli_config_base / "cidx" / "reranker_state.json"
+
+    health_monitor = ProviderHealthMonitor.get_instance(
+        persistence_path=_sinbin_persistence_path
+    )
+    cli_rerank_config = CliRerankConfigService(global_config)
+
+    # Resolve effective rerank_query (precedence: explicit flag > auto_populate > None).
+    # Empty string disables reranking explicitly (mirrors server guard).
+    effective_rerank_query: Optional[str]
+    if rerank_query is not None:
+        effective_rerank_query = rerank_query if rerank_query != "" else None
+    elif global_config.rerank.auto_populate_rerank_query:
+        effective_rerank_query = query
+    else:
+        effective_rerank_query = None
+
+    # Resolve embedder providers (primary, secondary) from environment.
+    # No-provider guard fires at the embedding call sites where the chain is invoked.
+    primary_embedder, secondary_embedder = _resolve_embedder_providers()
+
     # Validate --regex flag compatibility
     if regex:
         # Regex requires FTS mode
@@ -5528,6 +5602,13 @@ def query(
             language_filter = languages[0] if languages else None
 
             # Define FTS search function for parallel execution
+            # Over-fetch when reranking so reranker has enough candidates.
+            _hybrid_fetch_limit = (
+                (limit * _RERANK_OVERFETCH_MULTIPLIER)
+                if effective_rerank_query
+                else limit
+            )
+
             def execute_fts():
                 try:
                     tantivy_manager = TantivyIndexManager(fts_index_dir)
@@ -5537,7 +5618,7 @@ def query(
                         case_sensitive=case_sensitive,
                         edit_distance=edit_distance,
                         snippet_lines=snippet_lines,
-                        limit=limit,
+                        limit=_hybrid_fetch_limit,
                         language_filter=language_filter,
                         path_filters=list(path_filter) if path_filter else None,
                         exclude_paths=list(exclude_paths) if exclude_paths else None,
@@ -5555,7 +5636,7 @@ def query(
                 semantic_future = executor.submit(
                     _execute_semantic_search,
                     query=query,
-                    limit=limit,
+                    limit=_hybrid_fetch_limit,
                     languages=languages,
                     exclude_languages=exclude_languages,
                     path_filter=path_filter,
@@ -5580,6 +5661,27 @@ def query(
                 except Exception as e:
                     console.print(f"[yellow]⚠️  Semantic search failed: {e}[/yellow]")
                     semantic_results = []
+
+            # Story #694: apply reranker stage to each sub-list independently.
+            if effective_rerank_query:
+                from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+
+                fts_results = _apply_cli_rerank_and_filter(
+                    results=fts_results,
+                    rerank_query=effective_rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=cli_rerank_config,
+                    user_limit=limit,
+                    health_monitor=health_monitor,
+                )
+                semantic_results = _apply_cli_rerank_and_filter(
+                    results=semantic_results,
+                    rerank_query=effective_rerank_query,
+                    rerank_instruction=rerank_instruction,
+                    config=cli_rerank_config,
+                    user_limit=limit,
+                    health_monitor=health_monitor,
+                )
 
             # Display hybrid results with clear separation (AC#2)
             _display_hybrid_results(
@@ -5607,12 +5709,18 @@ def query(
             try:
                 tantivy_manager = TantivyIndexManager(fts_index_dir)
                 tantivy_manager.initialize_index(create_new=False)
+                # Over-fetch when reranking so reranker has enough candidates.
+                _fts_fetch_limit = (
+                    (limit * _RERANK_OVERFETCH_MULTIPLIER)
+                    if effective_rerank_query
+                    else limit
+                )
                 fts_results = tantivy_manager.search(
                     query_text=query,
                     case_sensitive=case_sensitive,
                     edit_distance=edit_distance,
                     snippet_lines=snippet_lines,
-                    limit=limit,
+                    limit=_fts_fetch_limit,
                     languages=language_extensions,
                     path_filters=list(path_filter) if path_filter else None,
                     exclude_paths=list(exclude_paths) if exclude_paths else None,
@@ -5621,6 +5729,21 @@ def query(
                     ),
                     use_regex=regex,  # Pass regex flag
                 )
+
+                # Story #694: apply reranker stage if effective_rerank_query is set.
+                if effective_rerank_query:
+                    from code_indexer.cli_search_funnel import (
+                        _apply_cli_rerank_and_filter,
+                    )
+
+                    fts_results = _apply_cli_rerank_and_filter(
+                        results=fts_results,
+                        rerank_query=effective_rerank_query,
+                        rerank_instruction=rerank_instruction,
+                        config=cli_rerank_config,
+                        user_limit=limit,
+                        health_monitor=health_monitor,
+                    )
 
                 # Display results
                 _display_fts_results(fts_results, quiet=quiet, console=console)
@@ -6233,24 +6356,59 @@ def query(
             )
 
             if isinstance(vector_store_client, FilesystemVectorStore):
+                # Over-fetch when reranking so reranker has enough candidates (SHOULD-FIX 3).
+                _semantic_fetch_limit = (
+                    limit * _RERANK_OVERFETCH_MULTIPLIER
+                    if effective_rerank_query
+                    else limit * 2
+                )
                 # Use MultiIndexQueryService for unified query interface (supports multimodal)
                 raw_results, multi_index_timing = multi_index_service.query(
                     query_text=query,
-                    limit=limit * 2,  # Get more to account for post-filtering
+                    limit=_semantic_fetch_limit,
                     collection_name=collection_name,
                     filter_conditions=query_filter_conditions,
                 )
                 # Use multi-index timing from service
                 search_timing: Dict[str, Any] = multi_index_timing
             else:
-                # FilesystemVectorStore: pre-compute embedding (no parallel support yet)
-                query_embedding = embedding_provider.get_embedding(
-                    query, embedding_purpose="query"
+                # FilesystemVectorStore: pre-compute embedding via chain (Story #904).
+                if primary_embedder is None and secondary_embedder is None:
+                    console.print(
+                        "No embedding provider configured. "
+                        "Set VOYAGE_API_KEY or COHERE_API_KEY.",
+                        style="red",
+                    )
+                    sys.exit(1)
+                (
+                    _embed_vec,
+                    _embed_provider,
+                    _embed_failure,
+                    _embed_ms,
+                    _embed_outcomes,
+                ) = _run_embedder_chain(
+                    text=query,
+                    embedding_purpose="query",
+                    primary_provider=primary_embedder,
+                    secondary_provider=secondary_embedder,
+                    health_monitor=health_monitor,
+                )
+                if _embed_vec is None:
+                    raise EmbedderUnavailableError(
+                        f"Both embedding providers unavailable: {_embed_failure}",
+                        providers_attempted=_embed_outcomes,
+                    )
+                query_embedding = _embed_vec
+                # Over-fetch when reranking so reranker has enough candidates (SHOULD-FIX 3).
+                _semantic_fetch_limit2 = (
+                    limit * _RERANK_OVERFETCH_MULTIPLIER
+                    if effective_rerank_query
+                    else limit * 2
                 )
                 raw_results_list = vector_store_client.search(
                     query_vector=query_embedding,
                     filter_conditions=query_filter_conditions,
-                    limit=limit * 2,
+                    limit=_semantic_fetch_limit2,
                     collection_name=collection_name,
                 )
                 raw_results = raw_results_list  # Type compatibility
@@ -6304,11 +6462,34 @@ def query(
                 search_timing = multi_index_timing
                 timing_info.update(search_timing)
             else:
-                # Filesystem backend: pre-compute embedding
+                # Filesystem backend: pre-compute embedding via chain (Story #904).
+                if primary_embedder is None and secondary_embedder is None:
+                    console.print(
+                        "No embedding provider configured. "
+                        "Set VOYAGE_API_KEY or COHERE_API_KEY.",
+                        style="red",
+                    )
+                    sys.exit(1)
                 search_start = time.time()
-                query_embedding = embedding_provider.get_embedding(
-                    query, embedding_purpose="query"
+                (
+                    _embed_vec2,
+                    _embed_provider2,
+                    _embed_failure2,
+                    _embed_ms2,
+                    _embed_outcomes2,
+                ) = _run_embedder_chain(
+                    text=query,
+                    embedding_purpose="query",
+                    primary_provider=primary_embedder,
+                    secondary_provider=secondary_embedder,
+                    health_monitor=health_monitor,
                 )
+                if _embed_vec2 is None:
+                    raise EmbedderUnavailableError(
+                        f"Both embedding providers unavailable: {_embed_failure2}",
+                        providers_attempted=_embed_outcomes2,
+                    )
+                query_embedding = _embed_vec2
                 raw_results_list = vector_store_client.search_with_model_filter(
                     query_vector=query_embedding,
                     embedding_model=current_model,
@@ -6328,8 +6509,21 @@ def query(
             git_results = query_service.filter_results_by_current_branch(raw_results)  # type: ignore[arg-type]
             timing_info["git_filter_ms"] = (time.time() - git_filter_start) * 1000
 
-        # Limit to requested number after filtering
+        # Limit to requested number after filtering (over-fetched earlier for rerank)
         results = git_results[:limit]
+
+        # Story #694: apply reranker stage if effective_rerank_query is set.
+        if effective_rerank_query:
+            from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+
+            results = _apply_cli_rerank_and_filter(
+                results=results,
+                rerank_query=effective_rerank_query,
+                rerank_instruction=rerank_instruction,
+                config=cli_rerank_config,
+                user_limit=limit,
+                health_monitor=health_monitor,
+            )
 
         # Apply staleness detection to local query results
         if results:
@@ -6415,6 +6609,15 @@ def query(
             timing_info=timing_info,
             current_display_branch=current_display_branch,
         )
+
+    except EmbedderUnavailableError as e:
+        # Story #904: clean user-facing message when all embedding providers are down.
+        console.print(
+            f"❌ Embedding unavailable: {e}",
+            style="red",
+            markup=False,
+        )
+        sys.exit(1)
 
     except Exception as e:
         console.print(f"❌ Search failed: {e}", style="red", markup=False)

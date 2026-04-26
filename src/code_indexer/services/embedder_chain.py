@@ -90,19 +90,27 @@ def _run_embedder_chain(
     primary_provider: Optional[EmbeddingProvider],
     secondary_provider: Optional[EmbeddingProvider],
     health_monitor: ProviderHealthMonitor,
-) -> Tuple[Optional[List[float]], Optional[str], Optional[str], int]:
+) -> Tuple[
+    Optional[List[float]], Optional[str], Optional[str], int, List[Tuple[str, str]]
+]:
     """Run primary->secondary embedder chain for a single text.
 
     Mirrors _run_provider_chain() from server/mcp/reranking.py:132-170.
 
-    Returns: (embedding_vector, provider_name, worst_failure_reason, elapsed_ms).
-    On full success: (vector, "voyage" or "cohere", None, ms).
-    On total failure: (None, None, reason, ms).
+    Returns: (embedding_vector, provider_name, worst_failure_reason, elapsed_ms, providers_outcomes).
+    providers_outcomes contains only failed/sinbinned providers (successful provider not appended).
+    On primary success: (vector, "voyage", None, ms, []).
+    On failover success: (vector, "cohere", None, ms, [("voyage", "failed"|"sinbinned")]).
+    On total failure: (None, None, reason, ms, [(name, reason), ...]).
 
     Terminal failure_reason values:
       "no-providers-configured" -- primary and secondary are both None
       "all-sinbinned"           -- all configured providers gated (health=down or sinbinned)
       "failed"                  -- at least one provider raised an exception
+
+    providers_outcomes per-provider reason values:
+      "sinbinned" -- provider was skipped due to health=down or sin-bin gate
+      "failed"    -- provider was attempted and raised an exception
     """
     t_start = time.monotonic()
 
@@ -115,10 +123,12 @@ def _run_embedder_chain(
 
     if not providers:
         elapsed_ms = int((time.monotonic() - t_start) * 1000)
-        return None, None, "no-providers-configured", elapsed_ms
+        return None, None, "no-providers-configured", elapsed_ms, []
 
     worst_failure: Optional[str] = None
     any_attempted = False
+    providers_outcomes: List[Tuple[str, str]] = []
+    first_failed_name: Optional[str] = None
 
     for name, health_key, provider in providers:
         vector, failure_reason = _attempt_provider_embed(
@@ -126,17 +136,29 @@ def _run_embedder_chain(
         )
         if vector is not None:
             elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            return vector, name, None, elapsed_ms
+            # Emit failover INFO log when a secondary succeeded after primary failed.
+            if first_failed_name is not None:
+                logger.info(
+                    "Embedder failover: %s unavailable, using %s",
+                    first_failed_name,
+                    name,
+                )
+            return vector, name, None, elapsed_ms, providers_outcomes
+        # Record per-provider outcome: "sinbinned" for skipped, "failed" for exceptions.
+        per_provider_reason = "sinbinned" if failure_reason == "skipped" else "failed"
+        providers_outcomes.append((name, per_provider_reason))
         # Track worst failure: "failed" outranks "skipped" (mirrors reranking.py:167).
         if worst_failure != "failed":
             worst_failure = failure_reason
         if failure_reason != "skipped":
             any_attempted = True
+            if first_failed_name is None:
+                first_failed_name = name
 
     elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
     # All configured providers were gated out — none attempted an actual call.
     if not any_attempted:
-        return None, None, "all-sinbinned", elapsed_ms
+        return None, None, "all-sinbinned", elapsed_ms, providers_outcomes
 
-    return None, None, worst_failure, elapsed_ms
+    return None, None, worst_failure, elapsed_ms, providers_outcomes
