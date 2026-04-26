@@ -597,6 +597,18 @@ class GracefulInterruptHandler:
 console = Console()
 
 
+def _get_reranker_sinbin_path() -> Path:
+    """Return the XDG-compliant sinbin persistence path for CLI reranker state.
+
+    Respects XDG_CONFIG_HOME if set; falls back to ~/.config/cidx/reranker_state.json.
+    Single source of truth used by both the temporal rerank path (Story #905) and
+    the Bundle 4 hoisted init block.
+    """
+    _xdg = os.environ.get("XDG_CONFIG_HOME")
+    _base = Path(_xdg) if _xdg else Path.home() / ".config"
+    return _base / "cidx" / "reranker_state.json"
+
+
 def _display_query_timing(console: Console, timing_info: Dict[str, Any]) -> None:
     """Display query execution timing telemetry.
 
@@ -1117,6 +1129,7 @@ def _execute_semantic_search(
     project_root: Path,
     config_manager,
     console: Console,
+    file_extensions: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Execute semantic search - extracted for parallel execution in hybrid mode.
 
@@ -1230,6 +1243,24 @@ def _execute_semantic_search(
                 # Single path filter: append directly
                 filter_conditions.setdefault("must", []).extend(path_filters)
 
+        # Story #906: --file-extensions filter wiring.
+        # The "language" field IS cidx's file-extension field in the index schema
+        # (test helper _must_extension_conditions finds extension entries via
+        # c.get("key") == "language"). Per the test contract, multiple extensions
+        # are appended as DIRECT must-entries; cidx's vector_store engine
+        # OR-merges multiple direct entries with the same key. Composes with
+        # --language as INTERSECTION.
+        if file_extensions:
+            parsed_file_extensions = [
+                ext.strip().lstrip(".")
+                for ext in file_extensions.split(",")
+                if ext.strip()
+            ]
+            for ext in parsed_file_extensions:
+                filter_conditions.setdefault("must", []).append(
+                    {"key": "language", "match": {"value": ext}}
+                )
+
         # Build exclusion filters (must_not conditions)
         if exclude_languages:
             language_validator = LanguageValidator()
@@ -1336,6 +1367,23 @@ def _execute_semantic_search(
                     # Single path filter: add directly
                     filter_conditions_list.append(
                         {"key": "path", "match": {"text": path_filter[0]}}
+                    )
+
+            # Story #906: --file-extensions wiring into filter_conditions_list.
+            # The "language" field IS cidx's file-extension field (test helper
+            # _must_extension_conditions matches c.get("key") == "language").
+            # Multiple extensions appended as DIRECT must-entries (cidx
+            # vector_store OR-merges multiple direct entries with same key).
+            # Composes with --language as INTERSECTION.
+            if file_extensions:
+                parsed_file_extensions = [
+                    ext.strip().lstrip(".")
+                    for ext in file_extensions.split(",")
+                    if ext.strip()
+                ]
+                for ext in parsed_file_extensions:
+                    filter_conditions_list.append(
+                        {"key": "language", "match": {"value": ext}}
                     )
 
             # Build filter conditions preserving both must and must_not conditions
@@ -4791,6 +4839,19 @@ def display_temporal_results(results, temporal_service):
     type=str,
     help="Query multiple repositories (comma-separated aliases, e.g., 'repo1,repo2,repo3'). Remote mode only. Mutually exclusive with --repo.",
 )
+@click.option(
+    "--file-extensions",
+    "file_extensions",
+    default=None,
+    type=str,
+    help=(
+        'Comma-separated list of file extensions to include (e.g., "py,js,ts"). '
+        "Leading dot optional (.py and py both work). "
+        "Whitespace around commas is tolerated. "
+        "Composes with --language as intersection (both filters must match). "
+        "Empty string is treated as no filter."
+    ),
+)
 # --show-unchanged removed: Story 2 - all temporal results are changes now
 @click.option(
     "--rerank-query",
@@ -4846,6 +4907,7 @@ def query(
     repos: Optional[str],
     rerank_query: Optional[str],
     rerank_instruction: Optional[str],
+    file_extensions: Optional[str] = None,
 ):
     """Search the indexed codebase using semantic similarity.
 
@@ -5312,6 +5374,64 @@ def query(
                 chunk_type=chunk_type,
             )
 
+            # Story #905: Apply unified rerank funnel to temporal results.
+            # All imports are inside this guard so they load only when results exist.
+            if temporal_results.results:
+                from code_indexer.cli_search_funnel import _apply_cli_rerank_and_filter
+                from code_indexer.config_global import load_global_config
+                from code_indexer.services.cli_rerank_config_shim import (
+                    CliRerankConfigService,
+                )
+                from code_indexer.services.provider_health_monitor import (
+                    ProviderHealthMonitor,
+                )
+
+                _global_config = load_global_config()
+
+                # Resolve effective rerank query: explicit flag > auto-populate > None.
+                # Empty string is treated as "not provided" so auto-populate can fire.
+                _temporal_effective_rerank_query: Optional[str]
+                if rerank_query:
+                    _temporal_effective_rerank_query = rerank_query
+                elif _global_config.rerank.auto_populate_rerank_query:
+                    _temporal_effective_rerank_query = query
+                else:
+                    _temporal_effective_rerank_query = None
+
+                if _temporal_effective_rerank_query:
+                    _temporal_monitor = ProviderHealthMonitor.get_instance(
+                        persistence_path=_get_reranker_sinbin_path()
+                    )
+                    _temporal_shim = CliRerankConfigService(_global_config)
+
+                    # Convert TemporalSearchResult objects to FTS-shaped dicts so the
+                    # funnel's content extractor can read result text.  The original
+                    # object is stored under "_temporal_obj" for round-trip
+                    # reconstruction after reranking so no data is lost.
+                    _funnel_inputs = [
+                        {
+                            "snippet": r.content,
+                            "file_path": r.file_path,
+                            "score": r.score,
+                            "_temporal_obj": r,
+                        }
+                        for r in temporal_results.results
+                    ]
+
+                    _reranked_dicts = _apply_cli_rerank_and_filter(
+                        results=_funnel_inputs,
+                        rerank_query=_temporal_effective_rerank_query,
+                        rerank_instruction=rerank_instruction,
+                        config=_temporal_shim,
+                        user_limit=limit,
+                        health_monitor=_temporal_monitor,
+                    )
+
+                    # Reconstruct TemporalSearchResult list in reranked order.
+                    temporal_results.results = [
+                        d["_temporal_obj"] for d in _reranked_dicts
+                    ]
+
             # Keep a reference for display helpers that expect a temporal_service param
             temporal_service = TemporalSearchService(
                 config_manager=config_manager,
@@ -5432,15 +5552,9 @@ def query(
 
     global_config = load_global_config()
 
-    # Persistence path for sin-bin state: XDG-compliant, CLI-specific location.
-    _xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
-    _cli_config_base = (
-        Path(_xdg_config_home) if _xdg_config_home else Path.home() / ".config"
-    )
-    _sinbin_persistence_path = _cli_config_base / "cidx" / "reranker_state.json"
-
+    # Persistence path for sin-bin state: delegate to shared helper.
     health_monitor = ProviderHealthMonitor.get_instance(
-        persistence_path=_sinbin_persistence_path
+        persistence_path=_get_reranker_sinbin_path()
     )
     cli_rerank_config = CliRerankConfigService(global_config)
 
@@ -5647,6 +5761,7 @@ def query(
                     project_root=project_root,
                     config_manager=ctx.obj["config_manager"],
                     console=console,
+                    file_extensions=file_extensions,
                 )
 
                 # Wait for BOTH to complete (parallel execution)
@@ -6110,6 +6225,24 @@ def query(
                 # Single path filter: append directly
                 filter_conditions.setdefault("must", []).extend(path_filters)
 
+        # Story #906: --file-extensions filter wiring.
+        # The "language" field IS cidx's file-extension field in the index schema
+        # (see test helper _must_extension_conditions which finds extension entries
+        # via c.get("key") == "language"). Per the test contract, multiple
+        # extensions are appended as DIRECT must-entries (NOT should-wrapped) —
+        # cidx's vector_store engine OR-merges multiple direct entries with the
+        # same key. Composes with --language as INTERSECTION.
+        if file_extensions:
+            parsed_file_extensions = [
+                ext.strip().lstrip(".")
+                for ext in file_extensions.split(",")
+                if ext.strip()
+            ]
+            for ext in parsed_file_extensions:
+                filter_conditions.setdefault("must", []).append(
+                    {"key": "language", "match": {"value": ext}}
+                )
+
         # Build exclusion filters (must_not conditions)
         if exclude_languages:
             language_validator = LanguageValidator()
@@ -6337,6 +6470,23 @@ def query(
                     # Single path filter: add directly
                     filter_conditions_list.append(
                         {"key": "path", "match": {"text": path_filter[0]}}
+                    )
+
+            # Story #906: --file-extensions wiring into filter_conditions_list.
+            # The "language" field IS cidx's file-extension field (test helper
+            # _must_extension_conditions matches c.get("key") == "language").
+            # Multiple extensions appended as DIRECT must-entries (cidx
+            # vector_store OR-merges multiple direct entries with same key).
+            # Composes with --language as INTERSECTION.
+            if file_extensions:
+                parsed_file_extensions = [
+                    ext.strip().lstrip(".")
+                    for ext in file_extensions.split(",")
+                    if ext.strip()
+                ]
+                for ext in parsed_file_extensions:
+                    filter_conditions_list.append(
+                        {"key": "language", "match": {"value": ext}}
                     )
 
             # Build filter conditions preserving both must and must_not conditions
