@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 
 
 class Action(str, Enum):
-    """Journal action identifiers. Story #908 contribution: self_loop_deleted."""
+    """Journal action identifiers.
+
+    Story #908: self_loop_deleted.
+    Story #910: malformed_yaml_reemitted.
+    """
 
     self_loop_deleted = "self_loop_deleted"
+    malformed_yaml_reemitted = "malformed_yaml_reemitted"
 
 
 _VALID_VERDICTS: frozenset = frozenset({"CONFIRMED", "REFUTED", "INCONCLUSIVE", "N_A"})
@@ -260,6 +265,150 @@ def build_and_append_journal_entry(
             logger.warning(msg)
 
 
+def body_byte_offset(raw_bytes: bytes, close_idx: int) -> int:
+    """Return byte offset of the first byte AFTER the closing --- line.
+
+    Counts (close_idx + 1) newline bytes from the start of raw_bytes to
+    find the position immediately after the closing '---\\n' delimiter.
+    Preserves body bytes including mixed \\r\\n endings (AC5).
+
+    Extracted from DepMapRepairExecutor._body_byte_offset (Finding #3 / Story #910).
+    """
+    count = 0
+    target = close_idx + 1
+    for i, b in enumerate(raw_bytes):
+        if b == ord("\n"):
+            count += 1
+            if count == target:
+                return i + 1
+    return len(raw_bytes)
+
+
+def emit_repos_lines(json_repos: List[str]) -> List[str]:
+    """Return YAML lines for the participating_repos block.
+
+    Returns a list entry for each repo, or an inline empty list.
+    Used by reemit_frontmatter_from_domain_info to avoid duplicating emission logic.
+
+    Extracted from DepMapRepairExecutor._emit_repos_lines (Finding #3 / Story #910).
+    """
+    from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
+
+    if json_repos:
+        return ["participating_repos:"] + [
+            f"  - {yaml_quote_if_unsafe(r)}" for r in json_repos
+        ]
+    return ["participating_repos: []"]
+
+
+def reemit_frontmatter_from_domain_info(
+    content: str,
+    bounds: tuple,
+    domain_info: Dict[str, Any],
+) -> str:
+    """Replace frontmatter with authoritative _domains.json values; body unchanged.
+
+    Uses split("\\n") (not splitlines()) to preserve \\r chars in body,
+    keeping mixed line-ending files byte-identical after round-trip (AC5).
+
+    Preconditions (asserted; stripped under python -O):
+      - content is str
+      - bounds is a 2-item tuple of ints with open_idx < close_idx
+      - domain_info is a dict
+
+    Extracted from DepMapRepairExecutor._reemit_frontmatter_from_domain_info (Finding #3).
+    """
+    from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
+
+    assert isinstance(content, str), "content must be str"
+    assert (
+        isinstance(bounds, tuple)
+        and len(bounds) == 2
+        and isinstance(bounds[0], int)
+        and isinstance(bounds[1], int)
+        and bounds[0] < bounds[1]
+    ), f"bounds must be (int, int) with open_idx < close_idx, got {bounds!r}"
+    assert isinstance(domain_info, dict), "domain_info must be a dict"
+
+    lines = content.split("\n")
+    open_idx, close_idx = bounds
+    body_lines = lines[close_idx:]  # closing "---" + everything after
+
+    name = domain_info.get("name", "")
+    last_analyzed = domain_info.get("last_analyzed", "")
+    json_repos = domain_info.get("participating_repos", [])
+    if not isinstance(json_repos, list):
+        json_repos = []
+
+    old_fm_lines = lines[open_idx + 1 : close_idx]
+    new_fm: List[str] = []
+    name_done = last_analyzed_done = repos_done = False
+    skip_repos_indent = False
+
+    for line in old_fm_lines:
+        if line.startswith("name:"):
+            new_fm.append(f"name: {yaml_quote_if_unsafe(name)}")
+            name_done = True
+            skip_repos_indent = False
+        elif line.startswith("last_analyzed"):
+            new_fm.append(f"last_analyzed: {yaml_quote_if_unsafe(last_analyzed)}")
+            last_analyzed_done = True
+            skip_repos_indent = False
+        elif line.startswith("participating_repos:"):
+            new_fm.extend(emit_repos_lines(json_repos))
+            repos_done = True
+            skip_repos_indent = True
+        elif skip_repos_indent and (line.startswith("  ") or line.startswith("\t")):
+            continue  # drop old list items
+        else:
+            skip_repos_indent = False
+            new_fm.append(line)
+
+    if not name_done:
+        new_fm.append(f"name: {yaml_quote_if_unsafe(name)}")
+    if not last_analyzed_done:
+        new_fm.append(f"last_analyzed: {yaml_quote_if_unsafe(last_analyzed)}")
+    if not repos_done:
+        new_fm.extend(emit_repos_lines(json_repos))
+
+    return "\n".join(["---"] + new_fm + body_lines)
+
+
+def build_and_append_malformed_yaml_journal_entry(
+    file_path: Path,
+    domain_name: str,
+    errors: Optional[List[str]] = None,
+) -> None:
+    """Build MALFORMED_YAML JournalEntry and append. Catches write/format exceptions (AC8).
+
+    Called after a successful surgical frontmatter re-emit (Story #910).
+    """
+    try:
+        jnl = RepairJournal()
+        entry = JournalEntry(
+            anomaly_type="MALFORMED_YAML",
+            source_domain=domain_name,
+            target_domain=domain_name,
+            source_repos=[],
+            target_repos=[],
+            verdict="N_A",
+            action=Action.malformed_yaml_reemitted.value,
+            citations=[],
+            file_writes=[
+                {"path": str(file_path), "operation": "frontmatter_reemitted"}
+            ],
+            claude_response_raw="",
+            effective_mode="deterministic",
+        )
+        jnl.append(entry)
+    except (ValueError, TypeError, RuntimeError, OSError) as exc:
+        msg = f"Phase 3.7: journal write failed for {domain_name}: {exc}"
+        if errors is not None:
+            errors.append(msg)
+        else:
+            logger.warning(msg)
+
+
 def _repair_one_self_loop(
     output_dir: Path,
     anomaly: "AnomalyEntry",
@@ -294,20 +443,30 @@ def _repair_one_self_loop(
     build_and_append_journal_entry(md_path, domain_name, None, journal, errors)
 
 
-def run_phase37(output_dir: Path, fixed: List[str], errors: List[str]) -> None:
-    """Repair SELF_LOOP anomalies across all domains (Phase 3.7 orchestrator).
+def run_phase37(
+    output_dir: Path,
+    fixed: List[str],
+    errors: List[str],
+) -> None:
+    """Repair SELF_LOOP graph-channel anomalies (Phase 3.7 SELF_LOOP orchestrator).
 
     Called by DepMapRepairExecutor._run_phase37 shim after enable flag check.
     Creates one RepairJournal so CIDX_DATA_DIR env var is honoured (Bug #879).
+
+    MALFORMED_YAML repairs are handled separately by run_malformed_yaml_repairs
+    in dep_map_repair_malformed_yaml.py (Story #910 extraction).
     """
     from code_indexer.server.services.dep_map_mcp_parser import DepMapMCPParser
     from code_indexer.server.services.dep_map_parser_hygiene import AnomalyType
 
     parser = DepMapMCPParser(dep_map_path=output_dir.parent)
-    _, _, _, data_anomalies = parser.get_cross_domain_graph_with_channels()
+    _, _all_anomalies, _parser_anomalies, data_anomalies = (
+        parser.get_cross_domain_graph_with_channels()
+    )
+
+    # SELF_LOOP repairs (Story #908)
     self_loop_anomalies = [a for a in data_anomalies if a.type == AnomalyType.SELF_LOOP]
-    if not self_loop_anomalies:
-        return
-    journal = RepairJournal()
-    for anomaly in self_loop_anomalies:
-        _repair_one_self_loop(output_dir, anomaly, fixed, errors, journal)
+    if self_loop_anomalies:
+        journal = RepairJournal()
+        for anomaly in self_loop_anomalies:
+            _repair_one_self_loop(output_dir, anomaly, fixed, errors, journal)

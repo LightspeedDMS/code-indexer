@@ -41,10 +41,16 @@ from code_indexer.server.services.dep_map_repair_phase37 import (
     JournalEntry,  # noqa: F401 — re-exported for test backward compat
     RepairJournal,  # noqa: F401 — re-exported for test backward compat
     atomic_write_text,
+    body_byte_offset,
     build_and_append_journal_entry,
+    emit_repos_lines,
+    reemit_frontmatter_from_domain_info,
     remove_self_loop_rows,
     resolve_self_loop_md_path,
     run_phase37,
+)
+from code_indexer.server.services.dep_map_repair_malformed_yaml import (
+    run_malformed_yaml_repairs,
 )
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
@@ -562,13 +568,23 @@ class DepMapRepairExecutor:
         fixed: List[str],
         errors: List[str],
     ) -> None:
-        """Phase 3.7 shim: check enable flag then delegate to phase37 module.
+        """Phase 3.7 shim: check enable flag then delegate to phase37 and malformed_yaml modules.
 
         No-op when enable_graph_channel_repair is False (AC2).
         """
         if not self._enable_graph_channel_repair:
             return
         run_phase37(output_dir, fixed, errors)
+        run_malformed_yaml_repairs(
+            output_dir,
+            fixed,
+            errors,
+            domain_analyzer=self._domain_analyzer,
+            load_domains_json_fn=self._load_domains_json,
+            log_fn=self._log,
+            locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
+            is_safe_domain_name_fn=self._is_safe_domain_name,
+        )
 
     def _repair_self_loop(
         self,
@@ -620,6 +636,38 @@ class DepMapRepairExecutor:
         build_and_append_journal_entry(
             md_path, domain_name, journal_path, journal, errors
         )
+
+    def _repair_malformed_yaml(
+        self,
+        output_dir: Path,
+        anomaly: Any,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """Thin shim kept for test backward compat; delegates to module-level helper.
+
+        All logic lives in dep_map_repair_malformed_yaml.repair_single_malformed_yaml_anomaly.
+        """
+        from code_indexer.server.services.dep_map_repair_malformed_yaml import (
+            repair_single_malformed_yaml_anomaly,
+        )
+
+        repair_single_malformed_yaml_anomaly(
+            output_dir,
+            anomaly,
+            self._load_domains_json(output_dir),
+            fixed,
+            errors,
+            domain_analyzer=self._domain_analyzer,
+            log_fn=self._log,
+            locate_frontmatter_bounds_fn=self._locate_frontmatter_bounds,
+            is_safe_domain_name_fn=self._is_safe_domain_name,
+        )
+
+    @staticmethod
+    def _body_byte_offset(raw_bytes: bytes, close_idx: int) -> int:
+        """Delegate to phase37.body_byte_offset (extracted per Finding #3 / Story #910)."""
+        return body_byte_offset(raw_bytes, close_idx)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 4: Regenerate _index.md
@@ -828,6 +876,20 @@ class DepMapRepairExecutor:
         if not key_found:
             result.extend(new_repos_lines)
         return result
+
+    @staticmethod
+    def _emit_repos_lines(json_repos: List[str]) -> List[str]:
+        """Delegate to phase37.emit_repos_lines (extracted per Finding #3 / Story #910)."""
+        return emit_repos_lines(json_repos)
+
+    @staticmethod
+    def _reemit_frontmatter_from_domain_info(
+        content: str,
+        bounds: tuple,
+        domain_info: Dict[str, Any],
+    ) -> str:
+        """Delegate to phase37.reemit_frontmatter_from_domain_info (Finding #3 / Story #910)."""
+        return reemit_frontmatter_from_domain_info(content, bounds, domain_info)
 
     def _extract_description_from_md(self, md_file: Path) -> str:
         """
