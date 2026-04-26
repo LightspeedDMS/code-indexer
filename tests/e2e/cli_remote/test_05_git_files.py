@@ -29,7 +29,6 @@ import uuid
 from pathlib import Path
 from subprocess import CompletedProcess
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 

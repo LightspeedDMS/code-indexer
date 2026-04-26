@@ -5,6 +5,7 @@ Since v9.23.3 both glibc arena-fragmentation mitigations ship enabled by
 default so fresh installs automatically inherit the protections.  Operators
 can still disable either flag by setting it to false in ~/.cidx-server/config.json.
 """
+
 import pytest
 
 

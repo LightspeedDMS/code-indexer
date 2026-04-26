@@ -73,6 +73,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "cow_daemon",
             "memory_retrieval_config",
             "lifecycle_analysis_config",
+            "codex_integration_config",  # Story #844 — runtime, not bootstrap
         }
     )
 

@@ -56,6 +56,7 @@ class MCPSelfRegistrationService:
         self._registration_lock = (
             threading.Lock()
         )  # Story #203 Finding 5: Thread safety
+        self._cached_auth_header: Optional[str] = None
 
     def ensure_registered(self) -> bool:
         """
@@ -226,6 +227,11 @@ class MCPSelfRegistrationService:
         auth_bytes = auth_string.encode("ascii")
         auth_b64 = base64.b64encode(auth_bytes).decode("ascii")
         auth_header = f"Authorization: Basic {auth_b64}"
+        # Cache the header value portion (everything after "Authorization: ") so
+        # build_auth_header_from_creds() can return it to Codex auth without
+        # re-assembling credentials (v9.23.10).
+        _prefix = "Authorization: "
+        self._cached_auth_header = auth_header[len(_prefix) :]
 
         # Build command
         cmd = [
@@ -252,3 +258,28 @@ class MCPSelfRegistrationService:
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             logger.error(f"Failed to register MCP server: {e}")
             return False
+
+    def get_cached_auth_header_value(self) -> Optional[str]:
+        """
+        Return the cached Authorization header value set during register_in_claude_code().
+
+        Returns:
+            'Basic <b64>' string if register_in_claude_code() has been called
+            successfully in this process, or None if registration has not yet run.
+        """
+        return self._cached_auth_header
+
+    def build_auth_header_from_creds(self) -> Optional[str]:
+        """
+        Ensure registration is complete and return the cached auth header value.
+
+        Calls ensure_registered() to trigger the registration flow if not yet done.
+        Once registration completes, register_in_claude_code() populates
+        self._cached_auth_header. Returns the cached value.
+
+        Returns:
+            'Basic <b64>' header value string, or None if registration could not
+            complete (e.g. Claude CLI unavailable).
+        """
+        self.ensure_registered()
+        return self._cached_auth_header

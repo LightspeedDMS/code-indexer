@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from tests.e2e.helpers import run_cidx
 
