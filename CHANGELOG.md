@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v9.23.8
+
+### Operator helpers
+
+- **`scripts/setup-codex-npm-prefix.sh --update-cidx-server-systemd` flag**: extends the v9.23.6 helper to optionally patch the cidx-server systemd unit's `Environment="PATH=..."` line, prepending the npm bin dir (defaults to `~/.npm-global/bin`) so the cidx-server process can find `codex` after the install. Closes the operationalization loop: with this flag, the only manual steps an operator needs are (1) running the script (security: chooses where global npm packages land), (2) entering OPENAI_API_KEY in the Web UI Config Screen (security: secret entry). Everything else (npm install, PATH setup, systemd unit patch + daemon-reload, codex login on next server restart, auth.json schema, dispatcher invocation) is now automatic. Idempotent: when the bin dir is already in PATH, no-op + skip rewrite. Honors `CIDX_SYSTEMD_UNIT_PATH` env override for testing. 5 new unit tests (10 total in the script suite). Manual E2E confirmed on staging: when `~/.npm-global/bin` was already added to the systemd PATH (via earlier manual edit), running with the flag emits "PATH already configured" and exits clean.
+
+### Recommended operator runbook (single command + 1 UI entry)
+
+```bash
+# 1. One-time host setup (operator-driven, security-sensitive):
+sudo -u <cidx-server-user> bash scripts/setup-codex-npm-prefix.sh --update-cidx-server-systemd
+sudo systemctl restart cidx-server
+
+# 2. Set OPENAI_API_KEY in Web UI:
+#    Browser → /admin/config → Codex CLI Integration → Enabled: Yes,
+#    Credential Mode: api_key, OPENAI_API_KEY: <sk-proj-...>, Save.
+#    On next cidx-server restart (or save-triggered reload), codex_cli_startup
+#    runs `codex login --with-api-key` (v9.23.7), writes the correct minimal
+#    apikey-mode auth.json, and CodexInvoker authenticates successfully without
+#    any further operator intervention.
+```
+
 ## v9.23.7
 
 ### Bug fixes
