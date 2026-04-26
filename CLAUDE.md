@@ -353,9 +353,9 @@ Rationale: batch processing needs rate limiting for API cost; interactive UX exp
 
 No fallbacks — research and propose solutions. JSON errors: use `_validate_and_debug_prompt()`, check non-ASCII characters, long lines, quotes.
 
-**Codex/Claude divergence (v9.23.9)**:
+**Codex/Claude divergence (v9.23.10)**:
 
-- `cidx-local` MCP is registered automatically at server startup for BOTH CLI paths: Claude via `MCPSelfRegistrationService` (HTTP + Basic auth, `client_id:client_secret` encoded as Base64), and Codex via `_ensure_codex_mcp_http_registered` in `codex_cli_startup.py` (HTTP + Bearer JWT, admin-scope token injected as `CIDX_MCP_BEARER_TOKEN` env var). See `src/code_indexer/server/startup/codex_cli_startup.py`.
+- `cidx-local` MCP is registered automatically at server startup for BOTH CLI paths using the SAME persistent `client_id:client_secret` credentials issued by `MCPCredentialManager`: Claude via `MCPSelfRegistrationService` (HTTP + Basic auth header passed directly), and Codex via `_ensure_codex_mcp_http_registered` in `codex_cli_startup.py` (TOML config — `env_http_headers = { Authorization = "CIDX_MCP_AUTH_HEADER" }` — codex reads `CIDX_MCP_AUTH_HEADER` env var and injects it verbatim as the Authorization header). `CodexInvoker` retrieves the header value via `build_codex_mcp_auth_header_provider()` closure. No JWT, no TTL. See `src/code_indexer/server/startup/codex_mcp_registration.py` and `src/code_indexer/server/services/codex_mcp_auth_header_provider.py`.
 - Hook parity is NOT achieved — codex 0.125 has no `PostToolUse` hook equivalent (verified via `codex --help` and `codex exec --help`; reference: github.com/openai/codex/issues/16732). Citation and audit enforcement at the hook layer remain Claude-only. This is accepted as permanent degradation. See CHANGELOG v9.23.9.
 
 ---

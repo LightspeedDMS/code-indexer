@@ -1,39 +1,79 @@
 """
-Unit tests proving bearer_token_provider is wired at the production CodexInvoker
+Unit tests proving auth_header_provider is wired at the production CodexInvoker
 construction site inside DescriptionRefreshScheduler._build_cli_dispatcher().
 
-These are WIRING tests — they test the production builder method, not isolated
-component construction. The goal is to prove that in production, the CodexInvoker
-receives a bearer_token_provider closure that produces valid admin-scope JWTs.
+v9.23.10: auth_header_provider replaces bearer_token_provider. The closure
+produces a persistent 'Basic <b64>' string from MCPCredentialManager-issued
+credentials — no JWT, no TTL.
 
 Test inventory (4 tests across 2 classes):
 
-  TestCliDispatcherCodexBearerProviderWired (2 tests)
-    test_codex_invoker_in_cli_dispatcher_has_bearer_provider
-    test_bearer_provider_produces_valid_admin_jwt
+  TestCliDispatcherCodexAuthHeaderProviderWired (2 tests)
+    test_codex_invoker_in_cli_dispatcher_has_auth_header_provider
+    test_auth_header_provider_produces_basic_string
 
-  TestCliDispatcherCodexBearerProviderAbsentWhenDisabled (2 tests)
+  TestCliDispatcherCodexAuthHeaderProviderAbsentWhenDisabled (2 tests)
     test_codex_invoker_is_none_when_codex_disabled
-    test_bearer_provider_absent_when_no_codex_home
+    test_auth_header_provider_absent_when_no_codex_home
 """
 
 from __future__ import annotations
 
 import os
-import secrets
 from unittest.mock import MagicMock, patch
 
-from code_indexer.server.auth.jwt_manager import JWTManager
+import pytest
+
+from code_indexer.server.services.mcp_self_registration_service import (
+    MCPSelfRegistrationService,
+)
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-# Sentinel value used as CODEX_HOME — not a real path, just a recognisable string
-# for assertions. Using a non-path sentinel avoids coupling tests to filesystem shapes.
+# Clearly synthetic placeholder — not a real credential.
 _SENTINEL_CODEX_HOME = "sentinel-codex-home"
-_TEST_SECRET = secrets.token_urlsafe(32)
+_FAKE_BASIC_HEADER = "Basic abc"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def real_mcp_singleton():
+    """Build a real MCPSelfRegistrationService with stubbed dependencies, register as singleton.
+
+    Yields the service instance. Always clears the singleton on teardown so
+    tests don't leak state.
+    """
+    fake_config_manager = MagicMock()
+    fake_mcp_credential_manager = MagicMock()
+
+    fake_config = MagicMock()
+    fake_config.mcp_self_registration.client_id = "test-client-id"
+    fake_config.mcp_self_registration.client_secret = "test-client-secret"
+    fake_config_manager.load_config.return_value = fake_config
+
+    fake_mcp_credential_manager.get_credential_by_client_id.return_value = {
+        "client_id": "test-client-id",
+        "client_secret": "test-client-secret",
+    }
+
+    real_service = MCPSelfRegistrationService(
+        config_manager=fake_config_manager,
+        mcp_credential_manager=fake_mcp_credential_manager,
+    )
+    # Pre-populate the cached header so get_cached_auth_header_value() returns
+    # the expected value without invoking ensure_registered() (which would call
+    # subprocess).
+    real_service._cached_auth_header = _FAKE_BASIC_HEADER
+    MCPSelfRegistrationService.set_instance(real_service)
+    yield real_service
+    MCPSelfRegistrationService.set_instance(None)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +102,6 @@ def _make_mock_config(codex_enabled: bool, codex_weight: float = 0.5):
     cfg = MagicMock()
     cfg.claude_integration_config = claude_cfg
     cfg.codex_integration_config = codex_cfg
-    cfg.jwt_expiration_minutes = 10
     return cfg
 
 
@@ -85,122 +124,93 @@ def _make_scheduler():
     )
 
 
-def _build_dispatcher_and_call_provider_with_codex_enabled():
+def _build_dispatcher_and_call_provider_with_codex_enabled(real_mcp_singleton):
     """
     Build a dispatcher from _build_cli_dispatcher() with Codex enabled, then call
-    the bearer_token_provider closure while all patches are still active.
+    the auth_header_provider closure while the real singleton is registered.
 
-    Patches must remain active when provider() is called because the closure
-    references module-level JWTSecretManager / get_config_service names — the
-    mock substitutions are only in effect inside the with block.
+    real_mcp_singleton must be the fixture-provided MCPSelfRegistrationService
+    instance already registered via MCPSelfRegistrationService.set_instance().
+    This exercises the real get_instance() path — no class-symbol patching.
 
     Returns:
-        Tuple of (dispatcher, token_string) both obtained under active patches.
-        token_string is None when dispatcher.codex is None.
+        Tuple of (dispatcher, header_string) both obtained with the singleton active.
+        header_string is None when dispatcher.codex is None.
     """
     config = _make_mock_config(codex_enabled=True, codex_weight=0.7)
     scheduler = _make_scheduler()
 
-    with (
-        patch(
-            "code_indexer.server.services.codex_bearer_provider.get_config_service"
-        ) as mock_get_cfg,
-        patch.dict("os.environ", {"CODEX_HOME": _SENTINEL_CODEX_HOME}),
-        patch(
-            "code_indexer.server.services.codex_bearer_provider.JWTSecretManager"
-        ) as mock_jwt_secret_mgr_cls,
-    ):
-        mock_svc = MagicMock()
-        mock_svc.get_config.return_value = config
-        mock_get_cfg.return_value = mock_svc
-
-        mock_secret_mgr = MagicMock()
-        mock_secret_mgr.get_or_create_secret.return_value = _TEST_SECRET
-        mock_jwt_secret_mgr_cls.return_value = mock_secret_mgr
-
+    with patch.dict("os.environ", {"CODEX_HOME": _SENTINEL_CODEX_HOME}):
         dispatcher = scheduler._build_cli_dispatcher(config)
-        # Call the provider while patches are still active so JWTSecretManager
-        # is still substituted and the token is signed with _TEST_SECRET.
-        provider = dispatcher.codex._bearer_token_provider if dispatcher.codex else None
-        token = provider() if provider is not None else None
-        return dispatcher, token
+        provider = dispatcher.codex._auth_header_provider if dispatcher.codex else None
+        header = provider() if provider is not None else None
+        return dispatcher, header
 
 
 # ---------------------------------------------------------------------------
-# Tests: bearer_token_provider wired when Codex is enabled
+# Tests: auth_header_provider wired when Codex is enabled
 # ---------------------------------------------------------------------------
 
 
-class TestCliDispatcherCodexBearerProviderWired:
-    """_build_cli_dispatcher wires bearer_token_provider when Codex is enabled."""
+class TestCliDispatcherCodexAuthHeaderProviderWired:
+    """_build_cli_dispatcher wires auth_header_provider when Codex is enabled."""
 
-    def test_codex_invoker_in_cli_dispatcher_has_bearer_provider(self):
+    def test_codex_invoker_in_cli_dispatcher_has_auth_header_provider(
+        self, real_mcp_singleton
+    ):
         """
         CRITICAL WIRING TEST: When Codex is enabled and CODEX_HOME is set,
         _build_cli_dispatcher must build a CodexInvoker with a non-None
-        _bearer_token_provider.
+        _auth_header_provider.
 
         This is the production construction site — not an isolated component test.
-        Without this wiring, CIDX_MCP_BEARER_TOKEN is never injected and codex
+        Without this wiring, CIDX_MCP_AUTH_HEADER is never injected and codex
         cannot authenticate against the cidx-local MCP HTTP endpoint.
         """
-        dispatcher, _token = _build_dispatcher_and_call_provider_with_codex_enabled()
+        dispatcher, _header = _build_dispatcher_and_call_provider_with_codex_enabled(
+            real_mcp_singleton
+        )
 
         assert dispatcher.codex is not None, (
             "codex invoker must be built when Codex is enabled"
         )
-        assert dispatcher.codex._bearer_token_provider is not None, (
-            "CRITICAL: _bearer_token_provider must be non-None at the production "
-            "construction site. Without this, CIDX_MCP_BEARER_TOKEN is never injected "
+        assert dispatcher.codex._auth_header_provider is not None, (
+            "CRITICAL: _auth_header_provider must be non-None at the production "
+            "construction site. Without this, CIDX_MCP_AUTH_HEADER is never injected "
             "and codex cannot authenticate against cidx-local MCP."
         )
 
-    def test_bearer_provider_produces_valid_admin_jwt(self):
+    def test_auth_header_provider_produces_basic_string(self, real_mcp_singleton):
         """
-        The bearer_token_provider closure wired at the production site must produce
-        a JWT that JWTManager.validate_token() accepts with admin-scope claims.
-
-        Uses real JWTManager with _TEST_SECRET (injected via patch) to verify
-        end-to-end: construction site builds closure -> closure mints token ->
-        token validates with role=admin, username=admin.
-
-        The token is obtained inside the patch context (via the helper) because the
-        closure references module-level JWTSecretManager which is only substituted
-        while the patch is active.
+        The auth_header_provider closure wired at the production site must produce
+        a string starting with 'Basic ' (persistent MCPCredentialManager credentials,
+        no JWT TTL).
         """
-        dispatcher, token = _build_dispatcher_and_call_provider_with_codex_enabled()
+        dispatcher, header = _build_dispatcher_and_call_provider_with_codex_enabled(
+            real_mcp_singleton
+        )
 
         assert dispatcher.codex is not None, "codex invoker must be present"
-        assert dispatcher.codex._bearer_token_provider is not None, (
-            "bearer_token_provider must be wired"
+        assert dispatcher.codex._auth_header_provider is not None, (
+            "auth_header_provider must be wired"
         )
-        assert isinstance(token, str) and token, (
-            f"Provider must return a non-empty string token; got {token!r}"
-        )
-
-        # Validate using real JWTManager with the same test secret
-        jwt_manager = JWTManager(secret_key=_TEST_SECRET, token_expiration_minutes=10)
-        payload = jwt_manager.validate_token(token)  # must not raise
-        assert payload.get("username") == "admin", (
-            f"Token must carry username='admin'; got {payload.get('username')!r}"
-        )
-        assert payload.get("role") == "admin", (
-            f"Token must carry role='admin'; got {payload.get('role')!r}"
+        assert isinstance(header, str) and header.startswith("Basic "), (
+            f"Provider must return a string starting with 'Basic '; got {header!r}"
         )
 
 
 # ---------------------------------------------------------------------------
-# Tests: bearer_token_provider absent when Codex is disabled / no CODEX_HOME
+# Tests: auth_header_provider absent when Codex is disabled / no CODEX_HOME
 # ---------------------------------------------------------------------------
 
 
-class TestCliDispatcherCodexBearerProviderAbsentWhenDisabled:
+class TestCliDispatcherCodexAuthHeaderProviderAbsentWhenDisabled:
     """No CodexInvoker when Codex is disabled or CODEX_HOME is unset."""
 
     def test_codex_invoker_is_none_when_codex_disabled(self):
         """
         When codex_integration_config.enabled=False, the dispatcher has codex=None.
-        No bearer_token_provider is needed or built.
+        No auth_header_provider is needed or built.
         """
         config = _make_mock_config(codex_enabled=False)
         scheduler = _make_scheduler()
@@ -210,7 +220,7 @@ class TestCliDispatcherCodexBearerProviderAbsentWhenDisabled:
             "codex invoker must be None when Codex integration is disabled"
         )
 
-    def test_bearer_provider_absent_when_no_codex_home(self):
+    def test_auth_header_provider_absent_when_no_codex_home(self):
         """
         When Codex is enabled but CODEX_HOME is absent from the environment,
         no CodexInvoker is built (the CODEX_HOME guard prevents construction).

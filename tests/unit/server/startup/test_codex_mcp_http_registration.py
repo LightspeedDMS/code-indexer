@@ -1,39 +1,39 @@
 """
-Unit tests for _ensure_codex_mcp_http_registered in codex_cli_startup.py.
+Unit tests for _ensure_codex_mcp_http_registered in codex_mcp_registration.py.
 
-Closes Story #848 follow-up: Codex MCP launcher gap — HTTP transport.
+v9.23.10: Registration now writes config.toml directly (TOML file IO) instead of
+spawning subprocess `codex mcp add`. Codex 0.125 `codex mcp add` does not support
+`--http-headers` / `--env-http-headers` flags, so direct TOML editing is required.
 
-Test inventory (8 tests across 4 classes):
+Test inventory (6 tests across 5 classes):
 
-  TestHttpRegistrationCommandStructure (2 tests)
-    test_command_structure_with_url_and_bearer_token_env_var
-    test_codex_home_env_passed_to_subprocess
+  TestTomlRegistrationAbsentFile (1 test)
+    test_absent_config_toml_creates_file_with_section
 
-  TestHttpRegistrationIdempotency (2 tests)
-    test_already_registered_skips_add_call
-    test_not_registered_calls_add_after_get
+  TestTomlRegistrationIdempotency (2 tests)
+    test_already_registered_skips_write
+    test_stale_config_is_replaced
 
-  TestHttpRegistrationFailures (3 tests)
-    test_nonzero_add_exit_logs_warning_and_does_not_raise
-    test_timeout_expired_logs_warning_and_does_not_raise
-    test_file_not_found_logs_warning_and_does_not_raise
+  TestTomlRegistrationSectionStructure (1 test)
+    test_written_section_has_correct_structure
 
-  TestHttpRegistrationWiring (1 test)
-    test_initialize_wires_http_registration_with_port
+  TestTomlRegistrationAtomicWrite (1 test)
+    test_write_is_atomic_tmp_then_replace
+
+  TestTomlRegistrationFailures (1 test)
+    test_io_error_logs_warning_and_does_not_raise
 """
 
 from __future__ import annotations
 
 import logging
-import subprocess
+import os
+import stat
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from code_indexer.server.startup.codex_cli_startup import (
-    initialize_codex_manager_on_startup,
-)
 from code_indexer.server.startup.codex_mcp_registration import (
     _ensure_codex_mcp_http_registered,
 )
@@ -44,11 +44,9 @@ from code_indexer.server.startup.codex_mcp_registration import (
 # ---------------------------------------------------------------------------
 
 _TEST_PORT = 8000
-_TEST_PORT_ALT = 9123
+_TEST_HOST = "localhost"
 _MCP_NAME = "cidx-local"
-_BEARER_ENV_VAR = "CIDX_MCP_BEARER_TOKEN"
-_SUBPROCESS_TIMEOUT = 30
-_TEST_API_KEY = "test-api-key-sentinel"  # non-secret sentinel value
+_AUTH_HEADER_ENV_VAR = "CIDX_MCP_AUTH_HEADER"
 
 
 # ---------------------------------------------------------------------------
@@ -65,409 +63,310 @@ def codex_home(tmp_path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Tests: absent config.toml
 # ---------------------------------------------------------------------------
 
 
-def _make_run_result(returncode: int, stderr: bytes = b"") -> MagicMock:
-    mock = MagicMock()
-    mock.returncode = returncode
-    mock.stderr = stderr
-    return mock
+class TestTomlRegistrationAbsentFile:
+    """When config.toml does not exist, function creates it with the section."""
 
-
-def _get_returncode_for_cmd(cmd: list, get_rc: int, add_rc: int) -> int:
-    """Return the appropriate returncode based on the command being run."""
-    if cmd[:3] == ["codex", "mcp", "get"]:
-        return get_rc
-    if cmd[:3] == ["codex", "mcp", "add"]:
-        return add_rc
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Tests: HTTP registration command structure
-# ---------------------------------------------------------------------------
-
-
-class TestHttpRegistrationCommandStructure:
-    """_ensure_codex_mcp_http_registered builds the correct codex command."""
-
-    def test_command_structure_with_url_and_bearer_token_env_var(self, codex_home):
+    def test_absent_config_toml_creates_file_with_section(self, codex_home):
         """
-        With port=8000 and get returning rc=1 (absent), the commands must be in order:
-          1. ["codex", "mcp", "get", "cidx-local"]          -- pre-check
-          2. ["codex", "mcp", "remove", "cidx-local"]        -- defensive remove (non-fatal when absent)
-          3. ["codex", "mcp", "add", "cidx-local",
-              "--url", "http://localhost:8000/mcp",
-              "--bearer-token-env-var", "CIDX_MCP_BEARER_TOKEN"]  -- register
-
-        Asserts call ORDER: get -> remove -> add (exactly 3 calls).
+        When config.toml does not exist, _ensure_codex_mcp_http_registered must
+        create the file containing the [mcp_servers.cidx-local] section with
+        the expected url and env_http_headers.Authorization entry.
         """
+        import tomli
 
-        def _fake_run(cmd, **kwargs):
-            rc = _get_returncode_for_cmd(cmd, get_rc=1, add_rc=0)
-            return _make_run_result(rc)
+        config_toml = codex_home / "config.toml"
+        assert not config_toml.exists(), "Precondition: config.toml must not exist"
 
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
+        _ensure_codex_mcp_http_registered(
+            codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
+        )
+
+        assert config_toml.exists(), "config.toml must be created"
+        with open(config_toml, "rb") as f:
+            data = tomli.load(f)
+        section = data.get("mcp_servers", {}).get(_MCP_NAME, {})
+        assert section, f"[mcp_servers.{_MCP_NAME}] section must exist in config.toml"
+        assert section.get("url") == f"http://{_TEST_HOST}:{_TEST_PORT}/mcp", (
+            f"url must be 'http://{_TEST_HOST}:{_TEST_PORT}/mcp'; got {section.get('url')!r}"
+        )
+        assert (
+            section.get("env_http_headers", {}).get("Authorization")
+            == _AUTH_HEADER_ENV_VAR
+        ), f"env_http_headers.Authorization must be {_AUTH_HEADER_ENV_VAR!r}"
+
+
+# ---------------------------------------------------------------------------
+# Tests: idempotency
+# ---------------------------------------------------------------------------
+
+
+class TestTomlRegistrationIdempotency:
+    """Second call with matching config is a no-op; stale config is replaced."""
+
+    def test_already_registered_skips_write(self, codex_home, caplog):
+        """
+        When config.toml already contains the correct url AND
+        env_http_headers.Authorization = 'CIDX_MCP_AUTH_HEADER',
+        the second call must be a no-op (no write, INFO logged).
+        """
+        # First call creates the file
+        _ensure_codex_mcp_http_registered(
+            codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
+        )
+        config_toml = codex_home / "config.toml"
+        mtime_after_first = config_toml.stat().st_mtime_ns
+
+        # Second call — must be idempotent
+        with caplog.at_level(
+            logging.INFO,
+            logger="code_indexer.server.startup.codex_mcp_registration",
+        ):
             _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
+                codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
             )
 
-        all_cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert len(all_cmds) == 3, (
-            f"Expected exactly 3 subprocess calls (get + remove + add); got {len(all_cmds)}: {all_cmds!r}"
+        mtime_after_second = config_toml.stat().st_mtime_ns
+        assert mtime_after_second == mtime_after_first, (
+            "config.toml must NOT be modified on a second call with matching config"
         )
-        # First call: get pre-check
-        assert all_cmds[0] == [
-            "codex",
-            "mcp",
-            "get",
-            _MCP_NAME,
-        ], f"First subprocess call must be get pre-check; got {all_cmds[0]!r}"
-        # Second call: defensive remove (non-fatal when absent)
-        assert all_cmds[1] == [
-            "codex",
-            "mcp",
-            "remove",
-            _MCP_NAME,
-        ], f"Second subprocess call must be remove; got {all_cmds[1]!r}"
-        # Third call: add with HTTP URL and bearer env var
-        expected_add = [
-            "codex",
-            "mcp",
-            "add",
-            _MCP_NAME,
-            "--url",
-            f"http://localhost:{_TEST_PORT}/mcp",
-            "--bearer-token-env-var",
-            _BEARER_ENV_VAR,
-        ]
-        assert all_cmds[2] == expected_add, (
-            f"Third subprocess call must be add command {expected_add!r}; got {all_cmds[2]!r}"
+        info_msgs = [r.message for r in caplog.records if r.levelno == logging.INFO]
+        assert any("already registered" in m for m in info_msgs), (
+            "INFO log must confirm 'already registered' on idempotent call"
         )
 
-    def test_codex_home_env_passed_to_subprocess(self, codex_home):
+    def test_stale_config_is_replaced(self, codex_home):
         """
-        CODEX_HOME must be set in the env dict passed to subprocess.run
-        for every subprocess call (both get-check and add).
+        When config.toml contains a [mcp_servers.cidx-local] section with a
+        stale bearer_token_env_var (from v9.23.9), the section must be replaced
+        with the new env_http_headers entry. Verified by parsing the resulting TOML.
         """
+        import tomli
 
-        def _fake_run(cmd, **kwargs):
-            rc = _get_returncode_for_cmd(cmd, get_rc=1, add_rc=0)
-            return _make_run_result(rc)
+        config_toml = codex_home / "config.toml"
+        # Write stale v9.23.9-style config
+        stale_content = (
+            "[mcp_servers.cidx-local]\n"
+            f'url = "http://{_TEST_HOST}:{_TEST_PORT}/mcp"\n'
+            'bearer_token_env_var = "CIDX_MCP_BEARER_TOKEN"\n'
+        )
+        config_toml.write_text(stale_content)
 
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
+        _ensure_codex_mcp_http_registered(
+            codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
+        )
+
+        with open(config_toml, "rb") as f:
+            data = tomli.load(f)
+        section = data.get("mcp_servers", {}).get(_MCP_NAME, {})
+        assert "bearer_token_env_var" not in section, (
+            "Stale bearer_token_env_var must be absent from replaced section"
+        )
+        assert (
+            section.get("env_http_headers", {}).get("Authorization")
+            == _AUTH_HEADER_ENV_VAR
+        ), (
+            f"Replaced section must have env_http_headers.Authorization = {_AUTH_HEADER_ENV_VAR!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: section structure
+# ---------------------------------------------------------------------------
+
+
+class TestTomlRegistrationSectionStructure:
+    """Written section has correct TOML structure — verified by parsing."""
+
+    def test_written_section_has_correct_structure(self, codex_home):
+        """
+        Parse config.toml with tomli after registration and assert:
+          - data["mcp_servers"]["cidx-local"]["url"] == "http://localhost:8000/mcp"
+          - data["mcp_servers"]["cidx-local"]["env_http_headers"]["Authorization"]
+              == "CIDX_MCP_AUTH_HEADER"
+          - "bearer_token_env_var" key is absent from the section
+        """
+        import tomli
+
+        _ensure_codex_mcp_http_registered(
+            codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
+        )
+
+        config_toml = codex_home / "config.toml"
+        with open(config_toml, "rb") as f:
+            data = tomli.load(f)
+
+        section = data.get("mcp_servers", {}).get(_MCP_NAME, {})
+        assert section, f"[mcp_servers.{_MCP_NAME}] section must exist"
+
+        expected_url = f"http://{_TEST_HOST}:{_TEST_PORT}/mcp"
+        assert section.get("url") == expected_url, (
+            f"url must be {expected_url!r}; got {section.get('url')!r}"
+        )
+
+        env_headers = section.get("env_http_headers", {})
+        assert env_headers.get("Authorization") == _AUTH_HEADER_ENV_VAR, (
+            f"env_http_headers.Authorization must be {_AUTH_HEADER_ENV_VAR!r}; "
+            f"got {env_headers.get('Authorization')!r}"
+        )
+
+        assert "bearer_token_env_var" not in section, (
+            "bearer_token_env_var must NOT appear in the new registration section"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: atomic write
+# ---------------------------------------------------------------------------
+
+
+class TestTomlRegistrationAtomicWrite:
+    """Write is performed atomically via .tmp file then replace."""
+
+    def test_write_is_atomic_tmp_then_replace(self, codex_home):
+        """
+        The implementation must write to config.toml.tmp then call .replace()
+        to config.toml (cross-platform atomic overwrite semantics).
+        Verified by wrapping Path.replace to spy on calls:
+          - replace must be called at least once
+          - the replace target must be config.toml (not the .tmp file)
+        """
+        config_toml = codex_home / "config.toml"
+        replace_targets: list = []
+
+        original_replace = Path.replace
+
+        def _spy_replace(self, target):
+            replace_targets.append(Path(target))
+            return original_replace(self, target)
+
+        with patch.object(Path, "replace", _spy_replace):
             _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
+                codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
             )
 
-        assert mock_run.call_args_list, "At least one subprocess call expected"
-        for c in mock_run.call_args_list:
-            env = c.kwargs.get("env", {})
-            assert env.get("CODEX_HOME") == str(codex_home), (
-                f"CODEX_HOME must be {str(codex_home)!r} in call {c.args[0]!r}; "
-                f"got {env.get('CODEX_HOME')!r}"
-            )
-
-
-# ---------------------------------------------------------------------------
-# Tests: idempotency via pre-check
-# ---------------------------------------------------------------------------
-
-
-class TestHttpRegistrationIdempotency:
-    """Pre-check via `codex mcp get cidx-local` determines whether add runs."""
-
-    def test_already_registered_skips_add_call(self, codex_home):
-        """
-        When `codex mcp get cidx-local` returns rc=0 AND stdout contains the expected
-        URL (http://...:{port}/mcp) and bearer env var (CIDX_MCP_BEARER_TOKEN), the
-        registration is current. Neither `codex mcp remove` nor `codex mcp add` must
-        be called. Only one subprocess call occurs (the get pre-check).
-        """
-        expected_stdout = (
-            f"name: cidx-local\n"
-            f"url: http://localhost:{_TEST_PORT}/mcp\n"
-            f"bearer-token-env-var: {_BEARER_ENV_VAR}\n"
-        ).encode()
-
-        def _fake_run(cmd, **kwargs):
-            if cmd[:3] == ["codex", "mcp", "get"]:
-                m = _make_run_result(0)
-                m.stdout = expected_stdout
-                return m
-            return _make_run_result(0)
-
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
-            _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
-            )
-
-        all_cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert len(all_cmds) == 1, (
-            f"Expected exactly 1 subprocess call (get only) when already registered; "
-            f"got {len(all_cmds)}: {all_cmds!r}"
+        assert replace_targets, "Path.replace must be called during atomic write"
+        assert any(t == config_toml for t in replace_targets), (
+            f"replace must target {config_toml}; got {replace_targets!r}"
         )
-        assert all_cmds[0] == [
-            "codex",
-            "mcp",
-            "get",
-            _MCP_NAME,
-        ], f"First call must be get pre-check; got {all_cmds[0]!r}"
-        add_calls = [c for c in all_cmds if c[:3] == ["codex", "mcp", "add"]]
-        assert not add_calls, (
-            f"codex mcp add must NOT be called when already registered; got {add_calls!r}"
-        )
-        remove_calls = [c for c in all_cmds if c[:3] == ["codex", "mcp", "remove"]]
-        assert not remove_calls, (
-            f"codex mcp remove must NOT be called when already registered; got {remove_calls!r}"
-        )
-
-    def test_not_registered_calls_add_after_get(self, codex_home):
-        """
-        When `codex mcp get cidx-local` returns rc=1 (not registered),
-        the implementation must call remove (defensive, non-fatal no-op) then add,
-        in order: get -> remove -> add (exactly 3 calls).
-        """
-
-        def _fake_run(cmd, **kwargs):
-            rc = _get_returncode_for_cmd(cmd, get_rc=1, add_rc=0)
-            return _make_run_result(rc)
-
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
-            _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
-            )
-
-        all_cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert len(all_cmds) == 3, (
-            f"Expected exactly 3 calls (get then remove then add); got {len(all_cmds)}: {all_cmds!r}"
-        )
-        assert all_cmds[0][:3] == ["codex", "mcp", "get"], (
-            f"First call must be get pre-check; got {all_cmds[0]!r}"
-        )
-        assert all_cmds[1][:3] == ["codex", "mcp", "remove"], (
-            f"Second call must be remove; got {all_cmds[1]!r}"
-        )
-        add_cmds = [c for c in all_cmds if c[:3] == ["codex", "mcp", "add"]]
-        assert len(add_cmds) == 1, (
-            f"codex mcp add must be called exactly once; got {len(add_cmds)} calls"
-        )
-        assert all_cmds[2][:3] == ["codex", "mcp", "add"], (
-            f"Third call must be add; got {all_cmds[2]!r}"
+        tmp_file = codex_home / "config.toml.tmp"
+        assert not tmp_file.exists(), (
+            "config.toml.tmp must NOT remain after successful atomic write"
         )
 
 
 # ---------------------------------------------------------------------------
-# Tests: failure cases
+# Tests: failure handling
 # ---------------------------------------------------------------------------
 
 
-class TestHttpRegistrationFailures:
-    """Non-zero returncode, timeout, and FileNotFoundError all log WARNING and do not raise."""
+class TestTomlRegistrationFailures:
+    """IO errors log WARNING and do not raise."""
 
-    def test_nonzero_add_exit_logs_warning_and_does_not_raise(self, codex_home, caplog):
+    def test_io_error_logs_warning_and_does_not_raise(self, codex_home, caplog):
         """
-        When codex mcp add returns nonzero, a WARNING is logged with truncated
-        stderr text, and the function does not raise.
+        When writing config.toml fails with an IOError, a WARNING is logged
+        and the function does not propagate the exception (non-fatal).
         """
-        stderr_text = "cidx-local already exists with different config"
-
-        def _fake_run(cmd, **kwargs):
-            if cmd[:3] == ["codex", "mcp", "get"]:
-                return _make_run_result(1)  # not yet registered
-            return _make_run_result(1, stderr_text.encode("utf-8"))
-
         with (
-            patch("subprocess.run", side_effect=_fake_run),
+            patch("pathlib.Path.replace", side_effect=IOError("disk full")),
             caplog.at_level(
                 logging.WARNING,
-                logger="code_indexer.server.startup.codex_cli_startup",
+                logger="code_indexer.server.startup.codex_mcp_registration",
             ),
         ):
             # Must NOT raise
             _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
+                codex_home=codex_home, port=_TEST_PORT, host=_TEST_HOST
             )
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings, "Expected WARNING on nonzero codex mcp add exit"
-        combined = " ".join(r.message for r in warnings)
-        assert stderr_text in combined, (
-            f"WARNING must include stderr text {stderr_text!r}; got {combined!r}"
-        )
-
-    def test_timeout_expired_logs_warning_and_does_not_raise(self, codex_home, caplog):
-        """
-        When subprocess.run raises TimeoutExpired during mcp add, a WARNING is
-        logged and the function does not propagate the exception.
-        """
-
-        def _fake_run(cmd, **kwargs):
-            if cmd[:3] == ["codex", "mcp", "get"]:
-                return _make_run_result(1)  # not registered
-            raise subprocess.TimeoutExpired(cmd=cmd, timeout=_SUBPROCESS_TIMEOUT)
-
-        with (
-            patch("subprocess.run", side_effect=_fake_run),
-            caplog.at_level(
-                logging.WARNING,
-                logger="code_indexer.server.startup.codex_cli_startup",
-            ),
-        ):
-            _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
-            )
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings, "Expected WARNING on TimeoutExpired during codex mcp add"
-
-    def test_file_not_found_logs_warning_and_does_not_raise(self, codex_home, caplog):
-        """
-        When subprocess.run raises FileNotFoundError (codex not installed),
-        a WARNING is logged and the function does not propagate the exception.
-        This applies even during the get pre-check (codex binary absent).
-        """
-        with (
-            patch("subprocess.run", side_effect=FileNotFoundError("codex not found")),
-            caplog.at_level(
-                logging.WARNING,
-                logger="code_indexer.server.startup.codex_cli_startup",
-            ),
-        ):
-            _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
-            )
-
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings, "Expected WARNING when codex binary is not found"
+        assert warnings, "Expected WARNING when config.toml write fails"
 
 
 # ---------------------------------------------------------------------------
-# Tests: wiring into initialize_codex_manager_on_startup
+# Tests: mode preservation and parent directory creation (Finding 2, v9.23.10)
 # ---------------------------------------------------------------------------
 
 
-class TestConfigAwareIdempotency:
-    """Config-aware idempotency: stale registration triggers remove + re-add."""
+class TestTomlRegistrationModePreservation:
+    """v9.23.10 Finding 2: _write_toml_atomic must preserve file mode and create parents."""
 
-    def test_stale_registration_triggers_remove_and_readd(self, codex_home):
+    def test_creates_missing_parent_dirs_and_sets_mode_0600(self, tmp_path):
+        """Fresh CODEX_HOME with no parent dir: creates parents and writes config.toml at 0600.
+
+        v9.23.10: codex's config.toml is 0600 by convention. The old implementation let
+        the temp file inherit the process umask (typically 0644), making the renamed file
+        world-readable. Also, CODEX_HOME itself may not exist on fresh installs.
         """
-        When `codex mcp get cidx-local` returns rc=0 but stdout does NOT contain
-        http://...:{port}/mcp and CIDX_MCP_BEARER_TOKEN, the registration is stale.
-        _ensure_codex_mcp_http_registered must:
-          1. Run `codex mcp remove cidx-local`
-          2. Then run `codex mcp add` with the correct URL and bearer env var.
+        nested = tmp_path / "fresh" / "codex-home"
+        config_toml = nested / "config.toml"
+
+        _ensure_codex_mcp_http_registered(
+            codex_home=nested, port=8000, host="localhost"
+        )
+
+        assert config_toml.exists(), "config.toml must be created"
+        assert config_toml.parent.exists(), "parent codex-home must be created"
+        mode = stat.S_IMODE(config_toml.stat().st_mode)
+        assert mode == 0o600, f"config.toml must be 0600, got {oct(mode)}"
+
+    def test_preserves_existing_mode(self, tmp_path):
+        """Existing config.toml mode must be preserved through atomic write.
+
+        v9.23.10: Operators may set a non-default mode (e.g. 0640 for group-readable).
+        The atomic rewrite must not silently downgrade to umask-derived permissions.
         """
-        stale_stdout = b"type: stdio\ncommand: cidx mcp serve\n"
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        config_toml = codex_home / "config.toml"
+        config_toml.write_text("# existing\n", encoding="utf-8")
+        os.chmod(config_toml, 0o640)
 
-        def _fake_run(cmd, **kwargs):
-            if cmd[:3] == ["codex", "mcp", "get"]:
-                result = _make_run_result(0)
-                result.stdout = stale_stdout
-                return result
-            if cmd[:3] == ["codex", "mcp", "remove"]:
-                return _make_run_result(0)
-            return _make_run_result(0)  # add
-
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
-            _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=_TEST_PORT, host="localhost"
-            )
-
-        all_cmds = [c.args[0] for c in mock_run.call_args_list]
-        remove_cmds = [c for c in all_cmds if c[:3] == ["codex", "mcp", "remove"]]
-        add_cmds = [c for c in all_cmds if c[:3] == ["codex", "mcp", "add"]]
-        assert remove_cmds, (
-            "codex mcp remove must be called when registered transport is stale"
-        )
-        assert add_cmds, (
-            "codex mcp add must be called after removing stale registration"
-        )
-        expected_url = f"http://localhost:{_TEST_PORT}/mcp"
-        assert expected_url in add_cmds[0], (
-            f"add command must include URL {expected_url!r}; got {add_cmds[0]!r}"
+        _ensure_codex_mcp_http_registered(
+            codex_home=codex_home, port=8000, host="localhost"
         )
 
-    def test_matching_registration_skips_add(self, codex_home):
+        mode = stat.S_IMODE(config_toml.stat().st_mode)
+        assert mode == 0o640, f"existing mode must be preserved, got {oct(mode)}"
+
+
+# ---------------------------------------------------------------------------
+# Regression guard: service_init.py singleton wiring (Finding 1, v9.23.10)
+# ---------------------------------------------------------------------------
+
+
+class TestServiceInitSingletonWiring:
+    """v9.23.10 regression guard: textual presence check that service_init.py
+    contains the MCPSelfRegistrationService.set_instance call.
+
+    Uses inspect.getsource() — the codebase-established convention for
+    structural wiring regression guards (see test_golden_repo_manager_scheduler_wiring.py,
+    test_cluster_pool_wiring.py). This is a source-text substring check; it
+    does not verify execution-path reachability.
+    """
+
+    def test_service_init_calls_set_instance_for_mcp_registration(self):
+        """v9.23.10 regression guard: textual check that service_init.py contains
+        'MCPSelfRegistrationService.set_instance'. Without this call, the singleton
+        is never populated and codex_mcp_auth_header_provider raises RuntimeError on
+        first invocation in production, causing silent fallback to Claude.
+
+        Source-text substring check — matches the established codebase pattern used in
+        test_golden_repo_manager_scheduler_wiring and test_cluster_pool_wiring.
         """
-        When stdout from `codex mcp get cidx-local` contains the expected URL
-        (http://...:{port}/mcp) and CIDX_MCP_BEARER_TOKEN, registration is current.
-        Neither remove nor add should be called.
-        """
-        port = _TEST_PORT
-        matching_stdout = (
-            f"url: http://localhost:{port}/mcp\nbearer_token_env: {_BEARER_ENV_VAR}\n"
-        ).encode()
+        import inspect
 
-        def _fake_run(cmd, **kwargs):
-            result = _make_run_result(0)
-            result.stdout = matching_stdout
-            return result
+        from code_indexer.server.startup import service_init
 
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
-            _ensure_codex_mcp_http_registered(
-                codex_home=codex_home, port=port, host="localhost"
-            )
-
-        all_cmds = [c.args[0] for c in mock_run.call_args_list]
-        remove_cmds = [c for c in all_cmds if c[:3] == ["codex", "mcp", "remove"]]
-        add_cmds = [c for c in all_cmds if c[:3] == ["codex", "mcp", "add"]]
-        assert not remove_cmds, (
-            f"codex mcp remove must NOT be called on matching registration; got {remove_cmds!r}"
-        )
-        assert not add_cmds, (
-            f"codex mcp add must NOT be called on matching registration; got {add_cmds!r}"
-        )
-
-
-class TestHttpRegistrationWiring:
-    """HTTP registration is wired into initialize_codex_manager_on_startup with the server port."""
-
-    def test_initialize_wires_http_registration_with_port(self, tmp_path):
-        """
-        When Codex is enabled with api_key mode and server_config.port is set,
-        initialize_codex_manager_on_startup must invoke the HTTP MCP registration
-        using the correct port in the URL.
-
-        This is a unit-level wiring test: subprocess.run is patched to intercept
-        the commands without spawning real processes.
-        """
-        from code_indexer.server.utils.config_manager import CodexIntegrationConfig
-
-        codex_cfg = CodexIntegrationConfig(
-            enabled=True,
-            credential_mode="api_key",
-            api_key=_TEST_API_KEY,
-        )
-        server_config = MagicMock()
-        server_config.codex_integration_config = codex_cfg
-        server_config.port = _TEST_PORT_ALT
-        server_config.host = "localhost"
-
-        seen_cmds: list = []
-
-        def _fake_run(cmd, **kwargs):
-            seen_cmds.append(list(cmd))
-            rc = _get_returncode_for_cmd(cmd, get_rc=1, add_rc=0)
-            return _make_run_result(rc)
-
-        with patch("subprocess.run", side_effect=_fake_run):
-            initialize_codex_manager_on_startup(
-                server_config=server_config,
-                server_data_dir=str(tmp_path),
-            )
-
-        get_cmds = [c for c in seen_cmds if c[:3] == ["codex", "mcp", "get"]]
-        add_cmds = [c for c in seen_cmds if c[:3] == ["codex", "mcp", "add"]]
-        assert get_cmds, "codex mcp get (pre-check) must have been called"
-        assert add_cmds, "codex mcp add must have been called"
-
-        expected_url = f"http://localhost:{_TEST_PORT_ALT}/mcp"
-        assert expected_url in add_cmds[0], (
-            f"add command must include URL {expected_url!r}; got {add_cmds[0]!r}"
-        )
-        assert _BEARER_ENV_VAR in add_cmds[0], (
-            f"add command must include bearer env var {_BEARER_ENV_VAR!r}; got {add_cmds[0]!r}"
+        src = inspect.getsource(service_init)
+        assert "MCPSelfRegistrationService.set_instance" in src, (
+            "v9.23.10 invariant violated: service_init.py must contain "
+            "MCPSelfRegistrationService.set_instance(...) so the singleton is "
+            "populated for codex auth-header provider. Without this call, "
+            "build_codex_mcp_auth_header_provider() raises RuntimeError on first "
+            "invocation in production, causing silent fallback to Claude."
         )

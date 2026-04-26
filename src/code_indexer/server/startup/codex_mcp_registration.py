@@ -1,319 +1,231 @@
 """
-Codex MCP HTTP registration helpers (Story #848 HTTP follow-up).
+Codex MCP HTTP registration helpers (v9.23.10 TOML rewrite).
 
-Provides idempotent registration of the cidx-local MCP endpoint via HTTP
-transport. Extracted from codex_cli_startup.py to keep that module under the
-500-line MESSI rule 6 soft cap.
+Registers the cidx-local MCP endpoint by writing $CODEX_HOME/config.toml
+directly. Codex 0.125 `codex mcp add` has no --http-headers / --env-http-headers
+flags, so direct TOML editing is required.
 
 Public entry point consumed by codex_cli_startup:
-    _ensure_codex_mcp_http_registered(codex_home, port, host, timeout)
+    _ensure_codex_mcp_http_registered(codex_home, port, host)
 """
 
 from __future__ import annotations
 
 import logging
-import os
-import subprocess
+import re
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Constants (relocated from codex_cli_startup.py — values unchanged)
+# Constants
 # ---------------------------------------------------------------------------
 
-# Default subprocess timeout for `codex mcp add` / `codex mcp get`.
-_DEFAULT_CODEX_MCP_ADD_TIMEOUT_SECONDS = 30
-
-# Maximum number of characters from subprocess stderr included in WARNING logs.
-_MAX_STDERR_LOG_CHARS = 500
-
-# Name used when registering with codex mcp add/get.
+# Name used when registering the MCP server in config.toml.
 _CIDX_MCP_NAME = "cidx-local"
 
 # MCP endpoint path served by the CIDX HTTP server.
 _MCP_PATH = "/mcp"
 
-# Environment variable that codex reads to supply the Bearer token.
-_MCP_BEARER_ENV_VAR = "CIDX_MCP_BEARER_TOKEN"
+# Environment variable that codex reads and injects verbatim as the
+# Authorization header value on every MCP HTTP request.
+_MCP_AUTH_HEADER_ENV_VAR = "CIDX_MCP_AUTH_HEADER"
 
-# Valid TCP port range.
+# Valid TCP port range — used for input validation in the entry point.
 _PORT_MIN = 1
 _PORT_MAX = 65535
 
-# `codex mcp get` exit code when the named MCP is absent (POSIX "not found").
-_CODEX_MCP_GET_NOT_FOUND_RC = 1
-
-# Default CIDX server port used as fallback when server_config does not expose port.
-_DEFAULT_CIDX_SERVER_PORT = 8000
-
 
 # ---------------------------------------------------------------------------
-# Validation helper
+# TOML read helper
 # ---------------------------------------------------------------------------
 
 
-def _validate_mcp_host_port(host: str, port: int) -> bool:
-    """Return True when host and port are valid for MCP URL construction, else log + return False."""
-    if not isinstance(host, str) or not host.strip():
-        logger.warning(
-            "cidx-local MCP HTTP registration skipped — invalid host %r (must be non-empty string)",
-            host,
-        )
-        return False
-    if (
-        not isinstance(port, int)
-        or isinstance(port, bool)
-        or not (_PORT_MIN <= port <= _PORT_MAX)
-    ):
-        logger.warning(
-            "cidx-local MCP HTTP registration skipped — invalid port %r (must be int 1..65535)",
-            port,
-        )
-        return False
-    return True
+def _read_toml(config_toml: Path) -> Tuple[Optional[Dict], Optional[str]]:
+    """Read and parse config_toml. Returns (data_dict, None) on success.
 
+    When config_toml does not exist, returns ({}, None) so the caller can
+    proceed to create the file.
 
-# ---------------------------------------------------------------------------
-# Shared subprocess argument validation
-# ---------------------------------------------------------------------------
+    When the file exists but contains invalid TOML, returns (None, error_str)
+    so the caller can log and skip the write (preserving the broken file for
+    operator inspection).
 
-
-def _validate_subprocess_env_and_timeout(op_name: str, env: dict, timeout: int) -> bool:
-    """Return True when env and timeout are valid for a subprocess call, else log + return False.
-
-    Args:
-        op_name: Short name of the calling operation (e.g. "codex mcp get") for log messages.
-        env: Environment dict to pass to subprocess.run.
-        timeout: Subprocess timeout in seconds.
-
-    Returns:
-        True when both arguments are valid. False (after logging WARNING) otherwise.
+    IOErrors from an existing file propagate to the caller unchanged.
     """
-    if not isinstance(env, dict):
-        logger.warning(
-            "%s skipped — env must be a dict, got %r", op_name, type(env).__name__
-        )
-        return False
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
-        logger.warning(
-            "%s skipped — invalid timeout %r (must be int > 0)", op_name, timeout
-        )
-        return False
-    return True
-
-
-# ---------------------------------------------------------------------------
-# Staleness check
-# ---------------------------------------------------------------------------
-
-
-def _codex_mcp_registration_matches(
-    stdout_text: str, port: int, bearer_env_var: str
-) -> bool:
-    """Return True when stdout from `codex mcp get` confirms a matching HTTP registration.
-
-    A registration matches when the stdout contains both the expected MCP URL
-    (http://...:{port}/mcp) and the expected bearer-token env var name.
-
-    Args:
-        stdout_text: Decoded stdout string from `codex mcp get cidx-local`.
-        port: Expected TCP port in the MCP URL.
-        bearer_env_var: Expected bearer-token env var name.
-
-    Returns:
-        True when both the URL port marker and the bearer env var are found in stdout_text.
-    """
-    port_marker = f":{port}{_MCP_PATH}"
-    return port_marker in stdout_text and bearer_env_var in stdout_text
-
-
-# ---------------------------------------------------------------------------
-# Idempotency pre-check
-# ---------------------------------------------------------------------------
-
-
-def _codex_mcp_is_already_registered(
-    env: dict, timeout: int, port: int, bearer_env_var: str
-) -> Optional[bool]:
-    """Run `codex mcp get cidx-local`. Return True=current, False=absent/stale, None=error/skip.
-
-    Exit 0 = present; stdout is inspected via _codex_mcp_registration_matches to
-    distinguish a current registration (True) from a stale one (False).
-    Exit 1 = absent (POSIX "not found") — returns False.
-    Any other non-zero exit returns None so the caller skips the add call.
-
-    Args:
-        env: Environment dict for the subprocess (must contain CODEX_HOME).
-        timeout: Subprocess timeout in seconds.
-        port: Expected TCP port in the MCP URL (used for staleness check).
-        bearer_env_var: Expected bearer-token env var name (used for staleness check).
-    """
-    if not _validate_subprocess_env_and_timeout("codex mcp get", env, timeout):
-        return None
-    if (
-        not isinstance(port, int)
-        or isinstance(port, bool)
-        or not (_PORT_MIN <= port <= _PORT_MAX)
-    ):
-        logger.warning(
-            "codex mcp get skipped — invalid port %r (must be int 1..65535)", port
-        )
-        return None
-    if not isinstance(bearer_env_var, str) or not bearer_env_var.strip():
-        logger.warning(
-            "codex mcp get skipped — bearer_env_var must be a non-empty string, got %r",
-            bearer_env_var,
-        )
-        return None
-    get_cmd = ["codex", "mcp", "get", _CIDX_MCP_NAME]
+    if not config_toml.exists():
+        return {}, None
     try:
-        result = subprocess.run(
-            get_cmd, env=env, check=False, capture_output=True, timeout=timeout
-        )
-        if result.returncode == 0:
-            stdout_text = result.stdout.decode(errors="replace")
-            if _codex_mcp_registration_matches(stdout_text, port, bearer_env_var):
-                return True
-            logger.debug(
-                "codex mcp get cidx-local rc=0 but registration is stale — will remove and re-add"
-            )
-            return False
-        if result.returncode == _CODEX_MCP_GET_NOT_FOUND_RC:
-            logger.debug(
-                "codex mcp get cidx-local rc=%d — not yet registered", result.returncode
-            )
-            return False
-        stderr_text = result.stderr.decode(errors="replace")[:_MAX_STDERR_LOG_CHARS]
-        logger.warning(
-            "codex mcp get returned unexpected exit %d — skipping HTTP registration; stderr: %s",
-            result.returncode,
-            stderr_text,
-        )
-        return None
-    except FileNotFoundError:
-        logger.warning(
-            "codex binary not found — cidx-local MCP HTTP registration skipped"
-        )
-        return None
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "codex mcp get timed out — skipping cidx-local MCP HTTP registration"
-        )
-        return None
+        import tomli
 
-
-# ---------------------------------------------------------------------------
-# Add and orchestration helpers
-# ---------------------------------------------------------------------------
-
-
-def _codex_mcp_remove(env: dict, timeout: int) -> None:
-    """Run `codex mcp remove cidx-local`. Non-fatal on all errors.
-
-    Called before re-adding a stale registration so codex mcp add does not fail
-    with a "name already exists" error. All exceptions are caught and logged so
-    the stale-registration recovery path always continues.
-
-    Args:
-        env: Environment dict for the subprocess (must contain CODEX_HOME).
-        timeout: Subprocess timeout in seconds.
-    """
-    if not _validate_subprocess_env_and_timeout("codex mcp remove", env, timeout):
-        return
-    remove_cmd = ["codex", "mcp", "remove", _CIDX_MCP_NAME]
-    try:
-        result = subprocess.run(
-            remove_cmd, env=env, check=False, capture_output=True, timeout=timeout
-        )
-        if result.returncode != 0:
-            stderr_text = result.stderr.decode(errors="replace")[:_MAX_STDERR_LOG_CHARS]
-            logger.warning(
-                "codex mcp remove returned non-zero exit %d — "
-                "stale cidx-local entry may persist; stderr: %s",
-                result.returncode,
-                stderr_text,
-            )
-        else:
-            logger.debug("codex mcp remove cidx-local completed (exit 0)")
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "codex mcp remove timed out — stale cidx-local entry may persist"
-        )
-    except FileNotFoundError:
-        logger.warning("codex binary not found — codex mcp remove skipped")
+        with open(config_toml, "rb") as fh:
+            return tomli.load(fh), None
     except Exception as exc:
-        logger.warning(
-            "Unexpected error running codex mcp remove — re-registration will proceed: %s",
-            exc,
-        )
+        import tomli
+
+        if isinstance(exc, tomli.TOMLDecodeError):
+            return None, f"TOML parse error in {config_toml}: {exc}"
+        raise
 
 
-def _run_codex_mcp_http_add(mcp_url: str, env: dict, timeout: int) -> None:
-    """Run `codex mcp add cidx-local --url <url> --bearer-token-env-var ...`. Non-fatal."""
-    add_cmd = [
-        "codex",
-        "mcp",
-        "add",
-        _CIDX_MCP_NAME,
-        "--url",
-        mcp_url,
-        "--bearer-token-env-var",
-        _MCP_BEARER_ENV_VAR,
-    ]
-    try:
-        result = subprocess.run(
-            add_cmd, env=env, check=False, capture_output=True, timeout=timeout
-        )
-        if result.returncode != 0:
-            stderr_text = result.stderr.decode(errors="replace")[:_MAX_STDERR_LOG_CHARS]
-            logger.warning(
-                "codex mcp add (HTTP) returned non-zero exit %d — "
-                "cidx-local may not be registered; stderr: %s",
-                result.returncode,
-                stderr_text,
-            )
-        else:
-            logger.info("cidx-local MCP registered via HTTP transport at %s", mcp_url)
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "codex mcp add (HTTP) timed out — cidx-local may not be registered in CODEX_HOME"
-        )
-    except FileNotFoundError:
-        logger.warning("codex binary not found — cidx-local MCP HTTP add skipped")
+# ---------------------------------------------------------------------------
+# Idempotency check
+# ---------------------------------------------------------------------------
+
+
+def _is_already_registered(data: Dict, url: str) -> bool:
+    """Return True when config.toml already has a current cidx-local section.
+
+    A registration is current when:
+      - data["mcp_servers"]["cidx-local"]["url"] == url
+      - data["mcp_servers"]["cidx-local"]["env_http_headers"]["Authorization"]
+            == _MCP_AUTH_HEADER_ENV_VAR
+
+    Any missing key or value mismatch returns False (stale or absent).
+    """
+    section = data.get("mcp_servers", {}).get(_CIDX_MCP_NAME, {})
+    if not section:
+        return False
+    if section.get("url") != url:
+        return False
+    env_headers = section.get("env_http_headers", {})
+    return env_headers.get("Authorization") == _MCP_AUTH_HEADER_ENV_VAR
+
+
+# ---------------------------------------------------------------------------
+# Section text builder
+# ---------------------------------------------------------------------------
+
+
+def _build_mcp_section_text(url: str) -> str:
+    """Return the TOML text for the [mcp_servers.cidx-local] section."""
+    return (
+        f"[mcp_servers.{_CIDX_MCP_NAME}]\n"
+        f'url = "{url}"\n'
+        f"[mcp_servers.{_CIDX_MCP_NAME}.env_http_headers]\n"
+        f'Authorization = "{_MCP_AUTH_HEADER_ENV_VAR}"\n'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Atomic TOML write
+# ---------------------------------------------------------------------------
+
+
+def _write_toml_atomic(config_toml: Path, url: str, existing_text: str) -> None:
+    """Write config.toml atomically, replacing any existing cidx-local section.
+
+    Uses a .tmp file + Path.replace() for cross-platform atomic overwrite
+    semantics. The cidx-local section (and its env_http_headers sub-section)
+    is removed from the existing text using multiline-anchored regex, then
+    the new section is appended.
+
+    v9.23.10: creates parent dirs on fresh CODEX_HOME deploys, and preserves
+    existing file mode (defaulting to 0o600 for new files) so the renamed
+    file does not inherit the process umask (typically 0644).
+    """
+    import os
+    import stat
+
+    pattern = re.compile(
+        r"^\[mcp_servers\." + re.escape(_CIDX_MCP_NAME) + r"(?:\.[^\]]+)?\]"
+        r".*?"
+        r"(?=^\[(?!mcp_servers\." + re.escape(_CIDX_MCP_NAME) + r")|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    stripped = pattern.sub("", existing_text).rstrip("\n")
+    separator = "\n\n" if stripped else ""
+    new_text = stripped + separator + _build_mcp_section_text(url)
+
+    config_toml.parent.mkdir(parents=True, exist_ok=True)
+
+    if config_toml.exists():
+        mode = stat.S_IMODE(config_toml.stat().st_mode)
+    else:
+        mode = 0o600
+
+    tmp_file = config_toml.with_suffix(".toml.tmp")
+    tmp_file.write_text(new_text, encoding="utf-8")
+    os.chmod(tmp_file, mode)
+    tmp_file.replace(config_toml)
+    os.chmod(config_toml, mode)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 
 def _ensure_codex_mcp_http_registered(
     codex_home: Path,
     port: int,
     host: str,
-    timeout: int = _DEFAULT_CODEX_MCP_ADD_TIMEOUT_SECONDS,
 ) -> None:
-    """Idempotently register cidx-local MCP via HTTP transport. Non-fatal on all errors.
+    """Idempotently register cidx-local MCP in $CODEX_HOME/config.toml.
+
+    Writes (or updates) the [mcp_servers.cidx-local] section so that codex
+    injects CIDX_MCP_AUTH_HEADER as the Authorization header on every MCP
+    HTTP request. Non-fatal: all errors are logged as WARNING and do not
+    propagate.
 
     Args:
-        codex_home: Path to the CODEX_HOME directory.
+        codex_home: Path to the CODEX_HOME directory (must be Path or os.PathLike).
         port: TCP port the CIDX server listens on (1..65535).
-        host: Hostname the CIDX server binds to. Must be supplied by the caller —
-            typically derived from server_config.host with bind-all addresses
-            (0.0.0.0, "") normalised to "localhost" before this call.
-        timeout: Subprocess timeout seconds for get and add calls.
+        host: Hostname the CIDX server binds to (non-empty string).
     """
-    if not _validate_mcp_host_port(host, port):
+    import os
+
+    if not isinstance(codex_home, (Path, os.PathLike)):
+        logger.warning(
+            "cidx-local MCP registration skipped — codex_home must be a Path, got %r",
+            type(codex_home).__name__,
+        )
         return
-    env = {**os.environ, "CODEX_HOME": str(codex_home)}
-    registered = _codex_mcp_is_already_registered(
-        env, timeout, port, _MCP_BEARER_ENV_VAR
-    )
-    if registered is None:
-        return  # error already logged by helper
-    if registered:
-        logger.info("cidx-local MCP already registered in CODEX_HOME — skipping add")
+    if not isinstance(host, str) or not host.strip():
+        logger.warning(
+            "cidx-local MCP registration skipped — invalid host %r (must be non-empty string)",
+            host,
+        )
         return
-    # registered is False: either absent or stale. Remove first (non-fatal no-op when absent),
-    # then add with the current URL and bearer env var.
-    _codex_mcp_remove(env, timeout)
-    mcp_url = f"http://{host.strip()}:{port}{_MCP_PATH}"
-    _run_codex_mcp_http_add(mcp_url, env, timeout)
+    if (
+        not isinstance(port, int)
+        or isinstance(port, bool)
+        or not (_PORT_MIN <= port <= _PORT_MAX)
+    ):
+        logger.warning(
+            "cidx-local MCP registration skipped — invalid port %r (must be int %d..%d)",
+            port,
+            _PORT_MIN,
+            _PORT_MAX,
+        )
+        return
+
+    config_toml = Path(codex_home) / "config.toml"
+    url = f"http://{host}:{port}{_MCP_PATH}"
+
+    try:
+        data, parse_error = _read_toml(config_toml)
+        if parse_error is not None:
+            logger.warning("cidx-local MCP registration skipped — %s", parse_error)
+            return
+
+        if _is_already_registered(data, url):
+            logger.info(
+                "cidx-local MCP already registered in %s — skipping write", config_toml
+            )
+            return
+
+        existing_text = (
+            config_toml.read_text(encoding="utf-8") if config_toml.exists() else ""
+        )
+        _write_toml_atomic(config_toml, url, existing_text)
+        logger.info("cidx-local MCP registered in %s at %s", config_toml, url)
+
+    except Exception as exc:
+        logger.warning(
+            "cidx-local MCP registration failed — %s: %s",
+            type(exc).__name__,
+            exc,
+        )
