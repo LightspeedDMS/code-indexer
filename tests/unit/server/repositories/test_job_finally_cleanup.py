@@ -172,8 +172,8 @@ class _BrokenDatabaseConnectionManager(DatabaseConnectionManager):
     def close_thread_connection(self) -> None:
         # Signature matches the base class method introduced by Fix A.3
         # (see DatabaseConnectionManager.close_thread_connection).  No
-        # type: ignore is needed because base and override both take no
-        # arguments and return None.
+        # suppression comment is needed because base and override both
+        # take no arguments and return None.
         raise RuntimeError(self.BREAK_MESSAGE)
 
 

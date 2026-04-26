@@ -202,7 +202,7 @@ def register_repo_routes(
             # Idempotent: same user/alias activation already in progress.
             # Return 200 with the existing job_id so the caller can poll.
             # JSONResponse is used to override the route decorator's default 202.
-            inflight_alias: str = request.user_alias or request.golden_repo_alias
+            inflight_alias: Optional[str] = request.user_alias or request.golden_repo_alias
             return JSONResponse(
                 status_code=200,
                 content={

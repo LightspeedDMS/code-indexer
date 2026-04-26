@@ -20,7 +20,8 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import httpx
 
@@ -93,7 +94,7 @@ def _auth_headers(token: str | None) -> dict[str, str]:
 
 def run_cidx(
     *args: str,
-    cwd: str | None = None,
+    cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
     stdin_input: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -164,7 +165,9 @@ def login(base_url: str, username: str, password: str) -> str:
         timeout=LOGIN_TIMEOUT,
     )
     response.raise_for_status()
-    return response.json()["access_token"]
+    token = response.json()["access_token"]
+    assert isinstance(token, str), f"access_token must be str, got {type(token).__name__}"
+    return token
 
 
 # ---------------------------------------------------------------------------

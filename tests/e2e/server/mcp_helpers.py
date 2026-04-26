@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Union
 
 from fastapi.testclient import TestClient
+from requests import Response
 
 # ---------------------------------------------------------------------------
 # JSON type alias
@@ -65,7 +66,7 @@ def call_mcp_tool(
     tool_name: str,
     arguments: JsonArgs,
     headers: dict,
-) -> object:
+) -> Response:
     """POST a tools/call JSON-RPC request and return the raw Response.
 
     All protocol literals are resolved from module constants so callers
