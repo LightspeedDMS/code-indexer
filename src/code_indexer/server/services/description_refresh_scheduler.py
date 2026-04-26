@@ -14,13 +14,19 @@ import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, cast
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
+from code_indexer.server.services.codex_bearer_provider import (
+    build_codex_bearer_provider,
+)
 from code_indexer.server.storage.sqlite_backends import (
     DescriptionRefreshTrackingBackend,
     GoldenRepoMetadataSqliteBackend,
 )
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -1111,6 +1117,9 @@ class DescriptionRefreshScheduler:
         weight from config.  Otherwise codex=None and the effective weight
         collapses to 0.0 inside CliDispatcher.
 
+        Wires bearer_token_provider for cidx-local MCP authentication via fresh
+        admin-scope JWT (TTL = jwt_expiration_minutes from runtime config).
+
         Args:
             config: ServerConfig returned by config_manager.load_config().
 
@@ -1134,7 +1143,10 @@ class DescriptionRefreshScheduler:
         if codex_cfg and codex_cfg.enabled:
             codex_home = os.environ.get("CODEX_HOME", "")
             if codex_home:
-                codex_invoker = CodexInvoker(codex_home=codex_home)
+                codex_invoker = CodexInvoker(
+                    codex_home=codex_home,
+                    bearer_token_provider=build_codex_bearer_provider(),
+                )
                 codex_weight = codex_cfg.codex_weight
 
         return CliDispatcher(
@@ -1162,7 +1174,9 @@ class DescriptionRefreshScheduler:
         if self._cli_dispatcher is not None:
             dispatcher = self._cli_dispatcher
         else:
-            config = self._config_manager.load_config() if self._config_manager else None
+            config = (
+                self._config_manager.load_config() if self._config_manager else None
+            )
             dispatcher = self._build_cli_dispatcher(config)
 
         result = dispatcher.dispatch(

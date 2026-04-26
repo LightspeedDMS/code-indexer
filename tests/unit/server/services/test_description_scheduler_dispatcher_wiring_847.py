@@ -26,7 +26,9 @@ from unittest.mock import MagicMock, patch
 from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
 
 # The scheduler hard-timeout constant — the dispatcher must receive this exact value.
-_EXPECTED_TIMEOUT = 120  # _CLAUDE_CLI_HARD_TIMEOUT_SECONDS in description_refresh_scheduler.py
+_EXPECTED_TIMEOUT = (
+    120  # _CLAUDE_CLI_HARD_TIMEOUT_SECONDS in description_refresh_scheduler.py
+)
 _EXPECTED_FLOW = "description_refresh"
 
 
@@ -35,7 +37,9 @@ _EXPECTED_FLOW = "description_refresh"
 # ---------------------------------------------------------------------------
 
 
-def _make_success_result(cli_used: str = "claude", was_failover: bool = False) -> InvocationResult:
+def _make_success_result(
+    cli_used: str = "claude", was_failover: bool = False
+) -> InvocationResult:
     # Output must exceed 100 chars to pass _validate_cli_output's minimum-length check.
     return InvocationResult(
         success=True,

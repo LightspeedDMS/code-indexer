@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -39,6 +38,11 @@ from code_indexer.server.services.codex_lease_loop import (
     _CODEX_STATE_FILENAME,
 )
 from code_indexer.server.services.llm_creds_client import LlmCredsClient
+from code_indexer.server.startup.codex_mcp_registration import (
+    _DEFAULT_CIDX_SERVER_PORT,
+    _MAX_STDERR_LOG_CHARS,
+    _ensure_codex_mcp_http_registered,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +131,9 @@ def _login_codex_with_api_key(
             timeout=timeout_seconds,
         )
         if result.returncode != 0:
-            stderr_text = result.stderr.decode("utf-8", errors="replace")[:_MAX_STDERR_LOG_CHARS]
+            stderr_text = result.stderr.decode("utf-8", errors="replace")[
+                :_MAX_STDERR_LOG_CHARS
+            ]
             logger.warning(
                 "`codex login --with-api-key` failed (exit %d): %s",
                 result.returncode,
@@ -142,7 +148,9 @@ def _login_codex_with_api_key(
         )
         return False
     except FileNotFoundError:
-        logger.warning("codex binary not found on PATH — Codex feature effectively disabled")
+        logger.warning(
+            "codex binary not found on PATH — Codex feature effectively disabled"
+        )
         return False
     except Exception as exc:
         logger.warning("Unexpected error running `codex login --with-api-key`: %s", exc)
@@ -168,7 +176,9 @@ def _handle_api_key_mode(api_key: str, base_dir: Path) -> None:
         raise ValueError("api_key must not be empty in api_key credential_mode")
     codex_home = _ensure_codex_home(base_dir)
     os.environ["OPENAI_API_KEY"] = api_key.strip()
-    login_succeeded = _login_codex_with_api_key(codex_home=codex_home, api_key=api_key.strip())
+    login_succeeded = _login_codex_with_api_key(
+        codex_home=codex_home, api_key=api_key.strip()
+    )
     if not login_succeeded:
         logger.warning(
             "Codex login via api_key mode failed; continuing with OPENAI_API_KEY env var fallback"
@@ -218,9 +228,7 @@ def _handle_subscription_mode(
         server_dir_path=str(base_dir),
         state_filename=_CODEX_STATE_FILENAME,
     )
-    creds_mgr = CodexCredentialsFileManager(
-        auth_json_path=codex_home / "auth.json"
-    )
+    creds_mgr = CodexCredentialsFileManager(auth_json_path=codex_home / "auth.json")
     loop = CodexLeaseLoop(
         client=client,
         state_manager=state_mgr,
@@ -238,93 +246,13 @@ def _handle_subscription_mode(
     logger.info("Codex subscription mode: lease acquired, auth.json written")
 
     if return_shutdown_hook:
+
         def shutdown() -> None:
             loop.stop()
             logger.info("Codex subscription lease returned on shutdown")
 
         return shutdown
     return None
-
-
-# ---------------------------------------------------------------------------
-# Story #848: MCP registration helper
-# ---------------------------------------------------------------------------
-
-# FIXME (Story #848 follow-up): The default cidx-local MCP launcher command is
-# not yet implemented. Codex-cli's `mcp add ... -- <stdio command>` requires a
-# real stdio-mode launcher, but cidx currently only exposes its MCP via HTTP
-# transport (see MCPSelfRegistrationService for the pattern Claude uses). A
-# follow-up story is needed to either:
-#   (a) implement `cidx mcp serve` as a stdio launcher in cli.py, OR
-#   (b) verify codex-cli `mcp add` supports HTTP transport with custom auth
-#       headers, then use the existing HTTP+Basic-auth pattern from
-#       MCPSelfRegistrationService.
-# Until then, this default produces no registration call (empty command is
-# detected and skipped with an INFO log). Operators can override via the
-# optional `cidx_mcp_command` parameter in `_ensure_codex_mcp_registered`.
-_DEFAULT_CIDX_MCP_COMMAND = ""  # See FIXME above
-
-# Default subprocess timeout for `codex mcp add`.  Callers may override via
-# _ensure_codex_mcp_registered's timeout parameter.
-_DEFAULT_CODEX_MCP_ADD_TIMEOUT_SECONDS = 30
-
-# Maximum number of characters from subprocess stderr included in WARNING logs.
-# Truncates long error streams to keep log lines readable.
-_MAX_STDERR_LOG_CHARS = 500
-
-
-def _ensure_codex_mcp_registered(
-    codex_home: Path,
-    cidx_mcp_command: str,
-    timeout: int = _DEFAULT_CODEX_MCP_ADD_TIMEOUT_SECONDS,
-) -> None:
-    """
-    Idempotently register the cidx-local MCP server in CODEX_HOME.
-
-    Runs once at CIDX server startup.  ``codex mcp add`` is idempotent —
-    re-registration with the same name is a no-op.
-
-    Non-zero exit codes and TimeoutExpired are both logged at WARNING level
-    and do not propagate as exceptions (registration failure is non-fatal).
-
-    Args:
-        codex_home: Path to the CODEX_HOME directory.
-        cidx_mcp_command: Shell command string used to launch the CIDX MCP
-            server. Parsed with ``shlex.split`` so quoted arguments and
-            escaped spaces are handled correctly.
-        timeout: Subprocess timeout seconds. Defaults to
-            _DEFAULT_CODEX_MCP_ADD_TIMEOUT_SECONDS.
-    """
-    if not cidx_mcp_command or not cidx_mcp_command.strip():
-        logger.info(
-            "cidx-local MCP registration skipped — no launcher command configured "
-            "(see _DEFAULT_CIDX_MCP_COMMAND FIXME for follow-up story)"
-        )
-        return
-
-    cmd_parts = shlex.split(cidx_mcp_command)
-    cmd = ["codex", "mcp", "add", "cidx-local", "--"] + cmd_parts
-    env = {**os.environ, "CODEX_HOME": str(codex_home)}
-    try:
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            check=False,
-            capture_output=True,
-            timeout=timeout,
-        )
-        if proc.returncode != 0:
-            stderr_text = proc.stderr.decode(errors="replace")[:_MAX_STDERR_LOG_CHARS]
-            logger.warning(
-                "codex mcp add returned non-zero exit %d — cidx-local may not be registered; "
-                "stderr: %s",
-                proc.returncode,
-                stderr_text,
-            )
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "codex mcp add timed out — cidx-local may not be registered in CODEX_HOME"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -399,11 +327,15 @@ def initialize_codex_manager_on_startup(
             "Expected one of: 'none', 'api_key', 'subscription'."
         )
 
-    # Story #848: register cidx-local MCP server in CODEX_HOME after credentials
-    # are in place (applies to both api_key and subscription modes).
+    # Register cidx-local MCP via HTTP transport after credentials are in place
+    # (applies to both api_key and subscription modes).
     codex_home = base_dir / "codex-home"
-    _ensure_codex_mcp_registered(
+    raw_host = getattr(server_config, "host", "localhost")
+    # Normalize bind-all addresses to loopback — codex runs on the same host.
+    host = "localhost" if raw_host in ("0.0.0.0", "") else raw_host
+    _ensure_codex_mcp_http_registered(
         codex_home=codex_home,
-        cidx_mcp_command=_DEFAULT_CIDX_MCP_COMMAND,
+        host=host,
+        port=getattr(server_config, "port", _DEFAULT_CIDX_SERVER_PORT),
     )
     return shutdown_hook

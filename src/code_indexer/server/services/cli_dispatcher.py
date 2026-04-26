@@ -81,7 +81,9 @@ class CliDispatcher:
         """
         # When codex is absent, bypass selection entirely.
         if self.codex is None:
-            return self.claude.invoke(flow=flow, cwd=cwd, prompt=prompt, timeout=timeout)
+            return self.claude.invoke(
+                flow=flow, cwd=cwd, prompt=prompt, timeout=timeout
+            )
 
         codex_primary = random.random() < self.codex_weight
         primary, alternate = (

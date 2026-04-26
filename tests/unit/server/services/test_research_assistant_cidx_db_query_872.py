@@ -14,7 +14,6 @@ import threading
 import tempfile
 import shutil
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 BACKGROUND_THREAD_WAIT_SECONDS = 5.0
@@ -73,9 +72,7 @@ def _run_and_capture(research_service, capture_mode="calls"):
         done_event.set()
         return mock_result
 
-    target = (
-        "code_indexer.server.services.research_assistant_service.subprocess.run"
-    )
+    target = "code_indexer.server.services.research_assistant_service.subprocess.run"
     with patch(target, side_effect=capture_run):
         research_service.execute_prompt(session_id, "Test question")
         done_event.wait(timeout=BACKGROUND_THREAD_WAIT_SECONDS)
@@ -103,8 +100,7 @@ def test_db_query_script_present_in_allow_rules(research_service):
     db_query_rules = [r for r in allow_list if "cidx-db-query.sh" in r]
 
     assert len(db_query_rules) >= 1, (
-        "Allow list must contain a cidx-db-query.sh rule. "
-        f"Got allow list: {allow_list}"
+        f"Allow list must contain a cidx-db-query.sh rule. Got allow list: {allow_list}"
     )
     for rule in db_query_rules:
         assert rule.startswith("Bash(/"), (

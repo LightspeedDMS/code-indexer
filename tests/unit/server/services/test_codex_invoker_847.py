@@ -200,8 +200,14 @@ class TestCodexInvokerJsonlParsing:
         """item.completed events with item.type != agent_message are not returned."""
         invoker = _make_invoker()
         jsonl = _jsonl(
-            {"type": "item.completed", "item": {"type": "tool_call", "text": "tool output"}},
-            {"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}},
+            {
+                "type": "item.completed",
+                "item": {"type": "tool_call", "text": "tool output"},
+            },
+            {
+                "type": "item.completed",
+                "item": {"type": "reasoning", "text": "thinking"},
+            },
         )
         proc = _make_proc(stdout=jsonl)
         with patch("subprocess.Popen", return_value=proc):
@@ -229,7 +235,9 @@ class TestCodexInvokerTimeout:
         proc = _make_proc(
             pid=9999,
             communicate_side_effect=[
-                subprocess.TimeoutExpired(cmd=_CLI_USED_CODEX, timeout=_ONE_SECOND_TIMEOUT),
+                subprocess.TimeoutExpired(
+                    cmd=_CLI_USED_CODEX, timeout=_ONE_SECOND_TIMEOUT
+                ),
                 ("", ""),
             ],
         )
@@ -367,9 +375,7 @@ class TestCodexInvokerFailureClassification:
     def test_quota_error_stderr_returns_retryable_on_other(self) -> None:
         """stderr containing quota error → RETRYABLE_ON_OTHER."""
         invoker = _make_invoker()
-        proc = _make_proc(
-            stderr="Error: quota exceeded for this account", returncode=1
-        )
+        proc = _make_proc(stderr="Error: quota exceeded for this account", returncode=1)
         with patch("subprocess.Popen", return_value=proc):
             result = invoker.invoke(
                 flow=_FLOW_DESCRIBE,
@@ -386,7 +392,9 @@ class TestCodexInvokerFailureClassification:
         proc = _make_proc(
             pid=7777,
             communicate_side_effect=[
-                subprocess.TimeoutExpired(cmd=_CLI_USED_CODEX, timeout=_DEFAULT_TIMEOUT),
+                subprocess.TimeoutExpired(
+                    cmd=_CLI_USED_CODEX, timeout=_DEFAULT_TIMEOUT
+                ),
                 ("", ""),
             ],
         )
@@ -402,7 +410,9 @@ class TestCodexInvokerFailureClassification:
         assert result.success is False
         assert result.failure_class == FailureClass.RETRYABLE_ON_SAME
 
-    def test_nonzero_returncode_without_agent_message_returns_retryable_on_other(self) -> None:
+    def test_nonzero_returncode_without_agent_message_returns_retryable_on_other(
+        self,
+    ) -> None:
         """Non-zero returncode with no agent_message events → RETRYABLE_ON_OTHER."""
         invoker = _make_invoker()
         proc = _make_proc(stderr="some generic error", returncode=2)

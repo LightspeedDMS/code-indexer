@@ -15,9 +15,13 @@ Test inventory (3 tests):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +29,9 @@ from code_indexer.server.services.intelligence_cli_invoker import InvocationResu
 # ---------------------------------------------------------------------------
 
 
-def _make_success_result(output: str = "generated description", cli_used: str = "claude") -> InvocationResult:
+def _make_success_result(
+    output: str = "generated description", cli_used: str = "claude"
+) -> InvocationResult:
     return InvocationResult(
         success=True,
         output=output,
@@ -35,7 +41,7 @@ def _make_success_result(output: str = "generated description", cli_used: str = 
     )
 
 
-def _make_manager(cli_dispatcher=None) -> "ClaudeCliManager":
+def _make_manager(cli_dispatcher=None) -> ClaudeCliManager:
     """Build a ClaudeCliManager with zero worker threads for deterministic testing."""
     from code_indexer.server.services.claude_cli_manager import ClaudeCliManager
 
@@ -60,12 +66,16 @@ class TestManagerWorkerInvokesDispatcher:
         the injected dispatcher.dispatch is invoked exactly once.
         """
         mock_dispatcher = MagicMock()
-        mock_dispatcher.dispatch.return_value = _make_success_result(output="the answer")
+        mock_dispatcher.dispatch.return_value = _make_success_result(
+            output="the answer"
+        )
 
         manager = _make_manager(cli_dispatcher=mock_dispatcher)
 
         received: list = []
-        callback = lambda success, result: received.append((success, result))
+
+        def callback(success, result):
+            received.append((success, result))
 
         repo_path = Path("/fake/repo")
         manager._process_work(repo_path, callback)
@@ -101,7 +111,9 @@ class TestManagerCodexWeightZeroEquivalentToLegacy:
         manager = _make_manager(cli_dispatcher=dispatcher)
 
         received: list = []
-        callback = lambda success, result: received.append((success, result))
+
+        def callback(success, result):
+            received.append((success, result))
 
         manager._process_work(Path("/repo"), callback)
 
@@ -129,12 +141,16 @@ class TestManagerCallbackReceivesDispatcherOutput:
         """
         expected_output = "verbatim dispatcher output string"
         mock_dispatcher = MagicMock()
-        mock_dispatcher.dispatch.return_value = _make_success_result(output=expected_output)
+        mock_dispatcher.dispatch.return_value = _make_success_result(
+            output=expected_output
+        )
 
         manager = _make_manager(cli_dispatcher=mock_dispatcher)
 
         received: list = []
-        callback = lambda success, result: received.append((success, result))
+
+        def callback(success, result):
+            received.append((success, result))
 
         manager._process_work(Path("/repo"), callback)
 
