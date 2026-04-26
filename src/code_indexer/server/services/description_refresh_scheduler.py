@@ -1101,7 +1101,7 @@ class DescriptionRefreshScheduler:
             repo_path_obj,
         )
 
-    def _build_cli_dispatcher(self, config) -> "CliDispatcher":
+    def _build_cli_dispatcher(self, config) -> "CliDispatcher":  # noqa: F821
         """
         Build a CliDispatcher from *config* (Story #847).
 
@@ -1162,7 +1162,9 @@ class DescriptionRefreshScheduler:
         if self._cli_dispatcher is not None:
             dispatcher = self._cli_dispatcher
         else:
-            config = self._config_manager.load_config() if self._config_manager else None
+            config = (
+                self._config_manager.load_config() if self._config_manager else None
+            )
             dispatcher = self._build_cli_dispatcher(config)
 
         result = dispatcher.dispatch(

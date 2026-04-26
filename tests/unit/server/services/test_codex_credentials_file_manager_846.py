@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from contextlib import contextmanager
+
 from typing import Generator, List, Tuple
 from unittest.mock import patch
 
@@ -86,7 +86,9 @@ def written_manager(manager):
 
 
 @pytest.fixture()
-def replace_tracker(manager) -> Generator[Tuple[CodexCredentialsFileManager, list], None, None]:
+def replace_tracker(
+    manager,
+) -> Generator[Tuple[CodexCredentialsFileManager, list], None, None]:
     """
     Fixture that wraps os.replace with a call-tracker for atomic-write tests.
 
@@ -261,7 +263,9 @@ class TestWriteCredentialsSecurity:
         )
         src, dst = replace_calls[0]
         assert src != dst, "Temp file must differ from destination"
-        assert str(auth_path.parent) in src, "Temp file must be in same dir as auth.json"
+        assert str(auth_path.parent) in src, (
+            "Temp file must be in same dir as auth.json"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +428,10 @@ class TestProviderResponseCustomFieldsPresent:
 
     def test_defaults_account_id_when_key_absent_inside_custom_fields(self):
         """SPIKE fallback: custom_fields present but account_id key missing."""
-        response = {**_FULL_PROVIDER_RESPONSE, "custom_fields": {"id_token": TEST_ID_TOKEN}}
+        response = {
+            **_FULL_PROVIDER_RESPONSE,
+            "custom_fields": {"id_token": TEST_ID_TOKEN},
+        }
         result = _provider_response_to_auth_json(response)
         assert result["tokens"]["account_id"] == ""
 

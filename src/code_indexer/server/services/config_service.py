@@ -40,6 +40,7 @@ BOOTSTRAP_KEYS = frozenset(
         "cluster",
         "enable_malloc_arena_max",  # Bug #897
         "enable_malloc_trim",  # Bug #897
+        "enable_graph_channel_repair",  # Story #908 / Epic #907
         "fault_injection_enabled",  # Story #746
         "fault_injection_nonprod_ack",  # Story #746
     }

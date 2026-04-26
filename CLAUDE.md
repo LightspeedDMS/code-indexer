@@ -428,6 +428,31 @@ Files: `src/code_indexer/server/mcp/memory_retrieval_pipeline.py`, `src/code_ind
 
 ---
 
+### Phase 3.7 Dep-Map Graph-Channel Repair (Story #908, Epic #907)
+
+Phase 3.7 is inserted in `_run_branch_a_dep_map` between Phase 3.5 (metadata backfill) and Phase 4 (index regeneration), at progress percent 78. It repairs graph-channel anomalies detected by the dep-map parser (SELF_LOOP in Story #908; subsequent stories add MALFORMED_YAML, GARBAGE_DOMAIN_REJECTED, BIDIRECTIONAL_MISMATCH).
+
+**Bootstrap flag**: `enable_graph_channel_repair` in `config.json` (bootstrap-only, not DB). Default `True`. Pattern follows Bug #897 `enable_malloc_trim`. When `False`, `_run_phase37` returns immediately without reading parser anomalies or touching the journal. Passed to `DepMapRepairExecutor.__init__` as `enable_graph_channel_repair: bool = True`.
+
+**Journal**: Append-only JSONL at `~/.cidx-server/dep_map_repair_journal.jsonl` (CIDX_DATA_DIR env var honored per Bug #879 IPC alignment). Each line is a 12-field JSON object: `timestamp`, `anomaly_type`, `source_domain`, `target_domain`, `source_repos`, `target_repos`, `verdict`, `action`, `citations`, `file_writes`, `claude_response_raw`, `effective_mode`. Atomic per-line writes via module-scope `_write_lock` (threading.Lock). `RepairJournal` class in `dep_map_repair_phase37.py`.
+
+**Action enum master list** (grows per story):
+- `self_loop_deleted` (Story #908) — deterministic; no Claude involved
+
+**Verdict enum**: `CONFIRMED | REFUTED | INCONCLUSIVE | N_A` (deterministic repairs use `N_A`).
+
+**File split** (MESSI Rule 6 extraction at 1100-line trigger):
+- `src/code_indexer/server/services/dep_map_repair_executor.py` — orchestration, phase shims (~966 lines)
+- `src/code_indexer/server/services/dep_map_repair_phase37.py` — journal types (`Action`, `JournalEntry`, `RepairJournal`), journal constants, and Phase 3.7 step functions (~313 lines)
+
+The executor re-exports `Action`, `JournalEntry`, `RepairJournal` from phase37 for backward compat. Tests that import these symbols from the executor continue to work.
+
+`_repair_self_loop` stays on the executor class (tests call it there). `run_phase37` in phase37 module is the actual orchestrator. `_run_phase37` in executor is a thin shim that checks the enable flag and delegates.
+
+Tests: `tests/unit/server/services/test_dep_map_908_*.py` (25 tests across 8 ACs + 3 builder/helper files).
+
+---
+
 ## Further Reading
 
 - Architecture: `docs/architecture.md`

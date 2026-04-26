@@ -136,9 +136,12 @@ class TestEnsureCodexMcpRegisteredIdempotencyAndTimeout:
         When subprocess.run raises TimeoutExpired, _ensure_codex_mcp_registered
         logs a WARNING and does NOT re-raise the exception.
         """
-        with patch("subprocess.run") as mock_run, caplog.at_level(
-            logging.WARNING,
-            logger="code_indexer.server.startup.codex_cli_startup",
+        with (
+            patch("subprocess.run") as mock_run,
+            caplog.at_level(
+                logging.WARNING,
+                logger="code_indexer.server.startup.codex_cli_startup",
+            ),
         ):
             mock_run.side_effect = subprocess.TimeoutExpired(
                 cmd=["codex", "mcp", "add"], timeout=_EXPECTED_SUBPROCESS_TIMEOUT
@@ -181,9 +184,12 @@ class TestEnsureCodexMcpRegisteredEmptyCommand:
         one INFO log record explaining that registration was skipped because no command
         is configured.
         """
-        with patch("subprocess.run"), caplog.at_level(
-            logging.INFO,
-            logger="code_indexer.server.startup.codex_cli_startup",
+        with (
+            patch("subprocess.run"),
+            caplog.at_level(
+                logging.INFO,
+                logger="code_indexer.server.startup.codex_cli_startup",
+            ),
         ):
             _ensure_codex_mcp_registered(
                 codex_home=codex_home,
@@ -191,7 +197,9 @@ class TestEnsureCodexMcpRegisteredEmptyCommand:
             )
 
         info_records = [
-            r for r in caplog.records if r.levelno == logging.INFO and "skip" in r.message.lower()
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO and "skip" in r.message.lower()
         ]
         assert info_records, (
             f"Expected an INFO log mentioning skip when command is empty; "
@@ -208,9 +216,12 @@ class TestEnsureCodexMcpRegisteredStderrCapture:
         must contain the decoded stderr text so operators can diagnose failures.
         """
         error_text = "command not found: codex"
-        with patch("subprocess.run") as mock_run, caplog.at_level(
-            logging.WARNING,
-            logger="code_indexer.server.startup.codex_cli_startup",
+        with (
+            patch("subprocess.run") as mock_run,
+            caplog.at_level(
+                logging.WARNING,
+                logger="code_indexer.server.startup.codex_cli_startup",
+            ),
         ):
             mock_run.return_value = MagicMock(
                 returncode=1,
@@ -232,9 +243,12 @@ class TestEnsureCodexMcpRegisteredStderrCapture:
         """
         When subprocess.run returns rc == 0, no WARNING log is emitted.
         """
-        with patch("subprocess.run") as mock_run, caplog.at_level(
-            logging.WARNING,
-            logger="code_indexer.server.startup.codex_cli_startup",
+        with (
+            patch("subprocess.run") as mock_run,
+            caplog.at_level(
+                logging.WARNING,
+                logger="code_indexer.server.startup.codex_cli_startup",
+            ),
         ):
             mock_run.return_value = MagicMock(returncode=0, stderr=b"")
             _ensure_codex_mcp_registered(
@@ -271,7 +285,9 @@ class TestInitializeCodexMcpRegistrationIntegration:
         mcp_add_calls = [
             c
             for c in mock_run.call_args_list
-            if c.args and len(c.args[0]) >= 3 and c.args[0][:3] == ["codex", "mcp", "add"]
+            if c.args
+            and len(c.args[0]) >= 3
+            and c.args[0][:3] == ["codex", "mcp", "add"]
         ]
         assert not mcp_add_calls, (
             f"_ensure_codex_mcp_registered must not run when Codex disabled; "

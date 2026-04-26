@@ -26,14 +26,20 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 # ---------------------------------------------------------------------------
 
 
-def _make_invoker(analysis_model: str = "opus", soft_timeout_seconds: int = 90) -> "ClaudeInvoker":
+def _make_invoker(
+    analysis_model: str = "opus", soft_timeout_seconds: int = 90
+) -> "ClaudeInvoker":  # noqa: F821
     """Import here so import errors surface as test failures, not collection errors."""
     from code_indexer.server.services.claude_invoker import ClaudeInvoker
 
-    return ClaudeInvoker(analysis_model=analysis_model, soft_timeout_seconds=soft_timeout_seconds)
+    return ClaudeInvoker(
+        analysis_model=analysis_model, soft_timeout_seconds=soft_timeout_seconds
+    )
 
 
-def _completed_process(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+def _completed_process(
+    returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> MagicMock:
     """Build a mock subprocess.CompletedProcess."""
     proc = MagicMock(spec=subprocess.CompletedProcess)
     proc.returncode = returncode
@@ -90,7 +96,9 @@ class TestClaudeInvokerInputValidation:
         """Empty cwd → RETRYABLE_ON_OTHER failure; subprocess never called."""
         with patch("subprocess.run") as mock_run:
             invoker = _make_invoker()
-            result = invoker.invoke(flow="describe", cwd="", prompt="some prompt", timeout=30)
+            result = invoker.invoke(
+                flow="describe", cwd="", prompt="some prompt", timeout=30
+            )
             assert result.success is False
             assert result.failure_class == FailureClass.RETRYABLE_ON_OTHER
             mock_run.assert_not_called()
@@ -117,7 +125,9 @@ class TestClaudeInvokerInputValidation:
         """bool timeout (True/False) is rejected — bool is not a valid int here."""
         with patch("subprocess.run") as mock_run:
             invoker = _make_invoker()
-            result = invoker.invoke(flow="describe", cwd="/tmp", prompt="p", timeout=True)
+            result = invoker.invoke(
+                flow="describe", cwd="/tmp", prompt="p", timeout=True
+            )
             assert result.success is False
             assert result.failure_class == FailureClass.RETRYABLE_ON_OTHER
             mock_run.assert_not_called()
@@ -172,7 +182,9 @@ class TestClaudeInvokerCommandLine:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout="hello world")
             invoker = _make_invoker()
-            invoker.invoke(flow="describe", cwd="/tmp", prompt="describe this", timeout=30)
+            invoker.invoke(
+                flow="describe", cwd="/tmp", prompt="describe this", timeout=30
+            )
             cmd = mock_run.call_args[0][0]
             assert cmd[0] == "script"
 
@@ -203,7 +215,9 @@ class TestClaudeInvokerCommandLine:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout="result text")
             invoker = _make_invoker()
-            invoker.invoke(flow="describe", cwd="/tmp", prompt="unique-prompt-xyz", timeout=30)
+            invoker.invoke(
+                flow="describe", cwd="/tmp", prompt="unique-prompt-xyz", timeout=30
+            )
             cmd = mock_run.call_args[0][0]
             # prompt is shell-quoted inside the -c argument
             cmd_str = " ".join(cmd)
@@ -342,7 +356,9 @@ class TestClaudeInvokerSubprocessParams:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = _completed_process(stdout="text")
             invoker = _make_invoker()
-            invoker.invoke(flow="describe", cwd="/repo/myproject", prompt="p", timeout=30)
+            invoker.invoke(
+                flow="describe", cwd="/repo/myproject", prompt="p", timeout=30
+            )
             _, kwargs = mock_run.call_args
             assert kwargs.get("cwd") == "/repo/myproject"
 

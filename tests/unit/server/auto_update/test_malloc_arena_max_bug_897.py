@@ -261,9 +261,7 @@ def test_ensure_malloc_arena_max_honors_cidx_data_dir_across_users(
         service_name="cidx-server",
     )
 
-    side_effects = _make_subprocess_run_mock(
-        _SERVICE_WITHOUT_ARENA, write_success=True
-    )
+    side_effects = _make_subprocess_run_mock(_SERVICE_WITHOUT_ARENA, write_success=True)
 
     with patch("subprocess.run") as mock_run:
         mock_run.side_effect = side_effects

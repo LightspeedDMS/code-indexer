@@ -28,22 +28,22 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 # structural counts and are acceptable as literals per project convention.
 # ---------------------------------------------------------------------------
 
-_CWD = os.devnull               # portable, guaranteed-present path on Unix
+_CWD = os.devnull  # portable, guaranteed-present path on Unix
 _FLOW = "describe"
 _PROMPT = "describe this repo"
-_TIMEOUT_S = 30                  # hard timeout passed to dispatch()
+_TIMEOUT_S = 30  # hard timeout passed to dispatch()
 
-_SMALL_DISPATCH_COUNT = 100      # loops for codex-disabled scenarios
-_TINY_DISPATCH_COUNT = 10        # smallest loop used in one targeted test
-_LARGE_DISPATCH_COUNT = 1000     # statistical distribution test
+_SMALL_DISPATCH_COUNT = 100  # loops for codex-disabled scenarios
+_TINY_DISPATCH_COUNT = 10  # smallest loop used in one targeted test
+_LARGE_DISPATCH_COUNT = 1000  # statistical distribution test
 
-_CODEX_WEIGHT_NONE = 0.0         # all dispatches go to Claude
-_CODEX_WEIGHT_ALL = 1.0          # all dispatches go to Codex
-_CODEX_WEIGHT_HALF = 0.5         # fifty/fifty split
-_NON_ZERO_CODEX_WEIGHT = 0.9     # non-zero weight used with codex=None
+_CODEX_WEIGHT_NONE = 0.0  # all dispatches go to Claude
+_CODEX_WEIGHT_ALL = 1.0  # all dispatches go to Codex
+_CODEX_WEIGHT_HALF = 0.5  # fifty/fifty split
+_NON_ZERO_CODEX_WEIGHT = 0.9  # non-zero weight used with codex=None
 
-_BELOW_ZERO_WEIGHT = -0.01       # invalid: below lower bound
-_ABOVE_ONE_WEIGHT = 1.01         # invalid: above upper bound
+_BELOW_ZERO_WEIGHT = -0.01  # invalid: below lower bound
+_ABOVE_ONE_WEIGHT = 1.01  # invalid: above upper bound
 
 # Deterministic random values for distribution tests.
 # _RANDOM_LOW < _CODEX_WEIGHT_HALF  → Codex selected as primary.
@@ -92,11 +92,9 @@ def _stub_invoker(results: list) -> MagicMock:
     return stub
 
 
-def _dispatch(dispatcher: "CliDispatcher") -> InvocationResult:
+def _dispatch(dispatcher: "CliDispatcher") -> InvocationResult:  # noqa: F821
     """Call dispatcher.dispatch with shared test constants."""
-    return dispatcher.dispatch(
-        flow=_FLOW, cwd=_CWD, prompt=_PROMPT, timeout=_TIMEOUT_S
-    )
+    return dispatcher.dispatch(flow=_FLOW, cwd=_CWD, prompt=_PROMPT, timeout=_TIMEOUT_S)
 
 
 def _make_dispatcher(
@@ -175,9 +173,7 @@ class TestCliDispatcherCodexDisabled:
         """When codex is None, all _SMALL_DISPATCH_COUNT dispatches use Claude."""
         from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
-        claude_stub = _stub_invoker(
-            [_success_result("claude")] * _SMALL_DISPATCH_COUNT
-        )
+        claude_stub = _stub_invoker([_success_result("claude")] * _SMALL_DISPATCH_COUNT)
         dispatcher = CliDispatcher(claude=claude_stub, codex=None)
         for _ in range(_SMALL_DISPATCH_COUNT):
             result = _dispatch(dispatcher)
@@ -188,9 +184,7 @@ class TestCliDispatcherCodexDisabled:
         """When codex=None, _NON_ZERO_CODEX_WEIGHT kwarg is ignored — Claude always called."""
         from code_indexer.server.services.cli_dispatcher import CliDispatcher
 
-        claude_stub = _stub_invoker(
-            [_success_result("claude")] * _TINY_DISPATCH_COUNT
-        )
+        claude_stub = _stub_invoker([_success_result("claude")] * _TINY_DISPATCH_COUNT)
         dispatcher = CliDispatcher(
             claude=claude_stub, codex=None, codex_weight=_NON_ZERO_CODEX_WEIGHT
         )
@@ -212,9 +206,7 @@ class TestCliDispatcherWeightSelection:
             codex_results=[_success_result("codex")] * _LARGE_DISPATCH_COUNT,
             codex_weight=_CODEX_WEIGHT_NONE,
         )
-        side_effects = [
-            i / _LARGE_DISPATCH_COUNT for i in range(_LARGE_DISPATCH_COUNT)
-        ]
+        side_effects = [i / _LARGE_DISPATCH_COUNT for i in range(_LARGE_DISPATCH_COUNT)]
         with patch("random.random", side_effect=side_effects):
             for _ in range(_LARGE_DISPATCH_COUNT):
                 _dispatch(dispatcher)
@@ -228,9 +220,7 @@ class TestCliDispatcherWeightSelection:
             codex_results=[_success_result("codex")] * _LARGE_DISPATCH_COUNT,
             codex_weight=_CODEX_WEIGHT_ALL,
         )
-        side_effects = [
-            i / _LARGE_DISPATCH_COUNT for i in range(_LARGE_DISPATCH_COUNT)
-        ]
+        side_effects = [i / _LARGE_DISPATCH_COUNT for i in range(_LARGE_DISPATCH_COUNT)]
         with patch("random.random", side_effect=side_effects):
             for _ in range(_LARGE_DISPATCH_COUNT):
                 _dispatch(dispatcher)

@@ -21,7 +21,10 @@ from code_indexer.server.services.codex_credentials_file_manager import (
     CodexCredentialsFileManager,
     _provider_response_to_auth_json,
 )
-from code_indexer.server.services.llm_creds_client import CheckoutResponse, LlmCredsClient
+from code_indexer.server.services.llm_creds_client import (
+    CheckoutResponse,
+    LlmCredsClient,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +162,14 @@ class CodexLeaseLoop:
                 lease_id, cred_id = resp.lease_id, resp.credential_id
                 self._write_auth_and_persist(resp)
                 self._active_lease_id, self._active_credential_id = lease_id, cred_id
-                logger.info("Codex credential checkout successful: lease_id=%s", lease_id)
+                logger.info(
+                    "Codex credential checkout successful: lease_id=%s", lease_id
+                )
                 return True
             except Exception as exc:
-                logger.warning("Codex lease acquisition failed (job will be skipped): %s", exc)
+                logger.warning(
+                    "Codex lease acquisition failed (job will be skipped): %s", exc
+                )
                 if lease_id is not None:
                     self._compensate(lease_id, cred_id)
                 self._active_lease_id = self._active_credential_id = None

@@ -1100,6 +1100,11 @@ class ServerConfig:
     enable_malloc_trim: bool = True  # Mitigation 1: call malloc_trim(0) after eviction. Default ON since v9.23.3.
     enable_malloc_arena_max: bool = True  # Mitigation 2: inject MALLOC_ARENA_MAX=2 via systemd. Default ON since v9.23.3.
 
+    # Story #908 / Epic #907 - Graph-channel anomaly repair (bootstrap-only, never DB).
+    # Default True so fresh installs automatically run Phase 3.7 SELF_LOOP repair.
+    # Set enable_graph_channel_repair=false in config.json to disable.
+    enable_graph_channel_repair: bool = True
+
     def __post_init__(self):
         """Initialize nested config objects if not provided."""
         if self.password_security is None:

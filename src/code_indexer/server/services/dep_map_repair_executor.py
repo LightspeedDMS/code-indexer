@@ -31,7 +31,21 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
+
+if TYPE_CHECKING:
+    from code_indexer.server.services.dep_map_parser_hygiene import AnomalyEntry
+
+from code_indexer.server.services.dep_map_repair_phase37 import (
+    Action,  # noqa: F401 — re-exported for test backward compat
+    JournalEntry,  # noqa: F401 — re-exported for test backward compat
+    RepairJournal,  # noqa: F401 — re-exported for test backward compat
+    atomic_write_text,
+    build_and_append_journal_entry,
+    remove_self_loop_rows,
+    resolve_self_loop_md_path,
+    run_phase37,
+)
 
 from code_indexer.global_repos.lifecycle_batch_runner import LifecycleBatchRunner
 from code_indexer.global_repos.yaml_emitter_utils import yaml_quote_if_unsafe
@@ -106,6 +120,7 @@ class DepMapRepairExecutor:
         progress_callback: Optional[Callable[[int, str], None]] = None,
         lifecycle_invoker: Optional[Callable] = None,
         golden_repos_dir: Optional[Path] = None,
+        enable_graph_channel_repair: bool = True,
     ) -> None:
         self._health_detector = health_detector
         self._index_regenerator = index_regenerator
@@ -115,6 +130,11 @@ class DepMapRepairExecutor:
         self._progress_callback = progress_callback
         self._lifecycle_invoker = lifecycle_invoker
         self._golden_repos_dir = golden_repos_dir
+        self._enable_graph_channel_repair: bool = enable_graph_channel_repair
+        logger.debug(
+            "[RepairExecutor] enable_graph_channel_repair=%s",
+            self._enable_graph_channel_repair,
+        )
 
     def execute(
         self,
@@ -215,6 +235,8 @@ class DepMapRepairExecutor:
         self._run_phase3(output_dir, health_report, fixed, errors)
         self._report_progress(75, "Phase 3.5: Backfilling JSON metadata from markdown")
         self._run_phase35(output_dir, fixed, errors)
+        self._report_progress(78, "Phase 3.7: Repairing graph-channel anomalies")
+        self._run_phase37(output_dir, fixed, errors)
         self._report_progress(80, "Phase 4: Regenerating index")
         self._run_phase4(output_dir, health_report, fixed, errors)
         self._report_progress(90, "Phase 5: Validating repair")
@@ -529,6 +551,75 @@ class DepMapRepairExecutor:
 
         domains_file = output_dir / "_domains.json"
         domains_file.write_text(json.dumps(new_list, indent=2), encoding="utf-8")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase 3.7: Repair SELF_LOOP graph-channel anomalies (Story #908)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _run_phase37(
+        self,
+        output_dir: Path,
+        fixed: List[str],
+        errors: List[str],
+    ) -> None:
+        """Phase 3.7 shim: check enable flag then delegate to phase37 module.
+
+        No-op when enable_graph_channel_repair is False (AC2).
+        """
+        if not self._enable_graph_channel_repair:
+            return
+        run_phase37(output_dir, fixed, errors)
+
+    def _repair_self_loop(
+        self,
+        output_dir: Path,
+        anomaly: "AnomalyEntry",
+        fixed: List[str],
+        errors: List[str],
+        *,
+        journal_path: Optional[Path] = None,
+        journal: Optional["RepairJournal"] = None,
+    ) -> None:
+        """Remove one SELF_LOOP row from a domain .md file and journal the repair.
+
+        Delegates to phase37 step functions. Never raises (AC8). Idempotent (AC4).
+        """
+        raw_file = anomaly.file
+        if ".." in raw_file:
+            errors.append(f"Phase 3.7: unsafe path rejected (traversal): {raw_file!r}")
+            return
+
+        filename = Path(raw_file).name  # basename — handles absolute paths from parser
+        if not filename.endswith(".md"):
+            errors.append(
+                f"Phase 3.7: anomaly file does not end with .md: {raw_file!r}"
+            )
+            return
+
+        domain_name = filename[: -len(".md")]
+        md_path = resolve_self_loop_md_path(output_dir, domain_name, errors)
+        if md_path is None:
+            return
+
+        try:
+            original_lines = md_path.read_text(encoding="utf-8").splitlines(
+                keepends=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"Phase 3.7: cannot read {domain_name}.md: {exc}")
+            return
+
+        new_lines = remove_self_loop_rows(domain_name, original_lines)
+        if new_lines == original_lines:
+            return  # idempotent — no self-loop row present
+
+        if not atomic_write_text(md_path, "".join(new_lines), errors):
+            return
+
+        fixed.append(f"Phase 3.7: removed self-loop from {domain_name}.md")
+        build_and_append_journal_entry(
+            md_path, domain_name, journal_path, journal, errors
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase 4: Regenerate _index.md

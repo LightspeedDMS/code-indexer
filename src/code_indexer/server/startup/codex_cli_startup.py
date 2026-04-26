@@ -127,7 +127,9 @@ def _login_codex_with_api_key(
             timeout=timeout_seconds,
         )
         if result.returncode != 0:
-            stderr_text = result.stderr.decode("utf-8", errors="replace")[:_MAX_STDERR_LOG_CHARS]
+            stderr_text = result.stderr.decode("utf-8", errors="replace")[
+                :_MAX_STDERR_LOG_CHARS
+            ]
             logger.warning(
                 "`codex login --with-api-key` failed (exit %d): %s",
                 result.returncode,
@@ -142,7 +144,9 @@ def _login_codex_with_api_key(
         )
         return False
     except FileNotFoundError:
-        logger.warning("codex binary not found on PATH — Codex feature effectively disabled")
+        logger.warning(
+            "codex binary not found on PATH — Codex feature effectively disabled"
+        )
         return False
     except Exception as exc:
         logger.warning("Unexpected error running `codex login --with-api-key`: %s", exc)
@@ -168,7 +172,9 @@ def _handle_api_key_mode(api_key: str, base_dir: Path) -> None:
         raise ValueError("api_key must not be empty in api_key credential_mode")
     codex_home = _ensure_codex_home(base_dir)
     os.environ["OPENAI_API_KEY"] = api_key.strip()
-    login_succeeded = _login_codex_with_api_key(codex_home=codex_home, api_key=api_key.strip())
+    login_succeeded = _login_codex_with_api_key(
+        codex_home=codex_home, api_key=api_key.strip()
+    )
     if not login_succeeded:
         logger.warning(
             "Codex login via api_key mode failed; continuing with OPENAI_API_KEY env var fallback"
@@ -218,9 +224,7 @@ def _handle_subscription_mode(
         server_dir_path=str(base_dir),
         state_filename=_CODEX_STATE_FILENAME,
     )
-    creds_mgr = CodexCredentialsFileManager(
-        auth_json_path=codex_home / "auth.json"
-    )
+    creds_mgr = CodexCredentialsFileManager(auth_json_path=codex_home / "auth.json")
     loop = CodexLeaseLoop(
         client=client,
         state_manager=state_mgr,
@@ -238,6 +242,7 @@ def _handle_subscription_mode(
     logger.info("Codex subscription mode: lease acquired, auth.json written")
 
     if return_shutdown_hook:
+
         def shutdown() -> None:
             loop.stop()
             logger.info("Codex subscription lease returned on shutdown")

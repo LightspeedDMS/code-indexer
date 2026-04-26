@@ -1177,9 +1177,15 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
     Returns:
         Configured DepMapRepairExecutor instance.
     """
+    from ..services.config_service import get_config_service
     from ..services.dep_map_health_detector import DepMapHealthDetector
     from ..services.dep_map_index_regenerator import IndexRegenerator
     from ..services.dep_map_repair_executor import DepMapRepairExecutor
+
+    # Read bootstrap flag from ServerConfig (bootstrap-only, never DB).
+    enable_graph_channel_repair: bool = bool(
+        get_config_service().get_config().enable_graph_channel_repair
+    )
 
     detector = DepMapHealthDetector()
     regenerator = IndexRegenerator()
@@ -1210,6 +1216,7 @@ def _build_repair_executor(dep_map_service, output_dir: Path, activity_journal):
         domain_analyzer=domain_analyzer,
         journal_callback=journal_cb,
         progress_callback=_progress_cb,
+        enable_graph_channel_repair=enable_graph_channel_repair,
     )
 
 

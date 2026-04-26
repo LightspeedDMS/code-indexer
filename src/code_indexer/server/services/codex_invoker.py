@@ -30,8 +30,8 @@ from code_indexer.server.services.intelligence_cli_invoker import (
 logger = logging.getLogger(__name__)
 
 _CLI_USED = "codex"
-_STDERR_SNIPPET_LEN = 200     # max chars of stderr included in error messages
-_JSONL_LOG_SNIPPET_LEN = 80   # max chars of a malformed JSONL line in caller logs
+_STDERR_SNIPPET_LEN = 200  # max chars of stderr included in error messages
+_JSONL_LOG_SNIPPET_LEN = 80  # max chars of a malformed JSONL line in caller logs
 
 # Stderr substrings that indicate permanent credential/config problems.
 # All are mapped to RETRYABLE_ON_OTHER (failover to alternate CLI).
@@ -44,7 +44,9 @@ _PERMANENT_FAILURE_STDERR_PATTERNS = (
 )
 
 
-def _make_failure_result(error_msg: str, failure_class: FailureClass) -> InvocationResult:
+def _make_failure_result(
+    error_msg: str, failure_class: FailureClass
+) -> InvocationResult:
     """Construct a failed InvocationResult with was_failover=False."""
     return InvocationResult(
         success=False,
@@ -86,7 +88,9 @@ class CodexInvoker:
             )
         self._codex_home = codex_home
 
-    def invoke(self, flow: str, cwd: str, prompt: str, timeout: int) -> InvocationResult:
+    def invoke(
+        self, flow: str, cwd: str, prompt: str, timeout: int
+    ) -> InvocationResult:
         """
         Invoke Codex CLI and return the parsed result.
 
@@ -124,9 +128,18 @@ class CodexInvoker:
         """Validate all invoke() parameters. Returns a failure result on error, else None."""
         checks = [
             (timeout <= 0, f"timeout {timeout!r}: must be > 0"),
-            (not isinstance(flow, str) or not flow, f"flow must be non-empty string, got {flow!r}"),
-            (not isinstance(cwd, str) or not cwd, f"cwd must be non-empty string, got {cwd!r}"),
-            (not isinstance(prompt, str) or not prompt, f"prompt must be non-empty string, got {prompt!r}"),
+            (
+                not isinstance(flow, str) or not flow,
+                f"flow must be non-empty string, got {flow!r}",
+            ),
+            (
+                not isinstance(cwd, str) or not cwd,
+                f"cwd must be non-empty string, got {cwd!r}",
+            ),
+            (
+                not isinstance(prompt, str) or not prompt,
+                f"prompt must be non-empty string, got {prompt!r}",
+            ),
         ]
         for is_invalid, detail in checks:
             if is_invalid:
@@ -140,7 +153,8 @@ class CodexInvoker:
     ) -> "Union[subprocess.Popen[str], InvocationResult]":
         """Start the Codex subprocess. Returns Popen on success, InvocationResult on error."""
         cmd = [
-            "codex", "exec",
+            "codex",
+            "exec",
             "--json",
             "--skip-git-repo-check",
             "--dangerously-bypass-approvals-and-sandbox",
@@ -176,7 +190,9 @@ class CodexInvoker:
         try:
             return proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            error_msg = f"CodexInvoker: timed out after {timeout}s — killing process group"
+            error_msg = (
+                f"CodexInvoker: timed out after {timeout}s — killing process group"
+            )
             logger.warning(error_msg)
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -185,10 +201,14 @@ class CodexInvoker:
             try:
                 proc.communicate()
             except Exception as drain_exc:
-                logger.debug("CodexInvoker: post-kill drain failed (benign): %s", drain_exc)
+                logger.debug(
+                    "CodexInvoker: post-kill drain failed (benign): %s", drain_exc
+                )
             return _make_failure_result(error_msg, FailureClass.RETRYABLE_ON_SAME)
 
-    def _handle_nonzero_exit(self, returncode: int, stderr_text: str) -> InvocationResult:
+    def _handle_nonzero_exit(
+        self, returncode: int, stderr_text: str
+    ) -> InvocationResult:
         """Classify and return a failure result for a non-zero process exit."""
         failure_class = _classify_stderr_failure(stderr_text)
         error_msg = (
