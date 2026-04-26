@@ -181,6 +181,31 @@ _INDEX_SAFETY_BUFFER_SECONDS = 60
 _RERANK_OVERFETCH_MULTIPLIER = 4
 
 
+def _parse_file_extensions(raw: Optional[str]) -> List[str]:
+    """Parse --file-extensions CLI flag into a normalized list (Story #906).
+
+    Comma-separated input. Each token is whitespace-stripped, then any leading
+    dots are stripped (so '.py' and 'py' are equivalent). Tokens that are empty
+    after BOTH normalization steps are skipped (handles inputs like '.' or
+    '.,py' that would otherwise produce empty entries). Returns [] when input
+    is None, empty, or whitespace-only.
+
+    Examples:
+      _parse_file_extensions(None)           == []
+      _parse_file_extensions("")             == []
+      _parse_file_extensions("py")           == ["py"]
+      _parse_file_extensions("py,js")        == ["py", "js"]
+      _parse_file_extensions(".py,.js")      == ["py", "js"]
+      _parse_file_extensions("py, js, ts")   == ["py", "js", "ts"]
+      _parse_file_extensions(".")            == []
+      _parse_file_extensions(".,py")         == ["py"]
+    """
+    if not raw:
+        return []
+    normalized = (ext.strip().lstrip(".") for ext in raw.split(","))
+    return [ext for ext in normalized if ext]
+
+
 def _log_skipped_provider_warning(provider_name: str) -> None:
     """Log a warning that a provider was skipped due to missing API key."""
     logger.warning(
@@ -1243,24 +1268,6 @@ def _execute_semantic_search(
                 # Single path filter: append directly
                 filter_conditions.setdefault("must", []).extend(path_filters)
 
-        # Story #906: --file-extensions filter wiring.
-        # The "language" field IS cidx's file-extension field in the index schema
-        # (test helper _must_extension_conditions finds extension entries via
-        # c.get("key") == "language"). Per the test contract, multiple extensions
-        # are appended as DIRECT must-entries; cidx's vector_store engine
-        # OR-merges multiple direct entries with the same key. Composes with
-        # --language as INTERSECTION.
-        if file_extensions:
-            parsed_file_extensions = [
-                ext.strip().lstrip(".")
-                for ext in file_extensions.split(",")
-                if ext.strip()
-            ]
-            for ext in parsed_file_extensions:
-                filter_conditions.setdefault("must", []).append(
-                    {"key": "language", "match": {"value": ext}}
-                )
-
         # Build exclusion filters (must_not conditions)
         if exclude_languages:
             language_validator = LanguageValidator()
@@ -1375,16 +1382,10 @@ def _execute_semantic_search(
             # Multiple extensions appended as DIRECT must-entries (cidx
             # vector_store OR-merges multiple direct entries with same key).
             # Composes with --language as INTERSECTION.
-            if file_extensions:
-                parsed_file_extensions = [
-                    ext.strip().lstrip(".")
-                    for ext in file_extensions.split(",")
-                    if ext.strip()
-                ]
-                for ext in parsed_file_extensions:
-                    filter_conditions_list.append(
-                        {"key": "language", "match": {"value": ext}}
-                    )
+            for ext in _parse_file_extensions(file_extensions):
+                filter_conditions_list.append(
+                    {"key": "language", "match": {"value": ext}}
+                )
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
@@ -6225,24 +6226,6 @@ def query(
                 # Single path filter: append directly
                 filter_conditions.setdefault("must", []).extend(path_filters)
 
-        # Story #906: --file-extensions filter wiring.
-        # The "language" field IS cidx's file-extension field in the index schema
-        # (see test helper _must_extension_conditions which finds extension entries
-        # via c.get("key") == "language"). Per the test contract, multiple
-        # extensions are appended as DIRECT must-entries (NOT should-wrapped) —
-        # cidx's vector_store engine OR-merges multiple direct entries with the
-        # same key. Composes with --language as INTERSECTION.
-        if file_extensions:
-            parsed_file_extensions = [
-                ext.strip().lstrip(".")
-                for ext in file_extensions.split(",")
-                if ext.strip()
-            ]
-            for ext in parsed_file_extensions:
-                filter_conditions.setdefault("must", []).append(
-                    {"key": "language", "match": {"value": ext}}
-                )
-
         # Build exclusion filters (must_not conditions)
         if exclude_languages:
             language_validator = LanguageValidator()
@@ -6478,16 +6461,10 @@ def query(
             # Multiple extensions appended as DIRECT must-entries (cidx
             # vector_store OR-merges multiple direct entries with same key).
             # Composes with --language as INTERSECTION.
-            if file_extensions:
-                parsed_file_extensions = [
-                    ext.strip().lstrip(".")
-                    for ext in file_extensions.split(",")
-                    if ext.strip()
-                ]
-                for ext in parsed_file_extensions:
-                    filter_conditions_list.append(
-                        {"key": "language", "match": {"value": ext}}
-                    )
+            for ext in _parse_file_extensions(file_extensions):
+                filter_conditions_list.append(
+                    {"key": "language", "match": {"value": ext}}
+                )
 
             # Build filter conditions preserving both must and must_not conditions
             query_filter_conditions = (
