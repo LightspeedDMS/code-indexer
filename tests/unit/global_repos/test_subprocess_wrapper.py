@@ -28,13 +28,12 @@ LONG_OUTER_TIMEOUT = 240
 SCRIPT_NULL_DEVICE = os.devnull
 
 
-def _make_result(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
-    """Create a mock subprocess.CompletedProcess result."""
-    result = MagicMock()
-    result.returncode = returncode
-    result.stdout = stdout
-    result.stderr = stderr
-    return result
+def _make_proc(returncode: int = 0, stdout: str = "", stderr: str = "") -> MagicMock:
+    """Create a mock Popen process whose communicate() returns (stdout, stderr)."""
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.communicate.return_value = (stdout, stderr)
+    return proc
 
 
 def _run_wrapper(
@@ -47,22 +46,36 @@ def _run_wrapper(
     outer_timeout: int = OUTER_TIMEOUT,
 ):
     """
-    Call invoke_claude_cli with mocked subprocess.run and patched env.
+    Call invoke_claude_cli with mocked subprocess.Popen and patched env.
 
-    Returns (mock_run, success, output).
+    invoke_claude_cli uses Popen+communicate rather than subprocess.run.
+    - Normal path: Popen returns a mock proc; proc.communicate() returns (stdout, "").
+    - TimeoutExpired side_effect: raised by proc.communicate() to exercise the
+      SIGTERM+SIGKILL grace period path.
+    - OSError side_effect: raised by Popen() itself to exercise the outer
+      exception handler.
+
+    Returns (mock_popen, success, output).
     """
     from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
 
-    with patch("subprocess.run") as mock_run:
+    with patch("subprocess.Popen") as mock_popen:
         if side_effect is not None:
-            mock_run.side_effect = side_effect
+            if isinstance(side_effect, subprocess.TimeoutExpired):
+                # TimeoutExpired must be raised by proc.communicate(), not by Popen()
+                proc = _make_proc(returncode=returncode, stdout=stdout)
+                proc.communicate.side_effect = side_effect
+                mock_popen.return_value = proc
+            else:
+                # OSError and other exceptions are raised by Popen() itself
+                mock_popen.side_effect = side_effect
         else:
-            mock_run.return_value = _make_result(returncode=returncode, stdout=stdout)
+            mock_popen.return_value = _make_proc(returncode=returncode, stdout=stdout)
         with patch.dict("os.environ", env, clear=True):
             success, output = invoke_claude_cli(
                 str(tmp_path), "test prompt", shell_timeout, outer_timeout
             )
-    return mock_run, success, output
+    return mock_popen, success, output
 
 
 class TestEnvFiltering:
@@ -80,22 +93,22 @@ class TestEnvFiltering:
     ):
         """CLAUDECODE and (when CLAUDECODE present) ANTHROPIC_API_KEY are dropped."""
         env = {"PATH": "/usr/bin", **extra_env}
-        mock_run, _, _ = _run_wrapper(tmp_path, env)
-        called_env = mock_run.call_args[1]["env"]
+        mock_popen, _, _ = _run_wrapper(tmp_path, env)
+        called_env = mock_popen.call_args[1]["env"]
         assert absent_key not in called_env
 
     def test_anthropic_api_key_kept_when_claudecode_absent(self, tmp_path):
         """ANTHROPIC_API_KEY is kept when CLAUDECODE is not in parent env."""
         env = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-secret"}
-        mock_run, _, _ = _run_wrapper(tmp_path, env)
-        called_env = mock_run.call_args[1]["env"]
+        mock_popen, _, _ = _run_wrapper(tmp_path, env)
+        called_env = mock_popen.call_args[1]["env"]
         assert "ANTHROPIC_API_KEY" in called_env
 
     def test_other_env_vars_passed_through(self, tmp_path):
         """Non-filtered env vars are forwarded to subprocess."""
         env = {"MY_VAR": "hello", "ANOTHER": "world"}
-        mock_run, _, _ = _run_wrapper(tmp_path, env)
-        called_env = mock_run.call_args[1]["env"]
+        mock_popen, _, _ = _run_wrapper(tmp_path, env)
+        called_env = mock_popen.call_args[1]["env"]
         assert called_env["MY_VAR"] == "hello"
         assert called_env["ANOTHER"] == "world"
 
@@ -130,35 +143,39 @@ class TestTimeoutAndCommand:
     """Tests that timeout values and command structure are correct."""
 
     def test_outer_timeout_passed_to_subprocess_run(self, tmp_path):
-        """outer_timeout_seconds is passed as timeout= to subprocess.run."""
-        mock_run, _, _ = _run_wrapper(tmp_path, {}, outer_timeout=LONG_OUTER_TIMEOUT)
-        assert mock_run.call_args[1]["timeout"] == LONG_OUTER_TIMEOUT
+        """outer_timeout_seconds is passed as timeout= to proc.communicate()."""
+        mock_popen, _, _ = _run_wrapper(tmp_path, {}, outer_timeout=LONG_OUTER_TIMEOUT)
+        # invoke_claude_cli passes outer_timeout_seconds to proc.communicate(timeout=...)
+        assert (
+            mock_popen.return_value.communicate.call_args[1]["timeout"]
+            == LONG_OUTER_TIMEOUT
+        )
 
     def test_inner_timeout_in_command_string(self, tmp_path):
         """shell_timeout_seconds appears in the inner claude command string."""
-        mock_run, _, _ = _run_wrapper(
+        mock_popen, _, _ = _run_wrapper(
             tmp_path,
             {},
             shell_timeout=LONG_SHELL_TIMEOUT,
             outer_timeout=LONG_OUTER_TIMEOUT,
         )
-        full_cmd = mock_run.call_args[0][0]
+        full_cmd = mock_popen.call_args[0][0]
         inner_cmd = full_cmd[3]  # script -q -c <inner_cmd> /dev/null
         assert str(LONG_SHELL_TIMEOUT) in inner_cmd
 
     def test_script_pseudo_tty_wrapper_used(self, tmp_path):
         """Outer command uses 'script -q -c ... /dev/null' for pseudo-TTY."""
-        mock_run, _, _ = _run_wrapper(tmp_path, {})
-        full_cmd = mock_run.call_args[0][0]
+        mock_popen, _, _ = _run_wrapper(tmp_path, {})
+        full_cmd = mock_popen.call_args[0][0]
         assert full_cmd[0] == "script"
         assert full_cmd[1] == "-q"
         assert full_cmd[2] == "-c"
         assert full_cmd[4] == SCRIPT_NULL_DEVICE
 
     def test_repo_path_used_as_cwd(self, tmp_path):
-        """repo_path argument is passed as cwd= to subprocess.run."""
-        mock_run, _, _ = _run_wrapper(tmp_path, {})
-        assert mock_run.call_args[1]["cwd"] == str(tmp_path)
+        """repo_path argument is passed as cwd= to subprocess.Popen."""
+        mock_popen, _, _ = _run_wrapper(tmp_path, {})
+        assert mock_popen.call_args[1]["cwd"] == str(tmp_path)
 
 
 class TestErrorHandling:
@@ -173,18 +190,18 @@ class TestErrorHandling:
     )
     def test_exception_returns_false(self, tmp_path, side_effect, returncode):
         """subprocess exceptions return (False, str) without propagating."""
-        _, success, msg = _run_wrapper(tmp_path, {}, side_effect=side_effect)
+        _mock_popen, success, msg = _run_wrapper(tmp_path, {}, side_effect=side_effect)
         assert success is False
         assert isinstance(msg, str)
 
     def test_nonzero_exit_returns_false(self, tmp_path):
         """Non-zero subprocess exit code returns (False, error_message)."""
-        _, success, msg = _run_wrapper(tmp_path, {}, returncode=1)
+        _mock_popen, success, msg = _run_wrapper(tmp_path, {}, returncode=1)
         assert success is False
         assert isinstance(msg, str)
 
     def test_success_returns_true_with_output(self, tmp_path):
         """Zero exit returns (True, cleaned_output)."""
-        _, success, output = _run_wrapper(tmp_path, {}, stdout="clean result")
+        _mock_popen, success, output = _run_wrapper(tmp_path, {}, stdout="clean result")
         assert success is True
         assert output == "clean result"

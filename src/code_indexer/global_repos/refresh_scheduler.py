@@ -27,8 +27,10 @@ from .cleanup_manager import CleanupManager
 from .shared_operations import DEFAULT_REFRESH_INTERVAL, GlobalRepoOperations
 from code_indexer.server.repositories.background_jobs import DuplicateJobError
 from code_indexer.server.services.cidx_meta_backup import (
+    CidxMetaBackupBootstrap,
     ClaudeConflictResolver,
     CidxMetaBackupSync,
+    detect_default_branch,
 )
 from code_indexer.server.services.config_service import get_config_service
 from code_indexer.server.storage.sqlite_backends import GoldenRepoMetadataSqliteBackend
@@ -1159,9 +1161,42 @@ class RefreshScheduler:
                         and backup_cfg is not None
                         and backup_cfg.enabled
                     ):
+                        # MED-3: Run MetaDirectoryUpdater before sync so description
+                        # files are created/removed on disk before CidxMetaBackupSync
+                        # runs `git add -A`.  git add -A is a superset of
+                        # MetaDirectoryUpdater's filesystem writes once it has run.
+                        # Wrapped in try/except so a MetaDirectoryUpdater failure
+                        # does not block backup sync (matching the defensive pattern
+                        # used for backup_cfg fetch and bootstrap errors in this block).
+                        try:
+                            MetaDirectoryUpdater(master_path, self.registry).update()
+                        except Exception as meta_err:
+                            logger.warning(
+                                "MetaDirectoryUpdater failed for %s before backup sync: %s",
+                                alias_name,
+                                meta_err,
+                            )
+
+                        # MED-2: Idempotent bootstrap call ensures URL changes applied
+                        # via DB-only paths (not through the Save route) are applied
+                        # on the next refresh cycle.  CidxMetaBackupBootstrap.bootstrap()
+                        # is cheap when the remote URL has not changed (reads
+                        # `git remote get-url origin` and returns immediately on match).
+                        if backup_cfg.remote_url:
+                            try:
+                                CidxMetaBackupBootstrap().bootstrap(
+                                    master_path, backup_cfg.remote_url
+                                )
+                            except Exception as bootstrap_err:
+                                logger.warning(
+                                    "cidx-meta backup bootstrap failed for %s: %s",
+                                    alias_name,
+                                    bootstrap_err,
+                                )
+                        branch = detect_default_branch(master_path) or "master"
                         sync_result = CidxMetaBackupSync(
                             master_path,
-                            "master",
+                            branch,
                             ClaudeConflictResolver(),
                         ).sync()
                         if sync_result.skipped and not force_reset:

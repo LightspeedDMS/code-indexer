@@ -7708,9 +7708,9 @@ async def update_cidx_meta_backup_config(
         config_service.update_setting("cidx_meta_backup", "remote_url", remote_url)
 
         if remote_url:
-            repo_root = (
-                config_service.config_manager.server_dir / "golden_repos" / "cidx-meta"
-            )
+            from ..services.cidx_meta_backup import get_cidx_meta_path
+
+            repo_root = get_cidx_meta_path(config_service.config_manager.server_dir)
             CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
 
         return _create_config_page_response(

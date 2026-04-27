@@ -3,6 +3,7 @@
 from .bootstrap import CidxMetaBackupBootstrap
 from .branch_detect import detect_default_branch
 from .conflict_resolver import ClaudeConflictResolver, ResolverResult
+from .paths import get_cidx_meta_path
 from .sync import CidxMetaBackupSync, SyncResult
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "ResolverResult",
     "SyncResult",
     "detect_default_branch",
+    "get_cidx_meta_path",
 ]

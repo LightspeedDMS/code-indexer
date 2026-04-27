@@ -569,8 +569,8 @@ def toggle_cidx_meta_backup(
         "/admin/config/cidx_meta_backup",
         token,
         data={
-            "cidx_meta_backup_enabled": "true" if enabled else "false",
-            "cidx_meta_backup_remote_url": remote_url,
+            "enabled": "true" if enabled else "false",
+            "remote_url": remote_url,
         },
     )
     resp.raise_for_status()

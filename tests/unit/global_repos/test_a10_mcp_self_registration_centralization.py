@@ -29,7 +29,8 @@ def test_invoke_claude_cli_triggers_mcp_self_registration(tmp_path):
     AC-V4-12 — invoke_claude_cli calls MCPSelfRegistrationService.get_instance().ensure_registered()
     before spawning the Claude CLI subprocess.
 
-    Fails RED until A10a adds get_instance() and the centralized call.
+    invoke_claude_cli uses subprocess.Popen; the mock proc's communicate() must
+    return (stdout, stderr) and proc.returncode must be 0.
     """
     from code_indexer.server.services.mcp_self_registration_service import (
         MCPSelfRegistrationService,
@@ -41,12 +42,11 @@ def test_invoke_claude_cli_triggers_mcp_self_registration(tmp_path):
     with patch.object(
         MCPSelfRegistrationService, "get_instance", return_value=mock_service
     ) as mock_get_instance:
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.Popen") as mock_popen:
             mock_proc = MagicMock()
             mock_proc.returncode = 0
-            mock_proc.stdout = _VALID_CLI_OUTPUT
-            mock_proc.stderr = ""
-            mock_run.return_value = mock_proc
+            mock_proc.communicate.return_value = (_VALID_CLI_OUTPUT, "")
+            mock_popen.return_value = mock_proc
 
             from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
 
@@ -98,44 +98,48 @@ def test_ensure_registered_cached_across_many_invocations(tmp_path):
     original = MCPSelfRegistrationService.get_instance()
     MCPSelfRegistrationService.set_instance(real_service)
 
-    def _fake_run(cmd, *args, **kwargs):
-        result = MagicMock()
-        result.returncode = 0
-        result.stdout = (
-            _VALID_CLI_OUTPUT
-            if (isinstance(cmd, list) and cmd and cmd[0] == "script")
-            else ""
-        )
-        result.stderr = ""
-        return result
-
     try:
-        with patch("subprocess.run", side_effect=_fake_run) as mock_run:
-            from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
+        # subprocess.run is used by MCPSelfRegistrationService.claude_cli_available()
+        # and is_already_registered() (both call ["claude", ...] via subprocess.run).
+        # subprocess.Popen is used by invoke_claude_cli itself for the CLI spawn.
+        # Both must be patched when using the real MCPSelfRegistrationService.
+        mock_run_result = MagicMock()
+        mock_run_result.returncode = 0
 
-            # First call: registration work (--version, mcp get) may occur
-            invoke_claude_cli(
-                repo_path=str(tmp_path),
-                prompt="test",
-                shell_timeout_seconds=30,
-                outer_timeout_seconds=60,
-            )
-            total_after_first = mock_run.call_count
+        with patch("subprocess.run", return_value=mock_run_result):
+            with patch("subprocess.Popen") as mock_popen:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.communicate.return_value = (_VALID_CLI_OUTPUT, "")
+                mock_popen.return_value = mock_proc
 
-            # Calls 2-100: only 1 subprocess per call (the CLI spawn), no registration
-            for _ in range(99):
+                from code_indexer.global_repos.repo_analyzer import invoke_claude_cli
+
+                # First call: registration work (--version, mcp get) may occur via
+                # subprocess.run inside MCPSelfRegistrationService.ensure_registered().
+                # Only Popen calls (the CLI spawn itself) are counted here.
                 invoke_claude_cli(
                     repo_path=str(tmp_path),
                     prompt="test",
                     shell_timeout_seconds=30,
                     outer_timeout_seconds=60,
                 )
+                total_after_first = mock_popen.call_count
 
-            additional_calls = mock_run.call_count - total_after_first
-            assert additional_calls == 99, (
-                f"Invocations 2-100 produced {additional_calls} subprocess calls "
-                f"(expected exactly 99 — one CLI spawn each, zero registration overhead). "
-                f"Cache short-circuit is broken."
-            )
+                # Calls 2-100: only 1 Popen per call (the CLI spawn), no registration
+                for _ in range(99):
+                    invoke_claude_cli(
+                        repo_path=str(tmp_path),
+                        prompt="test",
+                        shell_timeout_seconds=30,
+                        outer_timeout_seconds=60,
+                    )
+
+                additional_calls = mock_popen.call_count - total_after_first
+                assert additional_calls == 99, (
+                    f"Invocations 2-100 produced {additional_calls} Popen calls "
+                    f"(expected exactly 99 — one CLI spawn each, zero registration overhead). "
+                    f"Cache short-circuit is broken."
+                )
     finally:
         MCPSelfRegistrationService.set_instance(original)
