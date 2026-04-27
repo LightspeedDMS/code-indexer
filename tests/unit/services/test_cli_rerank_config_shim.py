@@ -70,7 +70,7 @@ def _make_global_config(
 def make_shim(monkeypatch: pytest.MonkeyPatch):
     """Factory fixture: call make_shim(voyage_key, cohere_key, **config_kwargs).
 
-    Sets or clears VOYAGE_API_KEY / COHERE_API_KEY for the test, then
+    Sets or clears VOYAGE_API_KEY / CO_API_KEY for the test, then
     constructs and returns a CliRerankConfigService.  All **config_kwargs
     are forwarded to _make_global_config.
     """
@@ -85,9 +85,9 @@ def make_shim(monkeypatch: pytest.MonkeyPatch):
         else:
             monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
         if cohere_key is not None:
-            monkeypatch.setenv("COHERE_API_KEY", cohere_key)
+            monkeypatch.setenv("CO_API_KEY", cohere_key)
         else:
-            monkeypatch.delenv("COHERE_API_KEY", raising=False)
+            monkeypatch.delenv("CO_API_KEY", raising=False)
         return CliRerankConfigService(_make_global_config(**config_kwargs))
 
     return _factory

@@ -231,7 +231,7 @@ def no_key_config(monkeypatch: pytest.MonkeyPatch) -> CliRerankConfigService:
     environment cannot leak in and accidentally enable reranking.
     """
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    monkeypatch.delenv("CO_API_KEY", raising=False)
     return CliRerankConfigService(make_global_config())
 
 
@@ -239,7 +239,7 @@ def no_key_config(monkeypatch: pytest.MonkeyPatch) -> CliRerankConfigService:
 def voyage_config(monkeypatch: pytest.MonkeyPatch) -> CliRerankConfigService:
     """Shim with VOYAGE_API_KEY sentinel set; Cohere key explicitly absent."""
     monkeypatch.setenv("VOYAGE_API_KEY", SENTINEL_VOYAGE_KEY)
-    monkeypatch.delenv("COHERE_API_KEY", raising=False)
+    monkeypatch.delenv("CO_API_KEY", raising=False)
     return CliRerankConfigService(make_global_config())
 
 
@@ -247,7 +247,7 @@ def voyage_config(monkeypatch: pytest.MonkeyPatch) -> CliRerankConfigService:
 def both_key_config(monkeypatch: pytest.MonkeyPatch) -> CliRerankConfigService:
     """Shim with both provider sentinel keys set."""
     monkeypatch.setenv("VOYAGE_API_KEY", SENTINEL_VOYAGE_KEY)
-    monkeypatch.setenv("COHERE_API_KEY", SENTINEL_COHERE_KEY)
+    monkeypatch.setenv("CO_API_KEY", SENTINEL_COHERE_KEY)
     return CliRerankConfigService(make_global_config())
 
 

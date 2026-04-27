@@ -6503,7 +6503,7 @@ def query(
                 if primary_embedder is None and secondary_embedder is None:
                     console.print(
                         "No embedding provider configured. "
-                        "Set VOYAGE_API_KEY or COHERE_API_KEY.",
+                        "Set VOYAGE_API_KEY or CO_API_KEY.",
                         style="red",
                     )
                     sys.exit(1)
@@ -6593,7 +6593,7 @@ def query(
                 if primary_embedder is None and secondary_embedder is None:
                     console.print(
                         "No embedding provider configured. "
-                        "Set VOYAGE_API_KEY or COHERE_API_KEY.",
+                        "Set VOYAGE_API_KEY or CO_API_KEY.",
                         style="red",
                     )
                     sys.exit(1)
