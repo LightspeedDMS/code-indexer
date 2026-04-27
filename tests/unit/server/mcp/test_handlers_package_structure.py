@@ -62,6 +62,7 @@ EXPECTED_REGISTRY_KEYS = frozenset(
         "git_search_diffs",
         "directory_tree",
         "authenticate",
+        "elevate_session",
         "cidx_ssh_key_create",
         "cidx_ssh_key_list",
         "cidx_ssh_key_delete",

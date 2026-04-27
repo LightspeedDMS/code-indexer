@@ -11,6 +11,7 @@ Provides:
 import ctypes
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from typing import List
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,8 +20,30 @@ from code_indexer.server.app import app
 from code_indexer.server.auth.dependencies import (
     get_current_user,
     get_current_admin_user,
+    get_current_admin_user_hybrid,
 )
 from code_indexer.server.auth.user_manager import User, UserRole
+
+
+def _find_elevation_check_dependencies() -> List:
+    """Return all require_elevation._check callables registered across app routes.
+
+    Story #925 added @require_elevation() to several admin routes. Tests that
+    verify schema/handler logic (not elevation gating) need to bypass the
+    elevation check dependency entirely. FastAPI resolves Depends() at route
+    registration time, so we scan all routes for _check closures and return
+    them so admin_client can override them in app.dependency_overrides.
+    """
+    deps = []
+    for route in app.routes:
+        if not hasattr(route, "dependant"):
+            continue
+        for dep in route.dependant.dependencies:
+            fn = dep.call
+            qualname = getattr(fn, "__qualname__", "")
+            if "require_elevation.<locals>._check" in qualname:
+                deps.append(fn)
+    return deps
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +120,18 @@ def _patch_closure(handler, var_name: str, replacement):
 
 @pytest.fixture
 def admin_client():
-    """TestClient with admin user bypassing JWT."""
+    """TestClient with admin user bypassing JWT and elevation enforcement.
+
+    Overrides all standard auth dependencies AND every require_elevation._check
+    closure found on registered routes so that schema/handler tests are not
+    blocked by the elevation gate (Story #925).
+    """
     admin = _make_admin()
     app.dependency_overrides[get_current_user] = lambda: admin
     app.dependency_overrides[get_current_admin_user] = lambda: admin
+    app.dependency_overrides[get_current_admin_user_hybrid] = lambda: admin
+    for check_dep in _find_elevation_check_dependencies():
+        app.dependency_overrides[check_dep] = lambda: admin
     yield TestClient(app, raise_server_exceptions=False)
     app.dependency_overrides.clear()
 

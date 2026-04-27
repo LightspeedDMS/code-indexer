@@ -14,16 +14,102 @@ All service return values explicitly null-checked with error responses.
 import base64
 import html as html_module
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+
+from code_indexer.server.auth.elevated_session_manager import elevated_session_manager
+from code_indexer.server.auth.dependencies import CIDX_SESSION_COOKIE
 
 logger = logging.getLogger(__name__)
 
 _LOGIN_ROUTE = "/login"
 _ADMIN_ROUTE = "/admin/"
 _VERIFY_ROUTE = "/admin/mfa/verify"
+
+# Scope hierarchy: rank 0 = broadest ("full"), rank 1 = narrower ("totp_repair").
+# A session satisfies required_scope R when session_rank <= required_rank.
+_SCOPE_RANK: Dict[str, int] = {"full": 0, "totp_repair": 1}
+
+
+def _resolve_session_key(request: Request) -> Optional[str]:
+    """Return cidx_session cookie value as elevation session key, or None."""
+    cookie = request.cookies.get(CIDX_SESSION_COOKIE)
+    return str(cookie) if cookie is not None else None
+
+
+def _check_elevation_window(
+    request: Request,
+    required_scope: str = "full",
+) -> Optional[Dict[str, Any]]:
+    """Return error dict if elevation check fails, or None when check passes.
+
+    Story #925 AC5/AC6: enforces TOTP step-up elevation for Web UI endpoints.
+    Fails closed: no window -> returns elevation_required error dict.
+    Both required_scope and session.scope are validated against _SCOPE_RANK;
+    unknown values raise ValueError (programmer error, not a runtime auth failure).
+    """
+    if required_scope not in _SCOPE_RANK:
+        raise ValueError(
+            f"required_scope must be one of {sorted(_SCOPE_RANK)}, got {required_scope!r}"
+        )
+
+    session_key = _resolve_session_key(request)
+    if not session_key:
+        return {"error": "elevation_required", "message": "No active elevation window."}
+
+    session = elevated_session_manager.touch_atomic(session_key)
+    if session is None:
+        return {"error": "elevation_required", "message": "No active elevation window."}
+
+    if session.scope not in _SCOPE_RANK:
+        raise ValueError(
+            f"Session has unrecognized scope {session.scope!r}; "
+            f"expected one of {sorted(_SCOPE_RANK)}"
+        )
+    session_rank = _SCOPE_RANK[session.scope]
+    required_rank = _SCOPE_RANK[required_scope]
+    if session_rank > required_rank:
+        return {
+            "error": "elevation_required",
+            "message": (
+                f"Scope {required_scope!r} required; current scope is {session.scope!r}."
+            ),
+        }
+    return None
+
+
+def _cross_user_setup_guard(
+    request: Request,
+    admin_username: str,
+    target_user: str,
+) -> Optional[Any]:
+    """Enforce AC5 elevation + confirmation for cross-user TOTP setup.
+
+    Returns a JSONResponse (403 or 400) when the guard fails, or None when
+    all checks pass. Caller emits audit log only on the success path.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    elev_err = _check_elevation_window(request, required_scope="full")
+    if elev_err is not None:
+        return _JSONResponse(content=elev_err, status_code=403)
+
+    confirm = request.query_params.get("confirm_overwrite")
+    if confirm != "1":
+        return _JSONResponse(
+            content={
+                "error": "confirm_overwrite_required",
+                "message": (
+                    "Overwriting another admin's TOTP requires confirm_overwrite=1 "
+                    "in the request."
+                ),
+            },
+            status_code=400,
+        )
+    return None
+
 
 mfa_router = APIRouter(prefix="/admin/mfa", tags=["mfa"])
 user_mfa_router = APIRouter(tags=["user-mfa"])
@@ -200,6 +286,9 @@ def mfa_setup_page(
         user: Target username (admin setting up MFA for another user).
               Defaults to the logged-in user if not specified.
         mode: If 'show', re-displays existing QR without regenerating secret.
+
+    Story #925 AC5: Cross-user setup requires active full-scope elevation +
+    explicit confirm_overwrite=1. Audit log written immediately before success return.
     """
     admin_username = _get_session_username(request)
     if not admin_username:
@@ -207,16 +296,20 @@ def mfa_setup_page(
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
 
-    # Determine target user (self or another user)
     target_user = user if user else admin_username
+    is_cross_user = target_user != admin_username
+
+    # AC5: cross-user guard (elevation + explicit confirmation)
+    if is_cross_user:
+        guard_err = _cross_user_setup_guard(request, admin_username, target_user)
+        if guard_err is not None:
+            return guard_err
 
     if mode == "show":
-        # Re-display existing QR (no regeneration)
         uri = _totp_service.get_provisioning_uri(target_user)
         if uri is None:
             return HTMLResponse(f"No MFA configured for {target_user}", status_code=404)
     else:
-        # New setup — generate fresh secret
         secret = _totp_service.generate_secret(target_user)
         if secret is None:
             return HTMLResponse("Failed to generate secret", status_code=500)
@@ -235,6 +328,17 @@ def mfa_setup_page(
     verified = request.query_params.get("verified") == "1"
     qr_b64 = base64.b64encode(qr_bytes).decode()
     csrf = request.cookies.get("csrf_token", "")
+
+    # AC5: accurate audit log immediately before success return
+    if is_cross_user:
+        action = "viewed existing TOTP QR" if is_show else "regenerated TOTP secret"
+        logger.info(
+            "Admin %s %s for %s (cross-user setup, elevation confirmed)",
+            admin_username,
+            action,
+            target_user,
+        )
+
     return HTMLResponse(
         _render_setup(
             qr_b64,
@@ -249,7 +353,13 @@ def mfa_setup_page(
 
 @mfa_router.get("/recovery-codes", response_class=HTMLResponse)
 def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
-    """Regenerate and display recovery codes for a user."""
+    """Regenerate and display recovery codes for a user.
+
+    Story #925 AC6: requires active elevation window.
+    Cross-user operations require full scope; self-service accepts totp_repair scope.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+
     admin_username = _get_session_username(request)
     if not admin_username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
@@ -257,6 +367,13 @@ def mfa_recovery_codes_page(request: Request, user: Optional[str] = None):
         return HTMLResponse("MFA service not available", status_code=503)
 
     target = user if user else admin_username
+    is_cross_user = target != admin_username
+    required_scope = "full" if is_cross_user else "totp_repair"
+
+    elev_err = _check_elevation_window(request, required_scope=required_scope)
+    if elev_err is not None:
+        return _JSONResponse(content=elev_err, status_code=403)
+
     codes = _totp_service.generate_recovery_codes(target)
     if codes is None:
         return HTMLResponse("Failed to generate recovery codes", status_code=500)
@@ -351,12 +468,21 @@ def mfa_status(request: Request):
 
 @mfa_router.post("/disable", response_class=HTMLResponse)
 def mfa_disable(request: Request, totp_code: str = Form(...)):
-    """Disable MFA. Requires valid TOTP code or recovery code."""
+    """Disable MFA. Requires valid TOTP code or recovery code.
+
+    Story #925 AC6: requires active totp_repair-scope elevation window.
+    """
+    from fastapi.responses import JSONResponse as _JSONResponse
+
     username = _get_session_username(request)
     if not username:
         return RedirectResponse(_LOGIN_ROUTE, status_code=303)
     if _totp_service is None:
         return HTMLResponse("MFA service not available", status_code=503)
+
+    elev_err = _check_elevation_window(request, required_scope="totp_repair")
+    if elev_err is not None:
+        return _JSONResponse(content=elev_err, status_code=403)
 
     valid = _totp_service.verify_code(
         username, totp_code

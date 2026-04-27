@@ -46,6 +46,10 @@ server_config: Optional["ServerConfig"] = None
 # auto_error=False allows us to handle missing credentials manually and return 401 per MCP spec
 security = HTTPBearer(auto_error=False)
 
+# JWT cookie name — used for cookie-based auth (Web UI) and elevation-window lookup.
+# Single source of truth; imported by mfa_routes and tests.
+CIDX_SESSION_COOKIE = "cidx_session"
+
 
 def _build_www_authenticate_header() -> str:
     """
@@ -199,7 +203,7 @@ def _refresh_jwt_cookie(response: Response, payload: Dict[str, Any]) -> None:
     )
 
     response.set_cookie(
-        key="cidx_session",
+        key=CIDX_SESSION_COOKIE,
         value=new_token,
         httponly=True,
         secure=True,
@@ -237,7 +241,7 @@ def get_current_user(
     # Handle missing credentials (per MCP spec RFC 9728, return 401 not 403)
     if credentials is None:
         # No Authorization header - check for JWT cookie
-        token = request.cookies.get("cidx_session")
+        token = request.cookies.get(CIDX_SESSION_COOKIE)
         if token:
             # Validate cookie JWT using same logic as Bearer
             user = _validate_jwt_and_get_user(token)
@@ -835,7 +839,7 @@ def _resolve_session_key(request: Request) -> Optional[str]:
     jti = getattr(getattr(request, "state", None), "user_jti", None)
     if jti:
         return str(jti)
-    cookie = request.cookies.get("cidx_session")
+    cookie = request.cookies.get(CIDX_SESSION_COOKIE)
     return str(cookie) if cookie is not None else None
 
 

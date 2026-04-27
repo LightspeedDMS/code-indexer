@@ -18,13 +18,15 @@ from code_indexer.server.auth import dependencies
 from code_indexer.server.logging_utils import format_error_log
 from code_indexer.server.middleware.correlation import get_correlation_id
 
-from . import _utils
-from ._utils import (
+from code_indexer.server.mcp.handlers import _utils
+from code_indexer.server.mcp.handlers._utils import (
     _coerce_int,
     _mcp_response,
     _parse_json_string_array,
     _get_golden_repos_dir,
 )
+from code_indexer.server.mcp.auth.elevation_decorator import require_mcp_elevation
+from . import elevate_session as _elevate_session_module
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ JOB_ID_LENGTH = 8
 
 def _get_legacy():
     """Lazy import of _legacy for shared helpers."""
-    from . import _legacy
+    from code_indexer.server.mcp.handlers import _legacy
 
     return _legacy
 
@@ -47,7 +49,7 @@ def _get_legacy():
 
 def _get_scip_helpers():
     """Lazy import of scip helpers used by audit log handler."""
-    from .scip import (
+    from code_indexer.server.mcp.handlers.scip import (
         _filter_audit_entries,
         _get_pr_logs_from_service,
         _get_cleanup_logs_from_service,
@@ -69,7 +71,7 @@ def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all users (admin only)."""
     try:
         all_users = _utils.app_module.user_manager.get_all_users()
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "users": [
@@ -84,11 +86,12 @@ def list_users(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except Exception as e:
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {"success": False, "error": str(e), "users": [], "total": 0}
         )
 
 
+@require_mcp_elevation()
 def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new user (admin only)."""
     try:
@@ -99,7 +102,7 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         new_user = _utils.app_module.user_manager.create_user(
             username=username, password=password, role=role
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "user": {
@@ -111,7 +114,7 @@ def create_user(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             }
         )
     except Exception as e:
-        return _mcp_response({"success": False, "error": str(e), "user": None})
+        return _mcp_response({"success": False, "error": str(e), "user": None})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -137,9 +140,9 @@ def get_job_statistics(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             "total": active + pending + failed,
         }
 
-        return _mcp_response({"success": True, "statistics": stats})
+        return _mcp_response({"success": True, "statistics": stats})  # type: ignore[no-any-return]
     except Exception as e:
-        return _mcp_response({"success": False, "error": str(e), "statistics": {}})
+        return _mcp_response({"success": False, "error": str(e), "statistics": {}})  # type: ignore[no-any-return]
 
 
 def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -147,7 +150,7 @@ def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         job_id = params.get("job_id")
         if not job_id:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: job_id"}
             )
 
@@ -155,16 +158,16 @@ def get_job_details(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             job_id, user.username
         )
         if not job:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": f"Job '{job_id}' not found or access denied",
                 }
             )
 
-        return _mcp_response({"success": True, "job": job})
+        return _mcp_response({"success": True, "job": job})  # type: ignore[no-any-return]
     except Exception as e:
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -179,9 +182,10 @@ def handle_get_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
     golden_repos_dir = _get_golden_repos_dir()
     ops = GlobalRepoOperations(golden_repos_dir)
     config = ops.get_config()
-    return _mcp_response({"success": True, **config})
+    return _mcp_response({"success": True, **config})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Handler for set_global_config tool."""
     from code_indexer.global_repos.shared_operations import GlobalRepoOperations
@@ -191,17 +195,17 @@ def handle_set_global_config(args: Dict[str, Any], user: User) -> Dict[str, Any]
     refresh_interval = args.get("refresh_interval")
 
     if not refresh_interval:
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {"success": False, "error": "Missing required parameter: refresh_interval"}
         )
 
     try:
         ops.set_config(refresh_interval)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {"success": True, "status": "updated", "refresh_interval": refresh_interval}
         )
     except ValueError as e:
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -228,12 +232,12 @@ def handle_authenticate(
     api_key = args.get("api_key")
 
     if not username or not api_key:
-        return _mcp_response({"success": False, "error": "Missing username or api_key"})
+        return _mcp_response({"success": False, "error": "Missing username or api_key"})  # type: ignore[no-any-return]
     # Rate limit check BEFORE validating credentials
     allowed, retry_after = rate_limiter.consume(username)
     if not allowed:
         retry_after_int = int(math.ceil(retry_after))
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": f"Rate limit exceeded. Try again in {retry_after_int} seconds",
@@ -244,7 +248,7 @@ def handle_authenticate(
     # Validate API key
     user = user_manager.validate_user_api_key(username, api_key)
     if not user:
-        return _mcp_response({"success": False, "error": "Invalid credentials"})
+        return _mcp_response({"success": False, "error": "Invalid credentials"})  # type: ignore[no-any-return]
 
     # Successful authentication should refund the consumed token
     rate_limiter.refund(username)
@@ -269,7 +273,7 @@ def handle_authenticate(
         max_age=jwt_manager.token_expiration_minutes * 60,
     )
 
-    return _mcp_response(
+    return _mcp_response(  # type: ignore[no-any-return]
         {
             "success": True,
             "message": "Authentication successful",
@@ -313,7 +317,7 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         clear = params.get("clear", False)
 
         if not repo_alias:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "repository_alias is required",
@@ -321,7 +325,7 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         if not index_types:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "index_types is required",
@@ -354,7 +358,7 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             extra={"correlation_id": get_correlation_id()},
         )
 
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "job_id": job_id,
@@ -374,7 +378,7 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": str(e),
@@ -389,7 +393,7 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": str(e),
@@ -401,7 +405,7 @@ def trigger_reindex(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             f"trigger_reindex error in {elapsed_ms}ms: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": str(e),
@@ -433,7 +437,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         repo_alias = params.get("repository_alias")
 
         if not repo_alias:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "repository_alias is required",
@@ -460,7 +464,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
         }
         response.update(status_data)
 
-        return _mcp_response(response)
+        return _mcp_response(response)  # type: ignore[no-any-return]
 
     except FileNotFoundError as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -471,7 +475,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": str(e),
@@ -483,7 +487,7 @@ def get_index_status(params: Dict[str, Any], user: User) -> Dict[str, Any]:
             f"get_index_status error in {elapsed_ms}ms: {e}",
             extra={"correlation_id": get_correlation_id()},
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": str(e),
@@ -512,7 +516,7 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     # Permission check: admin only
     if user.role != UserRole.ADMIN:
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": "Permission denied. Admin role required to query logs.",
@@ -522,7 +526,7 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     # Get log database path from app.state
     log_db_path = getattr(_utils.app_module.app.state, "log_db_path", None)
     if not log_db_path:
-        return _mcp_response({"success": False, "error": "Log database not configured"})
+        return _mcp_response({"success": False, "error": "Log database not configured"})  # type: ignore[no-any-return]
 
     # Initialize service
     from code_indexer.server.services.log_aggregator_service import LogAggregatorService
@@ -552,7 +556,7 @@ def handle_admin_logs_query(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         search=search,
     )
 
-    return _mcp_response(
+    return _mcp_response(  # type: ignore[no-any-return]
         {"success": True, "logs": result["logs"], "pagination": result["pagination"]}
     )
 
@@ -573,7 +577,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """
     # Permission check: admin only
     if user.role != UserRole.ADMIN:
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": "Permission denied. Admin role required to export logs.",
@@ -583,7 +587,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     # Get log database path from app.state
     log_db_path = getattr(_utils.app_module.app.state, "log_db_path", None)
     if not log_db_path:
-        return _mcp_response({"success": False, "error": "Log database not configured"})
+        return _mcp_response({"success": False, "error": "Log database not configured"})  # type: ignore[no-any-return]
 
     # Initialize services
     from code_indexer.server.services.log_aggregator_service import LogAggregatorService
@@ -600,7 +604,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
     # Validate format
     if export_format not in ["json", "csv"]:
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": False,
                 "error": f"Invalid format '{export_format}'. Must be 'json' or 'csv'.",
@@ -625,7 +629,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     else:  # csv
         data = formatter.to_csv(logs)
 
-    return _mcp_response(
+    return _mcp_response(  # type: ignore[no-any-return]
         {
             "success": True,
             "format": export_format,
@@ -641,6 +645,7 @@ def admin_logs_export(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 # =============================================================================
 
 
+@require_mcp_elevation()
 def handle_set_session_impersonation(
     args: Dict[str, Any], user: User, session_state=None
 ) -> Dict[str, Any]:
@@ -672,7 +677,7 @@ def handle_set_session_impersonation(
             session_id=session_state.session_id if session_state else "unknown",
             ip_address="unknown",
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {"status": "error", "error": "Impersonation requires ADMIN role"}
         )
 
@@ -687,7 +692,7 @@ def handle_set_session_impersonation(
                 session_id=session_state.session_id,
                 ip_address="unknown",
             )
-        return _mcp_response({"status": "ok", "impersonating": None})
+        return _mcp_response({"status": "ok", "impersonating": None})  # type: ignore[no-any-return]
 
     # Look up target user and set impersonation
     try:
@@ -696,7 +701,7 @@ def handle_set_session_impersonation(
         target_user = _utils.app_module.user_manager.get_user(username)
 
         if target_user is None:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"status": "error", "error": f"User not found: {username}"}
             )
 
@@ -709,7 +714,7 @@ def handle_set_session_impersonation(
                 ip_address="unknown",
             )
 
-        return _mcp_response({"status": "ok", "impersonating": username})
+        return _mcp_response({"status": "ok", "impersonating": username})  # type: ignore[no-any-return]
 
     except Exception as e:
         logger.error(
@@ -719,7 +724,7 @@ def handle_set_session_impersonation(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"status": "error", "error": str(e)})
+        return _mcp_response({"status": "error", "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -774,7 +779,7 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -792,7 +797,7 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                     "repo_count": len(repos),
                 }
             )
-        return _mcp_response({"success": True, "groups": result_groups})
+        return _mcp_response({"success": True, "groups": result_groups})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -801,21 +806,22 @@ def handle_list_groups(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Create a new custom group."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
         name = args.get("name", "")
         if not name:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: name"}
             )
 
@@ -830,11 +836,11 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 target_id=str(group.id),
                 details=f"Created group '{group.name}' via MCP",
             )
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": True, "group_id": group.id, "name": group.name}
             )
         except ValueError as e:
-            return _mcp_response({"success": False, "error": str(e)})
+            return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -843,7 +849,7 @@ def handle_create_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -851,7 +857,7 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -861,7 +867,7 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
 
         members = group_manager.get_users_in_group(group_id)
         repos = group_manager.get_group_repos(group_id)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "id": group.id,
@@ -879,7 +885,7 @@ def handle_get_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -887,7 +893,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -902,7 +908,7 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 description=args.get("description"),
             )
             if not updated_group:
-                return _mcp_response(
+                return _mcp_response(  # type: ignore[no-any-return]
                     {"success": False, "error": f"Group not found: {group_id}"}
                 )
             group_manager.log_audit(
@@ -912,9 +918,9 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 target_id=str(group_id),
                 details=f"Updated group '{updated_group.name}' via MCP",
             )
-            return _mcp_response({"success": True})
+            return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except ValueError as e:
-            return _mcp_response({"success": False, "error": str(e)})
+            return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -923,12 +929,13 @@ def handle_update_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete a custom group."""
-    from ...services.group_access_manager import (
+    from ....services.group_access_manager import (
         DefaultGroupCannotBeDeletedError,
         GroupHasUsersError,
     )
@@ -936,7 +943,7 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -948,7 +955,7 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         try:
             result = group_manager.delete_group(group_id)
             if not result:
-                return _mcp_response(
+                return _mcp_response(  # type: ignore[no-any-return]
                     {"success": False, "error": f"Group not found: {group_id}"}
                 )
             group_manager.log_audit(
@@ -958,9 +965,9 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 target_id=str(group_id),
                 details=f"Deleted group '{group_name}' via MCP",
             )
-            return _mcp_response({"success": True})
+            return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except (DefaultGroupCannotBeDeletedError, GroupHasUsersError) as e:
-            return _mcp_response({"success": False, "error": str(e)})
+            return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -969,15 +976,16 @@ def handle_delete_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Assign a user to a group."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -987,7 +995,7 @@ def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, An
 
         user_id = args.get("user_id", "")
         if not user_id:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: user_id"}
             )
 
@@ -1001,7 +1009,7 @@ def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, An
             target_id=user_id,
             details=f"Assigned user '{user_id}' to group '{group.name}' via MCP",
         )
-        return _mcp_response({"success": True})
+        return _mcp_response({"success": True})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1010,15 +1018,16 @@ def handle_add_member_to_group(args: Dict[str, Any], user: User) -> Dict[str, An
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Remove a user from a group."""
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -1028,7 +1037,7 @@ def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[st
 
         user_id = args.get("user_id", "")
         if not user_id:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: user_id"}
             )
 
@@ -1040,7 +1049,7 @@ def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[st
             target_id=user_id,
             details=f"Removed user '{user_id}' from group '{group.name}' via MCP",
         )
-        return _mcp_response({"success": True})
+        return _mcp_response({"success": True})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1049,7 +1058,7 @@ def handle_remove_member_from_group(args: Dict[str, Any], user: User) -> Dict[st
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1057,7 +1066,7 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -1067,7 +1076,7 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
 
         repo_names = _parse_json_string_array(args.get("repo_names", []))
         if not repo_names:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: repo_names"}
             )
 
@@ -1084,7 +1093,7 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
                     target_id=repo_name,
                     details=f"Granted access to '{repo_name}' for group '{group.name}' via MCP",
                 )
-        return _mcp_response({"success": True, "added_count": added_count})
+        return _mcp_response({"success": True, "added_count": added_count})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1093,17 +1102,17 @@ def handle_add_repos_to_group(args: Dict[str, Any], user: User) -> Dict[str, Any
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Revoke a group's access to a single repository."""
-    from ...services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ....services.group_access_manager import CidxMetaCannotBeRevokedError
 
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -1113,7 +1122,7 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
 
         repo_name = args.get("repo_name", "")
         if not repo_name:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: repo_name"}
             )
 
@@ -1121,7 +1130,7 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
             if not group_manager.revoke_repo_access(
                 repo_name=repo_name, group_id=group_id
             ):
-                return _mcp_response(
+                return _mcp_response(  # type: ignore[no-any-return]
                     {
                         "success": False,
                         "error": f"Repository '{repo_name}' not found in group's access list",
@@ -1134,9 +1143,9 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
                 target_id=repo_name,
                 details=f"Revoked access to '{repo_name}' from group '{group.name}' via MCP",
             )
-            return _mcp_response({"success": True})
+            return _mcp_response({"success": True})  # type: ignore[no-any-return]
         except CidxMetaCannotBeRevokedError:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "cidx-meta access cannot be revoked from any group",
@@ -1150,20 +1159,20 @@ def handle_remove_repo_from_group(args: Dict[str, Any], user: User) -> Dict[str,
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_bulk_remove_repos_from_group(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
     """Revoke a group's access to multiple repositories."""
-    from ...services.group_access_manager import CidxMetaCannotBeRevokedError
-    from ...services.constants import CIDX_META_REPO
+    from ....services.group_access_manager import CidxMetaCannotBeRevokedError
+    from ....services.constants import CIDX_META_REPO
 
     try:
         group_manager = _get_group_manager()
         if not group_manager:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Group manager not configured"}
             )
 
@@ -1173,7 +1182,7 @@ def handle_bulk_remove_repos_from_group(
 
         repo_names = _parse_json_string_array(args.get("repo_names", []))
         if not repo_names:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {"success": False, "error": "Missing required parameter: repo_names"}
             )
 
@@ -1195,7 +1204,7 @@ def handle_bulk_remove_repos_from_group(
                     )
             except CidxMetaCannotBeRevokedError:
                 continue
-        return _mcp_response({"success": True, "removed_count": removed_count})
+        return _mcp_response({"success": True, "removed_count": removed_count})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1204,7 +1213,7 @@ def handle_bulk_remove_repos_from_group(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1217,7 +1226,7 @@ def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """List all API keys for the authenticated user."""
     try:
         keys = _utils.app_module.user_manager.get_api_keys(user.username)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "keys": [
@@ -1239,7 +1248,7 @@ def handle_list_api_keys(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1250,7 +1259,7 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
         description = args.get("description", "")
         api_key_manager = ApiKeyManager(user_manager=_utils.app_module.user_manager)
         api_key, key_id = api_key_manager.generate_key(user.username, name=description)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "key_id": key_id,
@@ -1266,15 +1275,16 @@ def handle_create_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Delete an API key belonging to the authenticated user."""
     try:
         key_id = args.get("key_id", "")
         if not key_id:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Missing required parameter: key_id",
@@ -1282,7 +1292,7 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             )
 
         result = _utils.app_module.user_manager.delete_api_key(user.username, key_id)
-        return _mcp_response({"success": result})
+        return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1291,7 +1301,7 @@ def handle_delete_api_key(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1304,7 +1314,7 @@ def handle_list_mcp_credentials(args: Dict[str, Any], user: User) -> Dict[str, A
     """List all MCP credentials for the authenticated user."""
     try:
         credentials = dependencies.mcp_credential_manager.get_credentials(user.username)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "credentials": [
@@ -1325,7 +1335,7 @@ def handle_list_mcp_credentials(args: Dict[str, Any], user: User) -> Dict[str, A
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1335,7 +1345,7 @@ def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
         result = dependencies.mcp_credential_manager.generate_credential(
             user.username, name=description
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "credential_id": result.get("credential_id", ""),
@@ -1353,7 +1363,7 @@ def handle_create_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1361,7 +1371,7 @@ def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
     try:
         credential_id = args.get("credential_id", "")
         if not credential_id:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Missing required parameter: credential_id",
@@ -1371,7 +1381,7 @@ def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
         result = dependencies.mcp_credential_manager.revoke_credential(
             user.username, credential_id
         )
-        return _mcp_response({"success": result})
+        return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1380,7 +1390,7 @@ def handle_delete_mcp_credential(args: Dict[str, Any], user: User) -> Dict[str, 
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1396,7 +1406,7 @@ def handle_admin_list_user_mcp_credentials(
     try:
         username = args.get("username", "")
         if not username:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Missing required parameter: username",
@@ -1404,7 +1414,7 @@ def handle_admin_list_user_mcp_credentials(
             )
 
         credentials = dependencies.mcp_credential_manager.get_credentials(username)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "credentials": [
@@ -1425,9 +1435,10 @@ def handle_admin_list_user_mcp_credentials(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
+@require_mcp_elevation()
 def handle_admin_create_user_mcp_credential(
     args: Dict[str, Any], user: User
 ) -> Dict[str, Any]:
@@ -1435,7 +1446,7 @@ def handle_admin_create_user_mcp_credential(
     try:
         username = args.get("username", "")
         if not username:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Missing required parameter: username",
@@ -1446,7 +1457,7 @@ def handle_admin_create_user_mcp_credential(
         result = dependencies.mcp_credential_manager.generate_credential(
             username, name=description
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "credential_id": result.get("credential_id", ""),
@@ -1464,7 +1475,7 @@ def handle_admin_create_user_mcp_credential(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1482,14 +1493,14 @@ def handle_admin_delete_user_mcp_credential(
         credential_id = args.get("credential_id", "")
 
         if not username:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Missing required parameter: username",
                 }
             )
         if not credential_id:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Missing required parameter: credential_id",
@@ -1499,7 +1510,7 @@ def handle_admin_delete_user_mcp_credential(
         result = dependencies.mcp_credential_manager.revoke_credential(
             username, credential_id
         )
-        return _mcp_response({"success": result})
+        return _mcp_response({"success": result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1508,7 +1519,7 @@ def handle_admin_delete_user_mcp_credential(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_admin_list_all_mcp_credentials(
@@ -1533,7 +1544,7 @@ def handle_admin_list_all_mcp_credentials(
                     }
                 )
 
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "credentials": all_credentials,
@@ -1547,7 +1558,7 @@ def handle_admin_list_all_mcp_credentials(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1561,7 +1572,7 @@ def handle_admin_list_system_mcp_credentials(
     """List system-managed MCP credentials owned by the admin user (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Permission denied: admin role required",
@@ -1569,7 +1580,7 @@ def handle_admin_list_system_mcp_credentials(
             )
 
         system_credentials = dependencies.user_manager.get_system_mcp_credentials()
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "system_credentials": system_credentials,
@@ -1584,7 +1595,7 @@ def handle_admin_list_system_mcp_credentials(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1597,7 +1608,7 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Query security audit logs with optional filtering (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Permission denied. Admin role required to query audit logs.",
@@ -1685,12 +1696,12 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
             args.get("to_date"),
             limit,
         )
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {"success": True, "entries": filtered, "total": len(filtered)}
         )
     except RuntimeError as e:
         logger.critical("AuditLogService configuration error: %s", e)
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {"success": False, "error": f"Server configuration error: {e}"}
         )
     except Exception as e:
@@ -1701,14 +1712,14 @@ def handle_query_audit_logs(args: Dict[str, Any], user: User) -> Dict[str, Any]:
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_enter_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Enter server maintenance mode (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Permission denied. Admin role required to enter maintenance mode.",
@@ -1723,7 +1734,7 @@ def handle_enter_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str,
         result = state.enter_maintenance_mode()
         if args.get("message"):
             result["custom_message"] = args["message"]
-        return _mcp_response({"success": True, **result})
+        return _mcp_response({"success": True, **result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1732,14 +1743,14 @@ def handle_enter_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str,
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_exit_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, Any]:
     """Exit server maintenance mode (admin only)."""
     try:
         if user.role != UserRole.ADMIN:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Permission denied. Admin role required to exit maintenance mode.",
@@ -1752,7 +1763,7 @@ def handle_exit_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, 
 
         state = get_maintenance_state()
         result = state.exit_maintenance_mode()
-        return _mcp_response({"success": True, **result})
+        return _mcp_response({"success": True, **result})  # type: ignore[no-any-return]
     except Exception as e:
         logger.error(
             format_error_log(
@@ -1761,7 +1772,7 @@ def handle_exit_maintenance_mode(args: Dict[str, Any], user: User) -> Dict[str, 
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str, Any]:
@@ -1773,7 +1784,7 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
 
         state = get_maintenance_state()
         status = state.get_status()
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "in_maintenance": status.get("maintenance_mode", False),
@@ -1792,7 +1803,7 @@ def handle_get_maintenance_status(args: Dict[str, Any], user: User) -> Dict[str,
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e)})
+        return _mcp_response({"success": False, "error": str(e)})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1821,7 +1832,7 @@ def handle_trigger_dependency_analysis(
 
         # AC8: Validate mode parameter
         if mode not in ["full", "delta"]:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": f"Invalid mode '{mode}'. Must be 'full' or 'delta'.",
@@ -1835,7 +1846,7 @@ def handle_trigger_dependency_analysis(
             _server_config.claude_integration_config if _server_config else None
         )
         if not _ci_config or not getattr(_ci_config, "dependency_map_enabled", False):
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Dependency map analysis is disabled",
@@ -1848,7 +1859,7 @@ def handle_trigger_dependency_analysis(
             _utils.app_module.app.state, "dependency_map_service", None
         )
         if not dependency_map_service:
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Dependency map service not available",
@@ -1857,7 +1868,7 @@ def handle_trigger_dependency_analysis(
             )
 
         if not dependency_map_service.is_available():
-            return _mcp_response(
+            return _mcp_response(  # type: ignore[no-any-return]
                 {
                     "success": False,
                     "error": "Dependency map analysis already in progress",
@@ -1893,7 +1904,7 @@ def handle_trigger_dependency_analysis(
         thread.start()
 
         # AC2/AC3: Return job_id immediately
-        return _mcp_response(
+        return _mcp_response(  # type: ignore[no-any-return]
             {
                 "success": True,
                 "job_id": job_id,
@@ -1911,7 +1922,7 @@ def handle_trigger_dependency_analysis(
                 extra={"correlation_id": get_correlation_id()},
             )
         )
-        return _mcp_response({"success": False, "error": str(e), "job_id": None})
+        return _mcp_response({"success": False, "error": str(e), "job_id": None})  # type: ignore[no-any-return]
 
 
 # =============================================================================
@@ -1921,6 +1932,7 @@ def handle_trigger_dependency_analysis(
 
 def _register(registry: dict) -> None:
     """Register admin handlers into HANDLER_REGISTRY."""
+    registry["elevate_session"] = _elevate_session_module.elevate_session
     registry["list_users"] = list_users
     registry["create_user"] = create_user
     registry["get_job_statistics"] = get_job_statistics

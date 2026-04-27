@@ -74,6 +74,9 @@ def test_all_server_config_fields_are_classified() -> None:
             "memory_retrieval_config",
             "lifecycle_analysis_config",
             "codex_integration_config",  # Story #844 — runtime, not bootstrap
+            "elevation_enforcement_enabled",  # Story #923/#925 — runtime Web UI setting
+            "elevation_idle_timeout_seconds",  # Story #923/#925 — runtime Web UI setting
+            "elevation_max_age_seconds",  # Story #923/#925 — runtime Web UI setting
         }
     )
 

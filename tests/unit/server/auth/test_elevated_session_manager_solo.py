@@ -261,12 +261,14 @@ def test_touch_returns_none_for_missing_key(manager):
     assert manager.touch_atomic(_SESSION_KEY_A) is None
 
 
+@pytest.mark.slow
 def test_touch_returns_none_after_idle_expiry(short_manager):
     short_manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
     time.sleep(_SLEEP_FOR_IDLE_EXPIRY)
     assert short_manager.touch_atomic(_SESSION_KEY_A) is None
 
 
+@pytest.mark.slow
 def test_touch_returns_none_after_absolute_max_age(short_manager):
     """Touches each shorter than idle_timeout eventually fail once max_age elapses."""
     short_manager.create(_SESSION_KEY_A, _USERNAME_ADMIN, _IP_LOCAL)
@@ -351,6 +353,7 @@ _CONCURRENCY_THREADS = 50
 _CONCURRENCY_OPS_PER_THREAD = 5
 
 
+@pytest.mark.slow
 def test_concurrent_create_touch_revoke_no_exceptions(manager):
     """50 threads doing interleaved create/touch/revoke must not raise."""
     errors: _queue.Queue = _queue.Queue()
