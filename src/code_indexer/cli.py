@@ -4864,7 +4864,7 @@ def display_temporal_results(results, temporal_service):
         "If omitted and auto_populate_rerank_query is true in global config, "
         "the search query is used automatically. "
         "Pass an empty string ('') to explicitly disable reranking. "
-        "Requires VOYAGE_API_KEY or COHERE_API_KEY."
+        "Requires VOYAGE_API_KEY or CO_API_KEY."
     ),
 )
 @click.option(

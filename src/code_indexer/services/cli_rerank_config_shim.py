@@ -80,7 +80,7 @@ class CliRerankConfigService:
     call config_service.get_config() to read model names and API keys.
     This class satisfies that surface using:
       - GlobalCliConfig  for model names, overfetch multiplier, vendor order
-      - VOYAGE_API_KEY / COHERE_API_KEY env vars for API key values
+      - VOYAGE_API_KEY / CO_API_KEY env vars for API key values
 
     API keys are captured once at construction time so shim instances are
     deterministic -- env var mutations after construction have no effect on
@@ -110,7 +110,7 @@ class CliRerankConfigService:
 
         # Read API keys once at construction time (deterministic state).
         voyageai_api_key: Optional[str] = os.environ.get("VOYAGE_API_KEY") or None
-        cohere_api_key: Optional[str] = os.environ.get("COHERE_API_KEY") or None
+        cohere_api_key: Optional[str] = os.environ.get("CO_API_KEY") or None
 
         self._config = _ConfigShim(
             rerank_config=_RerankConfigShim(
@@ -135,7 +135,7 @@ class CliRerankConfigService:
         A vendor is included only when its corresponding API key was captured
         at construction time:
           - "voyage"  requires VOYAGE_API_KEY
-          - "cohere"  requires COHERE_API_KEY
+          - "cohere"  requires CO_API_KEY
 
         The relative ordering follows global_config.rerank.preferred_vendor_order.
         """
@@ -182,7 +182,7 @@ def is_rerank_available(shim: CliRerankConfigService) -> bool:
         shim: A CliRerankConfigService instance.
 
     Returns:
-        True if VOYAGE_API_KEY or COHERE_API_KEY was set at shim construction.
+        True if VOYAGE_API_KEY or CO_API_KEY was set at shim construction.
 
     Raises:
         TypeError: If shim is None.
