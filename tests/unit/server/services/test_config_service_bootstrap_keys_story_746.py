@@ -74,6 +74,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "memory_retrieval_config",
             "lifecycle_analysis_config",
             "codex_integration_config",  # Story #844 — runtime, not bootstrap
+            "cidx_meta_backup_config",  # Story #926 — runtime, not bootstrap
         }
     )
 

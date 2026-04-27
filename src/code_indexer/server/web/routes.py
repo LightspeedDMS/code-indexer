@@ -18,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from fastapi import APIRouter, Query, Request, Response, Form, HTTPException, status
@@ -182,6 +182,7 @@ _VALID_CONFIG_SECTIONS = (
     "lifecycle_analysis",
     # Story #844 - Codex CLI integration configuration
     "codex_integration",
+    "cidx_meta_backup",
 )
 
 
@@ -5730,6 +5731,9 @@ def _get_current_config() -> dict:
         "codex_integration": settings.get(
             "codex_integration", asdict(CodexIntegrationConfig())
         ),
+        "cidx_meta_backup": settings.get(
+            "cidx_meta_backup", {"enabled": False, "remote_url": ""}
+        ),
     }
 
 
@@ -7647,6 +7651,79 @@ async def update_langfuse_pull_config(
             session,
             error_message=f"Failed to save configuration: {str(e)}",
             validation_errors={"langfuse_pull": str(e)},
+        )
+
+
+def _extract_git_hostname(remote_url: str) -> Optional[str]:
+    """Extract hostname from git@host:path or ssh:// URLs."""
+    if remote_url.startswith("git@") and ":" in remote_url:
+        return remote_url.split("@", 1)[1].split(":", 1)[0]
+    if remote_url.startswith("ssh://"):
+        return urlparse(remote_url).hostname
+    return None
+
+
+@web_router.post("/config/cidx_meta_backup", response_class=HTMLResponse)
+async def update_cidx_meta_backup_config(
+    request: Request,
+    csrf_token: Optional[str] = Form(None),
+):
+    """Update cidx-meta backup config with SSH validation and bootstrap."""
+    from ..services.cidx_meta_backup.bootstrap import CidxMetaBackupBootstrap
+    from ..services.config_service import get_config_service
+
+    session = _require_admin_session(request)
+    if not session:
+        return HTMLResponse(content="", status_code=401)
+
+    if not validate_login_csrf_token(request, csrf_token):
+        return _create_config_page_response(
+            request, session, error_message="Invalid CSRF token"
+        )
+
+    form_data = await request.form()
+    enabled = str(form_data.get("enabled", "false")).lower() == "true"
+    remote_url = str(form_data.get("remote_url", "")).strip()
+
+    if remote_url and not (
+        remote_url.startswith("file://")
+        or remote_url.startswith("https://")
+        or remote_url.startswith("http://")
+    ):
+        hostname = _extract_git_hostname(remote_url)
+        key_list = _get_ssh_key_manager().list_keys()
+        if hostname and not any(hostname in key.hosts for key in key_list.managed):
+            return _create_config_page_response(
+                request,
+                session,
+                error_message=f"No SSH key configured for {hostname}",
+                validation_errors={
+                    "cidx_meta_backup": f"No SSH key configured for {hostname}"
+                },
+            )
+
+    try:
+        config_service = get_config_service()
+        config_service.update_setting("cidx_meta_backup", "enabled", enabled)
+        config_service.update_setting("cidx_meta_backup", "remote_url", remote_url)
+
+        if remote_url:
+            repo_root = (
+                config_service.config_manager.server_dir / "golden_repos" / "cidx-meta"
+            )
+            CidxMetaBackupBootstrap().bootstrap(str(repo_root), remote_url)
+
+        return _create_config_page_response(
+            request,
+            session,
+            success_message="cidx-meta backup configuration saved",
+        )
+    except Exception as e:
+        return _create_config_page_response(
+            request,
+            session,
+            error_message=f"Failed to save configuration: {str(e)}",
+            validation_errors={"cidx_meta_backup": str(e)},
         )
 
 

@@ -2302,6 +2302,61 @@ function saveLlmCredsConfig() {
     </article>
 </details>
 
+<details class="config-section" id="section-cidx-meta-backup">
+    <summary>
+        <h2>cidx-meta Backup</h2>
+    </summary>
+    <p class="section-description">
+        Configures bidirectional git backup for the mutable cidx-meta golden repository.
+    </p>
+    <article>
+        <div id="display-cidx-meta-backup">
+            <table class="config-table">
+                <tbody>
+                    <tr>
+                        <td class="config-label">Enabled</td>
+                        <td class="config-value">{{ 'Yes' if config.cidx_meta_backup.enabled else 'No' }}</td>
+                        <td class="config-note"><small>Enable backup sync during each cidx-meta refresh</small></td>
+                    </tr>
+                    <tr>
+                        <td class="config-label">Remote URL</td>
+                        <td class="config-value">{{ config.cidx_meta_backup.remote_url or '(not set)' }}</td>
+                        <td class="config-note"><small>SSH, https://, or file:// git remote</small></td>
+                    </tr>
+                </tbody>
+            </table>
+            <div class="section-actions">
+                <button class="outline small" onclick="toggleEditMode('cidx-meta-backup')">Edit</button>
+            </div>
+        </div>
+        <form id="edit-form-cidx-meta-backup" method="post" action="/admin/config/cidx_meta_backup" style="display: none;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if validation_errors.cidx_meta_backup %}
+            <div class="validation-error">{{ validation_errors.cidx_meta_backup }}</div>
+            {% endif %}
+            <div class="form-grid">
+                <label for="cidx-meta-backup-enabled">
+                    Enabled
+                    <select id="cidx-meta-backup-enabled" name="enabled">
+                        <option value="true" {% if config.cidx_meta_backup.enabled %}selected{% endif %}>Yes</option>
+                        <option value="false" {% if not config.cidx_meta_backup.enabled %}selected{% endif %}>No</option>
+                    </select>
+                    <small>Run git sync before cidx-meta indexing</small>
+                </label>
+                <label for="cidx-meta-backup-remote-url">
+                    Remote URL
+                    <input type="text" id="cidx-meta-backup-remote-url" name="remote_url" value="{{ config.cidx_meta_backup.remote_url }}">
+                    <small>Use file:// or https:// directly; SSH URLs require a configured host key</small>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="submit" class="primary">Save</button>
+                <button type="button" class="secondary" onclick="cancelEdit('cidx-meta-backup')">Cancel</button>
+            </div>
+        </form>
+    </article>
+</details>
+
 <!-- Story #844: Codex CLI Integration -->
 <details class="config-section" id="section-codex-integration">
     <summary>

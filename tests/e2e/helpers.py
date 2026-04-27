@@ -17,6 +17,7 @@ No mocking -- all helpers exercise real subprocess, real HTTP, real CLI.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import time
@@ -63,6 +64,119 @@ SERVER_HEALTH_HTTP_TIMEOUT: float = 5.0
 
 GIT_SUBPROCESS_TIMEOUT: float = 5.0
 """Maximum seconds to wait for a git subprocess call (e.g., git config, git init)."""
+
+CONFLICT_RESOLUTION_TIMEOUT: float = 600.0
+"""Maximum seconds to wait for a Claude-assisted conflict resolution refresh job (Story #926 AC8).
+
+Conflict resolution invokes the Claude CLI subprocess which may take several minutes.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Git subprocess helper
+# ---------------------------------------------------------------------------
+
+
+def run_git(args: list[str], cwd: "Path") -> str:
+    """Run a git command in ``cwd`` and return stdout; raise on invalid input or failure.
+
+    Uses GIT_SUBPROCESS_TIMEOUT as the process deadline.
+
+    Args:
+        args: git sub-command and arguments (must not be None and must be non-empty).
+        cwd: Working directory (must not be None and must exist on disk).
+
+    Returns:
+        Stripped stdout from the git process.
+
+    Raises:
+        ValueError: If args is None, args is empty, cwd is None, or cwd does not exist.
+        RuntimeError: If the git process exits with a non-zero code.
+    """
+    if args is None:
+        raise ValueError("run_git: args must not be None")
+    if not args:
+        raise ValueError("run_git: args must be a non-empty list")
+    if cwd is None:
+        raise ValueError("run_git: cwd must not be None")
+    cwd_path = Path(cwd)
+    if not cwd_path.exists():
+        raise ValueError(f"run_git: cwd does not exist: {cwd_path}")
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=str(cwd_path),
+        capture_output=True,
+        text=True,
+        timeout=GIT_SUBPROCESS_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed in {cwd_path}:\n{result.stdout}\n{result.stderr}"
+        )
+    return result.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# JSON section field patcher
+# ---------------------------------------------------------------------------
+
+
+def patch_json_field(
+    base_dir: "Path",
+    json_file: "Path",
+    section: str,
+    field: str,
+    value: str,
+) -> None:
+    """Read a JSON file, merge one field into a named section dict, and write back.
+
+    Validates that ``json_file`` is located within ``base_dir`` (using
+    ``Path.resolve()`` + ``relative_to``) to prevent accidental writes outside
+    the intended directory.
+
+    Args:
+        base_dir: Trusted root directory (must not be None).
+        json_file: Path to the JSON file (created as empty dict if absent);
+                   must not be None and must be inside ``base_dir``.
+        section: Top-level key in the JSON object (must not be None or empty).
+        field: Key inside ``section`` to set (must not be None or empty).
+        value: String value to assign to ``field`` (must not be None).
+
+    Raises:
+        ValueError: If any required parameter is None or empty, or if
+                    json_file resolves outside base_dir.
+    """
+    if base_dir is None:
+        raise ValueError("patch_json_field: base_dir must not be None")
+    if json_file is None:
+        raise ValueError("patch_json_field: json_file must not be None")
+    if section is None:
+        raise ValueError("patch_json_field: section must not be None")
+    if not section:
+        raise ValueError("patch_json_field: section must be a non-empty string")
+    if field is None:
+        raise ValueError("patch_json_field: field must not be None")
+    if not field:
+        raise ValueError("patch_json_field: field must be a non-empty string")
+    if value is None:
+        raise ValueError("patch_json_field: value must not be None")
+
+    resolved_base = Path(base_dir).resolve()
+    resolved_file = Path(json_file).resolve()
+    try:
+        resolved_file.relative_to(resolved_base)
+    except ValueError:
+        raise ValueError(
+            f"patch_json_field: json_file {json_file} is not inside base_dir {base_dir}"
+        )
+
+    data: dict = json.loads(resolved_file.read_text()) if resolved_file.exists() else {}
+    section_data: dict = data.get(section, {})
+    if not isinstance(section_data, dict):
+        section_data = {}
+    section_data[field] = value
+    data[section] = section_data
+    resolved_file.write_text(json.dumps(data, indent=2))
 
 
 # ---------------------------------------------------------------------------
@@ -413,4 +527,50 @@ def wait_for_server(
             # Expected during server startup (connection refused, etc.)
             logger.debug("wait_for_server: transport error polling %s: %s", url, exc)
         time.sleep(poll_interval)
-    raise TimeoutError(f"Server at {url!r} did not become ready within {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# cidx-meta backup config toggle (Story #926)
+# ---------------------------------------------------------------------------
+
+
+def toggle_cidx_meta_backup(
+    client: "httpx.Client",
+    token: str,
+    *,
+    enabled: bool,
+    remote_url: str,
+) -> None:
+    """Enable or disable cidx-meta backup via the admin config endpoint.
+
+    Args:
+        client: Shared httpx.Client bound to the server base URL.
+        token: JWT access token (must not be None or empty).
+        enabled: True to enable backup, False to disable.
+        remote_url: Remote git URL for backup; may be empty when disabling
+                    (must not be None).
+
+    Raises:
+        ValueError: If client, token, or remote_url is None, or token is empty.
+        httpx.HTTPStatusError: If the server returns a non-2xx response.
+    """
+    if client is None:
+        raise ValueError("toggle_cidx_meta_backup: client must not be None")
+    if token is None:
+        raise ValueError("toggle_cidx_meta_backup: token must not be None")
+    if not token:
+        raise ValueError("toggle_cidx_meta_backup: token must not be empty")
+    if remote_url is None:
+        raise ValueError("toggle_cidx_meta_backup: remote_url must not be None")
+
+    resp = rest_call(
+        client,
+        "POST",
+        "/admin/config/cidx_meta_backup",
+        token,
+        data={
+            "cidx_meta_backup_enabled": "true" if enabled else "false",
+            "cidx_meta_backup_remote_url": remote_url,
+        },
+    )
+    resp.raise_for_status()
