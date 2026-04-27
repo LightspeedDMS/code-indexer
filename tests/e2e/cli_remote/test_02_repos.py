@@ -249,6 +249,3 @@ def test_query_via_server(
     )
     _assert_ok(result, "cidx query")
     assert result.stdout.strip(), "cidx query returned empty output"
-
-
-

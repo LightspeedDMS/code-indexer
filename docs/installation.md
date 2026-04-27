@@ -168,7 +168,7 @@ source ~/.bashrc  # or ~/.zshrc
 echo 'VOYAGE_API_KEY=your-api-key-here' > .env.local
 ```
 
-[Corrected by fact-checker: Changed .env.local format from `export VOYAGE_API_KEY="..."` to `VOYAGE_API_KEY=...` (no export statement). Note: CIDX does NOT automatically load .env.local files. The .env.local file is referenced in mcpb/bridge.py for the MCP bridge component only, not for CLI operations. For CLI usage, set VOYAGE_API_KEY via shell environment variable as shown in Option A.]
+[Corrected by fact-checker: Changed .env.local format from `export VOYAGE_API_KEY="..."` to `VOYAGE_API_KEY=...` (no export statement). Note: CIDX does NOT automatically load .env.local files. For CLI usage, set VOYAGE_API_KEY via shell environment variable as shown in Option A.]
 
 **Option C: System-Wide Configuration**
 
@@ -570,4 +570,3 @@ After successful installation:
 - **Migration**: [Migration Guide](migration-to-v8.md)
 
 ---
-

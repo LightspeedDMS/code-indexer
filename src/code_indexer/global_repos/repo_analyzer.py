@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Grace period given to the Claude subprocess to shut down after SIGTERM before
+# SIGKILL is sent.  Matches the Story #926 spec: "SIGTERM, fall back SIGKILL after 30s".
+_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS = 30
+
 
 def split_frontmatter_and_body(content: str) -> Tuple[Dict[str, Any], str]:
     """
@@ -221,29 +225,35 @@ def invoke_claude_cli(
         filtered_env = {k: v for k, v in os.environ.items() if k not in keys_to_drop}
         filtered_env["NO_COLOR"] = "1"
 
-        result = subprocess.run(
+        proc = subprocess.Popen(
             full_cmd,
             cwd=repo_path,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=outer_timeout_seconds,
             env=filtered_env,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=outer_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.terminate()  # SIGTERM — allow Claude to clean up
+            try:
+                proc.wait(timeout=_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()  # SIGKILL — force-terminate after grace period
+                proc.wait()
+            error_msg = f"Claude CLI timed out after {outer_timeout_seconds}s"
+            logger.warning(error_msg)
+            return False, error_msg
 
-        if result.returncode != 0:
+        if proc.returncode != 0:
             error_msg = (
-                f"Claude CLI returned non-zero: {result.returncode}, "
-                f"stderr: {result.stderr}"
+                f"Claude CLI returned non-zero: {proc.returncode}, stderr: {stderr}"
             )
             logger.warning(error_msg)
             return False, error_msg
 
-        return True, _clean_claude_output(result.stdout)
-
-    except subprocess.TimeoutExpired:
-        error_msg = f"Claude CLI timed out after {outer_timeout_seconds}s"
-        logger.warning(error_msg)
-        return False, error_msg
+        return True, _clean_claude_output(stdout)
     except Exception as exc:
         error_msg = f"Unexpected error during Claude CLI execution: {exc}"
         logger.error(error_msg, exc_info=True)

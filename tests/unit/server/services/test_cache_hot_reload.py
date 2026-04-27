@@ -135,8 +135,8 @@ def _seed_singletons(cache_module: ModuleType, cap_mb: int) -> None:
     hnsw_config = HNSWIndexCacheConfig(max_cache_size_mb=cap_mb)
     fts_config = FTSIndexCacheConfig(max_cache_size_mb=cap_mb)
 
-    cache_module._global_cache_instance = HNSWIndexCache(config=hnsw_config)
-    cache_module._global_fts_cache_instance = FTSIndexCache(config=fts_config)
+    cache_module._global_cache_instance = HNSWIndexCache(config=hnsw_config)  # type: ignore[attr-defined]  # private module singleton set directly for test isolation
+    cache_module._global_fts_cache_instance = FTSIndexCache(config=fts_config)  # type: ignore[attr-defined]  # private module singleton set directly for test isolation
 
 
 def _install_fake_entry(

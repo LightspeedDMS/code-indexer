@@ -14,7 +14,7 @@ import logging
 import shutil
 import tempfile
 import time
-from typing import List
+from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -171,7 +171,7 @@ class TestSinbinnedProviderSkip:
     def test_sinbinned_voyage_ai_not_queried(self, manager, repo_path, health_monitor):
         """When voyage-ai is sinbinned, _search_with_provider is called 0 times for it."""
         health_monitor._sinbin_until["voyage-ai"] = time.monotonic() + 60
-        queried = []
+        queried: list[Optional[str]] = []
 
         with patch.object(
             manager, "_search_with_provider", side_effect=_make_tracking_search(queried)
@@ -189,7 +189,7 @@ class TestSinbinnedProviderSkip:
     def test_sinbinned_cohere_not_queried(self, manager, repo_path, health_monitor):
         """When cohere is sinbinned, _search_with_provider is called 0 times for it."""
         health_monitor._sinbin_until["cohere"] = time.monotonic() + 60
-        queried = []
+        queried: list[Optional[str]] = []
 
         with patch.object(
             manager, "_search_with_provider", side_effect=_make_tracking_search(queried)
@@ -207,7 +207,7 @@ class TestSinbinnedProviderSkip:
     def test_neither_sinbinned_both_queried(self, manager, repo_path, health_monitor):
         """When neither provider is sinbinned, both are queried (regression guard)."""
         health_monitor._sinbin_until.clear()
-        queried = []
+        queried: list[Optional[str]] = []
 
         with patch.object(
             manager, "_search_with_provider", side_effect=_make_tracking_search(queried)
@@ -226,7 +226,7 @@ class TestSinbinnedProviderSkip:
     ):
         """A provider whose sin-bin has expired should be queried normally."""
         health_monitor._sinbin_until["voyage-ai"] = time.monotonic() - 1
-        queried = []
+        queried: list[Optional[str]] = []
 
         with patch.object(
             manager, "_search_with_provider", side_effect=_make_tracking_search(queried)

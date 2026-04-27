@@ -12,6 +12,7 @@ TDD: written before implementation to define expected behavior.
 Production file: src/code_indexer/server/services/search_service.py
 """
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from src.code_indexer.server.models.api_models import (
@@ -165,6 +166,30 @@ class TestPerformSemanticSearchFilterConditions:
     Tests that _perform_semantic_search() builds and passes filter_conditions
     to FilesystemVectorStore.search() matching the CLI reference pattern.
     """
+
+    @pytest.fixture(autouse=True)
+    def _set_http_client_factory(self):
+        """Set app.state.http_client_factory so Bug #899 fix succeeds.
+
+        _perform_semantic_search() now calls _get_http_client_factory() which
+        reads app.state.http_client_factory. Set a NullFaultFactory on the real
+        app state so the call succeeds without requiring a full server startup.
+
+        Import via src.code_indexer.server.app to match the module loaded by
+        tests that use the src. prefix, ensuring we set the factory on the same
+        State object the production code reads.
+        """
+        from code_indexer.server.fault_injection.null_factory import NullFaultFactory
+        import src.code_indexer.server.app as app_module
+
+        had_factory = hasattr(app_module.app.state, "http_client_factory")
+        original_factory = getattr(app_module.app.state, "http_client_factory", None)
+        app_module.app.state.http_client_factory = NullFaultFactory()
+        yield
+        if had_factory:
+            app_module.app.state.http_client_factory = original_factory
+        elif hasattr(app_module.app.state, "http_client_factory"):
+            del app_module.app.state.http_client_factory
 
     def _make_search_service_with_mocks(self, mock_vector_store, tmp_path):
         """Helper to set up SemanticSearchService with mocked backend."""

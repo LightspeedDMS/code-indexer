@@ -23,8 +23,8 @@ from code_indexer.server.services.memory_rate_limiter import (
 
 def test_none_config_raises() -> None:
     """MemoryRateLimiter rejects None config at construction time."""
-    # type: ignore required — intentionally passing None to verify runtime
-    # entry-point validation rejects invalid config before any attribute access.
+    # Intentionally passing None to verify runtime entry-point validation
+    # rejects invalid config before any attribute access.
     with pytest.raises(ValueError, match="config"):
         MemoryRateLimiter(None)  # type: ignore[arg-type]  # intentional invalid-type for runtime guard test
 
@@ -36,8 +36,8 @@ def test_invalid_user_id_raises() -> None:
         RateLimitConfig(capacity=5, refill_per_second=1.0), clock=clock
     )
     for method in (limiter.consume, limiter.peek, limiter.reset):
-        # type: ignore required — intentionally passing None to confirm the public
-        # API rejects invalid user_id values at runtime, not just at the type-checker level.
+        # Intentionally passing None to confirm the public API rejects invalid
+        # user_id values at runtime, not just at the type-checker level.
         with pytest.raises(ValueError, match="user_id"):
             method(None)  # type: ignore[arg-type]  # intentional invalid-type for runtime guard test
         with pytest.raises(ValueError, match="user_id"):

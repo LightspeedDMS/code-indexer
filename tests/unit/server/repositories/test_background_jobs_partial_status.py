@@ -281,9 +281,9 @@ class TestCompletedPartialWithSQLite:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if job_id not in self.manager.jobs:
-                return job_id
+                return str(job_id)
             time.sleep(_POLL_INTERVAL_SECONDS)
-        return job_id
+        return str(job_id)
 
     def test_completed_partial_removed_from_memory_when_sqlite_active(self):
         """AC1 lines 791-794 audit: COMPLETED_PARTIAL must be evicted like COMPLETED.

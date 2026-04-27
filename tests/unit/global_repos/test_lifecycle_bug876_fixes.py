@@ -129,10 +129,10 @@ def _make_stub_scheduler(golden_repos_dir: Path):
 
     class _StubScheduler:
         def acquire_write_lock(self, alias: str, owner_name: str = "") -> bool:
-            return mgr.acquire(alias, owner_name=owner_name)
+            return bool(mgr.acquire(alias, owner_name=owner_name))
 
         def release_write_lock(self, alias: str, owner_name: str = "") -> bool:
-            return mgr.release(alias, owner_name=owner_name)
+            return bool(mgr.release(alias, owner_name=owner_name))
 
     return _StubScheduler()
 

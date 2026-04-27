@@ -22,6 +22,8 @@ SQLite connections are released deterministically regardless of assertion
 outcomes.
 """
 
+from __future__ import annotations
+
 import os
 import sqlite3
 import threading

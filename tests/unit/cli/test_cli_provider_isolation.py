@@ -105,7 +105,7 @@ class TestProviderIsolation:
     def test_provider_failure_does_not_abort_other_providers(self, tmp_path):
         """When voyage-ai raises, cohere must still run and succeed."""
         cohere_ran = [False]
-        call_order = []
+        call_order: list[int] = []
 
         def indexer_factory(config_manager, vector_store, collection_name):
             call_order.append(len(call_order))

@@ -91,7 +91,10 @@ def _remove_all_members_from_group(
 
     # Get the current member list from the group
     show_result = run_cidx(
-        "admin", "groups", "show", str(group_id),
+        "admin",
+        "groups",
+        "show",
+        str(group_id),
         "--json",
         cwd=str(workspace),
         env=cli_env,
@@ -120,7 +123,9 @@ def _remove_all_members_from_group(
 
     # Find the ID of the default "admins" group so we can move users back to it
     list_result = run_cidx(
-        "admin", "groups", "list",
+        "admin",
+        "groups",
+        "list",
         "--json",
         cwd=str(workspace),
         env=cli_env,
@@ -156,8 +161,12 @@ def _remove_all_members_from_group(
 
     for member in members:
         move_result = run_cidx(
-            "admin", "groups", "add-member", str(admins_group_id),
-            "--user", member,
+            "admin",
+            "groups",
+            "add-member",
+            str(admins_group_id),
+            "--user",
+            member,
             cwd=str(workspace),
             env=cli_env,
         )

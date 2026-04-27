@@ -77,6 +77,7 @@ def test_all_server_config_fields_are_classified() -> None:
             "elevation_enforcement_enabled",  # Story #923/#925 — runtime Web UI setting
             "elevation_idle_timeout_seconds",  # Story #923/#925 — runtime Web UI setting
             "elevation_max_age_seconds",  # Story #923/#925 — runtime Web UI setting
+            "cidx_meta_backup_config",  # Story #926 — runtime, not bootstrap
         }
     )
 

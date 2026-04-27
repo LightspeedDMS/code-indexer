@@ -15,7 +15,7 @@ Invariant (MESSI rule 15, AC2):
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from code_indexer.server.auth.user_manager import User, UserRole
@@ -40,7 +40,8 @@ def _make_app_state(read_path: Path) -> MagicMock:
 
 
 def _parse_response(result: Any) -> Dict[str, Any]:
-    return json.loads(result["content"][0]["text"])
+    # cast needed: json.loads() returns Any; MCP handlers always return dict envelope
+    return cast(Dict[str, Any], json.loads(result["content"][0]["text"]))
 
 
 def _call_graph(params: dict, root: Path) -> Dict[str, Any]:
@@ -60,8 +61,8 @@ def _call_graph(params: dict, root: Path) -> Dict[str, Any]:
 def _write_domain_md(
     dep_map_dir: Path,
     domain: str,
-    outgoing: List[Dict[str, str]] = None,
-    incoming: List[Dict[str, str]] = None,
+    outgoing: Optional[List[Dict[str, str]]] = None,
+    incoming: Optional[List[Dict[str, str]]] = None,
 ) -> None:
     """Write a minimal domain markdown file."""
     out_rows = "".join(

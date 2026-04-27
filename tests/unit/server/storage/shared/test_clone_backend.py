@@ -61,8 +61,11 @@ class TestCloneBackendProtocol:
         import typing
         from code_indexer.server.storage.shared.clone_backend import CloneBackend
 
-        # Must be a Protocol subclass (structural subtyping, not ABC)
-        assert issubclass(CloneBackend, typing.Protocol)
+        # Must be a Protocol subclass (structural subtyping, not ABC).
+        # issubclass(X, typing.Protocol) is rejected by mypy because typing.Protocol
+        # is a special form, not a concrete class.  Inspecting __mro__ achieves the
+        # same runtime assertion without the type error.
+        assert typing.Protocol in CloneBackend.__mro__
 
 
 # ---------------------------------------------------------------------------

@@ -143,7 +143,9 @@ def _make_long_domain_body() -> str:
     whose length is guaranteed to be >= _MIN_PASS2_OUTPUT_CHARS.
     """
     header = f"# Domain Analysis: {_DOMAIN_NAME}\n\n## Overview\n\n"
-    filler_sentence = "This domain contains repository repo-a with verified dependencies. "
+    filler_sentence = (
+        "This domain contains repository repo-a with verified dependencies. "
+    )
     body = header
     while len(body) < _MIN_PASS2_OUTPUT_CHARS:
         body += filler_sentence
@@ -165,12 +167,17 @@ class TestPass2DispatcherConstruction:
         When Codex is enabled and CODEX_HOME is set, _build_pass2_dispatcher
         creates a CliDispatcher with both claude and codex invokers (both non-None).
         """
-        config = _make_mock_config(tmp_path, codex_enabled=True, codex_weight=_TEST_CODEX_WEIGHT)
+        config = _make_mock_config(
+            tmp_path, codex_enabled=True, codex_weight=_TEST_CODEX_WEIGHT
+        )
         codex_home = str(tmp_path / "codex-home")
 
-        with patch(
-            "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
-        ) as mock_get_cfg, patch.dict("os.environ", {"CODEX_HOME": codex_home}):
+        with (
+            patch(
+                "code_indexer.global_repos.dependency_map_analyzer.get_config_service"
+            ) as mock_get_cfg,
+            patch.dict("os.environ", {"CODEX_HOME": codex_home}),
+        ):
             mock_svc = MagicMock()
             mock_svc.get_config.return_value = config
             mock_get_cfg.return_value = mock_svc
@@ -179,7 +186,9 @@ class TestPass2DispatcherConstruction:
             dispatcher = analyzer._build_pass2_dispatcher()
 
         assert dispatcher.claude is not None, "claude invoker must always be present"
-        assert dispatcher.codex is not None, "codex invoker must be set when Codex enabled"
+        assert dispatcher.codex is not None, (
+            "codex invoker must be set when Codex enabled"
+        )
         assert dispatcher.codex_weight == _TEST_CODEX_WEIGHT
 
     def test_pass2_builds_dispatcher_claude_only_when_codex_disabled(self, tmp_path):
@@ -321,8 +330,14 @@ class TestPass2DispatcherCaching:
             prompt = "Minimal prompt for cache test"
             timeout = _DEFAULT_PASS_TIMEOUT
 
-            with patch.object(cli_mod.CliDispatcher, "__init__", _counting_init), \
-                 patch.object(cli_mod.CliDispatcher, "dispatch", return_value=_make_success_result()):
+            with (
+                patch.object(cli_mod.CliDispatcher, "__init__", _counting_init),
+                patch.object(
+                    cli_mod.CliDispatcher,
+                    "dispatch",
+                    return_value=_make_success_result(),
+                ),
+            ):
                 analyzer._invoke_pass2_dispatcher(prompt, timeout)
                 analyzer._invoke_pass2_dispatcher(prompt, timeout)
 
@@ -335,7 +350,9 @@ class TestPass2DispatcherCaching:
 class TestPass2FailoverOnRetryableOther:
     """CliDispatcher handles RETRYABLE_ON_OTHER by failing over to Claude (MEDIUM #5)."""
 
-    def test_pass2_failover_when_codex_returns_retryable_on_other(self, tmp_path, caplog):
+    def test_pass2_failover_when_codex_returns_retryable_on_other(
+        self, tmp_path, caplog
+    ):
         """
         When the Codex invoker returns RETRYABLE_ON_OTHER, the real CliDispatcher
         fails over to Claude and returns a successful result with was_failover=True.
@@ -389,7 +406,9 @@ class TestPass2FailoverOnRetryableOther:
             logging.INFO,
             logger="code_indexer.global_repos.dependency_map_analyzer",
         ):
-            output = analyzer._invoke_pass2_dispatcher("Test prompt", _DEFAULT_PASS_TIMEOUT)
+            output = analyzer._invoke_pass2_dispatcher(
+                "Test prompt", _DEFAULT_PASS_TIMEOUT
+            )
 
         assert output == long_body, (
             f"Output must match Claude's body after failover; got: {output[:200]!r}"
@@ -433,7 +452,9 @@ class TestPass2DispatcherOutputAndSource:
         staging_dir = _run_pass2(analyzer, tmp_path)
 
         domain_file = staging_dir / f"{_DOMAIN_NAME}.md"
-        assert domain_file.exists(), "Domain file must be written from dispatcher output"
+        assert domain_file.exists(), (
+            "Domain file must be written from dispatcher output"
+        )
         written = domain_file.read_text()
         # Strip the YAML frontmatter the SUT prepends — the body must equal expected_body.
         body = _strip_leading_yaml_frontmatter(written)

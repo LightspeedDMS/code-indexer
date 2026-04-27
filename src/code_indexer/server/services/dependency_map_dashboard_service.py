@@ -376,7 +376,7 @@ class DependencyMapDashboardService:
         if not clone_path:
             return None
 
-        return read_current_commit(clone_path)
+        return cast(Optional[str], read_current_commit(clone_path))
 
     def _build_repo_domain_map(self) -> Dict[str, List[str]]:
         """

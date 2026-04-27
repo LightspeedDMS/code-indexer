@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Breaking Changes
+
+- **MCPB Removed (epic #756)**. The MCP Bridge subsystem has been removed in a single hard-removal pass with no deprecation window. Removed in this release: the `cidx-bridge` and `cidx-token-refresh` console-script entry points; the entire `src/code_indexer/mcpb/` Python module (12 files, ~2,053 LOC); the `tests/mcpb/` and `tests/installer/` test trees; the `install-mcpb.sh`, `scripts/setup-mcpb.sh`, `scripts/installer/mcpb-installer.nsi`, and `scripts/installer/README.md` installer scripts; the `scripts/build_binary.py` MCPB-bundle build script and its companion test; the `.github/workflows/release-mcpb.yml` CI workflow (688 lines); the entire `docs/mcpb/` documentation tree (6 files, ~5,862 lines). Migration: any MCP-aware client should connect directly to the CIDX server's native MCP endpoints — `/mcp` (JWT-Bearer-authenticated via `POST /auth/login`) or `/mcp-public` (unauthenticated). The `cidx-bridge` stdio-to-HTTP shim is no longer needed because every modern MCP client supports streaming HTTP/SSE transports natively. **Impact**: any installation that depended on `cidx-bridge` or `cidx-token-refresh` binaries will see `command not found` after upgrade. Past GitHub Release artifacts that bundle `install-mcpb.sh` remain downloadable per the repository's tag-immutability policy, but no new MCPB installer will be built going forward. See `RELEASE_NOTES.md` for the user-facing migration note.
+
 ## v9.23.11 — 2026-04-26
 
 ### Fixed: v9.23.10 silent registration failure on staging (Python 3.9 / no `tomli`)

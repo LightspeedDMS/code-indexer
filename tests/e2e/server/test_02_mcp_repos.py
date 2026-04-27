@@ -111,7 +111,7 @@ REPOS_TOOLS: list[tuple[str, str, JsonArgs]] = [
 @pytest.mark.parametrize(
     PARAMETRIZE_FIELDS,
     REPOS_TOOLS,
-    ids=[t[TOOL_LABEL_INDEX] for t in REPOS_TOOLS],
+    ids=[str(t[TOOL_LABEL_INDEX]) for t in REPOS_TOOLS],
 )
 def test_mcp_repos_tool(
     label: str,

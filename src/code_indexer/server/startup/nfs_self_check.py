@@ -5,6 +5,8 @@ Validates that the filesystem hosting cidx_meta_dir honours O_CREAT|O_EXCL
 atomicity under concurrent contention before the shared memory store is enabled.
 """
 
+from __future__ import annotations
+
 import numbers
 import os
 import queue

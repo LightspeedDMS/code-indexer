@@ -179,11 +179,13 @@ Connect AI assistants to CIDX for semantic search directly in conversations. Sup
 # Local CLI integration
 cidx teach-ai --claude --project    # Creates CLAUDE.md
 
-# Remote MCP server for Claude Desktop
-# See MCP Bridge guide for setup
+# Remote MCP server for Claude Desktop / any MCP-aware client
+# Connect directly to the CIDX server's native MCP endpoints:
+#   /mcp         — authenticated (JWT Bearer token via POST /auth/login)
+#   /mcp-public  — unauthenticated
 ```
 
-See: [AI Integration Guide](docs/ai-integration.md) | [MCP Bridge Guide](docs/mcpb/README.md)
+See: [AI Integration Guide](docs/ai-integration.md)
 
 ### Langfuse Trace Sync (v8.10+)
 
@@ -500,7 +502,6 @@ For complete configuration reference including environment variables, daemon set
 
 ### AI Integration
 - [AI Integration Guide](docs/ai-integration.md) - Connect AI assistants to CIDX
-- [MCP Bridge Guide](docs/mcpb/README.md) - Claude Desktop integration via MCP
 - [Guardrails Repository Convention](docs/guardrails-repo-convention.md) - Custom safety guardrails for open delegation jobs
 
 ### Server Administration

@@ -185,7 +185,7 @@ def _get_server_jwt_secret() -> str:
             "server_app.jwt_manager is None — create_app() has not been called. "
             "Ensure the test_client fixture runs before this helper."
         )
-    return server_app.jwt_manager.secret_key
+    return str(server_app.jwt_manager.secret_key)
 
 
 @contextmanager

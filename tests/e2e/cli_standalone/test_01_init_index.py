@@ -94,7 +94,7 @@ def markupsafe_initialized(e2e_seed_repo_paths, e2e_cli_env: dict[str, str]) -> 
         result = run_cidx("init", cwd=path, env=e2e_cli_env)
         assert_cidx_ok(result, context="fixture:markupsafe_initialized")
     assert (path / ".code-indexer").is_dir()
-    return path
+    return Path(path)
 
 
 @pytest.fixture(scope="session")
@@ -105,7 +105,7 @@ def type_fest_initialized(e2e_seed_repo_paths, e2e_cli_env: dict[str, str]) -> P
         result = run_cidx("init", cwd=path, env=e2e_cli_env)
         assert_cidx_ok(result, context="fixture:type_fest_initialized")
     assert (path / ".code-indexer").is_dir()
-    return path
+    return Path(path)
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ Bug #679 Part 2.
 """
 
 import time
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -52,9 +53,9 @@ def _make_mock_health_status(
 
 
 def _make_mock_monitor(
-    providers: dict = None,
-    sinbin_until: dict = None,
-    sinbin_rounds: dict = None,
+    providers: Optional[dict] = None,
+    sinbin_until: Optional[dict] = None,
+    sinbin_rounds: Optional[dict] = None,
 ):
     """Build a mock ProviderHealthMonitor with controllable state."""
     monitor = MagicMock()
@@ -364,3 +365,80 @@ class TestProviderHealthEndpointEdgeCases:
             response = authed_client.get("/admin/provider-health")
         entry = response.json()["providers"][0]
         assert entry["sinbin_rounds"] == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /admin/provider-health/clear-sinbin (Bug #902)
+# ---------------------------------------------------------------------------
+
+
+class TestClearSinbinEndpoint:
+    """POST /admin/provider-health/clear-sinbin must require admin auth and clear sinbin state."""
+
+    @pytest.fixture()
+    def mock_sinbin_monitor(self):
+        """Patch ProviderHealthMonitor.get_instance with a mock that has clear stubs.
+
+        Auth test does not use this fixture: auth is rejected before the handler body runs.
+        Happy-path tests inject it to assert monitor method call counts.
+        """
+        monitor = MagicMock()
+        monitor.clear_sinbin_all = MagicMock()
+        monitor.clear_sinbin = MagicMock()
+        with patch(
+            "code_indexer.server.routers.admin_provider_health.ProviderHealthMonitor.get_instance",
+            return_value=monitor,
+        ):
+            yield monitor
+
+    def test_clear_sinbin_endpoint_requires_admin_auth(self, app_with_router):
+        """Unauthenticated POST returns 401 or 403 (auth rejected before handler runs)."""
+        from code_indexer.server.auth.dependencies import get_current_admin_user_hybrid
+
+        def _raise_forbidden():
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        app_with_router.dependency_overrides[get_current_admin_user_hybrid] = (
+            _raise_forbidden
+        )
+        try:
+            with TestClient(
+                app_with_router, raise_server_exceptions=False
+            ) as test_client:
+                response = test_client.post("/admin/provider-health/clear-sinbin")
+                assert response.status_code in (401, 403)
+        finally:
+            app_with_router.dependency_overrides.pop(
+                get_current_admin_user_hybrid, None
+            )
+
+    def test_clear_sinbin_endpoint_clears_all_providers_when_no_target(
+        self, authed_client, mock_sinbin_monitor
+    ):
+        """POST with empty body calls clear_sinbin_all() on the monitor."""
+        response = authed_client.post("/admin/provider-health/clear-sinbin", json={})
+        assert response.status_code == 200
+        mock_sinbin_monitor.clear_sinbin_all.assert_called_once()
+        mock_sinbin_monitor.clear_sinbin.assert_not_called()
+
+    def test_clear_sinbin_endpoint_clears_single_provider_when_target_given(
+        self, authed_client, mock_sinbin_monitor
+    ):
+        """POST with {target: 'voyage-ai'} calls clear_sinbin('voyage-ai') only."""
+        response = authed_client.post(
+            "/admin/provider-health/clear-sinbin",
+            json={"target": "voyage-ai"},
+        )
+        assert response.status_code == 200
+        mock_sinbin_monitor.clear_sinbin.assert_called_once_with("voyage-ai")
+        mock_sinbin_monitor.clear_sinbin_all.assert_not_called()
+
+    def test_clear_sinbin_endpoint_rejects_invalid_target_type(
+        self, authed_client, mock_sinbin_monitor
+    ):
+        """POST with {target: 123} (integer) returns 422 Unprocessable Entity."""
+        response = authed_client.post(
+            "/admin/provider-health/clear-sinbin",
+            json={"target": 123},
+        )
+        assert response.status_code == 422

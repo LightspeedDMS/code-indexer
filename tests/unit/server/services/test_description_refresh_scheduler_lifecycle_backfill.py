@@ -241,12 +241,14 @@ class TestReconcileBrokenLifecycleMetadataScan:
         _wire_all(sched)
         sched._golden_backend.list_repos.side_effect = RuntimeError("DB down")
 
-        dispatched: list = []
+        dispatched: list[dict[str, Any]] = []
+
+        def _record_thread(**kw: Any) -> MagicMock:
+            dispatched.append(kw)
+            return MagicMock()
 
         with patch(f"{SCHEDULER_MODULE}.threading") as mock_threading:
-            mock_threading.Thread.side_effect = (
-                lambda **kw: dispatched.append(kw) or MagicMock()
-            )
+            mock_threading.Thread.side_effect = _record_thread
 
             with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
                 result = sched.reconcile_broken_lifecycle_metadata()
@@ -271,7 +273,11 @@ class TestReconcileBrokenLifecycleMetadataScan:
             {"alias": "repo-b"},
         ]
 
-        thread_started = []
+        thread_started: list[dict[str, Any]] = []
+
+        def _record_thread_started(**kw: Any) -> MagicMock:
+            thread_started.append(kw)
+            return MagicMock()
 
         with patch(
             "code_indexer.global_repos.lifecycle_batch_runner.LifecycleFleetScanner"
@@ -283,9 +289,7 @@ class TestReconcileBrokenLifecycleMetadataScan:
             mock_scanner_cls.return_value = mock_scanner
 
             with patch(f"{SCHEDULER_MODULE}.threading") as mock_threading:
-                mock_threading.Thread.side_effect = (
-                    lambda **kw: thread_started.append(kw) or MagicMock()
-                )
+                mock_threading.Thread.side_effect = _record_thread_started
 
                 with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
                     result = sched.reconcile_broken_lifecycle_metadata()

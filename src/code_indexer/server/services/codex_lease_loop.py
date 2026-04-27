@@ -68,7 +68,7 @@ class CodexLeaseLoop:
     @property
     def state_file_path(self) -> Path:
         """Return the path to the codex-scoped lease state file."""
-        return self._state_mgr._state_file
+        return Path(self._state_mgr._state_file)
 
     def _do_checkin(self, lease_id: str, credential_id: Optional[str]) -> bool:
         """

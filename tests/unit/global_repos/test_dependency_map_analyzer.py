@@ -197,7 +197,9 @@ class TestPass2PerDomain:
         (CliDispatcher). We inject a mock CliDispatcher via cli_dispatcher= and verify
         dispatch() is called with the correct prompt and timeout.
         """
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         dispatcher_output = (
             "# Authentication Domain\n\nDetailed analysis with sufficient content to avoid retry. "
@@ -288,7 +290,9 @@ class TestPass2PerDomain:
 
     def test_run_pass_2_prompt_includes_tech_stack_verification(self, tmp_path):
         """Test that run_pass_2_per_domain prompt includes Technology Stack Verification mandate."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         dispatcher_output = (
             "# Domain Analysis\n\nContent here with sufficient length to avoid retry logic. "
@@ -890,7 +894,9 @@ class TestIncrementalPass2:
 
     def test_run_pass_2_uses_previous_domain_content(self, tmp_path):
         """Test that run_pass_2_per_domain includes previous domain content in prompt."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         dispatcher_output = (
             "# Updated Domain Analysis\n\nNew analysis with sufficient content to avoid retry. "
@@ -1608,7 +1614,9 @@ class TestPass2PromptGuardrails:
 
     def test_prompt_prohibits_yaml_frontmatter_output(self, tmp_path):
         """Test that Pass 2 prompt explicitly prohibits YAML frontmatter output."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -1647,7 +1655,9 @@ class TestPass2PromptGuardrails:
 
     def test_prompt_prohibits_speculative_content(self, tmp_path):
         """Test that Pass 2 prompt prohibits speculative/advisory content."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -1903,7 +1913,9 @@ class TestIteration10PromptReinforcement:
 
     def test_pass2_prompt_contains_heading_requirement(self, tmp_path):
         """Test that Pass 2 prompt includes heading requirement instruction."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -1949,7 +1961,9 @@ class TestIteration11Fix2QualityCheckPrevious:
 
     def test_skips_low_quality_previous_analysis(self, tmp_path):
         """Test that low-quality previous analysis (no headings or <1000 chars) is NOT fed into prompt."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -2005,7 +2019,9 @@ class TestIteration11Fix2QualityCheckPrevious:
 
     def test_includes_high_quality_previous_analysis(self, tmp_path):
         """Test that high-quality previous analysis (has headings AND >1000 chars) IS fed into prompt."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -2414,7 +2430,9 @@ class TestIteration13LargeDomainDetection:
 
     def test_large_domain_uses_output_first_prompt(self, tmp_path):
         """With 4+ repos, verify prompt starts with WRITE YOUR ANALYSIS FIRST."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -2463,7 +2481,9 @@ class TestIteration13LargeDomainDetection:
 
     def test_small_domain_uses_standard_prompt(self, tmp_path):
         """With 3 or fewer repos, verify prompt DOES contain Source Code Exploration Mandate."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -2806,7 +2826,9 @@ class TestIteration14PurposeDrivenHooks:
         dispatcher and verify the prompt sent to dispatch() contains the hook_reminder content
         (which is embedded in the prompt as a reminder section).
         """
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -2841,10 +2863,7 @@ class TestIteration14PurposeDrivenHooks:
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         # Verify purpose-driven language is present in the prompt
-        assert (
-            "inter-repository navigation" in prompt
-            or "inter-repo" in prompt
-        )
+        assert "inter-repository navigation" in prompt or "inter-repo" in prompt
         assert "concise" in prompt.lower()
         assert "# Domain Analysis" in prompt
 
@@ -2897,7 +2916,9 @@ class TestIteration14PurposeDrivenHooks:
 
     def test_standard_prompt_conciseness_guidelines(self, tmp_path):
         """Test that standard prompt (small domains <=3 repos) includes Content Guidelines with conciseness constraints."""
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -3057,7 +3078,9 @@ class TestIteration15InsideOutAndConciseness:
         Returns (analyzer, staging_dir, mock_dispatcher) so each test can call
         run_pass_2_per_domain and then read mock_dispatcher.dispatch.call_args.
         """
-        from code_indexer.server.services.intelligence_cli_invoker import InvocationResult
+        from code_indexer.server.services.intelligence_cli_invoker import (
+            InvocationResult,
+        )
 
         mock_dispatcher = MagicMock()
         mock_dispatcher.dispatch.return_value = InvocationResult(
@@ -3115,9 +3138,21 @@ class TestIteration15InsideOutAndConciseness:
             "participating_repos": ["small-repo", "large-repo", "medium-repo"],
         }
         repo_list = [
-            {"alias": "small-repo", "clone_path": "/path/small", "total_bytes": 1000000},
-            {"alias": "large-repo", "clone_path": "/path/large", "total_bytes": 10000000},
-            {"alias": "medium-repo", "clone_path": "/path/medium", "total_bytes": 5000000},
+            {
+                "alias": "small-repo",
+                "clone_path": "/path/small",
+                "total_bytes": 1000000,
+            },
+            {
+                "alias": "large-repo",
+                "clone_path": "/path/large",
+                "total_bytes": 10000000,
+            },
+            {
+                "alias": "medium-repo",
+                "clone_path": "/path/medium",
+                "total_bytes": 5000000,
+            },
         ]
 
         analyzer.run_pass_2_per_domain(
@@ -3128,7 +3163,9 @@ class TestIteration15InsideOutAndConciseness:
         prompt = mock_dispatcher.dispatch.call_args.kwargs["prompt"]
 
         repo_section_start = prompt.find("## Repository Filesystem Locations")
-        assert repo_section_start >= 0, "Repository Filesystem Locations section not found"
+        assert repo_section_start >= 0, (
+            "Repository Filesystem Locations section not found"
+        )
         next_section_start = prompt.find("##", repo_section_start + 10)
         repo_section = (
             prompt[repo_section_start:next_section_start]

@@ -179,7 +179,7 @@ def scip_typefest(
         f"scip generate on type-fest produced a Python traceback\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    return path
+    return Path(path)
 
 
 # ---------------------------------------------------------------------------

@@ -72,7 +72,7 @@ NEVER push to `master` without explicit user authorization in the **current conv
 |-------|-------|---------------|------|
 | `fast-automation.sh` | CLI, core logic, chunking, storage | ALL changes | ~6-7 min |
 | `server-fast-automation.sh` | Server (MCP/REST/services/auth/storage) | Touching `src/code_indexer/server/` | ~10-15 min |
-| `e2e-automation.sh` | 4-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote | Final regression gate — ALL completed work | ~30-60 min |
+| `e2e-automation.sh` | 5-phase E2E: CLI standalone, CLI daemon, server in-process, CLI remote, fault-injection resiliency | Final regression gate — ALL completed work | ~45-90 min |
 
 `fast-automation.sh` does NOT run server tests — it ignores `tests/unit/server/` entirely. Touching server code without running `server-fast-automation.sh` = untested changes.
 
@@ -96,11 +96,12 @@ NEVER push to `master` without explicit user authorization in the **current conv
 ### e2e-automation.sh Usage
 
 ```bash
-./e2e-automation.sh              # All 4 phases
+./e2e-automation.sh              # All 5 phases
 ./e2e-automation.sh --phase 1    # CLI standalone
 ./e2e-automation.sh --phase 2    # CLI daemon
 ./e2e-automation.sh --phase 3    # Server in-process (FastAPI TestClient)
 ./e2e-automation.sh --phase 4    # CLI remote (live uvicorn subprocess)
+./e2e-automation.sh --phase 5    # Fault-injection resiliency (live fault server, dual provider)
 ```
 
 Credentials from `.e2e-automation` (gitignored) or env: `E2E_ADMIN_USER`, `E2E_ADMIN_PASS`, `E2E_VOYAGE_API_KEY`. Exits immediately if admin credentials missing. Outcomes: SUCCESS = done; failures attributable to your change = root-cause → fix → re-run; new skips = treat as failure.
@@ -131,6 +132,8 @@ ruff check --fix src/ tests/
 ```
 
 Zero tolerance — never leave GitHub Actions failed. Fix in the same session. See memory: `feedback_ruff_black_version_alignment.md`.
+
+**Bug #900 prevention** (2026-04-26): 251 mypy errors had accumulated across 79 files on `development` because story DoDs were being interpreted as "no NEW lint errors introduced by this changeset" rather than "`lint.sh` exits 0". Partial cleanups don't compound — they hide. Going forward, every story DoD must require `./lint.sh` to exit 0 BEFORE merging the story branch back to `development`. If a story can't reach a clean lint, it must either fix the upstream debt or be blocked. CI gate must be `./lint.sh` (full ruff check + ruff format check + mypy across `src/` and `tests/`), not just `mypy src/`.
 
 ---
 
@@ -290,6 +293,26 @@ The depmap parser was split from a single 1042-line `dep_map_mcp_parser.py` into
 
 Files: `src/code_indexer/server/services/dep_map_{mcp_parser,parser_tables,parser_hygiene,parser_graph}.py`, `src/code_indexer/server/mcp/handlers/depmap.py`. Tests: `tests/unit/server/services/test_dep_map_887_*.py` (70 tests across 8 ACs + 4 remediation blocker files).
 
+### cidx-meta backup contract (Story #926)
+
+The server can maintain a continuous git backup of the cidx-meta directory to a remote repository. Key invariants:
+
+**Mutable base path only**: All git operations (bootstrap, sync, rebase, push) execute against `<server_data_dir>/data/golden-repos/cidx-meta/`. NEVER operate inside `.versioned/cidx-meta/v_{timestamp}/` snapshot directories. Use `get_cidx_meta_path(server_data_dir)` from `src/code_indexer/server/services/cidx_meta_backup/paths.py` — single source of truth for both the route and the refresh scheduler.
+
+**Index always runs after sync**: `CidxMetaBackupSync.sync()` runs BEFORE indexing in the refresh path. If sync succeeds (or partially fails with push-only error), indexing still runs. This is the deferred-failure pattern — a push failure becomes a `sync_failure` on the `SyncResult`, which causes the job to be marked FAILED after indexing completes.
+
+**Push/fetch failure is deferred, conflict failure is immediate**: Network errors (fetch fail, push fail) are captured in `SyncResult.sync_failure` and surfaced as `RuntimeError` at the end of the refresh job. Conflict resolution failure raises `RuntimeError` immediately (after `git rebase --abort`) and short-circuits indexing.
+
+**URL-change idempotency**: Changing the remote URL in the Web UI triggers `CidxMetaBackupBootstrap.bootstrap()` at Save time. The refresh scheduler also calls bootstrap at the start of every backup-enabled refresh cycle (idempotent — reads `git remote get-url origin`, no-ops on match). URL changes applied via direct DB edits are thus applied on the next refresh without requiring a Save.
+
+**Externalized conflict-resolution prompt**: `src/code_indexer/server/mcp/prompts/cidx_meta_conflict_resolution.md` — editable by operators. Must contain `{conflict_files}`, `{branch}`, and `{repo_path}` format placeholders.
+
+**Claude CLI routing**: Conflict resolution invokes Claude via `invoke_claude_cli()` in `src/code_indexer/global_repos/repo_analyzer.py` (Story #885 A10 boundary). On 600 s timeout, SIGTERM is sent first; SIGKILL follows after `_CLAUDE_TERMINATION_GRACE_PERIOD_SECONDS` (30 s).
+
+**Branch detection**: `detect_default_branch(master_path)` from `src/code_indexer/server/services/cidx_meta_backup/branch_detect.py` is called at the start of each backup sync to support remotes with `main` as default. Falls back to `"master"` when detection fails.
+
+Files: `src/code_indexer/server/services/cidx_meta_backup/` (bootstrap, sync, conflict_resolver, branch_detect, paths), `src/code_indexer/global_repos/refresh_scheduler.py` (backup branch), `src/code_indexer/server/web/routes.py` (config save route).
+
 ---
 
 ## Operational Modes
@@ -436,9 +459,9 @@ Runtime loader with caching: `tool_doc_loader.py`. Tests: `tests/unit/tools/test
 
 ## Version Bump
 
-Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/mcpb/setup.md` and `docs/server-deployment.md`.
+Source of truth: `src/code_indexer/__init__.py` `__version__` (line 9). Also update `README.md` version badge (line 5), `CHANGELOG.md` (new entry at top), `docs/architecture.md` server response example, `docs/query-guide.md` version refs. Check for stale refs in `docs/server-deployment.md`.
 
-DO NOT bump on CIDX version change: `mcpb/__init__.py` (separate version 1.0.0), `server/app.py` OpenAPI spec, `test-fixtures/` test data.
+DO NOT bump on CIDX version change: `server/app.py` OpenAPI spec, `test-fixtures/` test data.
 
 Verify: `grep -r "OLD_VERSION" --include="*.md" --include="*.py" .`
 
