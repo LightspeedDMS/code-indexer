@@ -1973,7 +1973,7 @@ def _register(registry: dict) -> None:
         handle_admin_list_system_mcp_credentials
     )
     registry["query_audit_logs"] = handle_query_audit_logs
-    registry["enter_maintenance_mode"] = handle_enter_maintenance_mode
-    registry["exit_maintenance_mode"] = handle_exit_maintenance_mode
+    # Story #924: enter/exit maintenance MCP tools removed — endpoints
+    # are localhost-only and auto-updater driven, not exposed via MCP.
     registry["get_maintenance_status"] = handle_get_maintenance_status
     registry["trigger_dependency_analysis"] = handle_trigger_dependency_analysis

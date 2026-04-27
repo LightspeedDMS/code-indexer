@@ -920,3 +920,55 @@ def require_elevation(required_scope: str = "full"):
         return user
 
     return _check
+
+
+def require_localhost(request: Request) -> None:
+    """Reject requests not originating from loopback (Story #924).
+
+    Story #924 -- maintenance mode enter/exit endpoints are auto-updater
+    driven (system processes, not humans). Restrict to loopback so:
+      - The local auto-updater (running as systemd service) can call them
+      - Network-side admins cannot DoS the server by toggling maintenance
+      - No TOTP elevation needed (auto-updater can't satisfy TOTP prompt)
+
+    Loopback whitelist (validated via ipaddress module):
+      127.0.0.0/8 (IPv4 loopback -- is_loopback is True)
+      ::1 (IPv6 loopback -- is_loopback is True)
+      ::ffff:127.x.x.x (IPv4-mapped IPv6 loopback -- mapped IPv4 is_loopback)
+
+    For reverse-proxied deployments, the proxy must NOT pass X-Forwarded-For
+    or similar headers for these endpoints -- the request.client.host check
+    here only sees the IMMEDIATE peer (which is the proxy, not the original
+    caller). If a proxy fronts these endpoints in production, this control
+    is degraded to "anyone the proxy reaches" -- operator must lock down
+    the proxy's exposure.
+
+    Raises:
+        HTTPException 403: when request.client.host is not a valid loopback address
+    """
+    import ipaddress
+
+    if request.client is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Localhost-only endpoint",
+        )
+    host = request.client.host
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Localhost-only endpoint",
+        )
+    # IPv4-mapped IPv6 addresses (::ffff:127.x.x.x) report is_loopback=False in
+    # Python's ipaddress module, so check the mapped IPv4 address explicitly.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        is_local = addr.ipv4_mapped.is_loopback
+    else:
+        is_local = addr.is_loopback
+    if not is_local:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Localhost-only endpoint; rejected request from {host}",
+        )

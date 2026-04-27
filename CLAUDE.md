@@ -173,6 +173,18 @@ Query capability is the core product value. NEVER remove or break: query functio
 
 Files: `src/code_indexer/server/auth/elevated_session_manager.py`, `src/code_indexer/server/auth/elevation_routes.py`, `src/code_indexer/server/web/elevation_web_routes.py`, `src/code_indexer/server/auth/dependencies.py::require_elevation`.
 
+### Maintenance Mode Localhost-Only (Epic #922 / Story #924)
+
+Maintenance mode write endpoints (`POST /api/admin/maintenance/enter` and `POST /api/admin/maintenance/exit`) are restricted to loopback callers via the `require_localhost` FastAPI dependency in `src/code_indexer/server/auth/dependencies.py`. These endpoints are auto-updater driven (system processes, not humans) so TOTP step-up elevation does not apply — a system process cannot satisfy a TOTP prompt.
+
+**Loopback whitelist**: `127.0.0.0/8`, `::1`, `::ffff:127.0.0.1` (dual-stack), `::ffff:127.x.x.x`.
+
+**MCP enter/exit tools removed entirely** — the `enter_maintenance_mode` and `exit_maintenance_mode` MCP tool registrations and tool docs were deleted. `get_maintenance_status` (read endpoint) remains.
+
+**Read endpoints unaffected**: `GET /api/admin/maintenance/status`, `GET /drain-status`, `GET /drain-timeout` continue to require admin auth only — not localhost.
+
+**Reverse-proxy caveat**: `require_localhost` checks `request.client.host` (the immediate peer). If a proxy fronts these endpoints, the proxy must NOT forward them externally — operators must lock down the proxy's exposure.
+
 ### Golden Repo Versioned Path (IMMUTABLE)
 
 - **Base clone** (`golden-repos/{alias}/`): mutable — where git ops and indexing happen
